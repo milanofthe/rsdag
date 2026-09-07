@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/rsgb", "crates/rsgb-jit"]
+members = ["crates/rsgb", "crates/rsgb-jit", "crates/rsgb-c"]
 
 [workspace.package]
 version = "0.1.0"
