@@ -87,3 +87,27 @@ def test_jacobian_with_respect_to_second_argument():
     got = Jt(np.array([2.0, 3.0]), 0.5)
     assert got.shape == (2, 1)
     assert np.allclose(got[:, 0], [2.0, 3.0])
+
+
+def test_numpy_linear_algebra_patterns_trace():
+    A = np.array([[1.0, 2.0], [3.0, 4.0]])
+
+    def f(x):
+        y = A @ x
+        z = np.dot(x, y)
+        return [np.linalg.norm(x), z, np.sum(y * y)]
+
+    x = np.array([0.3, -1.2])
+    got = jit(f)(x)
+    y = A @ x
+    assert np.allclose(got, [np.linalg.norm(x), np.dot(x, y), np.sum(y * y)], rtol=1e-14)
+    J = jacobian(f)(x)
+    assert J.shape == (3, 2)
+    assert np.allclose(J[0], x / np.linalg.norm(x), rtol=1e-12)
+
+
+def test_program_reports_ops_and_dump():
+    f = trace(lambda x: np.exp(x) * x, 1.0)
+    p = f.program(1.0)
+    assert p.n_inputs == 1 and p.n_outputs == 1 and p.n_ops >= 3
+    assert "Input" in p.dump()
