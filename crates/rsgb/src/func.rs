@@ -33,7 +33,7 @@ use rustc_hash::FxHashMap as HashMap;
 use crate::extern_fn::ExternBundle;
 use crate::node::{ExprId, SymbolId};
 
-/// Index of a function in a [`Context`](crate::context::Context).
+/// Index of a function in a [`Context`](crate::graph::Context).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct FuncId(pub u32);
 
@@ -53,7 +53,7 @@ pub enum Output {
 }
 
 /// How a function's outputs are computed.
-pub enum FuncBody {
+pub enum FunctionBody {
     /// Outputs are expressions over the parameters; a solver may register a
     /// compiled body for them (see [`Func::compiled`]).
     Symbolic,
@@ -76,7 +76,7 @@ pub struct Func {
     /// Formal leaves in argument order.
     pub params: Vec<SymbolId>,
     pub outputs: Vec<Output>,
-    pub body: FuncBody,
+    pub body: FunctionBody,
     /// Derivative output `d outputs[out] / d params[param]`, by index.
     pub(crate) deriv_index: HashMap<(u32, u32), u32>,
     /// The solver's compiled body (symbolic functions only).
@@ -108,7 +108,7 @@ impl Func {
     /// (see [`InterpretedBody`]); `None` for an extern function.
     pub fn interpreted_body<K: crate::field::Field>(
         &self,
-        ctx: &crate::context::Context<K>,
+        ctx: &crate::graph::Context<K>,
     ) -> Option<CompiledBody> {
         if self.is_extern() {
             return None;
@@ -135,14 +135,14 @@ impl Func {
     }
 
     pub fn is_extern(&self) -> bool {
-        matches!(self.body, FuncBody::Extern(_))
+        matches!(self.body, FunctionBody::Extern(_))
     }
 
     /// The bundle evaluating this function and the slot of each output:
     /// the extern body itself, or the compiled body a solver registered.
     pub fn evaluator(&self) -> Option<(&Arc<dyn ExternBundle>, Vec<Option<u32>>)> {
         match &self.body {
-            FuncBody::Extern(b) => Some((
+            FunctionBody::Extern(b) => Some((
                 b,
                 self.outputs
                     .iter()
@@ -152,7 +152,7 @@ impl Func {
                     })
                     .collect(),
             )),
-            FuncBody::Symbolic => self
+            FunctionBody::Symbolic => self
                 .compiled
                 .as_ref()
                 .map(|c| (&c.bundle, c.slot_of.clone())),

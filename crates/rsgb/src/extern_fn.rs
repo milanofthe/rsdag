@@ -1,7 +1,7 @@
 //! Compiled multi-output bodies backing [`Node::Opaque`](crate::node::Node::Opaque).
 //!
 //! An [`ExternId`](crate::node::ExternId) names an opaque operator in a
-//! [`Context`](crate::context::Context). On its own that operator has no body and
+//! [`Context`](crate::graph::Context). On its own that operator has no body and
 //! evaluates to `NaN` (its partial-derivative markers still give a Jacobian its
 //! structure); binding it to an output slot of an [`ExternBundle`] gives it a
 //! numeric implementation, so the eval paths (arena sweep and compiled
@@ -18,7 +18,7 @@
 /// once: a device's terminal currents *and* the entries of its Jacobian.
 /// Computing them in one call (the shared interior runs once) is the whole point of
 /// compilation, so several `Opaque` operators are bound to slots of a single
-/// `ExternBundle`. The [`Context`](crate::context::Context) records, per
+/// `ExternBundle`. The [`Context`](crate::graph::Context) records, per
 /// [`ExternId`](crate::node::ExternId), which bundle and which output slot it
 /// reads; the compiled tape then calls the bundle once and scatters its outputs
 /// to all sibling operators that share the same arguments.

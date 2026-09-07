@@ -9,9 +9,9 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap as HashMap;
 
 use super::{BatchTable, Op, Tape};
-use crate::context::Context;
 use crate::extern_fn::ExternBundle;
 use crate::func::{CompiledBody, FuncId, Output};
+use crate::graph::Context;
 use crate::node::{ExprId, Node, SymbolId};
 
 /// How [`Tape::compile`] orders the instruction stream.

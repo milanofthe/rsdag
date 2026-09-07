@@ -1,5 +1,5 @@
-use crate::context::Context;
 use crate::field::Field;
+use crate::graph::Context;
 use crate::node::{CmpOp, ExprId, Node, ReduceOp, UnaryOp};
 
 /// Render an expression to an infix string (raw, unsimplified).

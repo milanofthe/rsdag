@@ -3,12 +3,12 @@
 //! modes (linear-symbolic, DAE extraction, nonlinear transient).
 
 pub mod autodiff;
-pub mod context;
 pub mod display;
 pub mod eval;
 pub mod extern_fn;
 pub mod field;
 pub mod func;
+pub mod graph;
 pub mod node;
 pub mod tape;
 // Expression substitution is exposed only through the curated `substitute*`
@@ -16,12 +16,12 @@ pub mod tape;
 pub(crate) mod transform;
 
 pub use autodiff::{differentiate, gradient, hessian, jacobian, sparsity, time_derivative};
-pub use context::Context;
 pub use display::to_string;
 pub use eval::{eval, eval_named, eval_real, eval_real_all};
 pub use extern_fn::ExternBundle;
 pub use field::{ratio_powi, Field, F64};
-pub use func::{CompiledBody, Func, FuncBody, FuncId, Output, OutputId};
+pub use func::{CompiledBody, Func, FuncId, FunctionBody, Output, OutputId};
+pub use graph::Context;
 pub use node::{ArgList, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp, SymbolId, UnaryOp};
 pub use tape::{SchedulePolicy, SpecializedTape, Tape, TapeVisitor};
 pub use transform::{substitute, substitute_expr, substitute_many, substitute_many_all};

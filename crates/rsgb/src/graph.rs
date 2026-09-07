@@ -7,7 +7,7 @@ use num_rational::BigRational;
 use crate::field::Field;
 
 use crate::extern_fn::ExternBundle;
-use crate::func::{CompiledBody, Func, FuncBody, FuncId, Output, OutputId};
+use crate::func::{CompiledBody, Func, FuncId, FunctionBody, Output, OutputId};
 use crate::node::{ArgList, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp, SymbolId, UnaryOp};
 
 /// Owns the hash-consed symbolic DAG and the symbol table.
@@ -607,7 +607,7 @@ impl<K: Field> Context<K> {
             name: name.to_string(),
             params,
             outputs: outputs.into_iter().map(Output::Expr).collect(),
-            body: FuncBody::Symbolic,
+            body: FunctionBody::Symbolic,
             deriv_index: HashMap::default(),
             compiled: None,
         });
@@ -638,7 +638,7 @@ impl<K: Field> Context<K> {
             name: name.to_string(),
             params,
             outputs,
-            body: FuncBody::Extern(body),
+            body: FunctionBody::Extern(body),
             deriv_index: HashMap::default(),
             compiled: None,
         });

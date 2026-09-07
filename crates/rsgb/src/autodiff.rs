@@ -7,7 +7,7 @@
 use crate::field::Field;
 use rustc_hash::FxHashMap as HashMap;
 
-use crate::context::{Context, Memo};
+use crate::graph::{Context, Memo};
 use crate::node::{CmpOp, ExprId, Node, ReduceOp, SymbolId, UnaryOp};
 
 /// Derivative of `expr` with respect to the symbol `wrt`.

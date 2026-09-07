@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use crate::field::Field;
 use num_complex::Complex64;
 
-use crate::context::Context;
 use crate::func::{CompiledBody, FuncId, Output};
+use crate::graph::Context;
 use crate::node::ArgList;
 use crate::node::{
     cmp_bool, dot_slice, reduce_slice, unary_f64, ExprId, Node, ReduceOp, SymbolId, UnaryOp,
@@ -306,7 +306,7 @@ pub fn eval_named<K: Field>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::Context;
+    use crate::graph::Context;
 
     #[test]
     fn complex_eval_is_linear_on_shared_dag() {

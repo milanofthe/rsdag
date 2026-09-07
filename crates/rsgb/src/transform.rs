@@ -5,7 +5,7 @@
 use crate::field::Field;
 use rustc_hash::FxHashMap as HashMap;
 
-use crate::context::{Context, Memo};
+use crate::graph::{Context, Memo};
 use crate::node::{ExprId, Node, SymbolId};
 
 /// Replace every occurrence of symbol `from` with symbol `to` in `expr`,
