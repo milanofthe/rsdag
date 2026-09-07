@@ -2,6 +2,7 @@
 //! primitive behind graph transformations like node merging (shorting two
 //! nodes replaces one node-voltage symbol with the other's everywhere).
 
+use crate::field::Field;
 use rustc_hash::FxHashMap as HashMap;
 
 use crate::context::{Context, Memo};
@@ -10,7 +11,12 @@ use crate::node::{ExprId, Node, SymbolId};
 /// Replace every occurrence of symbol `from` with symbol `to` in `expr`,
 /// rebuilding through the smart constructors (so the result is re-folded and
 /// hash-consed). Memoised over shared subexpressions.
-pub fn substitute(ctx: &mut Context, expr: ExprId, from: SymbolId, to: SymbolId) -> ExprId {
+pub fn substitute<K: Field>(
+    ctx: &mut Context<K>,
+    expr: ExprId,
+    from: SymbolId,
+    to: SymbolId,
+) -> ExprId {
     let te = ctx.symbol_expr(to);
     substitute_expr(ctx, expr, from, te)
 }
@@ -20,7 +26,12 @@ pub fn substitute(ctx: &mut Context, expr: ExprId, from: SymbolId, to: SymbolId)
 /// behind node elimination: solving a node's KCL for its voltage and inlining
 /// that expression everywhere). Rebuilt through the smart constructors and
 /// memoised over shared subexpressions.
-pub fn substitute_expr(ctx: &mut Context, expr: ExprId, from: SymbolId, to: ExprId) -> ExprId {
+pub fn substitute_expr<K: Field>(
+    ctx: &mut Context<K>,
+    expr: ExprId,
+    from: SymbolId,
+    to: ExprId,
+) -> ExprId {
     let mut memo = ctx.take_memo();
     let r = subst_inner(ctx, expr, &|s| (s == from).then_some(to), &mut memo);
     ctx.put_memo(memo);
@@ -33,7 +44,11 @@ pub fn substitute_expr(ctx: &mut Context, expr: ExprId, from: SymbolId, to: Expr
 /// memoised over shared subexpressions. The substitution is simultaneous (a
 /// single traversal), so a target expression that itself mentions a mapped
 /// symbol is not re-substituted.
-pub fn substitute_many(ctx: &mut Context, expr: ExprId, map: &HashMap<SymbolId, ExprId>) -> ExprId {
+pub fn substitute_many<K: Field>(
+    ctx: &mut Context<K>,
+    expr: ExprId,
+    map: &HashMap<SymbolId, ExprId>,
+) -> ExprId {
     let mut memo = ctx.take_memo();
     let r = subst_inner(ctx, expr, &|s| map.get(&s).copied(), &mut memo);
     ctx.put_memo(memo);
@@ -48,8 +63,8 @@ pub fn substitute_many(ctx: &mut Context, expr: ExprId, map: &HashMap<SymbolId, 
 /// of its ports) -- substituting those root by root re-walks and re-interns the
 /// shared core per root, which measured as the dominant cost of Verilog-A
 /// instance cloning. Returns the substituted roots in input order.
-pub fn substitute_many_all(
-    ctx: &mut Context,
+pub fn substitute_many_all<K: Field>(
+    ctx: &mut Context<K>,
     exprs: &[ExprId],
     map: &HashMap<SymbolId, ExprId>,
 ) -> Vec<ExprId> {
@@ -68,8 +83,8 @@ pub fn substitute_many_all(
 /// memoised over shared subexpressions. Single-symbol and multi-symbol
 /// substitution differ only in their `resolve` closure, so the per-node walk
 /// lives here once (a new `Node` variant is then handled in exactly one place).
-fn subst_inner<F: Fn(SymbolId) -> Option<ExprId>>(
-    ctx: &mut Context,
+fn subst_inner<K: Field, F: Fn(SymbolId) -> Option<ExprId>>(
+    ctx: &mut Context<K>,
     expr: ExprId,
     resolve: &F,
     memo: &mut Memo,
@@ -153,7 +168,7 @@ mod tests {
     use super::*;
     use crate::node::Node;
 
-    fn sid(ctx: &mut Context, name: &str) -> SymbolId {
+    fn sid<K: Field>(ctx: &mut Context<K>, name: &str) -> SymbolId {
         let e = ctx.sym(name);
         match ctx.node(e) {
             Node::Symbol(s) => *s,
@@ -164,7 +179,7 @@ mod tests {
     #[test]
     fn substitute_many_is_simultaneous() {
         // Swap x<->y in x - y: simultaneous, so the result is y - x (not 0).
-        let mut ctx = Context::new();
+        let mut ctx: Context = Context::new();
         let x = ctx.sym("x");
         let y = ctx.sym("y");
         let f = ctx.sub(x, y);

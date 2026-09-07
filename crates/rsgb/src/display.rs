@@ -1,27 +1,21 @@
-use num_traits::One;
-
 use crate::context::Context;
+use crate::field::Field;
 use crate::node::{CmpOp, ExprId, Node, ReduceOp, UnaryOp};
 
 /// Render an expression to an infix string (raw, unsimplified).
 ///
 /// Good enough for inspection and tests. Pretty/canonical rendering of
 /// `H(s)` as a collected rational function is a job for the rewrite layer.
-pub fn to_string(ctx: &Context, id: ExprId) -> String {
+pub fn to_string<K: Field>(ctx: &Context<K>, id: ExprId) -> String {
     let mut out = String::new();
     write_expr(ctx, id, &mut out);
     out
 }
 
-fn write_expr(ctx: &Context, id: ExprId, out: &mut String) {
+fn write_expr<K: Field>(ctx: &Context<K>, id: ExprId, out: &mut String) {
     match ctx.node(id) {
         Node::Const(c) => {
-            let r = ctx.const_val(*c);
-            if r.denom().is_one() {
-                out.push_str(&r.numer().to_string());
-            } else {
-                out.push_str(&format!("{}/{}", r.numer(), r.denom()));
-            }
+            out.push_str(&ctx.const_val(*c).render());
         }
         Node::Symbol(s) => out.push_str(ctx.symbol_name(*s)),
         Node::Add(a, b) => {
@@ -134,7 +128,7 @@ fn unary_name(op: UnaryOp) -> &'static str {
 }
 
 /// Wrap sums in parens when they appear as a factor.
-fn write_factor(ctx: &Context, id: ExprId, out: &mut String) {
+fn write_factor<K: Field>(ctx: &Context<K>, id: ExprId, out: &mut String) {
     match ctx.node(id) {
         Node::Add(..) | Node::Neg(..) => {
             out.push('(');

@@ -4,13 +4,14 @@
 //! subexpressions are shared (hash-consing) and the result can be exported or
 //! differentiated again. Used to produce analytic Jacobians for DAE export.
 
+use crate::field::Field;
 use rustc_hash::FxHashMap as HashMap;
 
 use crate::context::{Context, Memo};
 use crate::node::{CmpOp, ExprId, Node, ReduceOp, SymbolId, UnaryOp};
 
 /// Derivative of `expr` with respect to the symbol `wrt`.
-pub fn differentiate(ctx: &mut Context, expr: ExprId, wrt: SymbolId) -> ExprId {
+pub fn differentiate<K: Field>(ctx: &mut Context<K>, expr: ExprId, wrt: SymbolId) -> ExprId {
     let mut memo = ctx.take_memo();
     let d = diff(ctx, expr, wrt, &mut memo);
     ctx.put_memo(memo);
@@ -22,8 +23,8 @@ pub fn differentiate(ctx: &mut Context, expr: ExprId, wrt: SymbolId) -> ExprId {
 /// (mapping a state symbol to its derivative expression, e.g. `v{k}` -> `vdot{k}`).
 /// The symbolic analogue of forming a capacitive current `dq/dt` from a charge
 /// `q(v)`; used to lower Verilog-A `ddt(...)` in arbitrary residual rows.
-pub fn time_derivative(
-    ctx: &mut Context,
+pub fn time_derivative<K: Field>(
+    ctx: &mut Context<K>,
     e: ExprId,
     deriv_of: &HashMap<SymbolId, ExprId>,
 ) -> ExprId {
@@ -47,7 +48,7 @@ pub fn time_derivative(
 /// [`crate::node::unary_f64`] exactly, so the Jacobian stays finite wherever the
 /// residual does (an out-of-range internal-node guess must not produce an
 /// `inf`/`NaN` Jacobian entry that derails Newton).
-fn unary_factor(ctx: &mut Context, op: UnaryOp, a: ExprId) -> ExprId {
+fn unary_factor<K: Field>(ctx: &mut Context<K>, op: UnaryOp, a: ExprId) -> ExprId {
     match op {
         UnaryOp::Exp => {
             // d/dx limexp(a) = exp(a) below the threshold, the constant slope
@@ -106,7 +107,7 @@ fn unary_factor(ctx: &mut Context, op: UnaryOp, a: ExprId) -> ExprId {
     }
 }
 
-fn diff(ctx: &mut Context, expr: ExprId, wrt: SymbolId, memo: &mut Memo) -> ExprId {
+fn diff<K: Field>(ctx: &mut Context<K>, expr: ExprId, wrt: SymbolId, memo: &mut Memo) -> ExprId {
     if let Some(d) = memo.get(expr) {
         return d;
     }
@@ -244,7 +245,11 @@ fn diff(ctx: &mut Context, expr: ExprId, wrt: SymbolId, memo: &mut Memo) -> Expr
 }
 
 /// Jacobian matrix: `jac[i][j] = d(residuals[i]) / d(wrt[j])`.
-pub fn jacobian(ctx: &mut Context, residuals: &[ExprId], wrt: &[SymbolId]) -> Vec<Vec<ExprId>> {
+pub fn jacobian<K: Field>(
+    ctx: &mut Context<K>,
+    residuals: &[ExprId],
+    wrt: &[SymbolId],
+) -> Vec<Vec<ExprId>> {
     residuals
         .iter()
         .map(|&r| wrt.iter().map(|&s| differentiate(ctx, r, s)).collect())
@@ -259,7 +264,7 @@ pub fn jacobian(ctx: &mut Context, residuals: &[ExprId], wrt: &[SymbolId]) -> Ve
 /// return the same values everywhere; only the graph shape of the result
 /// differs. The result is an ordinary expression in the same context, so it can
 /// be differentiated again (see [`hessian`]).
-pub fn gradient(ctx: &mut Context, f: ExprId, wrt: &[SymbolId]) -> Vec<ExprId> {
+pub fn gradient<K: Field>(ctx: &mut Context<K>, f: ExprId, wrt: &[SymbolId]) -> Vec<ExprId> {
     // Reachable sub-DAG of f. Ascending ExprId is a topological order (a
     // hash-consed node has a larger id than its children), so iterating the
     // sorted set in REVERSE visits every node after all of its parents.
@@ -424,7 +429,7 @@ pub fn gradient(ctx: &mut Context, f: ExprId, wrt: &[SymbolId]) -> Vec<ExprId> {
 /// forward-over-reverse: one reverse sweep for the gradient, then one forward
 /// sweep per column. Like every derivative here it is an ordinary expression,
 /// so third and higher orders are just repeated application.
-pub fn hessian(ctx: &mut Context, f: ExprId, wrt: &[SymbolId]) -> Vec<Vec<ExprId>> {
+pub fn hessian<K: Field>(ctx: &mut Context<K>, f: ExprId, wrt: &[SymbolId]) -> Vec<Vec<ExprId>> {
     let grad = gradient(ctx, f, wrt);
     grad.iter()
         .map(|&g| wrt.iter().map(|&s| differentiate(ctx, g, s)).collect())
@@ -433,7 +438,7 @@ pub fn hessian(ctx: &mut Context, f: ExprId, wrt: &[SymbolId]) -> Vec<Vec<ExprId
 
 /// Structural sparsity pattern of a Jacobian: `true` where the entry is not the
 /// constant zero.
-pub fn sparsity(ctx: &Context, jac: &[Vec<ExprId>]) -> Vec<Vec<bool>> {
+pub fn sparsity<K: Field>(ctx: &Context<K>, jac: &[Vec<ExprId>]) -> Vec<Vec<bool>> {
     jac.iter()
         .map(|row| row.iter().map(|&e| !ctx.is_zero(e)).collect())
         .collect()
@@ -446,7 +451,7 @@ mod tests {
     use num_complex::Complex64;
     use std::collections::HashMap;
 
-    fn sid(ctx: &mut Context, name: &str) -> SymbolId {
+    fn sid<K: Field>(ctx: &mut Context<K>, name: &str) -> SymbolId {
         let id = ctx.sym(name);
         match ctx.node(id) {
             Node::Symbol(s) => *s,
@@ -456,7 +461,7 @@ mod tests {
 
     #[test]
     fn derivative_matches_finite_difference() {
-        let mut ctx = Context::new();
+        let mut ctx: Context = Context::new();
         // f = Is*(exp(v/Vt) - 1) + g*v^2  (a diode current plus a quadratic term)
         let v = ctx.sym("v");
         let vt = ctx.sym("Vt");
@@ -507,7 +512,7 @@ mod tests {
     #[test]
     fn exp_derivative_shares_primal_and_matches_limexp_tail() {
         use crate::node::EXP_LIMIT;
-        let mut ctx = Context::new();
+        let mut ctx: Context = Context::new();
         let x = ctx.sym("x");
         let e = ctx.exp(x);
         let xid = sid(&mut ctx, "x");
@@ -533,7 +538,7 @@ mod tests {
     #[test]
     fn select_and_opaque_autodiff() {
         use crate::node::CmpOp;
-        let mut ctx = Context::new();
+        let mut ctx: Context = Context::new();
         // f = select(x > 0, x*x, -x);  df/dx = select(x>0, 2x, -1)
         let x = ctx.sym("x");
         let zero = ctx.zero();
@@ -572,7 +577,7 @@ mod tests {
     fn gradient_matches_forward_mode() {
         // A device-like expression exercising every node kind the reverse sweep
         // handles: exp/ln guards, select subgradients, powers, reduce, dot.
-        let mut ctx = Context::new();
+        let mut ctx: Context = Context::new();
         let x = ctx.sym("x");
         let y = ctx.sym("y");
         let z = ctx.sym("z");
@@ -623,7 +628,7 @@ mod tests {
 
     #[test]
     fn gradient_handles_calls_and_absent_symbols() {
-        let mut ctx = Context::new();
+        let mut ctx: Context = Context::new();
         let x = ctx.sym("x");
         let two = ctx.konst_int(2);
         let two_x = ctx.mul(two, x);
@@ -644,7 +649,7 @@ mod tests {
     #[test]
     fn hessian_is_symmetric_and_correct() {
         // f = exp(x*y) + x^3*y  ->  d2f/dxdy = exp(xy)*(1 + xy) + 3x^2 (both orders).
-        let mut ctx = Context::new();
+        let mut ctx: Context = Context::new();
         let x = ctx.sym("x");
         let y = ctx.sym("y");
         let xy = ctx.mul(x, y);
@@ -675,7 +680,7 @@ mod tests {
 
     #[test]
     fn jacobian_and_sparsity() {
-        let mut ctx = Context::new();
+        let mut ctx: Context = Context::new();
         // r0 = a*x + b*y ; r1 = x  (so dr1/dy = 0)
         let x = ctx.sym("x");
         let y = ctx.sym("y");

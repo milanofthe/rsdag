@@ -106,7 +106,10 @@ impl ExternBundle for InterpretedBody {
 impl Func {
     /// An evaluator for every symbolic output of the function, interpreted
     /// (see [`InterpretedBody`]); `None` for an extern function.
-    pub fn interpreted_body(&self, ctx: &crate::context::Context) -> Option<CompiledBody> {
+    pub fn interpreted_body<K: crate::field::Field>(
+        &self,
+        ctx: &crate::context::Context<K>,
+    ) -> Option<CompiledBody> {
         if self.is_extern() {
             return None;
         }

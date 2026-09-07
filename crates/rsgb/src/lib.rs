@@ -7,6 +7,7 @@ pub mod context;
 pub mod display;
 pub mod eval;
 pub mod extern_fn;
+pub mod field;
 pub mod func;
 pub mod node;
 pub mod tape;
@@ -15,10 +16,11 @@ pub mod tape;
 pub(crate) mod transform;
 
 pub use autodiff::{differentiate, gradient, hessian, jacobian, sparsity, time_derivative};
-pub use context::{ratio_powi, Context};
+pub use context::Context;
 pub use display::to_string;
 pub use eval::{eval, eval_named, eval_real, eval_real_all};
 pub use extern_fn::ExternBundle;
+pub use field::{ratio_powi, Field, F64};
 pub use func::{CompiledBody, Func, FuncBody, FuncId, Output, OutputId};
 pub use node::{ArgList, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp, SymbolId, UnaryOp};
 pub use tape::{SchedulePolicy, SpecializedTape, Tape, TapeVisitor};
@@ -27,11 +29,27 @@ pub use transform::{substitute, substitute_expr, substitute_many, substitute_man
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn f64_field_builds_folds_and_evaluates() {
+        let mut g: Context<F64> = Context::new();
+        let x = g.sym("x");
+        let half = g.konst_f64(0.5);
+        let quarter = g.konst_f64(0.25);
+        let c = g.mul(half, quarter); // folds in f64
+        assert_eq!(g.const_f64(c), Some(0.125));
+        let e = g.add(x, c);
+        let tape = Tape::compile(&g, &[e], &[SymbolId(0)]);
+        let (mut work, mut out) = (Vec::new(), Vec::new());
+        tape.eval(&[2.0], &mut work, &mut out);
+        assert_eq!(out[0], 2.125);
+        assert_eq!(to_string(&g, e), "(x + 0.125)");
+    }
     use num_complex::Complex64;
 
     #[test]
     fn hash_consing_shares_identical_subexpressions() {
-        let mut ctx = Context::new();
+        let mut ctx: Context = Context::new();
         let a = ctx.sym("a");
         let b = ctx.sym("b");
         let s1 = ctx.add(a, b);
@@ -47,7 +65,7 @@ mod tests {
 
     #[test]
     fn folds_constants_and_identities() {
-        let mut ctx = Context::new();
+        let mut ctx: Context = Context::new();
         let a = ctx.sym("a");
         let zero = ctx.zero();
         let one = ctx.one();
@@ -67,7 +85,7 @@ mod tests {
     #[test]
     fn evaluates_admittance_like_expression() {
         // Y = 1/R + s*C, a capacitor-in-parallel-with-resistor admittance.
-        let mut ctx = Context::new();
+        let mut ctx: Context = Context::new();
         let r = ctx.sym("R");
         let c = ctx.sym("C");
         let s = ctx.sym("s");
@@ -91,7 +109,7 @@ mod tests {
 
     #[test]
     fn unary_folding_and_eval() {
-        let mut ctx = Context::new();
+        let mut ctx: Context = Context::new();
         // exp(0) = 1, ln(1) = 0 fold structurally.
         let z = ctx.zero();
         let o = ctx.one();

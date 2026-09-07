@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
+use crate::field::Field;
 use num_complex::Complex64;
-use num_traits::ToPrimitive;
 
 use crate::context::Context;
 use crate::func::{CompiledBody, FuncId, Output};
@@ -16,7 +16,11 @@ use crate::node::{
 /// is the in-Rust numeric evaluator behind the Python interface (residual /
 /// Jacobian per Newton step). Calls evaluate their function once per distinct
 /// argument list (see [`FuncEval`]).
-pub fn eval_real(ctx: &Context, env: &HashMap<SymbolId, f64>, roots: &[ExprId]) -> Vec<f64> {
+pub fn eval_real<K: Field>(
+    ctx: &Context<K>,
+    env: &HashMap<SymbolId, f64>,
+    roots: &[ExprId],
+) -> Vec<f64> {
     let w = eval_real_all(ctx, env);
     roots.iter().map(|&r| w[r.0 as usize]).collect()
 }
@@ -26,14 +30,14 @@ pub fn eval_real(ctx: &Context, env: &HashMap<SymbolId, f64>, roots: &[ExprId]) 
 /// need to locate the first non-finite node: since nodes are interned bottom-up,
 /// the lowest-index non-finite entry is the origin of a NaN/Inf (all its
 /// operands have smaller indices and are therefore finite).
-pub fn eval_real_all(ctx: &Context, env: &HashMap<SymbolId, f64>) -> Vec<f64> {
+pub fn eval_real_all<K: Field>(ctx: &Context<K>, env: &HashMap<SymbolId, f64>) -> Vec<f64> {
     let n = ctx.len();
     let mut w = vec![0.0_f64; n];
     let mut fe = FuncEval::new();
     let g = |w: &[f64], id: ExprId| w[id.0 as usize];
     for i in 0..n {
         w[i] = match ctx.node(ExprId(i as u32)) {
-            Node::Const(c) => ctx.const_val(*c).to_f64().unwrap_or(f64::NAN),
+            Node::Const(c) => ctx.const_val(*c).to_f64(),
             Node::Symbol(s) => env.get(s).copied().unwrap_or(f64::NAN),
             Node::Add(a, b) => g(&w, *a) + g(&w, *b),
             Node::Mul(a, b) => g(&w, *a) * g(&w, *b),
@@ -92,7 +96,14 @@ impl FuncEval {
 
     /// Output `out` of `f` at the argument values `args` (whose interned list
     /// `l` keys the memo).
-    pub fn output(&mut self, ctx: &Context, f: FuncId, out: u32, l: ArgList, args: &[f64]) -> f64 {
+    pub fn output<K: Field>(
+        &mut self,
+        ctx: &Context<K>,
+        f: FuncId,
+        out: u32,
+        l: ArgList,
+        args: &[f64],
+    ) -> f64 {
         let func = ctx.func(f);
         if matches!(func.outputs[out as usize], Output::Zero) {
             return 0.0;
@@ -146,7 +157,11 @@ impl Default for FuncEval {
 /// `Complex64`, the Laplace variable `s` as `j*omega` for AC analysis).
 /// This is the bridge from the symbolic layer to numeric results (Bode,
 /// verification); the fast batched evaluator (tape) comes later.
-pub fn eval(ctx: &Context, id: ExprId, env: &HashMap<SymbolId, Complex64>) -> Complex64 {
+pub fn eval<K: Field>(
+    ctx: &Context<K>,
+    id: ExprId,
+    env: &HashMap<SymbolId, Complex64>,
+) -> Complex64 {
     // Memoize per node: the expression is a hash-consed DAG (a node is reachable
     // by many paths -- e.g. an `H(s)` from symbolic LU), so naive recursion is
     // worst-case exponential. The cache makes it linear in the reachable nodes
@@ -156,8 +171,8 @@ pub fn eval(ctx: &Context, id: ExprId, env: &HashMap<SymbolId, Complex64>) -> Co
     eval_memo(ctx, id, env, &mut memo)
 }
 
-fn eval_memo(
-    ctx: &Context,
+fn eval_memo<K: Field>(
+    ctx: &Context<K>,
     id: ExprId,
     env: &HashMap<SymbolId, Complex64>,
     memo: &mut HashMap<ExprId, Complex64>,
@@ -170,14 +185,14 @@ fn eval_memo(
     v
 }
 
-fn eval_node(
-    ctx: &Context,
+fn eval_node<K: Field>(
+    ctx: &Context<K>,
     id: ExprId,
     env: &HashMap<SymbolId, Complex64>,
     memo: &mut HashMap<ExprId, Complex64>,
 ) -> Complex64 {
     match ctx.node(id) {
-        Node::Const(c) => Complex64::new(ctx.const_val(*c).to_f64().unwrap_or(f64::NAN), 0.0),
+        Node::Const(c) => Complex64::new(ctx.const_val(*c).to_f64(), 0.0),
         Node::Symbol(s) => *env
             .get(s)
             .unwrap_or_else(|| panic!("unbound symbol '{}'", ctx.symbol_name(*s))),
@@ -270,7 +285,11 @@ fn eval_node(
 }
 
 /// Convenience wrapper: bind symbols by name and evaluate.
-pub fn eval_named(ctx: &mut Context, id: ExprId, values: &[(&str, Complex64)]) -> Complex64 {
+pub fn eval_named<K: Field>(
+    ctx: &mut Context<K>,
+    id: ExprId,
+    values: &[(&str, Complex64)],
+) -> Complex64 {
     let env: HashMap<SymbolId, Complex64> = values
         .iter()
         .map(|(name, v)| {
@@ -295,7 +314,7 @@ mod tests {
         // references x_k twice. 40 levels => 2^40 naive recursions but only 40
         // distinct nodes. Completing quickly proves `eval` memoizes (is linear in
         // reachable nodes, not exponential in paths).
-        let mut ctx = Context::new();
+        let mut ctx: Context = Context::new();
         let s = ctx.sym("s");
         let mut e = s;
         for _ in 0..40 {

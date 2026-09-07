@@ -31,9 +31,7 @@ use cranelift_module::{Linkage, Module};
 use rustc_hash::FxHashMap as HashMap;
 
 use rsgb::extern_fn::ExternBundle;
-use rsgb::node::{
-    dot_slice, reduce_slice, unary_f64, CmpOp, ReduceOp, UnaryOp, REDUCE_SIMD_MIN,
-};
+use rsgb::node::{dot_slice, reduce_slice, unary_f64, CmpOp, ReduceOp, UnaryOp, REDUCE_SIMD_MIN};
 use rsgb::{Tape, TapeVisitor};
 
 /// Instructions per compiled function for the solver's outer tapes (residual

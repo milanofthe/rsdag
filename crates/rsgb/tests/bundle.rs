@@ -28,7 +28,7 @@ impl ExternBundle for TriBundle {
 #[test]
 fn bundle_scatters_and_runs_once() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut ctx = Context::new();
+    let mut ctx: Context = Context::new();
     let x = ctx.sym("x");
     let y = ctx.sym("y");
     let xs = match ctx.node(x) {

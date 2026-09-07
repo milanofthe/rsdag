@@ -2,10 +2,10 @@
 //! superinstruction fusion, liveness-driven slot allocation and the
 //! parameter-pure prolog split. See the module docs of [`super`] for the IR.
 
+use crate::field::Field;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use num_traits::ToPrimitive;
 use rustc_hash::FxHashMap as HashMap;
 
 use super::{BatchTable, Op, Tape};
@@ -33,7 +33,7 @@ impl Tape {
     /// Compile a tape computing `roots`, where `inputs[k]` (passed to
     /// [`eval`](Self::eval)) is the value of symbol `input_syms[k]`. Symbols not
     /// listed evaluate to `NaN`.
-    pub fn compile(ctx: &Context, roots: &[ExprId], input_syms: &[SymbolId]) -> Tape {
+    pub fn compile<K: Field>(ctx: &Context<K>, roots: &[ExprId], input_syms: &[SymbolId]) -> Tape {
         Self::compile_inner(ctx, roots, input_syms, None)
     }
 
@@ -46,8 +46,8 @@ impl Tape {
     /// are pinned so iteration-loop slot reuse cannot clobber them. Plain
     /// [`eval`](Self::eval) still runs the whole stream, so the split is
     /// invisible to callers that ignore it.
-    pub fn compile_split(
-        ctx: &Context,
+    pub fn compile_split<K: Field>(
+        ctx: &Context<K>,
         roots: &[ExprId],
         input_syms: &[SymbolId],
         pure_inputs: &[bool],
@@ -55,8 +55,8 @@ impl Tape {
         Self::compile_inner(ctx, roots, input_syms, Some(pure_inputs))
     }
 
-    fn compile_inner(
-        ctx: &Context,
+    fn compile_inner<K: Field>(
+        ctx: &Context<K>,
         roots: &[ExprId],
         input_syms: &[SymbolId],
         pure_inputs: Option<&[bool]>,
@@ -400,7 +400,7 @@ impl Tape {
         // built here (so a tape is total without any registration).
         let mut evaluators: HashMap<u32, (Arc<dyn ExternBundle>, Vec<Option<u32>>)> =
             HashMap::default();
-        let mut evaluator = |ctx: &Context, f: FuncId, out: u32| {
+        let mut evaluator = |ctx: &Context<K>, f: FuncId, out: u32| {
             let fi = f.0;
             let known = evaluators
                 .get(&fi)
@@ -496,9 +496,7 @@ impl Tape {
                                 let ap = p(*a);
                                 if ap > i && !emitted[ap] {
                                     let op = match ctx.node(*a) {
-                                        Node::Const(c) => Op::Const(
-                                            ctx.const_val(*c).to_f64().unwrap_or(f64::NAN),
-                                        ),
+                                        Node::Const(c) => Op::Const(ctx.const_val(*c).to_f64()),
                                         Node::Symbol(sym) => Op::Input(
                                             input_of.get(sym).copied().unwrap_or(u32::MAX),
                                         ),
@@ -557,7 +555,7 @@ impl Tape {
             }
             let s = |a: &ExprId| slot_by_pos[p(*a)];
             let op = match node {
-                Node::Const(c) => Op::Const(ctx.const_val(*c).to_f64().unwrap_or(f64::NAN)),
+                Node::Const(c) => Op::Const(ctx.const_val(*c).to_f64()),
                 Node::Symbol(sym) => Op::Input(input_of.get(sym).copied().unwrap_or(u32::MAX)),
                 Node::Add(a, b) => {
                     let fused_operand = if fused_into[p(*a)] == Some(i) {

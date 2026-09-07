@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet};
 
-use num_bigint::BigInt;
 use num_rational::BigRational;
-use num_traits::{One, ToPrimitive, Zero};
+
+use crate::field::Field;
 
 use crate::extern_fn::ExternBundle;
 use crate::func::{CompiledBody, Func, FuncBody, FuncId, Output, OutputId};
@@ -23,11 +23,11 @@ use crate::node::{ArgList, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp, Sym
 /// is interned by hashing 16 bytes; a constant is hashed once when it is first
 /// seen; an operand list is interned by content so equal lists share one
 /// window (which is what makes `Reduce`/`Dot`/`Opaque` hash-cons structurally).
-pub struct Context {
+pub struct Context<K: Field = BigRational> {
     nodes: Vec<Node>,
     dedup: HashMap<Node, ExprId>,
-    consts: Vec<BigRational>,
-    const_dedup: HashMap<BigRational, ConstId>,
+    consts: Vec<K>,
+    const_dedup: HashMap<K, ConstId>,
     /// `f64` bit pattern -> constant node, so a numeric literal that recurs
     /// (model thresholds, `EXP_LIMIT`, ...) skips the rational conversion.
     f64_cache: HashMap<u64, ExprId>,
@@ -98,13 +98,13 @@ impl Memo {
     }
 }
 
-impl Default for Context {
+impl<K: Field> Default for Context<K> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Context {
+impl<K: Field> Context<K> {
     pub fn new() -> Self {
         let mut ctx = Context {
             nodes: Vec::new(),
@@ -123,8 +123,8 @@ impl Context {
             output_dedup: HashMap::default(),
             memo: None,
         };
-        ctx.zero = ctx.konst(BigRational::zero());
-        ctx.one = ctx.konst(BigRational::one());
+        ctx.zero = ctx.konst(K::zero());
+        ctx.one = ctx.konst(K::one());
         ctx
     }
 
@@ -163,7 +163,7 @@ impl Context {
 
     /// The exact rational behind a constant id.
     #[inline]
-    pub fn const_val(&self, c: ConstId) -> &BigRational {
+    pub fn const_val(&self, c: ConstId) -> &K {
         &self.consts[c.0 as usize]
     }
 
@@ -229,7 +229,7 @@ impl Context {
 
     /// Borrow the rational value if `id` is a constant.
     #[inline]
-    pub fn const_of(&self, id: ExprId) -> Option<&BigRational> {
+    pub fn const_of(&self, id: ExprId) -> Option<&K> {
         match *self.node(id) {
             Node::Const(c) => Some(self.const_val(c)),
             _ => None,
@@ -238,7 +238,7 @@ impl Context {
 
     /// Value of `id` as an `f64` when it is a constant node, else `None`.
     pub fn const_f64(&self, id: ExprId) -> Option<f64> {
-        self.const_of(id).and_then(|r| r.to_f64())
+        self.const_of(id).map(|r| r.to_f64())
     }
 
     /// True if `id` is the constant zero.
@@ -255,7 +255,7 @@ impl Context {
 
     // --- leaf constructors -------------------------------------------------
 
-    pub fn konst(&mut self, r: BigRational) -> ExprId {
+    pub fn konst(&mut self, r: K) -> ExprId {
         let c = match self.const_dedup.get(&r) {
             Some(&c) => c,
             None => {
@@ -272,12 +272,12 @@ impl Context {
         match n {
             0 => self.zero,
             1 => self.one,
-            _ => self.konst(BigRational::from_integer(BigInt::from(n))),
+            _ => self.konst(K::from_i64(n)),
         }
     }
 
     pub fn ratio(&mut self, num: i64, den: i64) -> ExprId {
-        self.konst(BigRational::new(BigInt::from(num), BigInt::from(den)))
+        self.konst(K::from_ratio(num, den))
     }
 
     /// Exact rational constant from an `f64` (e.g. a model parameter threshold).
@@ -288,7 +288,7 @@ impl Context {
         if let Some(&id) = self.f64_cache.get(&x.to_bits()) {
             return id;
         }
-        let id = match BigRational::from_float(x) {
+        let id = match K::from_f64(x) {
             Some(r) => self.konst(r),
             None => self.zero,
         };
@@ -334,7 +334,7 @@ impl Context {
             return a;
         }
         if let (Some(x), Some(y)) = (self.const_of(a), self.const_of(b)) {
-            let v = x + y;
+            let v = x.add(y);
             return self.konst(v);
         }
         let (a, b) = order(a, b);
@@ -357,7 +357,7 @@ impl Context {
             return a;
         }
         if let (Some(x), Some(y)) = (self.const_of(a), self.const_of(b)) {
-            let v = x * y;
+            let v = x.mul(y);
             return self.konst(v);
         }
         let (a, b) = order(a, b);
@@ -369,7 +369,7 @@ impl Context {
             return a;
         }
         if let Some(x) = self.const_of(a) {
-            let v = -x;
+            let v = x.neg();
             return self.konst(v);
         }
         if let Node::Neg(inner) = *self.node(a) {
@@ -393,8 +393,7 @@ impl Context {
             // on a division by zero. This makes the constructor total, which the
             // parameter-fold transform relies on (folding a zero-valued parameter
             // that sits in a denominator must not crash).
-            if !(x.is_zero() && n < 0) {
-                let v = ratio_powi(x, n);
+            if let Some(v) = x.powi(n) {
                 return self.konst(v);
             }
         }
@@ -467,7 +466,7 @@ impl Context {
     /// Comparison node (`1.0`/`0.0`); folds when both operands are constant.
     pub fn cmp(&mut self, op: CmpOp, a: ExprId, b: ExprId) -> ExprId {
         if let (Some(x), Some(y)) = (self.const_of(a), self.const_of(b)) {
-            return if crate::node::cmp_bool(op, x, y) {
+            return if cmp_field(op, x, y) {
                 self.one
             } else {
                 self.zero
@@ -499,7 +498,7 @@ impl Context {
         // tape short); a zero factor zeroes a product, matching `mul`.
         let rest = match op {
             ReduceOp::Sum => {
-                let mut acc: Option<BigRational> = None;
+                let mut acc: Option<K> = None;
                 let mut rest = Vec::with_capacity(args.len());
                 for a in args {
                     if a == self.zero {
@@ -508,7 +507,7 @@ impl Context {
                     match self.const_of(a) {
                         Some(r) => {
                             acc = Some(match acc {
-                                Some(s) => s + r,
+                                Some(s) => s.add(r),
                                 None => r.clone(),
                             })
                         }
@@ -524,7 +523,7 @@ impl Context {
                 rest
             }
             ReduceOp::Product => {
-                let mut acc: Option<BigRational> = None;
+                let mut acc: Option<K> = None;
                 let mut rest = Vec::with_capacity(args.len());
                 for a in args {
                     if a == self.zero {
@@ -536,7 +535,7 @@ impl Context {
                     match self.const_of(a) {
                         Some(r) => {
                             acc = Some(match acc {
-                                Some(s) => s * r,
+                                Some(s) => s.mul(r),
                                 None => r.clone(),
                             })
                         }
@@ -837,21 +836,17 @@ fn order(a: ExprId, b: ExprId) -> (ExprId, ExprId) {
     }
 }
 
-/// Exact integer power of a rational (handles negative exponents).
-pub fn ratio_powi(base: &BigRational, n: i64) -> BigRational {
-    let mut acc = BigRational::one();
-    let mut b = base.clone();
-    let mut e = n.unsigned_abs();
-    while e > 0 {
-        if e & 1 == 1 {
-            acc *= &b;
-        }
-        b = &b * &b;
-        e >>= 1;
-    }
-    if n < 0 {
-        acc.recip()
-    } else {
-        acc
+/// A comparison of two constants of the field; an unordered pair (NaN in a
+/// floating field) compares false except for `Ne`.
+fn cmp_field<K: Field>(op: CmpOp, x: &K, y: &K) -> bool {
+    use std::cmp::Ordering::*;
+    match (op, x.partial_cmp(y)) {
+        (_, None) => op == CmpOp::Ne,
+        (CmpOp::Gt, Some(o)) => o == Greater,
+        (CmpOp::Ge, Some(o)) => o != Less,
+        (CmpOp::Lt, Some(o)) => o == Less,
+        (CmpOp::Le, Some(o)) => o != Greater,
+        (CmpOp::Eq, Some(o)) => o == Equal,
+        (CmpOp::Ne, Some(o)) => o != Equal,
     }
 }
