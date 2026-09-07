@@ -9,6 +9,7 @@ use crate::field::Field;
 use crate::extern_fn::ExternBundle;
 use crate::func::{CompiledBody, FuncId, Function, FunctionBody, Output, OutputId};
 use crate::node::{ArgList, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp, SymbolId, UnaryOp};
+use crate::role::{OutputRole, ParamRole};
 
 /// Owns the hash-consed symbolic DAG and the symbol table.
 ///
@@ -603,15 +604,60 @@ impl<K: Field> Graph<K> {
         outputs: Vec<ExprId>,
     ) -> FuncId {
         let id = FuncId(self.funcs.len() as u32);
+        let n_par = params.len();
+        let n_out = outputs.len();
         self.funcs.push(Function {
             name: name.to_string(),
             params,
+            param_roles: vec![ParamRole::Free; n_par],
             outputs: outputs.into_iter().map(Output::Expr).collect(),
+            output_roles: vec![OutputRole::Plain; n_out],
             body: FunctionBody::Symbolic,
             deriv_index: HashMap::default(),
             compiled: None,
         });
         id
+    }
+
+    /// Close an open graph over `outputs` into a function: every free symbol
+    /// the outputs depend on becomes a parameter, in symbol order. The
+    /// `Scope` idiom: build with named symbols, then close.
+    pub fn close(&mut self, name: &str, outputs: Vec<ExprId>) -> FuncId {
+        let params: Vec<SymbolId> = self.free_symbols_in(&outputs).into_iter().collect();
+        self.define_func(name, params, outputs)
+    }
+
+    /// Set the role of parameter `param` of function `f`.
+    pub fn set_param_role(&mut self, f: FuncId, param: u32, role: ParamRole) {
+        self.funcs[f.0 as usize].param_roles[param as usize] = role;
+    }
+
+    /// Set the role of output `out` of function `f`.
+    pub fn set_output_role(&mut self, f: FuncId, out: u32, role: OutputRole) {
+        self.funcs[f.0 as usize].output_roles[out as usize] = role;
+    }
+
+    /// Jacobian of the outputs of `f` with a role against its parameters with
+    /// a role: `(output index, param index, derivative output index)` for
+    /// every structurally nonzero pair, differentiating on demand.
+    pub fn jacobian_by_role(
+        &mut self,
+        f: FuncId,
+        out_role: impl Fn(&OutputRole) -> bool,
+        param_role: impl Fn(&ParamRole) -> bool,
+    ) -> Vec<(u32, u32, u32)> {
+        let outs = self.funcs[f.0 as usize].outputs_with_role(out_role);
+        let pars = self.funcs[f.0 as usize].params_with_role(param_role);
+        let mut entries = Vec::new();
+        for &o in &outs {
+            for &p in &pars {
+                let k = self.derivative_output(f, o, p);
+                if !matches!(self.funcs[f.0 as usize].outputs[k as usize], Output::Zero) {
+                    entries.push((o, p, k));
+                }
+            }
+        }
+        entries
     }
 
     /// Define an extern function over `arity` arguments whose outputs are the
@@ -634,10 +680,13 @@ impl<K: Field> Graph<K> {
             })
             .collect();
         let id = FuncId(self.funcs.len() as u32);
+        let n_out = outputs.len();
         self.funcs.push(Function {
             name: name.to_string(),
+            param_roles: vec![ParamRole::Free; params.len()],
             params,
             outputs,
+            output_roles: vec![OutputRole::Plain; n_out],
             body: FunctionBody::Extern(body),
             deriv_index: HashMap::default(),
             compiled: None,
@@ -651,6 +700,10 @@ impl<K: Field> Graph<K> {
         let func = &mut self.funcs[f.0 as usize];
         let k = func.outputs.len() as u32;
         func.outputs.push(deriv);
+        func.output_roles.push(OutputRole::Derivative {
+            of: out,
+            wrt: param,
+        });
         func.deriv_index.insert((out, param), k);
         k
     }
@@ -738,6 +791,10 @@ impl<K: Field> Graph<K> {
         let func = &mut self.funcs[f.0 as usize];
         let k = func.outputs.len() as u32;
         func.outputs.push(d);
+        func.output_roles.push(OutputRole::Derivative {
+            of: out,
+            wrt: param,
+        });
         func.deriv_index.insert((out, param), k);
         k
     }

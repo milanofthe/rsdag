@@ -10,6 +10,7 @@ pub mod field;
 pub mod func;
 pub mod graph;
 pub mod node;
+pub mod role;
 pub mod tape;
 // Expression substitution is exposed only through the curated `substitute*`
 // re-exports below, not as a module path.
@@ -23,12 +24,60 @@ pub use field::{ratio_powi, Field, F64};
 pub use func::{CompiledBody, FuncId, Function, FunctionBody, Output, OutputId};
 pub use graph::Graph;
 pub use node::{ArgList, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp, SymbolId, UnaryOp};
+pub use role::{OutputRole, ParamRole};
 pub use tape::{SchedulePolicy, SpecializedTape, Tape, TapeVisitor};
 pub use transform::{substitute, substitute_expr, substitute_many, substitute_many_all};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn roles_select_jacobian_blocks() {
+        // A one-state system: residual r = x' - (-k x + u), output y = 2 x.
+        let mut g: Graph = Graph::new();
+        let (x, xd, u, k) = (g.sym("x"), g.sym("xd"), g.sym("u"), g.sym("k"));
+        let kx = g.mul(k, x);
+        let rhs = g.sub(u, kx);
+        let r = g.sub(xd, rhs);
+        let two = g.konst_int(2);
+        let y = g.mul(two, x);
+        let f = g.close("sys", vec![r, y]);
+        let params = g.func(f).params.clone();
+        assert_eq!(params.len(), 4);
+        for (i, s) in params.iter().enumerate() {
+            let role = match g.symbol_name(*s) {
+                "x" => ParamRole::State { id: 0 },
+                "xd" => ParamRole::StateDot { id: 0 },
+                "u" => ParamRole::Input { port: 0, elem: 0 },
+                _ => ParamRole::Param,
+            };
+            g.set_param_role(f, i as u32, role);
+        }
+        g.set_output_role(f, 0, OutputRole::Residual { id: 0 });
+        g.set_output_role(f, 1, OutputRole::Output { port: 0, elem: 0 });
+        let jx = g.jacobian_by_role(
+            f,
+            |o| matches!(o, OutputRole::Residual { .. }),
+            |p| matches!(p, ParamRole::State { .. }),
+        );
+        assert_eq!(jx.len(), 1);
+        let jy = g.jacobian_by_role(
+            f,
+            |o| matches!(o, OutputRole::Output { .. }),
+            |p| matches!(p, ParamRole::State { .. }),
+        );
+        assert_eq!(jy.len(), 1);
+        let (of, wrt, k) = jy[0];
+        assert_eq!(
+            g.func(f).output_roles[k as usize],
+            OutputRole::Derivative { of, wrt }
+        );
+        match g.func(f).outputs[k as usize] {
+            Output::Expr(e) => assert_eq!(g.const_f64(e), Some(2.0)),
+            _ => panic!("expected an expression"),
+        }
+    }
 
     #[test]
     fn f64_field_builds_folds_and_evaluates() {

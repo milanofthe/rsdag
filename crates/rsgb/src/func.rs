@@ -32,6 +32,7 @@ use rustc_hash::FxHashMap as HashMap;
 
 use crate::extern_fn::ExternBundle;
 use crate::node::{ExprId, SymbolId};
+use crate::role::{OutputRole, ParamRole};
 
 /// Index of a function in a [`Graph`](crate::graph::Graph).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
@@ -75,7 +76,12 @@ pub struct Function {
     pub name: String,
     /// Formal leaves in argument order.
     pub params: Vec<SymbolId>,
+    /// One role per parameter (`Free` unless set).
+    pub param_roles: Vec<ParamRole>,
     pub outputs: Vec<Output>,
+    /// One role per output (`Plain` unless set; derivative outputs are
+    /// tagged `Derivative`).
+    pub output_roles: Vec<OutputRole>,
     pub body: FunctionBody,
     /// Derivative output `d outputs[out] / d params[param]`, by index.
     pub(crate) deriv_index: HashMap<(u32, u32), u32>,
@@ -132,6 +138,20 @@ impl Function {
             }),
             slot_of,
         })
+    }
+
+    /// Indices of the parameters carrying `role`, in argument order.
+    pub fn params_with_role(&self, role: impl Fn(&ParamRole) -> bool) -> Vec<u32> {
+        (0..self.params.len() as u32)
+            .filter(|&i| role(&self.param_roles[i as usize]))
+            .collect()
+    }
+
+    /// Indices of the outputs carrying `role`, in output order.
+    pub fn outputs_with_role(&self, role: impl Fn(&OutputRole) -> bool) -> Vec<u32> {
+        (0..self.outputs.len() as u32)
+            .filter(|&i| role(&self.output_roles[i as usize]))
+            .collect()
     }
 
     pub fn is_extern(&self) -> bool {
