@@ -12,6 +12,7 @@ pub mod graph;
 pub mod node;
 pub mod role;
 pub mod simplify;
+pub mod symbolic;
 pub mod tape;
 // Expression substitution is exposed only through the curated `substitute*`
 // re-exports below, not as a module path.
@@ -30,6 +31,7 @@ pub use node::{
 };
 pub use role::{OutputRole, ParamRole};
 pub use simplify::rebuild;
+pub use symbolic::{collect, determinant, rational_form, simplify_egraph};
 pub use tape::{SchedulePolicy, SpecializedTape, Tape, TapeVisitor};
 pub use transform::{substitute, substitute_expr, substitute_many, substitute_many_all};
 
