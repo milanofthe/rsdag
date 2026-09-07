@@ -125,7 +125,8 @@ fn cases(ext: bool, seeds: std::ops::Range<u64>) -> (usize, usize) {
                 close += 1;
             } else {
                 let (_, trace) =
-                    rsgb_c::verify::run_c_with(&cc, &tape, &[row.clone()], true).expect("C rerun");
+                    rsgb_c::verify::run_c_with(&cc, &tape, std::slice::from_ref(row), true)
+                        .expect("C rerun");
                 tape.eval(row, &mut w, &mut o);
                 let slots: Vec<String> = w
                     .iter()
