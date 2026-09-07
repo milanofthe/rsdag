@@ -154,7 +154,7 @@ fn contains_unsupported(g: &Graph<BigRational>, root: ExprId) -> bool {
         }
         match g.node(id) {
             Node::Cmp(..) | Node::Select(..) | Node::Call(..) => return true,
-            Node::Reduce(op, _) if matches!(op, ReduceOp::Min | ReduceOp::Max) => return true,
+            Node::Reduce(ReduceOp::Min | ReduceOp::Max, _) => return true,
             _ => stack.extend_from_slice(&g.operands(id)),
         }
     }

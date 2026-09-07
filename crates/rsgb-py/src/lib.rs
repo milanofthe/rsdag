@@ -8,6 +8,10 @@
 //! trace is a `Program`: a tape with an interpreter, an optional native
 //! (Cranelift) form, symbolic derivatives, and C source.
 
+// pyo3 0.22's method expansion trips clippy's `useless_conversion` on every
+// `PyResult` method; the conversions are the macro's, not ours.
+#![allow(clippy::useless_conversion)]
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
