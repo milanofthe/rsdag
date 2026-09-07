@@ -43,26 +43,36 @@ as fastsim's IR does it today. SANE's DAE `F(x, x', t) = 0` and fastsim's
   evaluator, the tape, the JIT trampolines and the C backend.
 - Ascending `ExprId` is a topological order; the tape relies on it.
 
-## 3. Constants
+## 3. Scalar types: generic on two axes
 
-Decision: exact rationals stay the canonical constant model, with the f64
-fast path SANE already has (`konst_f64` cache). Reasons: SANE's linear
-symbolic analysis and DAE export need exact arithmetic, and fastsim never
-observes a difference because every constant that reaches a tape is
-converted once at lowering. Rules:
+The graph and the execution are generic over two independent scalar types.
 
-- Folding at construction happens in rationals. An f64 that is not exactly
-  representable as a small rational (irrational results of folding, values
-  from tracing) is stored as its exact rational of the f64 bit pattern, so
-  round-tripping is lossless and hashing is by value.
-- Folding of transcendental functions of constants is not done in the graph
-  (fastsim's `unary_fold_in_domain` rule moves to the optimizer, where it
-  folds in f64 with the same reference implementation the backends use, and
-  only inside the function's domain).
+- Graph scalar `K: Field` is the type constants are stored and folded in:
+  `Rational` (SANE's exact linear analysis and DAE export), `f64`
+  (fastsim), `Complex<f64>` (frequency-domain graphs). `Field` needs zero,
+  one, add, mul, neg, recip, is_zero, Hash and Eq; the construction rules
+  use nothing else. Folding of transcendental functions of constants only
+  exists where `K` is a floating type, and then through the same reference
+  implementation the backends use.
+- Execution scalar `T: Scalar` is what tapes, the JIT and the C backend
+  compute in: `f64`, `f32`, `Complex<f64>`, and lane types. Constants are
+  lowered once with `K: Into<T>`. `Scalar` follows rslab's trait.
 
-Open: whether to keep `BigRational` or a small-integer fast path with
-`BigRational` overflow (the current SANE hot path allocates for every
-constant).
+Consequences:
+- `Cmp` and `Select` need real-valued predicates. For complex `T` a
+  comparison on the real part or the magnitude is an explicit op, never an
+  implicit convention. `Min`, `Max`, `Floor`, `Sign`, `Abs`-derived ops
+  exist only for `T: Real`.
+- Domain guards (`EXP_LIMIT`, `LN_FLOOR`, the sqrt clamp) belong to the
+  execution type; the reference unary implementations are provided per `T`
+  and the parity suite runs per `T`.
+- Differentiation is generic for free: it only emits graph ops.
+- The JIT and the C backend are instantiated per `T`: `f64` first, `f32`
+  cheap, `Complex<f64>` its own work item (register pairs, trampolines).
+- The system layer is type-independent; only its buffers are `T`.
+
+SANE instantiates `Graph<Rational>` with `Tape<f64>` or
+`Tape<Complex<f64>>`; fastsim `Graph<f64>` with `Tape<f64>`.
 
 ## 4. Bit-exactness contract
 
