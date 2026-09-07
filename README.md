@@ -7,8 +7,6 @@ tracer, so that every optimization lands in every consumer once.
 
 Private for now. Licensed under PolyForm Noncommercial 1.0.0 (see LICENSE).
 
-- `docs/inventory.md`: what SANE and fastsim have today and what each consumer
-  needs from the backend.
-- `docs/design.md`: the architecture (functions all the way down, roles as
-  the system layer, transformations, `Program<T>`, symbolic analysis).
-- `docs/plan.md`: the extraction plan.
+Development runs through GitHub issues, not documents: the inventory (#1),
+the architecture (#2) and the phases (#3 onwards, each depending on the
+previous one) live there, with dates, dependencies and history.
