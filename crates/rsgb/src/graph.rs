@@ -426,9 +426,23 @@ impl<K: Field> Graph<K> {
         // keeps transcendental constants symbolic.
         if !K::is_exact() {
             if let Some(x) = self.const_of(a) {
-                if let Some(v) = K::from_f64(unary_f64(op, x.to_f64())) {
-                    return self.konst(v);
+                let y = unary_f64(op, x.to_f64());
+                // Outside the domain the op stays (a NaN payload is the
+                // backend's business, not a constant's).
+                if !y.is_nan() {
+                    if let Some(v) = K::from_f64(y) {
+                        return self.konst(v);
+                    }
                 }
+            }
+        }
+        // `abs` of a magnitude or an `abs` is itself; of a negation, of the
+        // operand (exact in IEEE: abs only clears the sign bit).
+        if op == UnaryOp::Abs {
+            match *self.node(a) {
+                Node::Unary(UnaryOp::Abs | UnaryOp::Sqrt, _) => return a,
+                Node::Neg(inner) => return self.unary(UnaryOp::Abs, inner),
+                _ => {}
             }
         }
         match op {
@@ -462,8 +476,11 @@ impl<K: Field> Graph<K> {
         }
         if !K::is_exact() {
             if let (Some(x), Some(y)) = (self.const_of(a), self.const_of(b)) {
-                if let Some(v) = K::from_f64(binary_f64(op, x.to_f64(), y.to_f64())) {
-                    return self.konst(v);
+                let z = binary_f64(op, x.to_f64(), y.to_f64());
+                if !z.is_nan() {
+                    if let Some(v) = K::from_f64(z) {
+                        return self.konst(v);
+                    }
                 }
             }
         }
@@ -749,6 +766,40 @@ impl<K: Field> Graph<K> {
 
     pub fn func(&self, f: FuncId) -> &Function {
         &self.funcs[f.0 as usize]
+    }
+
+    /// Number of symbols.
+    pub fn n_symbols(&self) -> usize {
+        self.symbol_names.len()
+    }
+
+    /// Mutable access to a function (roles, memoised outputs).
+    pub fn func_mut(&mut self, f: FuncId) -> &mut Function {
+        &mut self.funcs[f.0 as usize]
+    }
+
+    /// Define an extern function over the given formal parameters (the
+    /// symbols already exist), see [`define_extern_func`](Self::define_extern_func).
+    pub fn define_extern_func_with_params(
+        &mut self,
+        name: &str,
+        params: Vec<SymbolId>,
+        body: Arc<dyn ExternBundle>,
+        outputs: Vec<Output>,
+    ) -> FuncId {
+        let id = FuncId(self.funcs.len() as u32);
+        let n_out = outputs.len();
+        self.funcs.push(Function {
+            name: name.to_string(),
+            param_roles: vec![ParamRole::Free; params.len()],
+            params,
+            outputs,
+            output_roles: vec![OutputRole::Plain; n_out],
+            body: FunctionBody::Extern(body),
+            deriv_index: HashMap::default(),
+            compiled: None,
+        });
+        id
     }
 
     pub fn n_funcs(&self) -> usize {
