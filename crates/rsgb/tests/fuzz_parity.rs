@@ -7,6 +7,7 @@
 //!   1. `Tape::eval` (flat, compact-slot) == `eval_real` (arena sweep), bit-exact.
 //!   2. `differentiate` == central finite differences, on the smooth fragment.
 
+mod common;
 use std::collections::HashMap;
 
 use rsgb::{differentiate, eval_real, ExprId, Graph, Node, ReduceOp, SymbolId, Tape};
@@ -62,6 +63,7 @@ fn build_with_syms(
     syms: &[ExprId],
     steps: usize,
     smooth: bool,
+    ext: bool,
 ) -> ExprId {
     let mut pool: Vec<ExprId> = syms.to_vec();
     for _ in 0..2 {
@@ -72,7 +74,6 @@ fn build_with_syms(
     // cmp / select / floor and reduce Min/Max.
     let base = 16;
     for _ in 0..steps {
-        let n_ops = if smooth { base } else { base + 5 };
         let a = pool[rng.below(pool.len())];
         let b = pool[rng.below(pool.len())];
         let c = pool[rng.below(pool.len())];
@@ -80,52 +81,58 @@ fn build_with_syms(
             let k = 2 + rng.below(3); // 2..4 operands
             (0..k).map(|_| pool[rng.below(pool.len())]).collect()
         };
-        let e = match rng.below(n_ops) {
-            0 => ctx.add(a, b),
-            1 => ctx.sub(a, b),
-            2 => ctx.mul(a, b),
-            3 => ctx.neg(a),
-            4 => {
-                // Negative powers of a constant zero are undefined over the
-                // exact rationals (0^-1 = 1/0); the smart constructor panics,
-                // so bump those to a safe exponent.
-                let mut k = rng.below(6) as i64 - 2; // -2..3
-                if k < 0 && ctx.is_zero(a) {
-                    k = 2;
+        let (idx, ext) = common::draw_op(&mut |n| rng.below(n), base + 5, base, smooth, ext);
+        let e = if ext {
+            common::ext_op(ctx, idx, a, b)
+        } else {
+            match idx {
+                0 => ctx.add(a, b),
+                1 => ctx.sub(a, b),
+                2 => ctx.mul(a, b),
+                3 => ctx.neg(a),
+                4 => {
+                    // Negative powers of a constant zero are undefined over the
+                    // exact rationals (0^-1 = 1/0); the smart constructor panics,
+                    // so bump those to a safe exponent.
+                    let mut k = rng.below(6) as i64 - 2; // -2..3
+                    if k < 0 && ctx.is_zero(a) {
+                        k = 2;
+                    }
+                    ctx.pow_i(a, k)
                 }
-                ctx.pow_i(a, k)
+                5 => ctx.exp(a),
+                // ln / sqrt of a structural constant zero would make their
+                // derivative divide by zero (recip(0)); steer those to a symbol.
+                6 => {
+                    let arg = if ctx.is_zero(a) { syms[0] } else { a };
+                    ctx.ln(arg)
+                }
+                7 => {
+                    let arg = if ctx.is_zero(a) { syms[0] } else { a };
+                    ctx.sqrt(arg)
+                }
+                8 => ctx.sin(a),
+                9 => ctx.cos(a),
+                10 => ctx.sinh(a),
+                11 => ctx.cosh(a),
+                12 => ctx.tanh(a),
+                13 => ctx.reduce(ReduceOp::Sum, rand_list(rng, &pool)),
+                14 => ctx.reduce(ReduceOp::Product, rand_list(rng, &pool)),
+                15 => {
+                    let la = rand_list(rng, &pool);
+                    let lb: Vec<ExprId> =
+                        (0..la.len()).map(|_| pool[rng.below(pool.len())]).collect();
+                    ctx.dot(la, lb)
+                }
+                16 => {
+                    let op = [rsgb::CmpOp::Gt, rsgb::CmpOp::Le, rsgb::CmpOp::Lt][rng.below(3)];
+                    ctx.cmp(op, a, b)
+                }
+                17 => ctx.select(a, b, c),
+                18 => ctx.floor(a),
+                19 => ctx.reduce(ReduceOp::Min, rand_list(rng, &pool)),
+                _ => ctx.reduce(ReduceOp::Max, rand_list(rng, &pool)),
             }
-            5 => ctx.exp(a),
-            // ln / sqrt of a structural constant zero would make their
-            // derivative divide by zero (recip(0)); steer those to a symbol.
-            6 => {
-                let arg = if ctx.is_zero(a) { syms[0] } else { a };
-                ctx.ln(arg)
-            }
-            7 => {
-                let arg = if ctx.is_zero(a) { syms[0] } else { a };
-                ctx.sqrt(arg)
-            }
-            8 => ctx.sin(a),
-            9 => ctx.cos(a),
-            10 => ctx.sinh(a),
-            11 => ctx.cosh(a),
-            12 => ctx.tanh(a),
-            13 => ctx.reduce(ReduceOp::Sum, rand_list(rng, &pool)),
-            14 => ctx.reduce(ReduceOp::Product, rand_list(rng, &pool)),
-            15 => {
-                let la = rand_list(rng, &pool);
-                let lb: Vec<ExprId> = (0..la.len()).map(|_| pool[rng.below(pool.len())]).collect();
-                ctx.dot(la, lb)
-            }
-            16 => {
-                let op = [rsgb::CmpOp::Gt, rsgb::CmpOp::Le, rsgb::CmpOp::Lt][rng.below(3)];
-                ctx.cmp(op, a, b)
-            }
-            17 => ctx.select(a, b, c),
-            18 => ctx.floor(a),
-            19 => ctx.reduce(ReduceOp::Min, rand_list(rng, &pool)),
-            _ => ctx.reduce(ReduceOp::Max, rand_list(rng, &pool)),
         };
         pool.push(e);
     }
@@ -145,7 +152,7 @@ fn eval_batch_matches_scalar_bit_exact() {
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
         let steps = 6 + rng.below(20);
-        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, false);
+        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, false, true);
         let tape = Tape::compile(&ctx, &[root], &sym_ids);
 
         // L distinct input sets; scalar eval each, then one batched eval.
@@ -187,7 +194,7 @@ fn tape_matches_arena_sweep_bit_exact() {
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
         let steps = 6 + rng.below(20);
-        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, false);
+        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, false, true);
 
         // Random input point.
         let inputs: Vec<f64> = (0..nsym).map(|_| rng.val()).collect();
@@ -226,7 +233,7 @@ fn split_tape_matches_unsplit_bit_exact() {
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
         let steps = 6 + rng.below(24);
-        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, false);
+        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, false, true);
 
         // Random purity mask ("parameters" vs "state"), at least one impure.
         let mut pure: Vec<bool> = (0..nsym).map(|_| rng.below(2) == 0).collect();
@@ -398,8 +405,8 @@ fn specialized_tape_matches_full_bit_exact() {
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
         let steps = 8 + rng.below(24);
-        let r1 = build_with_syms(&mut ctx, &mut rng, &syms, steps, false);
-        let r2 = build_with_syms(&mut ctx, &mut rng, &syms, steps, false);
+        let r1 = build_with_syms(&mut ctx, &mut rng, &syms, steps, false, false);
+        let r2 = build_with_syms(&mut ctx, &mut rng, &syms, steps, false, false);
         let tape = Tape::compile(&ctx, &[r1, r2], &sym_ids);
 
         let mut inputs: Vec<f64> = (0..nsym).map(|_| rng.val()).collect();
@@ -455,7 +462,7 @@ fn differentiate_matches_finite_differences() {
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
         let steps = 4 + rng.below(10);
-        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, true);
+        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, true, true);
 
         // Differentiate w.r.t. one symbol.
         let wrt = rng.below(nsym);
@@ -503,7 +510,7 @@ fn partial_specialization_checked_evals_bit_exact() {
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
         let steps = 8 + rng.below(24);
-        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, true);
+        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, true, true);
         let tape = Tape::compile(&ctx, &[root], &sym_ids);
         if tape.n_selects() == 0 {
             continue;

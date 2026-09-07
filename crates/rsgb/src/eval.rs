@@ -7,7 +7,8 @@ use crate::func::{CompiledBody, FuncId, Output};
 use crate::graph::Graph;
 use crate::node::ArgList;
 use crate::node::{
-    cmp_bool, dot_slice, reduce_slice, unary_f64, ExprId, Node, ReduceOp, SymbolId, UnaryOp,
+    binary_f64, cmp_bool, dot_slice, reduce_slice, unary_f64, BinOp, ExprId, Node, ReduceOp,
+    SymbolId, UnaryOp,
 };
 
 /// Evaluate a set of expression roots over the reals, given numeric symbol
@@ -44,6 +45,7 @@ pub fn eval_real_all<K: Field>(ctx: &Graph<K>, env: &HashMap<SymbolId, f64>) -> 
             Node::Neg(a) => -g(&w, *a),
             Node::Pow(a, k) => g(&w, *a).powi(*k as i32),
             Node::Unary(op, a) => unary_f64(*op, g(&w, *a)),
+            Node::Binary(op, a, b) => binary_f64(*op, g(&w, *a), g(&w, *b)),
             Node::Cmp(op, a, b) => {
                 if cmp_bool(*op, g(&w, *a), g(&w, *b)) {
                     1.0
@@ -209,6 +211,39 @@ fn eval_node<K: Field>(
                 UnaryOp::Tanh => x.tanh(),
                 UnaryOp::Atan => x.atan(),
                 UnaryOp::Floor => Complex64::new(x.re.floor(), 0.0),
+                UnaryOp::Tan => x.tan(),
+                UnaryOp::Log10 => x.ln() / std::f64::consts::LN_10,
+                UnaryOp::Log2 => x.ln() / std::f64::consts::LN_2,
+                UnaryOp::Log1p => (x + 1.0).ln(),
+                UnaryOp::Expm1 => x.exp() - 1.0,
+                UnaryOp::Cbrt => x.powf(1.0 / 3.0),
+                UnaryOp::Abs => Complex64::new(x.norm(), 0.0),
+                UnaryOp::Asin => x.asin(),
+                UnaryOp::Acos => x.acos(),
+                UnaryOp::Asinh => x.asinh(),
+                UnaryOp::Acosh => x.acosh(),
+                UnaryOp::Atanh => x.atanh(),
+                // Ordered and special real functions act on the real part.
+                UnaryOp::Sign | UnaryOp::Ceil | UnaryOp::Round | UnaryOp::Trunc => {
+                    Complex64::new(unary_f64(*op, x.re), 0.0)
+                }
+                UnaryOp::Erf
+                | UnaryOp::Erfc
+                | UnaryOp::Lgamma
+                | UnaryOp::Tgamma
+                | UnaryOp::Digamma
+                | UnaryOp::Trigamma
+                | UnaryOp::RandUniform => Complex64::new(unary_f64(*op, x.re), 0.0),
+            }
+        }
+        Node::Binary(op, a, b) => {
+            let x = eval_memo(ctx, *a, env, memo);
+            let y = eval_memo(ctx, *b, env, memo);
+            match op {
+                BinOp::Powf => x.powc(y),
+                BinOp::Mod | BinOp::Atan2 | BinOp::Hypot => {
+                    Complex64::new(binary_f64(*op, x.re, y.re), 0.0)
+                }
             }
         }
         Node::Cmp(op, a, b) => {

@@ -2,6 +2,8 @@
 //! input sets through `LaneTape` must match two scalar `Tape::eval` passes
 //! per lane, within floating-point codegen freedom (see `close`).
 
+#[path = "../../rsgb/tests/common/mod.rs"]
+mod common;
 use rsgb::node::Node;
 use rsgb::{ExprId, Graph, ReduceOp, SymbolId, Tape};
 use rsgb_jit::{LaneTape, LANES};
@@ -64,41 +66,47 @@ fn build(ctx: &mut Graph, rng: &mut Rng, syms: &[ExprId], steps: usize) -> Vec<E
         let a = pool[rng.below(pool.len())];
         let b = pool[rng.below(pool.len())];
         let c = pool[rng.below(pool.len())];
-        let e = match rng.below(21) {
-            0 => ctx.add(a, b),
-            1 => ctx.sub(a, b),
-            2 => ctx.mul(a, b),
-            3 => ctx.neg(a),
-            4 => {
-                let mut k = rng.below(6) as i64 - 2;
-                if k < 0 && ctx.is_zero(a) {
-                    k = 2;
+        let (idx, ext) = common::draw_op(&mut |n| rng.below(n), 21, 16, false, true);
+        let e = if ext {
+            common::ext_op(ctx, idx, a, b)
+        } else {
+            match idx {
+                0 => ctx.add(a, b),
+                1 => ctx.sub(a, b),
+                2 => ctx.mul(a, b),
+                3 => ctx.neg(a),
+                4 => {
+                    let mut k = rng.below(6) as i64 - 2;
+                    if k < 0 && ctx.is_zero(a) {
+                        k = 2;
+                    }
+                    ctx.pow_i(a, k)
                 }
-                ctx.pow_i(a, k)
+                5 => ctx.exp(a),
+                6 => ctx.ln(if ctx.is_zero(a) { syms[0] } else { a }),
+                7 => ctx.sqrt(if ctx.is_zero(a) { syms[0] } else { a }),
+                8 => ctx.sin(a),
+                9 => ctx.cos(a),
+                10 => ctx.sinh(a),
+                11 => ctx.cosh(a),
+                12 => ctx.tanh(a),
+                13 => ctx.reduce(ReduceOp::Sum, rand_list(rng, &pool)),
+                14 => ctx.reduce(ReduceOp::Product, rand_list(rng, &pool)),
+                15 => {
+                    let la = rand_list(rng, &pool);
+                    let lb: Vec<ExprId> =
+                        (0..la.len()).map(|_| pool[rng.below(pool.len())]).collect();
+                    ctx.dot(la, lb)
+                }
+                16 => {
+                    let op = [rsgb::CmpOp::Gt, rsgb::CmpOp::Le, rsgb::CmpOp::Lt][rng.below(3)];
+                    ctx.cmp(op, a, b)
+                }
+                17 => ctx.select(a, b, c),
+                18 => ctx.floor(a),
+                19 => ctx.reduce(ReduceOp::Min, rand_list(rng, &pool)),
+                _ => ctx.reduce(ReduceOp::Max, rand_list(rng, &pool)),
             }
-            5 => ctx.exp(a),
-            6 => ctx.ln(if ctx.is_zero(a) { syms[0] } else { a }),
-            7 => ctx.sqrt(if ctx.is_zero(a) { syms[0] } else { a }),
-            8 => ctx.sin(a),
-            9 => ctx.cos(a),
-            10 => ctx.sinh(a),
-            11 => ctx.cosh(a),
-            12 => ctx.tanh(a),
-            13 => ctx.reduce(ReduceOp::Sum, rand_list(rng, &pool)),
-            14 => ctx.reduce(ReduceOp::Product, rand_list(rng, &pool)),
-            15 => {
-                let la = rand_list(rng, &pool);
-                let lb: Vec<ExprId> = (0..la.len()).map(|_| pool[rng.below(pool.len())]).collect();
-                ctx.dot(la, lb)
-            }
-            16 => {
-                let op = [rsgb::CmpOp::Gt, rsgb::CmpOp::Le, rsgb::CmpOp::Lt][rng.below(3)];
-                ctx.cmp(op, a, b)
-            }
-            17 => ctx.select(a, b, c),
-            18 => ctx.floor(a),
-            19 => ctx.reduce(ReduceOp::Min, rand_list(rng, &pool)),
-            _ => ctx.reduce(ReduceOp::Max, rand_list(rng, &pool)),
         };
         pool.push(e);
     }

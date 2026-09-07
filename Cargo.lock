@@ -459,6 +459,7 @@ dependencies = [
 name = "rsgb"
 version = "0.1.0"
 dependencies = [
+ "libm",
  "num-bigint",
  "num-complex",
  "num-rational",

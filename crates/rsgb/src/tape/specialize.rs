@@ -63,7 +63,11 @@ impl Tape {
             let p = |s: u32| prod[s as usize];
             match self.ops[i] {
                 Op::Const(_) | Op::Input(_) => {}
-                Op::Add(a, b) | Op::Mul(a, b) | Op::Sub(a, b) | Op::Cmp(_, a, b) => {
+                Op::Add(a, b)
+                | Op::Mul(a, b)
+                | Op::Sub(a, b)
+                | Op::Cmp(_, a, b)
+                | Op::Binary(_, a, b) => {
                     dep_pool.extend([p(a), p(b)]);
                 }
                 Op::MulAdd(a, b, c) => {
@@ -243,6 +247,7 @@ impl Tape {
                 Op::Powi(_, n) => Op::Powi(ds(0), n),
                 Op::Unary(op, _) => Op::Unary(op, ds(0)),
                 Op::Cmp(op, ..) => Op::Cmp(op, ds(0), ds(1)),
+                Op::Binary(op, ..) => Op::Binary(op, ds(0), ds(1)),
                 // Only *pinned* selects vanish; an unpinned one survives as a
                 // real select over its (resolved) three operands.
                 Op::Select(..) => Op::Select(ds(0), ds(1), ds(2)),

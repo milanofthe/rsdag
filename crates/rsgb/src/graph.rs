@@ -8,7 +8,10 @@ use crate::field::Field;
 
 use crate::extern_fn::ExternBundle;
 use crate::func::{CompiledBody, FuncId, Function, FunctionBody, Output, OutputId};
-use crate::node::{ArgList, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp, SymbolId, UnaryOp};
+use crate::node::{
+    binary_f64, unary_f64, ArgList, BinOp, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp,
+    SymbolId, UnaryOp,
+};
 use crate::role::{OutputRole, ParamRole};
 
 /// Owns the hash-consed symbolic DAG and the symbol table.
@@ -186,10 +189,12 @@ impl<K: Field> Graph<K> {
         let z = ExprId(0);
         match *self.node(id) {
             Node::Const(_) | Node::Symbol(_) => Operands::Inline { buf: [z; 3], n: 0 },
-            Node::Add(a, b) | Node::Mul(a, b) | Node::Cmp(_, a, b) => Operands::Inline {
-                buf: [a, b, z],
-                n: 2,
-            },
+            Node::Add(a, b) | Node::Mul(a, b) | Node::Cmp(_, a, b) | Node::Binary(_, a, b) => {
+                Operands::Inline {
+                    buf: [a, b, z],
+                    n: 2,
+                }
+            }
             Node::Neg(a) | Node::Pow(a, _) | Node::Unary(_, a) => Operands::Inline {
                 buf: [a, z, z],
                 n: 1,
@@ -417,6 +422,15 @@ impl<K: Field> Graph<K> {
 
     /// Apply a unary function, with a few exact-at-special-points identities.
     pub fn unary(&mut self, op: UnaryOp, a: ExprId) -> ExprId {
+        // A floating field folds through the reference math; an exact field
+        // keeps transcendental constants symbolic.
+        if !K::is_exact() {
+            if let Some(x) = self.const_of(a) {
+                if let Some(v) = K::from_f64(unary_f64(op, x.to_f64())) {
+                    return self.konst(v);
+                }
+            }
+        }
         match op {
             UnaryOp::Exp if self.is_zero(a) => self.one, // exp(0) = 1
             UnaryOp::Ln if self.is_one(a) => self.zero,  // ln(1) = 0
@@ -429,6 +443,31 @@ impl<K: Field> Graph<K> {
             UnaryOp::Sqrt if self.is_one(a) => self.one,
             _ => self.intern(Node::Unary(op, a)),
         }
+    }
+
+    /// Binary function node (`Powf`, `Mod`, `Atan2`, `Hypot`): the powers of
+    /// zero and one resolve; a floating field folds constants through the
+    /// reference math.
+    pub fn binary(&mut self, op: BinOp, a: ExprId, b: ExprId) -> ExprId {
+        if op == BinOp::Powf {
+            if self.is_zero(b) {
+                return self.one;
+            }
+            if self.is_one(b) {
+                return a;
+            }
+            if let Some(n) = self.const_of(b).and_then(small_integer) {
+                return self.pow_i(a, n);
+            }
+        }
+        if !K::is_exact() {
+            if let (Some(x), Some(y)) = (self.const_of(a), self.const_of(b)) {
+                if let Some(v) = K::from_f64(binary_f64(op, x.to_f64(), y.to_f64())) {
+                    return self.konst(v);
+                }
+            }
+        }
+        self.intern(Node::Binary(op, a, b))
     }
 
     pub fn exp(&mut self, a: ExprId) -> ExprId {
@@ -905,5 +944,16 @@ fn cmp_field<K: Field>(op: CmpOp, x: &K, y: &K) -> bool {
         (CmpOp::Le, Some(o)) => o != Greater,
         (CmpOp::Eq, Some(o)) => o == Equal,
         (CmpOp::Ne, Some(o)) => o != Equal,
+    }
+}
+
+/// A constant that is a small integer (the exponent of a `Powf` that is
+/// really an integer power).
+fn small_integer<K: Field>(k: &K) -> Option<i64> {
+    let x = k.to_f64();
+    if x.fract() == 0.0 && x.abs() <= 64.0 && K::from_i64(x as i64) == *k {
+        Some(x as i64)
+    } else {
+        None
     }
 }

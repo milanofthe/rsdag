@@ -10,7 +10,9 @@
 use std::sync::Arc;
 
 use crate::extern_fn::ExternBundle;
-use crate::node::{cmp_bool, dot_slice, reduce_slice, unary_f64, CmpOp, ReduceOp, UnaryOp};
+use crate::node::{
+    binary_f64, cmp_bool, dot_slice, reduce_slice, unary_f64, BinOp, CmpOp, ReduceOp, UnaryOp,
+};
 
 #[derive(Clone, Copy, Debug)]
 enum Op {
@@ -30,6 +32,7 @@ enum Op {
     Neg(u32),
     Powi(u32, i32),
     Unary(UnaryOp, u32),
+    Binary(BinOp, u32, u32),
     Cmp(CmpOp, u32, u32),
     Select(u32, u32, u32),
     /// Reduction over `arg_pool[start .. start+len]`.
@@ -131,6 +134,7 @@ pub trait TapeVisitor {
     fn neg(&mut self, dst: u32, a: u32);
     fn powi(&mut self, dst: u32, a: u32, n: i32);
     fn unary(&mut self, dst: u32, op: UnaryOp, a: u32);
+    fn binary(&mut self, dst: u32, op: BinOp, a: u32, b: u32);
     fn cmp(&mut self, dst: u32, op: CmpOp, a: u32, b: u32);
     fn select(&mut self, dst: u32, c: u32, t: u32, e: u32);
     fn reduce(&mut self, dst: u32, op: ReduceOp, args: &[u32]);
@@ -318,6 +322,7 @@ impl Tape {
                     Op::Neg(a) => -g(a),
                     Op::Powi(a, n) => g(a).powi(n),
                     Op::Unary(op, a) => unary_f64(op, g(a)),
+                    Op::Binary(op, a, b) => binary_f64(op, g(a), g(b)),
                     Op::Cmp(op, a, b) => {
                         if cmp_bool(op, g(a), g(b)) {
                             1.0
@@ -519,6 +524,12 @@ impl Tape {
                             v[l] = unary_f64(op, wa[l]);
                         }
                     }
+                    Op::Binary(op, a, b) => {
+                        let (wa, wb) = (w(a), w(b));
+                        for l in 0..L {
+                            v[l] = binary_f64(op, wa[l], wb[l]);
+                        }
+                    }
                     Op::Cmp(op, a, b) => {
                         let (wa, wb) = (w(a), w(b));
                         for l in 0..L {
@@ -632,6 +643,7 @@ impl Tape {
                 Op::Neg(a) => v.neg(dst, a),
                 Op::Powi(a, n) => v.powi(dst, a, n),
                 Op::Unary(op, a) => v.unary(dst, op, a),
+                Op::Binary(op, a, b) => v.binary(dst, op, a, b),
                 Op::Cmp(op, a, b) => v.cmp(dst, op, a, b),
                 Op::Select(c, t, e) => v.select(dst, c, t, e),
                 Op::Reduce(op, s, l) => v.reduce(dst, op, ap(s, l)),

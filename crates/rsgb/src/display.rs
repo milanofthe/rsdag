@@ -1,6 +1,6 @@
 use crate::field::Field;
 use crate::graph::Graph;
-use crate::node::{CmpOp, ExprId, Node, ReduceOp, UnaryOp};
+use crate::node::{BinOp, CmpOp, ExprId, Node, ReduceOp, UnaryOp};
 
 /// Render an expression to an infix string (raw, unsimplified).
 ///
@@ -42,6 +42,19 @@ fn write_expr<K: Field>(ctx: &Graph<K>, id: ExprId, out: &mut String) {
             out.push_str(unary_name(*op));
             out.push('(');
             write_expr(ctx, *a, out);
+            out.push(')');
+        }
+        Node::Binary(op, a, b) => {
+            out.push_str(match op {
+                BinOp::Powf => "powf",
+                BinOp::Mod => "mod",
+                BinOp::Atan2 => "atan2",
+                BinOp::Hypot => "hypot",
+            });
+            out.push('(');
+            write_expr(ctx, *a, out);
+            out.push_str(", ");
+            write_expr(ctx, *b, out);
             out.push(')');
         }
         Node::Cmp(op, a, b) => {
@@ -124,6 +137,29 @@ fn unary_name(op: UnaryOp) -> &'static str {
         UnaryOp::Tanh => "tanh",
         UnaryOp::Atan => "atan",
         UnaryOp::Floor => "floor",
+        UnaryOp::Tan => "tan",
+        UnaryOp::Log10 => "log10",
+        UnaryOp::Log2 => "log2",
+        UnaryOp::Log1p => "log1p",
+        UnaryOp::Expm1 => "expm1",
+        UnaryOp::Cbrt => "cbrt",
+        UnaryOp::Abs => "abs",
+        UnaryOp::Sign => "sign",
+        UnaryOp::Ceil => "ceil",
+        UnaryOp::Round => "round",
+        UnaryOp::Trunc => "trunc",
+        UnaryOp::Asin => "asin",
+        UnaryOp::Acos => "acos",
+        UnaryOp::Asinh => "asinh",
+        UnaryOp::Acosh => "acosh",
+        UnaryOp::Atanh => "atanh",
+        UnaryOp::Erf => "erf",
+        UnaryOp::Erfc => "erfc",
+        UnaryOp::Lgamma => "lgamma",
+        UnaryOp::Tgamma => "tgamma",
+        UnaryOp::Digamma => "digamma",
+        UnaryOp::Trigamma => "trigamma",
+        UnaryOp::RandUniform => "rand_uniform",
     }
 }
 

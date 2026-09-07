@@ -123,6 +123,11 @@ fn subst_inner<K: Field, F: Fn(SymbolId) -> Option<ExprId>>(
             let b = subst_inner(ctx, b, resolve, memo);
             ctx.cmp(op, a, b)
         }
+        Node::Binary(op, a, b) => {
+            let a = subst_inner(ctx, a, resolve, memo);
+            let b = subst_inner(ctx, b, resolve, memo);
+            ctx.binary(op, a, b)
+        }
         Node::Select(c, t, e) => {
             let c = subst_inner(ctx, c, resolve, memo);
             let t = subst_inner(ctx, t, resolve, memo);

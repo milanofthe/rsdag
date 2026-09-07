@@ -171,6 +171,98 @@ pub enum UnaryOp {
     Tanh,
     Atan,
     Floor,
+    // The floating-point extension (reference implementations from `libm`,
+    // so the bits do not depend on the platform's C library).
+    Tan,
+    Log10,
+    Log2,
+    Log1p,
+    Expm1,
+    Cbrt,
+    Abs,
+    /// `-1`, `0`, `1` (`+-0.0` and NaN pass through, numpy's `sign`).
+    Sign,
+    Ceil,
+    Round,
+    Trunc,
+    Asin,
+    Acos,
+    Asinh,
+    Acosh,
+    Atanh,
+    Erf,
+    Erfc,
+    Lgamma,
+    Tgamma,
+    Digamma,
+    Trigamma,
+    /// Counter-based uniform noise in `[0, 1)` keyed by the argument's bits:
+    /// a pure function, so it traces, replays and batches like any other op.
+    RandUniform,
+}
+
+/// Binary operations beyond the ring (`Add`, `Mul`, `Neg`, `Pow` are their
+/// own node kinds for the canonical ordering and the reduction fusion; `Sub`
+/// and `Div` are `add(neg)` and `mul(recip)`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+pub enum BinOp {
+    /// `a^b` for real exponents (`Pow` covers integer exponents).
+    Powf,
+    /// `fmod(a, b)`: the remainder with the sign of `a`.
+    Mod,
+    /// `atan2(a, b)`.
+    Atan2,
+    /// `sqrt(a^2 + b^2)` without overflow.
+    Hypot,
+}
+
+/// Canonical evaluation of a [`BinOp`], the one reference for every backend.
+pub fn binary_f64(op: BinOp, x: f64, y: f64) -> f64 {
+    match op {
+        BinOp::Powf => libm::pow(x, y),
+        BinOp::Mod => libm::fmod(x, y),
+        BinOp::Atan2 => libm::atan2(x, y),
+        BinOp::Hypot => libm::hypot(x, y),
+    }
+}
+
+/// Digamma `psi(x)`: recurrence into the asymptotic zone, then the series.
+pub fn digamma(mut x: f64) -> f64 {
+    let mut result = 0.0;
+    while x < 6.0 {
+        result -= 1.0 / x;
+        x += 1.0;
+    }
+    let inv = 1.0 / x;
+    let inv2 = inv * inv;
+    result + libm::log(x)
+        - 0.5 * inv
+        - inv2 * (1.0 / 12.0 - inv2 * (1.0 / 120.0 - inv2 * (1.0 / 252.0)))
+}
+
+/// Trigamma `psi'(x)`: recurrence into the asymptotic zone, then the series.
+pub fn trigamma(mut x: f64) -> f64 {
+    let mut result = 0.0;
+    while x < 6.0 {
+        result += 1.0 / (x * x);
+        x += 1.0;
+    }
+    let inv = 1.0 / x;
+    let inv2 = inv * inv;
+    result
+        + inv
+        + 0.5 * inv2
+        + inv * inv2 * (1.0 / 6.0 - inv2 * (1.0 / 30.0 - inv2 * (1.0 / 42.0 - inv2 / 30.0)))
+}
+
+/// Counter-based uniform noise in `[0, 1)` from the bits of `key`
+/// (splitmix64 finalizer; the top 53 bits become the mantissa).
+pub fn rand_uniform(key: f64) -> f64 {
+    let mut z = key.to_bits().wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    ((z >> 11) as f64) * (1.0 / ((1u64 << 53) as f64))
 }
 
 /// Argument above which `exp` is linearly extrapolated (a "limited exponential",
@@ -229,6 +321,37 @@ pub fn unary_f64(op: UnaryOp, x: f64) -> f64 {
         UnaryOp::Tanh => x.tanh(),
         UnaryOp::Atan => x.atan(),
         UnaryOp::Floor => x.floor(),
+        UnaryOp::Tan => libm::tan(x),
+        UnaryOp::Log10 => libm::log10(x),
+        UnaryOp::Log2 => libm::log2(x),
+        UnaryOp::Log1p => libm::log1p(x),
+        UnaryOp::Expm1 => libm::expm1(x),
+        UnaryOp::Cbrt => libm::cbrt(x),
+        UnaryOp::Abs => x.abs(),
+        UnaryOp::Sign => {
+            if x > 0.0 {
+                1.0
+            } else if x < 0.0 {
+                -1.0
+            } else {
+                x
+            }
+        }
+        UnaryOp::Ceil => x.ceil(),
+        UnaryOp::Round => libm::round(x),
+        UnaryOp::Trunc => x.trunc(),
+        UnaryOp::Asin => libm::asin(x),
+        UnaryOp::Acos => libm::acos(x),
+        UnaryOp::Asinh => libm::asinh(x),
+        UnaryOp::Acosh => libm::acosh(x),
+        UnaryOp::Atanh => libm::atanh(x),
+        UnaryOp::Erf => libm::erf(x),
+        UnaryOp::Erfc => libm::erfc(x),
+        UnaryOp::Lgamma => libm::lgamma(x),
+        UnaryOp::Tgamma => libm::tgamma(x),
+        UnaryOp::Digamma => digamma(x),
+        UnaryOp::Trigamma => trigamma(x),
+        UnaryOp::RandUniform => rand_uniform(x),
     }
 }
 
@@ -276,6 +399,8 @@ pub enum Node {
     Pow(ExprId, i64),
     /// Elementary unary function.
     Unary(UnaryOp, ExprId),
+    /// Binary function beyond the ring (`Powf`, `Mod`, `Atan2`, `Hypot`).
+    Binary(BinOp, ExprId, ExprId),
     /// Comparison, yielding `1.0`/`0.0`. Used to build region conditions.
     Cmp(CmpOp, ExprId, ExprId),
     /// Conditional: `cond != 0 ? then : else_`. For region-based device models.

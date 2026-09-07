@@ -8,7 +8,7 @@ use crate::field::Field;
 use rustc_hash::FxHashMap as HashMap;
 
 use crate::graph::{Graph, Memo};
-use crate::node::{CmpOp, ExprId, Node, ReduceOp, SymbolId, UnaryOp};
+use crate::node::{BinOp, CmpOp, ExprId, Node, ReduceOp, SymbolId, UnaryOp};
 
 /// Derivative of `expr` with respect to the symbol `wrt`.
 pub fn differentiate<K: Field>(ctx: &mut Graph<K>, expr: ExprId, wrt: SymbolId) -> ExprId {
@@ -104,6 +104,141 @@ fn unary_factor<K: Field>(ctx: &mut Graph<K>, op: UnaryOp, a: ExprId) -> ExprId 
             let denom = ctx.add(one, a2);
             ctx.recip(denom)
         }
+        UnaryOp::Tan => {
+            // 1 + tan^2
+            let t = ctx.unary(UnaryOp::Tan, a);
+            let t2 = ctx.mul(t, t);
+            let one = ctx.one();
+            ctx.add(one, t2)
+        }
+        UnaryOp::Log10 => {
+            let r = ctx.recip(a);
+            let c = ctx.konst_f64(1.0 / std::f64::consts::LN_10);
+            ctx.mul(c, r)
+        }
+        UnaryOp::Log2 => {
+            let r = ctx.recip(a);
+            let c = ctx.konst_f64(1.0 / std::f64::consts::LN_2);
+            ctx.mul(c, r)
+        }
+        UnaryOp::Log1p => {
+            let one = ctx.one();
+            let d = ctx.add(one, a);
+            ctx.recip(d)
+        }
+        UnaryOp::Expm1 => ctx.exp(a),
+        UnaryOp::Cbrt => {
+            // 1 / (3 cbrt(a)^2)
+            let c = ctx.unary(UnaryOp::Cbrt, a);
+            let c2 = ctx.mul(c, c);
+            let three = ctx.konst_int(3);
+            let d = ctx.mul(three, c2);
+            ctx.recip(d)
+        }
+        UnaryOp::Abs => ctx.unary(UnaryOp::Sign, a),
+        UnaryOp::Sign | UnaryOp::Ceil | UnaryOp::Round | UnaryOp::Trunc | UnaryOp::RandUniform => {
+            ctx.zero()
+        }
+        UnaryOp::Asin | UnaryOp::Acos => {
+            // +-1 / sqrt(1 - a^2)
+            let a2 = ctx.mul(a, a);
+            let one = ctx.one();
+            let d = ctx.sub(one, a2);
+            let s = ctx.sqrt(d);
+            let r = ctx.recip(s);
+            if op == UnaryOp::Asin {
+                r
+            } else {
+                ctx.neg(r)
+            }
+        }
+        UnaryOp::Asinh => {
+            let a2 = ctx.mul(a, a);
+            let one = ctx.one();
+            let d = ctx.add(one, a2);
+            let s = ctx.sqrt(d);
+            ctx.recip(s)
+        }
+        UnaryOp::Acosh => {
+            let a2 = ctx.mul(a, a);
+            let one = ctx.one();
+            let d = ctx.sub(a2, one);
+            let s = ctx.sqrt(d);
+            ctx.recip(s)
+        }
+        UnaryOp::Atanh => {
+            let a2 = ctx.mul(a, a);
+            let one = ctx.one();
+            let d = ctx.sub(one, a2);
+            ctx.recip(d)
+        }
+        UnaryOp::Erf | UnaryOp::Erfc => {
+            // +-2/sqrt(pi) exp(-a^2)
+            let a2 = ctx.mul(a, a);
+            let na2 = ctx.neg(a2);
+            let e = ctx.exp(na2);
+            let c = ctx.konst_f64(std::f64::consts::FRAC_2_SQRT_PI);
+            let d = ctx.mul(c, e);
+            if op == UnaryOp::Erf {
+                d
+            } else {
+                ctx.neg(d)
+            }
+        }
+        UnaryOp::Lgamma => ctx.unary(UnaryOp::Digamma, a),
+        UnaryOp::Tgamma => {
+            let g = ctx.unary(UnaryOp::Tgamma, a);
+            let p = ctx.unary(UnaryOp::Digamma, a);
+            ctx.mul(g, p)
+        }
+        UnaryOp::Digamma => ctx.unary(UnaryOp::Trigamma, a),
+        UnaryOp::Trigamma => {
+            panic!("rsgb: the derivative of trigamma (polygamma of order 2) is not available")
+        }
+    }
+}
+
+/// Partial derivatives `(d/da, d/db)` of a binary function.
+fn binary_partials<K: Field>(
+    ctx: &mut Graph<K>,
+    op: BinOp,
+    a: ExprId,
+    b: ExprId,
+) -> (ExprId, ExprId) {
+    match op {
+        BinOp::Powf => {
+            // d/da = b a^(b-1), d/db = a^b ln a
+            let one = ctx.one();
+            let bm1 = ctx.sub(b, one);
+            let p = ctx.binary(BinOp::Powf, a, bm1);
+            let da = ctx.mul(b, p);
+            let ab = ctx.binary(BinOp::Powf, a, b);
+            let ln = ctx.ln(a);
+            let db = ctx.mul(ab, ln);
+            (da, db)
+        }
+        BinOp::Mod => {
+            // fmod(a, b) = a - b trunc(a/b): d/da = 1, d/db = -trunc(a/b)
+            let q = ctx.div(a, b);
+            let t = ctx.unary(UnaryOp::Trunc, q);
+            let one = ctx.one();
+            (one, ctx.neg(t))
+        }
+        BinOp::Atan2 => {
+            // d/da = b/(a^2+b^2), d/db = -a/(a^2+b^2)
+            let a2 = ctx.mul(a, a);
+            let b2 = ctx.mul(b, b);
+            let s = ctx.add(a2, b2);
+            let r = ctx.recip(s);
+            let da = ctx.mul(b, r);
+            let ar = ctx.mul(a, r);
+            (da, ctx.neg(ar))
+        }
+        BinOp::Hypot => {
+            let h = ctx.binary(BinOp::Hypot, a, b);
+            let r = ctx.recip(h);
+            (ctx.mul(a, r), ctx.mul(b, r))
+        }
     }
 }
 
@@ -154,6 +289,14 @@ fn diff<K: Field>(ctx: &mut Graph<K>, expr: ExprId, wrt: SymbolId, memo: &mut Me
             ctx.mul(factor, da)
         }
         // Comparisons are piecewise-constant: derivative is zero a.e.
+        Node::Binary(op, a, b) => {
+            let da = diff(ctx, a, wrt, memo);
+            let db = diff(ctx, b, wrt, memo);
+            let (pa, pb) = binary_partials(ctx, op, a, b);
+            let t1 = ctx.mul(pa, da);
+            let t2 = ctx.mul(pb, db);
+            ctx.add(t1, t2)
+        }
         Node::Cmp(..) => ctx.zero(),
         // Subgradient: differentiate through both branches, keep the condition.
         Node::Select(c, t, e) => {
@@ -326,6 +469,13 @@ pub fn gradient<K: Field>(ctx: &mut Graph<K>, f: ExprId, wrt: &[SymbolId]) -> Ve
                 let factor = unary_factor(ctx, op, x);
                 let t = ctx.mul(a_bar, factor);
                 push(&mut adj, x, t);
+            }
+            Node::Binary(op, x, y) => {
+                let (px, py) = binary_partials(ctx, op, x, y);
+                let tx = ctx.mul(a_bar, px);
+                let ty = ctx.mul(a_bar, py);
+                push(&mut adj, x, tx);
+                push(&mut adj, y, ty);
             }
             // Piecewise-constant: no value path into the operands.
             Node::Cmp(..) => {}

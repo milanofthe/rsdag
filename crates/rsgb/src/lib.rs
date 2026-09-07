@@ -23,7 +23,10 @@ pub use extern_fn::ExternBundle;
 pub use field::{ratio_powi, Field, F64};
 pub use func::{CompiledBody, FuncId, Function, FunctionBody, Output, OutputId};
 pub use graph::Graph;
-pub use node::{ArgList, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp, SymbolId, UnaryOp};
+pub use node::{
+    binary_f64, unary_f64, ArgList, BinOp, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp,
+    SymbolId, UnaryOp,
+};
 pub use role::{OutputRole, ParamRole};
 pub use tape::{SchedulePolicy, SpecializedTape, Tape, TapeVisitor};
 pub use transform::{substitute, substitute_expr, substitute_many, substitute_many_all};

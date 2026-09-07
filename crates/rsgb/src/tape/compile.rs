@@ -582,6 +582,7 @@ impl Tape {
                 Node::Pow(a, n) => Op::Powi(s(a), *n as i32),
                 Node::Unary(op, a) => Op::Unary(*op, s(a)),
                 Node::Cmp(op, a, b) => Op::Cmp(*op, s(a), s(b)),
+                Node::Binary(op, a, b) => Op::Binary(*op, s(a), s(b)),
                 Node::Select(c, t, e) => Op::Select(s(c), s(t), s(e)),
                 Node::Reduce(op, l) => {
                     let args = ctx.args(*l);

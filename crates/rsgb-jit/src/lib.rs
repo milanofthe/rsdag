@@ -31,7 +31,10 @@ use cranelift_module::{Linkage, Module};
 use rustc_hash::FxHashMap as HashMap;
 
 use rsgb::extern_fn::ExternBundle;
-use rsgb::node::{dot_slice, reduce_slice, unary_f64, CmpOp, ReduceOp, UnaryOp, REDUCE_SIMD_MIN};
+use rsgb::node::{
+    binary_f64, dot_slice, reduce_slice, unary_f64, BinOp, CmpOp, ReduceOp, UnaryOp,
+    REDUCE_SIMD_MIN,
+};
 use rsgb::{Tape, TapeVisitor};
 
 /// Instructions per compiled function for the solver's outer tapes (residual
@@ -104,6 +107,14 @@ extern "C" fn h_atan(x: f64) -> f64 {
 extern "C" fn h_floor(x: f64) -> f64 {
     unary_f64(UnaryOp::Floor, x)
 }
+/// The floating-point extension of the unary set: one trampoline, the op as
+/// a constant code (see `unary_code`), the same `unary_f64` as everywhere.
+extern "C" fn h_unary_ext(op: u32, x: f64) -> f64 {
+    unary_f64(unary_from_code(op), x)
+}
+extern "C" fn h_binary(op: u32, x: f64, y: f64) -> f64 {
+    binary_f64(binary_from_code(op), x, y)
+}
 extern "C" fn h_powi(x: f64, n: i64) -> f64 {
     x.powi(n as i32)
 }
@@ -168,8 +179,10 @@ extern "C" fn h_bundle_batch(
     b.call_batch(xs, n_groups, n_args, out);
 }
 
-fn unary_sym(op: UnaryOp) -> &'static str {
-    match op {
+/// The dedicated trampoline of a unary op, `None` for the extension ops
+/// (which go through `h_unary_ext` with their code).
+fn unary_sym(op: UnaryOp) -> Option<&'static str> {
+    Some(match op {
         UnaryOp::Exp => "h_exp",
         UnaryOp::Ln => "h_ln",
         UnaryOp::Sqrt => "h_sqrt",
@@ -180,7 +193,54 @@ fn unary_sym(op: UnaryOp) -> &'static str {
         UnaryOp::Tanh => "h_tanh",
         UnaryOp::Atan => "h_atan",
         UnaryOp::Floor => "h_floor",
-    }
+        _ => return None,
+    })
+}
+
+const UNARY_EXT: [UnaryOp; 23] = [
+    UnaryOp::Tan,
+    UnaryOp::Log10,
+    UnaryOp::Log2,
+    UnaryOp::Log1p,
+    UnaryOp::Expm1,
+    UnaryOp::Cbrt,
+    UnaryOp::Abs,
+    UnaryOp::Sign,
+    UnaryOp::Ceil,
+    UnaryOp::Round,
+    UnaryOp::Trunc,
+    UnaryOp::Asin,
+    UnaryOp::Acos,
+    UnaryOp::Asinh,
+    UnaryOp::Acosh,
+    UnaryOp::Atanh,
+    UnaryOp::Erf,
+    UnaryOp::Erfc,
+    UnaryOp::Lgamma,
+    UnaryOp::Tgamma,
+    UnaryOp::Digamma,
+    UnaryOp::Trigamma,
+    UnaryOp::RandUniform,
+];
+
+fn unary_code(op: UnaryOp) -> u32 {
+    UNARY_EXT
+        .iter()
+        .position(|&o| o == op)
+        .expect("an extension op") as u32
+}
+fn unary_from_code(code: u32) -> UnaryOp {
+    UNARY_EXT[code as usize]
+}
+const BINARY_OPS: [BinOp; 4] = [BinOp::Powf, BinOp::Mod, BinOp::Atan2, BinOp::Hypot];
+fn binary_code(op: BinOp) -> u32 {
+    BINARY_OPS
+        .iter()
+        .position(|&o| o == op)
+        .expect("a binary op") as u32
+}
+fn binary_from_code(code: u32) -> BinOp {
+    BINARY_OPS[code as usize]
 }
 
 fn reduce_code(op: ReduceOp) -> i64 {
@@ -192,7 +252,9 @@ fn reduce_code(op: ReduceOp) -> i64 {
     }
 }
 
-const HOST_NAMES: [&str; 15] = [
+const HOST_NAMES: [&str; 17] = [
+    "h_unary_ext",
+    "h_binary",
     "h_exp",
     "h_ln",
     "h_sqrt",
@@ -223,6 +285,8 @@ fn host_addr(name: &str) -> *const u8 {
         "h_atan" => h_atan as *const u8,
         "h_floor" => h_floor as *const u8,
         "h_powi" => h_powi as *const u8,
+        "h_unary_ext" => h_unary_ext as *const u8,
+        "h_binary" => h_binary as *const u8,
         "h_reduce" => h_reduce as *const u8,
         "h_dot" => h_dot as *const u8,
         "h_bundle" => h_bundle as *const u8,
@@ -311,6 +375,7 @@ enum ROp {
     Neg(u32, u32),
     Powi(u32, u32, i32),
     Unary(u32, UnaryOp, u32),
+    Binary(u32, BinOp, u32, u32),
     Cmp(u32, CmpOp, u32, u32),
     Select(u32, u32, u32, u32),
     Reduce(u32, ReduceOp, Vec<u32>),
@@ -334,6 +399,7 @@ impl ROp {
             | ROp::Neg(d, _)
             | ROp::Powi(d, _, _)
             | ROp::Unary(d, _, _)
+            | ROp::Binary(d, _, _, _)
             | ROp::Cmp(d, _, _, _)
             | ROp::Select(d, _, _, _)
             | ROp::Reduce(d, _, _)
@@ -347,7 +413,11 @@ impl ROp {
         match self {
             ROp::Const(..) | ROp::Input(..) | ROp::Pick(..) => {}
             ROp::Neg(_, a) | ROp::Powi(_, a, _) | ROp::Unary(_, _, a) => f(*a),
-            ROp::Add(_, a, b) | ROp::Mul(_, a, b) | ROp::Sub(_, a, b) | ROp::Cmp(_, _, a, b) => {
+            ROp::Add(_, a, b)
+            | ROp::Mul(_, a, b)
+            | ROp::Sub(_, a, b)
+            | ROp::Cmp(_, _, a, b)
+            | ROp::Binary(_, _, a, b) => {
                 f(*a);
                 f(*b);
             }
@@ -437,6 +507,9 @@ impl TapeVisitor for Recorder {
     }
     fn unary(&mut self, dst: u32, op: UnaryOp, a: u32) {
         self.ops.push(ROp::Unary(dst, op, a));
+    }
+    fn binary(&mut self, dst: u32, op: BinOp, a: u32, b: u32) {
+        self.ops.push(ROp::Binary(dst, op, a, b));
     }
     fn cmp(&mut self, dst: u32, op: CmpOp, a: u32, b: u32) {
         self.ops.push(ROp::Cmp(dst, op, a, b));
@@ -653,8 +726,20 @@ impl ChunkJit<'_> {
                         self.b.ins().select(pos, sq, zero)
                     }
                     UnaryOp::Floor => self.b.ins().floor(av),
-                    _ => self.call(unary_sym(*op), &[av]),
+                    _ => match unary_sym(*op) {
+                        Some(sym) => self.call(sym, &[av]),
+                        None => {
+                            let code = self.b.ins().iconst(types::I32, unary_code(*op) as i64);
+                            self.call("h_unary_ext", &[code, av])
+                        }
+                    },
                 };
+                self.set(*dst, v);
+            }
+            ROp::Binary(dst, op, a, b) => {
+                let (x, y) = (self.get(*a), self.get(*b));
+                let code = self.b.ins().iconst(types::I32, binary_code(*op) as i64);
+                let v = self.call("h_binary", &[code, x, y]);
                 self.set(*dst, v);
             }
             ROp::Cmp(dst, op, a, b) => {
@@ -806,8 +891,18 @@ fn compile_chunk(ops: &[ROp], n_work: usize, mask: &[bool]) -> Result<NativeChun
             UnaryOp::Atan,
             UnaryOp::Floor,
         ] {
-            decl(unary_sym(op), &[types::F64], Some(types::F64));
+            decl(
+                unary_sym(op).expect("a dedicated trampoline"),
+                &[types::F64],
+                Some(types::F64),
+            );
         }
+        decl("h_unary_ext", &[types::I32, types::F64], Some(types::F64));
+        decl(
+            "h_binary",
+            &[types::I32, types::F64, types::F64],
+            Some(types::F64),
+        );
         decl("h_powi", &[types::F64, types::I64], Some(types::F64));
         decl("h_reduce", &[types::I32, ptr_ty, ptr_ty], Some(types::F64));
         decl("h_dot", &[ptr_ty, ptr_ty, ptr_ty], Some(types::F64));
@@ -1132,6 +1227,32 @@ impl<const S: usize> LaneChunkJit<'_, S> {
         std::array::from_fn(|j| f(self, a[j], b[j]))
     }
     /// Apply a scalar host function lane-wise (same trampolines, same guards).
+    /// Apply a coded host function (`h_unary_ext`, `h_binary`) lane-wise.
+    fn per_lane_coded(
+        &mut self,
+        name: &'static str,
+        code: Value,
+        v: [Value; S],
+        w: Option<[Value; S]>,
+    ) -> [Value; S] {
+        let f = self.href[name];
+        std::array::from_fn(|j| {
+            let mut rs = [code, code];
+            for (l, r) in rs.iter_mut().enumerate() {
+                let x = self.b.ins().extractlane(v[j], l as u8);
+                let c = match w {
+                    Some(w) => {
+                        let y = self.b.ins().extractlane(w[j], l as u8);
+                        self.b.ins().call(f, &[code, x, y])
+                    }
+                    None => self.b.ins().call(f, &[code, x]),
+                };
+                *r = self.b.inst_results(c)[0];
+            }
+            let z = self.b.ins().splat(types::F64X2, rs[0]);
+            self.b.ins().insertlane(z, rs[1], 1)
+        })
+    }
     fn per_lane(&mut self, name: &'static str, v: [Value; S]) -> [Value; S] {
         let f = self.href[name];
         std::array::from_fn(|j| {
@@ -1284,8 +1405,20 @@ impl<const S: usize> LaneChunkJit<'_, S> {
                         })
                     }
                     UnaryOp::Floor => std::array::from_fn(|j| self.b.ins().floor(av[j])),
-                    _ => self.per_lane(unary_sym(*op), av),
+                    _ => match unary_sym(*op) {
+                        Some(sym) => self.per_lane(sym, av),
+                        None => {
+                            let code = self.b.ins().iconst(types::I32, unary_code(*op) as i64);
+                            self.per_lane_coded("h_unary_ext", code, av, None)
+                        }
+                    },
                 };
+                self.set(*dst, v);
+            }
+            ROp::Binary(dst, op, a, b) => {
+                let (x, y) = (self.get(*a), self.get(*b));
+                let code = self.b.ins().iconst(types::I32, binary_code(*op) as i64);
+                let v = self.per_lane_coded("h_binary", code, x, Some(y));
                 self.set(*dst, v);
             }
             ROp::Cmp(dst, op, a, b) => {
@@ -1399,8 +1532,18 @@ fn compile_lane_chunk<const S: usize>(
             UnaryOp::Atan,
             UnaryOp::Floor,
         ] {
-            decl(unary_sym(op), &[types::F64], Some(types::F64));
+            decl(
+                unary_sym(op).expect("a dedicated trampoline"),
+                &[types::F64],
+                Some(types::F64),
+            );
         }
+        decl("h_unary_ext", &[types::I32, types::F64], Some(types::F64));
+        decl(
+            "h_binary",
+            &[types::I32, types::F64, types::F64],
+            Some(types::F64),
+        );
         decl("h_powi", &[types::F64, types::I64], Some(types::F64));
         decl("h_reduce", &[types::I32, ptr_ty, ptr_ty], Some(types::F64));
         decl("h_dot", &[ptr_ty, ptr_ty, ptr_ty], Some(types::F64));
