@@ -72,7 +72,10 @@ pub fn run_c_with(
         }
     }
     main.push_str("    return 0;\n}\n");
-    let dir = std::env::temp_dir().join(format!("rsgb-c-{}-{}", std::process::id(), tape.n_ops()));
+    // One directory per call: tests run in parallel threads of one process.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("rsgb-c-{}-{seq}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let c_path: PathBuf = dir.join("harness.c");
     let bin: PathBuf = dir.join("harness");
