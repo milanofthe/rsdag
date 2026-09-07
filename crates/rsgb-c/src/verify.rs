@@ -25,6 +25,18 @@ pub fn find_compiler() -> Option<String> {
 /// every row of `inputs`, run it, and parse the outputs (transported as hex
 /// bit patterns, so nothing is lost in printing).
 pub fn run_c(cc: &str, tape: &Tape, inputs: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> {
+    run_c_with(cc, tape, inputs, false).map(|(rows, _)| rows)
+}
+
+/// [`run_c`] that also returns the harness's raw stdout; with `trace_slots`
+/// the harness prints every work slot after the last row (debugging a
+/// mismatch op by op).
+pub fn run_c_with(
+    cc: &str,
+    tape: &Tape,
+    inputs: &[Vec<f64>],
+    trace_slots: bool,
+) -> Result<(Vec<Vec<f64>>, String), String> {
     let src = crate::emit(tape, "rsgb_fn").map_err(|e| e.to_string())?;
     let n_in = inputs.first().map_or(0, |r| r.len());
     let n_out = tape.n_outputs();
@@ -52,6 +64,12 @@ pub fn run_c(cc: &str, tape: &Tape, inputs: &[Vec<f64>]) -> Result<Vec<Vec<f64>>
         main.push_str(&format!(
             "      for (int k = 0; k < {n_out}; k++) {{ uint64_t b; memcpy(&b, &out[k], 8); printf(\"%016llx \", (unsigned long long)b); }}\n      printf(\"\\n\"); }}\n"
         ));
+        if trace_slots {
+            main.push_str(&format!(
+                "    for (int k = 0; k < {}; k++) {{ uint64_t b; memcpy(&b, &work[k], 8); printf(\"slot %d %016llx %.17g\\n\", k, (unsigned long long)b, work[k]); }}\n",
+                tape.n_slots()
+            ));
+        }
     }
     main.push_str("    return 0;\n}\n");
     let dir = std::env::temp_dir().join(format!("rsgb-c-{}-{}", std::process::id(), tape.n_ops()));
@@ -76,9 +94,10 @@ pub fn run_c(cc: &str, tape: &Tape, inputs: &[Vec<f64>]) -> Result<Vec<Vec<f64>>
     if !run.status.success() {
         return Err("harness failed".to_string());
     }
-    let text = String::from_utf8_lossy(&run.stdout);
+    let text = String::from_utf8_lossy(&run.stdout).to_string();
     let rows = text
         .lines()
+        .filter(|l| !l.starts_with("slot "))
         .map(|l| {
             l.split_whitespace()
                 .map(|h| f64::from_bits(u64::from_str_radix(h, 16).unwrap_or(0)))
@@ -86,5 +105,5 @@ pub fn run_c(cc: &str, tape: &Tape, inputs: &[Vec<f64>]) -> Result<Vec<Vec<f64>>
         })
         .collect();
     let _ = std::fs::remove_dir_all(&dir);
-    Ok(rows)
+    Ok((rows, text))
 }

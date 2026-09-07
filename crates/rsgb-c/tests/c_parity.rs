@@ -124,6 +124,19 @@ fn cases(ext: bool, seeds: std::ops::Range<u64>) -> (usize, usize) {
             } else if (a - b).abs() <= 1e-12 * (1.0 + a.abs()) {
                 close += 1;
             } else {
+                let (_, trace) =
+                    rsgb_c::verify::run_c_with(&cc, &tape, &[row.clone()], true).expect("C rerun");
+                tape.eval(row, &mut w, &mut o);
+                let slots: Vec<String> = w
+                    .iter()
+                    .take(tape.n_slots())
+                    .enumerate()
+                    .map(|(k, v)| format!("slot {k} {:016x} {v:.17}", v.to_bits()))
+                    .collect();
+                eprintln!(
+                    "interpreter slots:\n{}\nC slots:\n{trace}",
+                    slots.join("\n")
+                );
                 panic!(
                     "seed {seed}: inputs {row:?} interpreter {a:?} vs C {b:?}\n{}\n{}",
                     tape.dump(),
