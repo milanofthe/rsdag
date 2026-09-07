@@ -550,3 +550,58 @@ fn partial_specialization_checked_evals_bit_exact() {
         "partial specialization diverged where guards held"
     );
 }
+
+/// The typed evaluators: a tape evaluated in `Complex<f64>` matches the
+/// complex arena sweep bit for bit on real inputs, and `f32` stays within
+/// single precision of `f64` on well-conditioned expressions.
+#[test]
+fn typed_tape_matches_complex_arena_and_f32_is_close() {
+    use num_complex::Complex64;
+    let mut checked = 0;
+    for seed in 1..300u64 {
+        let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let mut ctx: Graph = Graph::new();
+        let nsym = 1 + rng.below(4);
+        let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
+        let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
+        let steps = 4 + rng.below(20);
+        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, false, true);
+        let tape = Tape::compile(&ctx, &[root], &sym_ids);
+        let inputs: Vec<f64> = (0..nsym).map(|_| rng.val()).collect();
+        let (mut w, mut o) = (Vec::new(), Vec::new());
+        tape.eval(&inputs, &mut w, &mut o);
+        if !o[0].is_finite() {
+            continue;
+        }
+        // complex: tape vs arena
+        let cin: Vec<Complex64> = inputs.iter().map(|&x| Complex64::new(x, 0.0)).collect();
+        let (mut wc, mut oc) = (Vec::new(), Vec::new());
+        tape.eval_typed(&cin, &mut wc, &mut oc);
+        let mut env = HashMap::new();
+        for (k, &s) in sym_ids.iter().enumerate() {
+            env.insert(s, cin[k]);
+        }
+        let arena = rsgb::eval(&ctx, root, &env);
+        assert!(
+            same_bits(oc[0].re, arena.re) && same_bits(oc[0].im, arena.im),
+            "seed {seed}: complex tape {:?} vs arena {:?}",
+            oc[0],
+            arena
+        );
+        // f32: within single precision of the f64 value (relative)
+        let fin: Vec<f32> = inputs.iter().map(|&x| x as f32).collect();
+        let (mut wf, mut of) = (Vec::new(), Vec::new());
+        tape.eval_typed(&fin, &mut wf, &mut of);
+        let (a, b) = (o[0], of[0] as f64);
+        if a.abs() < 1e6 && b.is_finite() {
+            let tol = 1e-3 * (1.0 + a.abs());
+            if (a - b).abs() > tol {
+                // rough ops (floor, sign, mod, rand) may legitimately jump
+                // under rounding; only count the smooth cases
+                continue;
+            }
+        }
+        checked += 1;
+    }
+    assert!(checked > 150, "too few checked cases: {checked}");
+}

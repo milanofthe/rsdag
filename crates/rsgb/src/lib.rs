@@ -11,6 +11,7 @@ pub mod func;
 pub mod graph;
 pub mod node;
 pub mod role;
+pub mod scalar;
 pub mod simplify;
 pub mod symbolic;
 pub mod tape;
@@ -30,9 +31,14 @@ pub use node::{
     SymbolId, UnaryOp,
 };
 pub use role::{OutputRole, ParamRole};
+pub use scalar::Scalar;
 pub use simplify::rebuild;
 pub use symbolic::{collect, determinant, rational_form, simplify_egraph};
 pub use tape::{SchedulePolicy, SpecializedTape, Tape, TapeVisitor};
+/// The execution form of a function (see the design: `Program<T>` is the
+/// tape evaluated in a [`Scalar`] `T`; the storage is `f64`, the typed
+/// evaluators convert once).
+pub type Program = Tape;
 pub use transform::{substitute, substitute_expr, substitute_many, substitute_many_all};
 
 #[cfg(test)]

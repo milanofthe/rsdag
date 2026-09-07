@@ -250,6 +250,70 @@ impl Tape {
 
     /// Instruction count of the parameter-pure prolog (0 when compiled without
     /// [`compile_split`](Self::compile_split)).
+    /// Evaluate the whole tape in another execution scalar (`f32`,
+    /// `Complex<f64>`): constants convert from their `f64` lowering, every
+    /// op goes through [`Scalar`](crate::scalar::Scalar)'s reference
+    /// implementation for `T`. Tapes with bundle calls are `f64` only.
+    pub fn eval_typed<T: crate::scalar::Scalar>(
+        &self,
+        inputs: &[T],
+        work: &mut Vec<T>,
+        out: &mut Vec<T>,
+    ) {
+        use crate::scalar::{dot_slice_t, reduce_slice_t};
+        assert!(
+            self.bundles.is_empty(),
+            "eval_typed: tapes with bundle calls evaluate in f64 only"
+        );
+        work.clear();
+        work.resize(self.n_work + self.max_args, T::zero());
+        let (w, scratch) = work.split_at_mut(self.n_work);
+        for i in 0..self.ops.len() {
+            let g = |k: u32| w[k as usize];
+            let v = match self.ops[i] {
+                Op::Const(v) => T::from_f64(v),
+                Op::Input(k) => inputs.get(k as usize).copied().unwrap_or(T::nan()),
+                Op::Add(a, b) => g(a).add(g(b)),
+                Op::Mul(a, b) => g(a).mul(g(b)),
+                Op::MulAdd(a, b, c) => g(a).mul(g(b)).add(g(c)),
+                Op::Sub(a, b) => g(a).sub(g(b)),
+                Op::Neg(a) => g(a).neg(),
+                Op::Powi(a, n) => g(a).powi(n),
+                Op::Unary(op, a) => T::unary(op, g(a)),
+                Op::Binary(op, a, b) => T::binary(op, g(a), g(b)),
+                Op::Cmp(op, a, b) => T::cmp(op, g(a), g(b)),
+                Op::Select(c, t, e) => {
+                    if g(c).is_true() {
+                        g(t)
+                    } else {
+                        g(e)
+                    }
+                }
+                Op::Reduce(op, start, len) => {
+                    for k in 0..len {
+                        scratch[k as usize] = g(self.arg_pool[(start + k) as usize]);
+                    }
+                    reduce_slice_t(op, &scratch[..len as usize])
+                }
+                Op::Dot(start, len) => {
+                    for k in 0..2 * len {
+                        scratch[k as usize] = g(self.arg_pool[(start + k) as usize]);
+                    }
+                    dot_slice_t(
+                        &scratch[..len as usize],
+                        &scratch[len as usize..2 * len as usize],
+                    )
+                }
+                Op::BundleCall(..) | Op::BundleBatch(..) | Op::BundlePick(..) => {
+                    unreachable!("no bundles")
+                }
+            };
+            w[self.dst[i] as usize] = v;
+        }
+        out.clear();
+        out.extend(self.outputs.iter().map(|&o| w[o as usize]));
+    }
+
     pub fn prolog_len(&self) -> usize {
         self.prolog_ops
     }
