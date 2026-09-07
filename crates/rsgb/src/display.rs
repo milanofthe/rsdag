@@ -1,18 +1,18 @@
 use crate::field::Field;
-use crate::graph::Context;
+use crate::graph::Graph;
 use crate::node::{CmpOp, ExprId, Node, ReduceOp, UnaryOp};
 
 /// Render an expression to an infix string (raw, unsimplified).
 ///
 /// Good enough for inspection and tests. Pretty/canonical rendering of
 /// `H(s)` as a collected rational function is a job for the rewrite layer.
-pub fn to_string<K: Field>(ctx: &Context<K>, id: ExprId) -> String {
+pub fn to_string<K: Field>(ctx: &Graph<K>, id: ExprId) -> String {
     let mut out = String::new();
     write_expr(ctx, id, &mut out);
     out
 }
 
-fn write_expr<K: Field>(ctx: &Context<K>, id: ExprId, out: &mut String) {
+fn write_expr<K: Field>(ctx: &Graph<K>, id: ExprId, out: &mut String) {
     match ctx.node(id) {
         Node::Const(c) => {
             out.push_str(&ctx.const_val(*c).render());
@@ -128,7 +128,7 @@ fn unary_name(op: UnaryOp) -> &'static str {
 }
 
 /// Wrap sums in parens when they appear as a factor.
-fn write_factor<K: Field>(ctx: &Context<K>, id: ExprId, out: &mut String) {
+fn write_factor<K: Field>(ctx: &Graph<K>, id: ExprId, out: &mut String) {
     match ctx.node(id) {
         Node::Add(..) | Node::Neg(..) => {
             out.push('(');

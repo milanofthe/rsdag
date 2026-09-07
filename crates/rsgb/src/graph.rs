@@ -7,7 +7,7 @@ use num_rational::BigRational;
 use crate::field::Field;
 
 use crate::extern_fn::ExternBundle;
-use crate::func::{CompiledBody, Func, FuncId, FunctionBody, Output, OutputId};
+use crate::func::{CompiledBody, FuncId, Function, FunctionBody, Output, OutputId};
 use crate::node::{ArgList, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp, SymbolId, UnaryOp};
 
 /// Owns the hash-consed symbolic DAG and the symbol table.
@@ -23,7 +23,7 @@ use crate::node::{ArgList, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp, Sym
 /// is interned by hashing 16 bytes; a constant is hashed once when it is first
 /// seen; an operand list is interned by content so equal lists share one
 /// window (which is what makes `Reduce`/`Dot`/`Opaque` hash-cons structurally).
-pub struct Context<K: Field = BigRational> {
+pub struct Graph<K: Field = BigRational> {
     nodes: Vec<Node>,
     dedup: HashMap<Node, ExprId>,
     consts: Vec<K>,
@@ -41,7 +41,7 @@ pub struct Context<K: Field = BigRational> {
     symbol_ids: HashMap<String, SymbolId>,
     /// Functions (see [`crate::func`]) and the interned `(function, output)`
     /// pairs the `Call` nodes name.
-    funcs: Vec<Func>,
+    funcs: Vec<Function>,
     outputs: Vec<(FuncId, u32)>,
     output_dedup: HashMap<(FuncId, u32), OutputId>,
     /// Reusable per-node memo for the graph traversals (differentiation,
@@ -98,15 +98,15 @@ impl Memo {
     }
 }
 
-impl<K: Field> Default for Context<K> {
+impl<K: Field> Default for Graph<K> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<K: Field> Context<K> {
+impl<K: Field> Graph<K> {
     pub fn new() -> Self {
-        let mut ctx = Context {
+        let mut ctx = Graph {
             nodes: Vec::new(),
             dedup: HashMap::default(),
             consts: Vec::new(),
@@ -603,7 +603,7 @@ impl<K: Field> Context<K> {
         outputs: Vec<ExprId>,
     ) -> FuncId {
         let id = FuncId(self.funcs.len() as u32);
-        self.funcs.push(Func {
+        self.funcs.push(Function {
             name: name.to_string(),
             params,
             outputs: outputs.into_iter().map(Output::Expr).collect(),
@@ -634,7 +634,7 @@ impl<K: Field> Context<K> {
             })
             .collect();
         let id = FuncId(self.funcs.len() as u32);
-        self.funcs.push(Func {
+        self.funcs.push(Function {
             name: name.to_string(),
             params,
             outputs,
@@ -655,7 +655,7 @@ impl<K: Field> Context<K> {
         k
     }
 
-    pub fn func(&self, f: FuncId) -> &Func {
+    pub fn func(&self, f: FuncId) -> &Function {
         &self.funcs[f.0 as usize]
     }
 

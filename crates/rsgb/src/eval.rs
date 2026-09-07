@@ -4,7 +4,7 @@ use crate::field::Field;
 use num_complex::Complex64;
 
 use crate::func::{CompiledBody, FuncId, Output};
-use crate::graph::Context;
+use crate::graph::Graph;
 use crate::node::ArgList;
 use crate::node::{
     cmp_bool, dot_slice, reduce_slice, unary_f64, ExprId, Node, ReduceOp, SymbolId, UnaryOp,
@@ -17,7 +17,7 @@ use crate::node::{
 /// Jacobian per Newton step). Calls evaluate their function once per distinct
 /// argument list (see [`FuncEval`]).
 pub fn eval_real<K: Field>(
-    ctx: &Context<K>,
+    ctx: &Graph<K>,
     env: &HashMap<SymbolId, f64>,
     roots: &[ExprId],
 ) -> Vec<f64> {
@@ -30,7 +30,7 @@ pub fn eval_real<K: Field>(
 /// need to locate the first non-finite node: since nodes are interned bottom-up,
 /// the lowest-index non-finite entry is the origin of a NaN/Inf (all its
 /// operands have smaller indices and are therefore finite).
-pub fn eval_real_all<K: Field>(ctx: &Context<K>, env: &HashMap<SymbolId, f64>) -> Vec<f64> {
+pub fn eval_real_all<K: Field>(ctx: &Graph<K>, env: &HashMap<SymbolId, f64>) -> Vec<f64> {
     let n = ctx.len();
     let mut w = vec![0.0_f64; n];
     let mut fe = FuncEval::new();
@@ -98,7 +98,7 @@ impl FuncEval {
     /// `l` keys the memo).
     pub fn output<K: Field>(
         &mut self,
-        ctx: &Context<K>,
+        ctx: &Graph<K>,
         f: FuncId,
         out: u32,
         l: ArgList,
@@ -157,11 +157,7 @@ impl Default for FuncEval {
 /// `Complex64`, the Laplace variable `s` as `j*omega` for AC analysis).
 /// This is the bridge from the symbolic layer to numeric results (Bode,
 /// verification); the fast batched evaluator (tape) comes later.
-pub fn eval<K: Field>(
-    ctx: &Context<K>,
-    id: ExprId,
-    env: &HashMap<SymbolId, Complex64>,
-) -> Complex64 {
+pub fn eval<K: Field>(ctx: &Graph<K>, id: ExprId, env: &HashMap<SymbolId, Complex64>) -> Complex64 {
     // Memoize per node: the expression is a hash-consed DAG (a node is reachable
     // by many paths -- e.g. an `H(s)` from symbolic LU), so naive recursion is
     // worst-case exponential. The cache makes it linear in the reachable nodes
@@ -172,7 +168,7 @@ pub fn eval<K: Field>(
 }
 
 fn eval_memo<K: Field>(
-    ctx: &Context<K>,
+    ctx: &Graph<K>,
     id: ExprId,
     env: &HashMap<SymbolId, Complex64>,
     memo: &mut HashMap<ExprId, Complex64>,
@@ -186,7 +182,7 @@ fn eval_memo<K: Field>(
 }
 
 fn eval_node<K: Field>(
-    ctx: &Context<K>,
+    ctx: &Graph<K>,
     id: ExprId,
     env: &HashMap<SymbolId, Complex64>,
     memo: &mut HashMap<ExprId, Complex64>,
@@ -286,7 +282,7 @@ fn eval_node<K: Field>(
 
 /// Convenience wrapper: bind symbols by name and evaluate.
 pub fn eval_named<K: Field>(
-    ctx: &mut Context<K>,
+    ctx: &mut Graph<K>,
     id: ExprId,
     values: &[(&str, Complex64)],
 ) -> Complex64 {
@@ -306,7 +302,7 @@ pub fn eval_named<K: Field>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::Context;
+    use crate::graph::Graph;
 
     #[test]
     fn complex_eval_is_linear_on_shared_dag() {
@@ -314,7 +310,7 @@ mod tests {
         // references x_k twice. 40 levels => 2^40 naive recursions but only 40
         // distinct nodes. Completing quickly proves `eval` memoizes (is linear in
         // reachable nodes, not exponential in paths).
-        let mut ctx: Context = Context::new();
+        let mut ctx: Graph = Graph::new();
         let s = ctx.sym("s");
         let mut e = s;
         for _ in 0..40 {

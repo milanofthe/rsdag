@@ -1,13 +1,13 @@
 use crate::func::OutputId;
 
-/// Index of an interned expression node inside a [`crate::Context`].
+/// Index of an interned expression node inside a [`crate::Graph`].
 ///
 /// Cheap to copy and compare; identical subexpressions share one `ExprId`
 /// thanks to hash-consing, so structural equality is `O(1)`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct ExprId(pub u32);
 
-/// Index of an interned exact rational constant in a [`crate::Context`]'s
+/// Index of an interned exact rational constant in a [`crate::Graph`]'s
 /// constant table. Two equal rationals share one id, so a constant node is a
 /// 4-byte handle and comparing constants is an integer compare.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
@@ -16,7 +16,7 @@ pub struct ConstId(pub u32);
 /// An interned operand list: a `(start, len)` window into the context's shared
 /// argument pool. Lists are deduplicated by content, so two structurally equal
 /// variadic nodes carry the *same* `ArgList` and hash-cons to one node. Resolve
-/// to a slice with [`crate::Context::args`].
+/// to a slice with [`crate::Graph::args`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct ArgList {
     pub start: u32,
@@ -262,7 +262,7 @@ pub fn cmp_bool<T: PartialOrd>(op: CmpOp, x: T, y: T) -> bool {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Node {
     /// Exact rational constant, by id into the context's constant table (kept
-    /// reduced, sign in the numerator). Resolve with [`crate::Context::const_val`].
+    /// reduced, sign in the numerator). Resolve with [`crate::Graph::const_val`].
     Const(ConstId),
     /// Free symbol, referenced by id into the context symbol table.
     Symbol(SymbolId),
@@ -285,7 +285,7 @@ pub enum Node {
     Reduce(ReduceOp, ArgList),
     /// Inner product `Σ_i a[i]*b[i]` over two equal-length operand lists,
     /// stored as ONE list `[a_0..a_n, b_0..b_n]` (resolve the halves with
-    /// [`crate::Context::dot_args`]). The fused form of a sum of pairwise
+    /// [`crate::Graph::dot_args`]). The fused form of a sum of pairwise
     /// products (matrix-vector rows).
     Dot(ArgList),
     /// A call: output `OutputId` of a function (see [`crate::func`]) applied

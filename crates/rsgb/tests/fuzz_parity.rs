@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use rsgb::{differentiate, eval_real, Context, ExprId, Node, ReduceOp, SymbolId, Tape};
+use rsgb::{differentiate, eval_real, ExprId, Graph, Node, ReduceOp, SymbolId, Tape};
 
 // DETERMINISTIC RNG ====================================================================
 
@@ -41,7 +41,7 @@ impl Rng {
 
 // HELPERS ==============================================================================
 
-fn sym_id(ctx: &Context, e: ExprId) -> SymbolId {
+fn sym_id(ctx: &Graph, e: ExprId) -> SymbolId {
     match ctx.node(e) {
         Node::Symbol(s) => *s,
         _ => unreachable!(),
@@ -57,7 +57,7 @@ fn same_bits(a: f64, b: f64) -> bool {
 /// Build a random DAG over pre-created symbols. `smooth` restricts to
 /// differentiable ops (no cmp / select / floor) for the AD vs FD check.
 fn build_with_syms(
-    ctx: &mut Context,
+    ctx: &mut Graph,
     rng: &mut Rng,
     syms: &[ExprId],
     steps: usize,
@@ -140,7 +140,7 @@ fn eval_batch_matches_scalar_bit_exact() {
     let mut mismatches = 0;
     for seed in 1..600u64 {
         let mut rng = Rng(seed.wrapping_mul(0x2545_F491_4F6C_DD1D) | 1);
-        let mut ctx: Context = Context::new();
+        let mut ctx: Graph = Graph::new();
         let nsym = 1 + rng.below(4);
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
@@ -182,7 +182,7 @@ fn tape_matches_arena_sweep_bit_exact() {
     let mut mismatches = 0;
     for seed in 1..600u64 {
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
-        let mut ctx: Context = Context::new();
+        let mut ctx: Graph = Graph::new();
         let nsym = 1 + rng.below(4);
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
@@ -221,7 +221,7 @@ fn split_tape_matches_unsplit_bit_exact() {
     let mut mismatches = 0;
     for seed in 1..400u64 {
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
-        let mut ctx: Context = Context::new();
+        let mut ctx: Graph = Graph::new();
         let nsym = 2 + rng.below(4);
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
@@ -273,7 +273,7 @@ fn split_tape_matches_unsplit_bit_exact() {
 fn liveness_reuses_slots_on_deep_chains() {
     // A 200-deep accumulator chain ((((x+c)+c)+c)...) has 200+ reachable nodes
     // but only a couple are live at once -> the work buffer should be tiny.
-    let mut ctx: Context = Context::new();
+    let mut ctx: Graph = Graph::new();
     let x = ctx.sym("x");
     let mut acc = x;
     for i in 0..200 {
@@ -300,7 +300,7 @@ fn long_reduce_dot_match_arena_4lane() {
     // still agree bit-for-bit (both go through the shared reduce/dot slice fn).
     for seed in 1..200u64 {
         let mut rng = Rng(seed.wrapping_mul(0xD1B5_4A32_D192_ED03) | 1);
-        let mut ctx: Context = Context::new();
+        let mut ctx: Graph = Graph::new();
         let nsym = 3;
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
@@ -341,7 +341,7 @@ fn specialize_pins_and_guards() {
     // y = select(x > 0, exp(x), -x): specialized at x = 1 the select is gone
     // (fewer ops), the guard holds anywhere on the positive branch, fires on
     // the negative one, and respecializing restores parity.
-    let mut ctx: Context = Context::new();
+    let mut ctx: Graph = Graph::new();
     let x = ctx.sym("x");
     let zero = ctx.zero();
     let c = ctx.cmp(rsgb::CmpOp::Gt, x, zero);
@@ -393,7 +393,7 @@ fn specialized_tape_matches_full_bit_exact() {
     let mut holds = 0;
     for seed in 1..400u64 {
         let mut rng = Rng(seed.wrapping_mul(0xA076_1D64_78BD_642F) | 1);
-        let mut ctx: Context = Context::new();
+        let mut ctx: Graph = Graph::new();
         let nsym = 1 + rng.below(4);
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
@@ -450,7 +450,7 @@ fn differentiate_matches_finite_differences() {
     let mut checked = 0;
     for seed in 1..800u64 {
         let mut rng = Rng(seed.wrapping_mul(0x2545_F491_4F6C_DD1D) | 1);
-        let mut ctx: Context = Context::new();
+        let mut ctx: Graph = Graph::new();
         let nsym = 1 + rng.below(3);
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
@@ -498,7 +498,7 @@ fn partial_specialization_checked_evals_bit_exact() {
     let mut mismatches = 0;
     for seed in 1..500u64 {
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
-        let mut ctx: Context = Context::new();
+        let mut ctx: Graph = Graph::new();
         let nsym = 2 + rng.below(3);
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();

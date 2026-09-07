@@ -11,7 +11,7 @@ use rustc_hash::FxHashMap as HashMap;
 use super::{BatchTable, Op, Tape};
 use crate::extern_fn::ExternBundle;
 use crate::func::{CompiledBody, FuncId, Output};
-use crate::graph::Context;
+use crate::graph::Graph;
 use crate::node::{ExprId, Node, SymbolId};
 
 /// How [`Tape::compile`] orders the instruction stream.
@@ -33,7 +33,7 @@ impl Tape {
     /// Compile a tape computing `roots`, where `inputs[k]` (passed to
     /// [`eval`](Self::eval)) is the value of symbol `input_syms[k]`. Symbols not
     /// listed evaluate to `NaN`.
-    pub fn compile<K: Field>(ctx: &Context<K>, roots: &[ExprId], input_syms: &[SymbolId]) -> Tape {
+    pub fn compile<K: Field>(ctx: &Graph<K>, roots: &[ExprId], input_syms: &[SymbolId]) -> Tape {
         Self::compile_inner(ctx, roots, input_syms, None)
     }
 
@@ -47,7 +47,7 @@ impl Tape {
     /// [`eval`](Self::eval) still runs the whole stream, so the split is
     /// invisible to callers that ignore it.
     pub fn compile_split<K: Field>(
-        ctx: &Context<K>,
+        ctx: &Graph<K>,
         roots: &[ExprId],
         input_syms: &[SymbolId],
         pure_inputs: &[bool],
@@ -56,7 +56,7 @@ impl Tape {
     }
 
     fn compile_inner<K: Field>(
-        ctx: &Context<K>,
+        ctx: &Graph<K>,
         roots: &[ExprId],
         input_syms: &[SymbolId],
         pure_inputs: Option<&[bool]>,
@@ -400,7 +400,7 @@ impl Tape {
         // built here (so a tape is total without any registration).
         let mut evaluators: HashMap<u32, (Arc<dyn ExternBundle>, Vec<Option<u32>>)> =
             HashMap::default();
-        let mut evaluator = |ctx: &Context<K>, f: FuncId, out: u32| {
+        let mut evaluator = |ctx: &Graph<K>, f: FuncId, out: u32| {
             let fi = f.0;
             let known = evaluators
                 .get(&fi)

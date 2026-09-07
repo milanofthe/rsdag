@@ -33,7 +33,7 @@ use rustc_hash::FxHashMap as HashMap;
 use crate::extern_fn::ExternBundle;
 use crate::node::{ExprId, SymbolId};
 
-/// Index of a function in a [`Context`](crate::graph::Context).
+/// Index of a function in a [`Graph`](crate::graph::Graph).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct FuncId(pub u32);
 
@@ -55,7 +55,7 @@ pub enum Output {
 /// How a function's outputs are computed.
 pub enum FunctionBody {
     /// Outputs are expressions over the parameters; a solver may register a
-    /// compiled body for them (see [`Func::compiled`]).
+    /// compiled body for them (see [`Function::compiled`]).
     Symbolic,
     /// Outputs are slots of a numeric bundle.
     Extern(Arc<dyn ExternBundle>),
@@ -71,7 +71,7 @@ pub struct CompiledBody {
     pub slot_of: Vec<Option<u32>>,
 }
 
-pub struct Func {
+pub struct Function {
     pub name: String,
     /// Formal leaves in argument order.
     pub params: Vec<SymbolId>,
@@ -103,12 +103,12 @@ impl ExternBundle for InterpretedBody {
     }
 }
 
-impl Func {
+impl Function {
     /// An evaluator for every symbolic output of the function, interpreted
     /// (see [`InterpretedBody`]); `None` for an extern function.
     pub fn interpreted_body<K: crate::field::Field>(
         &self,
-        ctx: &crate::graph::Context<K>,
+        ctx: &crate::graph::Graph<K>,
     ) -> Option<CompiledBody> {
         if self.is_extern() {
             return None;

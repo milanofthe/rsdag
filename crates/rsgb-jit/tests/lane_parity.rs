@@ -3,7 +3,7 @@
 //! per lane, within floating-point codegen freedom (see `close`).
 
 use rsgb::node::Node;
-use rsgb::{Context, ExprId, ReduceOp, SymbolId, Tape};
+use rsgb::{ExprId, Graph, ReduceOp, SymbolId, Tape};
 use rsgb_jit::{LaneTape, LANES};
 
 struct Rng(u64);
@@ -24,7 +24,7 @@ impl Rng {
     }
 }
 
-fn sym_id(ctx: &Context, e: ExprId) -> SymbolId {
+fn sym_id(ctx: &Graph, e: ExprId) -> SymbolId {
     match ctx.node(e) {
         Node::Symbol(s) => *s,
         _ => unreachable!(),
@@ -50,7 +50,7 @@ fn close(a: f64, b: f64) -> bool {
     (a - b).abs() <= 1e-9 + 1e-9 * a.abs().max(b.abs())
 }
 
-fn build(ctx: &mut Context, rng: &mut Rng, syms: &[ExprId], steps: usize) -> Vec<ExprId> {
+fn build(ctx: &mut Graph, rng: &mut Rng, syms: &[ExprId], steps: usize) -> Vec<ExprId> {
     let mut pool: Vec<ExprId> = syms.to_vec();
     for _ in 0..2 {
         let k = ctx.konst_f64(rng.val());
@@ -113,7 +113,7 @@ fn lane_tape_matches_scalar_tape_per_lane() {
     #[allow(clippy::unusual_byte_groupings)] // mnemonic seed
     let mut rng = Rng(0x1a4e_5eed_0dd_b1a5);
     for case in 0..250 {
-        let mut ctx: Context = Context::new();
+        let mut ctx: Graph = Graph::new();
         let syms: Vec<ExprId> = ["x", "y", "z"].iter().map(|n| ctx.sym(n)).collect();
         let steps = 6 + rng.below(30);
         let roots = build(&mut ctx, &mut rng, &syms, steps);
@@ -159,7 +159,7 @@ fn lane_tape_matches_scalar_tape_per_lane() {
 /// impure binding, per lane.
 #[test]
 fn lane_tape_split_prolog_matches() {
-    let mut ctx: Context = Context::new();
+    let mut ctx: Graph = Graph::new();
     let (p, x) = (ctx.sym("p"), ctx.sym("x"));
     let ep = ctx.exp(p);
     let mx = ctx.mul(ep, x);
