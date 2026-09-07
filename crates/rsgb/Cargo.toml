@@ -1,0 +1,18 @@
+[package]
+name = "rsgb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Rust symbolic graph backend: hash-consed expression graph, differentiation, tape"
+
+[dependencies]
+num-bigint.workspace = true
+num-rational.workspace = true
+num-traits.workspace = true
+num-complex.workspace = true
+rustc-hash.workspace = true
+
+[lints]
+workspace = true
