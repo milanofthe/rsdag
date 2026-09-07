@@ -1,0 +1,24 @@
+[package]
+name = "rsgb-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Python tracer and bindings for rsgb: trace, jit, jacobian, grad"
+publish = false
+
+[lib]
+name = "_rsgb"
+crate-type = ["cdylib"]
+
+[dependencies]
+rsgb.workspace = true
+rsgb-jit = { path = "../rsgb-jit" }
+rsgb-c = { path = "../rsgb-c" }
+# `extension-module` is added by maturin (pyproject.toml); a plain cargo build
+# links libpython so the workspace builds and tests as a whole.
+pyo3 = { version = "0.22", features = ["abi3-py39"] }
+
+[lints]
+workspace = true

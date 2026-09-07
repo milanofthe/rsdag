@@ -1,0 +1,89 @@
+import numpy as np
+import pytest
+
+import rsgb
+from rsgb import grad, gt, jacobian, jit, trace, where
+
+
+def lorenz(x, t):
+    sigma, rho, beta = 10.0, 28.0, 8.0 / 3.0
+    return [sigma * (x[1] - x[0]), x[0] * (rho - x[2]) - x[1], x[0] * x[1] - beta * x[2]]
+
+
+def test_scalar_and_numpy_ufuncs():
+    f = jit(lambda x: np.sin(x) * np.exp(-x) + x**3 / 2)
+    x = 0.7
+    assert f(x) == pytest.approx(np.sin(x) * np.exp(-x) + x**3 / 2, rel=1e-15)
+
+
+def test_array_function_matches_numpy():
+    f = jit(lorenz)
+    x = np.array([1.0, 2.0, 3.0])
+    y = f(x, 0.0)
+    assert y.shape == (3,)
+    assert np.allclose(y, lorenz(x, 0.0), rtol=1e-15)
+
+
+def test_jacobian_matches_finite_differences():
+    J = jacobian(lorenz)
+    x = np.array([1.0, 2.0, 3.0])
+    got = J(x, 0.0)
+    assert got.shape == (3, 3)
+    h = 1e-6
+    fd = np.zeros((3, 3))
+    for j in range(3):
+        e = np.zeros(3)
+        e[j] = h
+        fd[:, j] = (np.asarray(lorenz(x + e, 0.0)) - np.asarray(lorenz(x - e, 0.0))) / (2 * h)
+    assert np.allclose(got, fd, atol=1e-6)
+
+
+def test_gradient_reverse_mode():
+    g = grad(lambda x: np.sum(x**2) + np.tanh(x[0] * x[1]))
+    x = np.array([0.3, -0.4, 1.2])
+    got = g(x)
+    expect = 2 * x
+    c = 1 - np.tanh(x[0] * x[1]) ** 2
+    expect[0] += c * x[1]
+    expect[1] += c * x[0]
+    assert np.allclose(got, expect, rtol=1e-12)
+
+
+def test_where_and_comparisons():
+    f = jit(lambda x: where(x > 0.0, x, -x * 2.0))
+    assert f(2.0) == 2.0
+    assert f(-1.5) == 3.0
+    v = jit(lambda x: where(gt(x, 1.0), x, 0.0))
+    assert np.array_equal(v(np.array([0.5, 2.0])), np.array([0.0, 2.0]))
+
+
+def test_native_and_c_source():
+    f = jit(lorenz, native=True)
+    x = np.array([1.0, 2.0, 3.0])
+    assert np.allclose(f(x, 0.0), lorenz(x, 0.0), rtol=1e-15)
+    src = f.c_source(x, 0.0, name="lorenz_rhs")
+    assert "void lorenz_rhs(" in src and "rsgb_powi" in src or "void lorenz_rhs(" in src
+
+
+def test_control_flow_is_rejected():
+    def bad(x):
+        if x > 0:
+            return x
+        return -x
+
+    with pytest.raises(TypeError):
+        trace(bad, 1.0)
+
+
+def test_retrace_on_new_shape():
+    f = jit(lambda x: np.sum(x))
+    assert f(np.array([1.0, 2.0])) == 3.0
+    assert f(np.array([1.0, 2.0, 3.0])) == 6.0
+
+
+def test_jacobian_with_respect_to_second_argument():
+    f = lambda x, t: [x[0] * t, x[1] * t * t]
+    Jt = jacobian(f, wrt=1)
+    got = Jt(np.array([2.0, 3.0]), 0.5)
+    assert got.shape == (2, 1)
+    assert np.allclose(got[:, 0], [2.0, 3.0])
