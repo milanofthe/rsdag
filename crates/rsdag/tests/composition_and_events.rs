@@ -15,14 +15,6 @@ use rsdag::{
     Tape, F64,
 };
 
-/// The symbol behind a symbol node.
-fn sym_of(g: &Graph<F64>, e: ExprId) -> SymbolId {
-    match g.node(e) {
-        rsdag::Node::Symbol(s) => *s,
-        _ => unreachable!(),
-    }
-}
-
 /// A first-order lag: `y = x`, `dx/dt = (u - x) / tau`. Built in its own
 /// graph, as a block library would.
 fn lag(name: &str) -> (Graph<F64>, rsdag::Module<F64>) {
@@ -193,7 +185,7 @@ fn an_event_is_a_guard_output_and_a_state_write() {
 /// when the region no longer holds. That report is the event.
 #[test]
 fn a_region_flip_is_reported_by_the_specialization() {
-    let (mut g, _) = saturation("sat");
+    let (g, _) = saturation("sat");
     let f = rsdag::FuncId(0);
     let y = match g.func(f).outputs[0] {
         rsdag::Output::Expr(e) => e,
