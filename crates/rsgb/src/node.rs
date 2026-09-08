@@ -355,6 +355,336 @@ pub fn unary_f64(op: UnaryOp, x: f64) -> f64 {
     }
 }
 
+/// What a unary op *is*, as data rather than code: how it prints, what it is
+/// called in generated C, and whether it is differentiable everywhere it is
+/// defined.
+///
+/// The semantics live in [`unary_f64`] (and in [`crate::Scalar`] for the
+/// other execution types), because a guard like the `exp` cap is code. What
+/// is data lives here, so a new op is one row plus its semantics and its
+/// lowerings, instead of an edit in the printer, the C backend, the JIT's
+/// code mapping and the generator.
+///
+/// The aggregate ops (`Reduce`, `Dot`) are deliberately not in this table:
+/// they carry an operand list rather than a fixed arity, they are how arrays
+/// and matrices lower natively into the graph, and every backend emits them
+/// as a loop rather than a call.
+#[derive(Clone, Copy, Debug)]
+pub struct UnarySpec {
+    /// The variant this row describes; `UNARY_OPS[op as usize].op == op`.
+    pub op: UnaryOp,
+    /// Name in printed expressions and in the Python and C frontends.
+    pub name: &'static str,
+    /// The callee in generated C: a `libm` name where the semantics agree,
+    /// an `rsgb_` helper where rsgb guards or defines the op itself.
+    pub c_fn: &'static str,
+    /// Differentiable everywhere it is defined. The rough ones (`floor`,
+    /// `sign`, the roundings, the noise source) have a zero or undefined
+    /// derivative and are excluded from smooth generated programs.
+    pub smooth: bool,
+}
+
+/// The unary vocabulary, in the order of the enum: `UNARY_OPS[op as usize]`
+/// is `op`'s row (checked by a test).
+pub const UNARY_OPS: &[UnarySpec] = &[
+    UnarySpec {
+        op: UnaryOp::Exp,
+        name: "exp",
+        c_fn: "rsgb_exp",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Ln,
+        name: "ln",
+        c_fn: "rsgb_ln",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Sqrt,
+        name: "sqrt",
+        c_fn: "rsgb_sqrt",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Sin,
+        name: "sin",
+        c_fn: "sin",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Cos,
+        name: "cos",
+        c_fn: "cos",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Sinh,
+        name: "sinh",
+        c_fn: "sinh",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Cosh,
+        name: "cosh",
+        c_fn: "cosh",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Tanh,
+        name: "tanh",
+        c_fn: "tanh",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Atan,
+        name: "atan",
+        c_fn: "atan",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Floor,
+        name: "floor",
+        c_fn: "floor",
+        smooth: false,
+    },
+    UnarySpec {
+        op: UnaryOp::Tan,
+        name: "tan",
+        c_fn: "tan",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Log10,
+        name: "log10",
+        c_fn: "log10",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Log2,
+        name: "log2",
+        c_fn: "log2",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Log1p,
+        name: "log1p",
+        c_fn: "log1p",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Expm1,
+        name: "expm1",
+        c_fn: "expm1",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Cbrt,
+        name: "cbrt",
+        c_fn: "cbrt",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Abs,
+        name: "abs",
+        c_fn: "fabs",
+        smooth: false,
+    },
+    UnarySpec {
+        op: UnaryOp::Sign,
+        name: "sign",
+        c_fn: "rsgb_sign",
+        smooth: false,
+    },
+    UnarySpec {
+        op: UnaryOp::Ceil,
+        name: "ceil",
+        c_fn: "ceil",
+        smooth: false,
+    },
+    UnarySpec {
+        op: UnaryOp::Round,
+        name: "round",
+        c_fn: "round",
+        smooth: false,
+    },
+    UnarySpec {
+        op: UnaryOp::Trunc,
+        name: "trunc",
+        c_fn: "trunc",
+        smooth: false,
+    },
+    UnarySpec {
+        op: UnaryOp::Asin,
+        name: "asin",
+        c_fn: "asin",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Acos,
+        name: "acos",
+        c_fn: "acos",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Asinh,
+        name: "asinh",
+        c_fn: "asinh",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Acosh,
+        name: "acosh",
+        c_fn: "acosh",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Atanh,
+        name: "atanh",
+        c_fn: "atanh",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Erf,
+        name: "erf",
+        c_fn: "erf",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Erfc,
+        name: "erfc",
+        c_fn: "erfc",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Lgamma,
+        name: "lgamma",
+        c_fn: "lgamma",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Tgamma,
+        name: "tgamma",
+        c_fn: "tgamma",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Digamma,
+        name: "digamma",
+        c_fn: "rsgb_digamma",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::Trigamma,
+        name: "trigamma",
+        c_fn: "rsgb_trigamma",
+        smooth: true,
+    },
+    UnarySpec {
+        op: UnaryOp::RandUniform,
+        name: "rand_uniform",
+        c_fn: "rsgb_rand_uniform",
+        smooth: false,
+    },
+];
+
+impl UnaryOp {
+    /// This op's row of [`UNARY_OPS`].
+    #[inline]
+    pub fn spec(self) -> &'static UnarySpec {
+        &UNARY_OPS[self as usize]
+    }
+    /// Name in printed expressions.
+    #[inline]
+    pub fn name(self) -> &'static str {
+        self.spec().name
+    }
+    /// The callee to emit in generated C.
+    #[inline]
+    pub fn c_fn(self) -> &'static str {
+        self.spec().c_fn
+    }
+    /// Differentiable everywhere it is defined.
+    #[inline]
+    pub fn is_smooth(self) -> bool {
+        self.spec().smooth
+    }
+    /// A stable integer code, for backends that pass the op to a host
+    /// routine as a value (the JIT's trampolines).
+    #[inline]
+    pub fn code(self) -> u32 {
+        self as u32
+    }
+    /// The op for a [`UnaryOp::code`]; panics on an unknown code.
+    #[inline]
+    pub fn from_code(code: u32) -> UnaryOp {
+        UNARY_OPS[code as usize].op
+    }
+}
+
+/// As [`UnarySpec`], for the binary ops beyond the ring.
+#[derive(Clone, Copy, Debug)]
+pub struct BinarySpec {
+    pub op: BinOp,
+    pub name: &'static str,
+    pub c_fn: &'static str,
+    pub smooth: bool,
+}
+
+/// The binary vocabulary, in the order of the enum.
+pub const BINARY_OPS: &[BinarySpec] = &[
+    BinarySpec {
+        op: BinOp::Powf,
+        name: "powf",
+        c_fn: "pow",
+        smooth: true,
+    },
+    BinarySpec {
+        op: BinOp::Mod,
+        name: "mod",
+        c_fn: "fmod",
+        smooth: false,
+    },
+    BinarySpec {
+        op: BinOp::Atan2,
+        name: "atan2",
+        c_fn: "atan2",
+        smooth: true,
+    },
+    BinarySpec {
+        op: BinOp::Hypot,
+        name: "hypot",
+        c_fn: "hypot",
+        smooth: true,
+    },
+];
+
+impl BinOp {
+    #[inline]
+    pub fn spec(self) -> &'static BinarySpec {
+        &BINARY_OPS[self as usize]
+    }
+    #[inline]
+    pub fn name(self) -> &'static str {
+        self.spec().name
+    }
+    #[inline]
+    pub fn c_fn(self) -> &'static str {
+        self.spec().c_fn
+    }
+    #[inline]
+    pub fn is_smooth(self) -> bool {
+        self.spec().smooth
+    }
+    #[inline]
+    pub fn code(self) -> u32 {
+        self as u32
+    }
+    #[inline]
+    pub fn from_code(code: u32) -> BinOp {
+        BINARY_OPS[code as usize].op
+    }
+}
+
 /// Evaluate a [`CmpOp`] on two ordered arguments. Single source of truth shared
 /// by the arena evaluator, the complex evaluator, the compiled tape (all `f64`)
 /// and the constant-folding interner (exact `BigRational`), so a `Cmp` node's
@@ -436,6 +766,63 @@ impl std::ops::Deref for Operands<'_> {
         match self {
             Operands::Inline { buf, n } => &buf[..*n as usize],
             Operands::Slice(s) => s,
+        }
+    }
+}
+
+#[cfg(test)]
+mod op_table_tests {
+    use super::*;
+
+    /// The tables are indexed by the enum's discriminant, and `unary_f64`'s
+    /// match is exhaustive, so a new variant without a row makes this fail
+    /// rather than silently reading the wrong row.
+    #[test]
+    fn tables_line_up_with_the_enums() {
+        for (i, spec) in UNARY_OPS.iter().enumerate() {
+            assert_eq!(spec.op as usize, i, "row {i} describes {:?}", spec.op);
+            assert_eq!(spec.op.spec().name, spec.name);
+            assert_eq!(UnaryOp::from_code(spec.op.code()), spec.op);
+            assert!(!spec.name.is_empty() && !spec.c_fn.is_empty());
+        }
+        for (i, spec) in BINARY_OPS.iter().enumerate() {
+            assert_eq!(spec.op as usize, i);
+            assert_eq!(BinOp::from_code(spec.op.code()), spec.op);
+        }
+        // Every variant has a row: the count is asserted against the last
+        // variant's discriminant, which only holds if the table is complete.
+        assert_eq!(UNARY_OPS.len(), UnaryOp::RandUniform as usize + 1);
+        assert_eq!(BINARY_OPS.len(), BinOp::Hypot as usize + 1);
+    }
+
+    /// Names are what the printer emits and what a frontend parses back, so
+    /// two ops must not share one.
+    #[test]
+    fn names_are_unique() {
+        let mut names: Vec<&str> = UNARY_OPS.iter().map(|s| s.name).collect();
+        names.sort_unstable();
+        let n = names.len();
+        names.dedup();
+        assert_eq!(names.len(), n);
+    }
+
+    /// `smooth` is the property the generator and the derivative checks rely
+    /// on: a rough op must not claim to be differentiable.
+    #[test]
+    fn roughness_is_recorded() {
+        for op in [
+            UnaryOp::Floor,
+            UnaryOp::Ceil,
+            UnaryOp::Round,
+            UnaryOp::Trunc,
+            UnaryOp::Sign,
+            UnaryOp::Abs,
+            UnaryOp::RandUniform,
+        ] {
+            assert!(!op.is_smooth(), "{op:?} is not differentiable");
+        }
+        for op in [UnaryOp::Exp, UnaryOp::Sin, UnaryOp::Erf, UnaryOp::Lgamma] {
+            assert!(op.is_smooth(), "{op:?} is differentiable");
         }
     }
 }

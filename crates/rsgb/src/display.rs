@@ -39,7 +39,7 @@ fn write_expr<K: Field>(ctx: &Graph<K>, id: ExprId, out: &mut String) {
             out.push_str(&format!("^{n}"));
         }
         Node::Unary(op, a) => {
-            out.push_str(unary_name(*op));
+            out.push_str(UnaryOp::name(*op));
             out.push('(');
             write_expr(ctx, *a, out);
             out.push(')');
@@ -122,44 +122,6 @@ fn write_expr<K: Field>(ctx: &Graph<K>, id: ExprId, out: &mut String) {
             }
             out.push(')');
         }
-    }
-}
-
-fn unary_name(op: UnaryOp) -> &'static str {
-    match op {
-        UnaryOp::Exp => "exp",
-        UnaryOp::Ln => "ln",
-        UnaryOp::Sqrt => "sqrt",
-        UnaryOp::Sin => "sin",
-        UnaryOp::Cos => "cos",
-        UnaryOp::Sinh => "sinh",
-        UnaryOp::Cosh => "cosh",
-        UnaryOp::Tanh => "tanh",
-        UnaryOp::Atan => "atan",
-        UnaryOp::Floor => "floor",
-        UnaryOp::Tan => "tan",
-        UnaryOp::Log10 => "log10",
-        UnaryOp::Log2 => "log2",
-        UnaryOp::Log1p => "log1p",
-        UnaryOp::Expm1 => "expm1",
-        UnaryOp::Cbrt => "cbrt",
-        UnaryOp::Abs => "abs",
-        UnaryOp::Sign => "sign",
-        UnaryOp::Ceil => "ceil",
-        UnaryOp::Round => "round",
-        UnaryOp::Trunc => "trunc",
-        UnaryOp::Asin => "asin",
-        UnaryOp::Acos => "acos",
-        UnaryOp::Asinh => "asinh",
-        UnaryOp::Acosh => "acosh",
-        UnaryOp::Atanh => "atanh",
-        UnaryOp::Erf => "erf",
-        UnaryOp::Erfc => "erfc",
-        UnaryOp::Lgamma => "lgamma",
-        UnaryOp::Tgamma => "tgamma",
-        UnaryOp::Digamma => "digamma",
-        UnaryOp::Trigamma => "trigamma",
-        UnaryOp::RandUniform => "rand_uniform",
     }
 }
 

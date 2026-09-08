@@ -159,41 +159,7 @@ fn lit(v: f64) -> String {
 }
 
 fn unary_c(op: UnaryOp, x: &str) -> String {
-    match op {
-        UnaryOp::Exp => format!("rsgb_exp({x})"),
-        UnaryOp::Ln => format!("rsgb_ln({x})"),
-        UnaryOp::Sqrt => format!("rsgb_sqrt({x})"),
-        UnaryOp::Sin => format!("sin({x})"),
-        UnaryOp::Cos => format!("cos({x})"),
-        UnaryOp::Sinh => format!("sinh({x})"),
-        UnaryOp::Cosh => format!("cosh({x})"),
-        UnaryOp::Tanh => format!("tanh({x})"),
-        UnaryOp::Atan => format!("atan({x})"),
-        UnaryOp::Floor => format!("floor({x})"),
-        UnaryOp::Tan => format!("tan({x})"),
-        UnaryOp::Log10 => format!("log10({x})"),
-        UnaryOp::Log2 => format!("log2({x})"),
-        UnaryOp::Log1p => format!("log1p({x})"),
-        UnaryOp::Expm1 => format!("expm1({x})"),
-        UnaryOp::Cbrt => format!("cbrt({x})"),
-        UnaryOp::Abs => format!("fabs({x})"),
-        UnaryOp::Sign => format!("rsgb_sign({x})"),
-        UnaryOp::Ceil => format!("ceil({x})"),
-        UnaryOp::Round => format!("round({x})"),
-        UnaryOp::Trunc => format!("trunc({x})"),
-        UnaryOp::Asin => format!("asin({x})"),
-        UnaryOp::Acos => format!("acos({x})"),
-        UnaryOp::Asinh => format!("asinh({x})"),
-        UnaryOp::Acosh => format!("acosh({x})"),
-        UnaryOp::Atanh => format!("atanh({x})"),
-        UnaryOp::Erf => format!("erf({x})"),
-        UnaryOp::Erfc => format!("erfc({x})"),
-        UnaryOp::Lgamma => format!("lgamma({x})"),
-        UnaryOp::Tgamma => format!("tgamma({x})"),
-        UnaryOp::Digamma => format!("rsgb_digamma({x})"),
-        UnaryOp::Trigamma => format!("rsgb_trigamma({x})"),
-        UnaryOp::RandUniform => format!("rsgb_rand_uniform({x})"),
-    }
+    format!("{}({x})", op.c_fn())
 }
 
 impl Emitter {
@@ -237,12 +203,7 @@ impl TapeVisitor for Emitter {
         self.set(dst, &e);
     }
     fn binary(&mut self, dst: u32, op: BinOp, a: u32, b: u32) {
-        let e = match op {
-            BinOp::Powf => format!("pow(work[{a}], work[{b}])"),
-            BinOp::Mod => format!("fmod(work[{a}], work[{b}])"),
-            BinOp::Atan2 => format!("atan2(work[{a}], work[{b}])"),
-            BinOp::Hypot => format!("hypot(work[{a}], work[{b}])"),
-        };
+        let e = format!("{}(work[{a}], work[{b}])", op.c_fn());
         self.set(dst, &e);
     }
     fn cmp(&mut self, dst: u32, op: CmpOp, a: u32, b: u32) {
