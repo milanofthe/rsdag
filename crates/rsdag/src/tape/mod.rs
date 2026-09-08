@@ -109,18 +109,52 @@ pub struct Tape {
     prolog_ops: usize,
 }
 
-/// A backend that lowers a [`Tape`]'s instruction stream.
+/// A backend that lowers a [`Tape`]'s instruction stream: the seam every
+/// code generator sits on.
 ///
-/// The tape is SANE's single evaluation IR; [`Tape::eval`] is the interpreting
-/// backend, and [`Tape::lower`] drives any other (a printer, or an alternative evaluator).
-/// Each method receives the destination work slot `dst` and the operand slots
-/// the op reads; a backend keeps its own slot→value map (the value of a slot is
-/// whatever its most recent writer produced -- the tape's liveness guarantees a
-/// slot is never reused while a value it holds is still needed, so reading the
-/// current occupant is always the intended SSA value).
+/// The tape is the evaluation IR. [`Tape::eval`] is the interpreting backend,
+/// [`Tape::lower`] drives any other one -- a printer, an alternative
+/// evaluator, or a generator emitting C, Verilog or a GPU kernel. Each method
+/// receives the destination work slot `dst` and the operand slots the op
+/// reads; a backend keeps its own slot-to-value map (the value of a slot is
+/// whatever its most recent writer produced -- the tape's liveness guarantees
+/// a slot is never reused while a value it holds is still needed, so reading
+/// the current occupant is always the intended SSA value).
 ///
-/// Slots are `u32` indices into a work array of width [`Tape::n_work`]; outputs
-/// are read from the slots in [`Tape::outputs`].
+/// Slots are `u32` indices into a work array of width [`Tape::n_work`];
+/// outputs are read from the slots in [`Tape::outputs`]. A program with a
+/// parameter-pure prefix (see [`Tape::compile_split`]) exposes it as the
+/// first [`Tape::prolog_len`] ops, which a generator emits as a separate
+/// function it can call once per parameter binding.
+///
+/// # What a generated backend must reproduce
+///
+/// rsdag's guarantee is that every backend computes the same IEEE operation
+/// sequence, so a generator that wants to stay inside it has to match five
+/// things. All five are available as data or as reference code in this
+/// crate, which is what makes a generator a walk over this trait rather than
+/// a re-derivation:
+///
+/// - **The domain guards.** [`crate::node::unary_f64`] is the reference for
+///   every unary op, including the `exp` cap at [`crate::node::EXP_LIMIT`],
+///   the `ln` floor at [`crate::node::LN_FLOOR`] and the `sqrt` clamp. An
+///   unguarded `exp` diverges on the first out-of-range Newton iterate.
+/// - **The op names.** [`crate::UnaryOp::c_fn`] and [`crate::BinOp::c_fn`]
+///   give the conventional C callee per op, and `name()` the spelling for
+///   any other target; a guarded op names an `rsdag_` helper the generator
+///   supplies from the reference above.
+/// - **The special functions.** [`crate::node::digamma`],
+///   [`crate::node::trigamma`] and [`crate::node::rand_uniform`] are defined
+///   here, not taken from a platform library, so a generator ports these
+///   exact series.
+/// - **The fold orders.** [`crate::node::reduce_slice`] and
+///   [`crate::node::dot_slice`] fold from the identity below
+///   [`crate::node::REDUCE_SIMD_MIN`] operands and with four accumulators
+///   above it. A different association gives different bits.
+/// - **No contraction.** [`TapeVisitor::mul_add`] is a fused *dispatch*, not
+///   a fused rounding: it rounds the product and the sum separately. A C
+///   generator therefore compiles with `-ffp-contract=off`, and no backend
+///   emits a hardware FMA for it.
 pub trait TapeVisitor {
     fn constant(&mut self, dst: u32, v: f64);
     /// `inputs[k]` (or the not-an-input sentinel `u32::MAX`).
