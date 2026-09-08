@@ -13,9 +13,9 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      # rsgb-py links libpython; it is built and tested by the python job.
-      - run: cargo clippy --workspace --exclude rsgb-py --all-targets --features rsgb/synth -- -D warnings
-      - run: cargo test --workspace --exclude rsgb-py --features rsgb/synth
+      # rsdag-py links libpython; it is built and tested by the python job.
+      - run: cargo clippy --workspace --exclude rsdag-py --all-targets --features rsdag/synth -- -D warnings
+      - run: cargo test --workspace --exclude rsdag-py --features rsdag/synth
   python:
     runs-on: ubuntu-latest
     steps:
@@ -25,6 +25,6 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install maturin numpy pytest
-      - run: maturin build --release -m crates/rsgb-py/Cargo.toml -o dist
+      - run: maturin build --release -m crates/rsdag-py/Cargo.toml -o dist
       - run: pip install dist/*.whl
-      - run: python -m pytest -q crates/rsgb-py/tests
+      - run: python -m pytest -q crates/rsdag-py/tests
