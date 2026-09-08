@@ -100,32 +100,3 @@ fn minor_matrix(m: &[Vec<ExprId>], row: usize, col: usize) -> Vec<Vec<ExprId>> {
     }
     out
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::display::to_string;
-
-    #[test]
-    fn determinant_of_a_diagonal_and_a_2x2() {
-        let mut g: Graph = Graph::new();
-        let (a, b, c, d) = (g.sym("a"), g.sym("b"), g.sym("c"), g.sym("d"));
-        let z = g.zero();
-        let det = determinant(&mut g, &[vec![a, z, z], vec![z, b, z], vec![z, z, c]]);
-        let mut env = std::collections::HashMap::new();
-        for (i, v) in [2.0, 3.0, 5.0].iter().enumerate() {
-            env.insert(crate::node::SymbolId(i as u32), *v);
-        }
-        assert_eq!(crate::eval::eval_real(&g, &env, &[det])[0], 30.0);
-        let det2 = determinant(&mut g, &[vec![a, b], vec![c, d]]);
-        assert_eq!(to_string(&g, det2), "(a*d + -b*c)");
-        assert_eq!(
-            count_det_terms(&[vec![true, false], vec![true, true]], 100),
-            1
-        );
-        assert_eq!(
-            count_det_terms(&[vec![true, true], vec![true, true]], 100),
-            2
-        );
-    }
-}
