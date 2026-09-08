@@ -33,6 +33,12 @@ egg.workspace = true
 # programs; a dev-dependency on self is how a test gets an optional feature
 # of its own crate.
 rsdag = { path = ".", features = ["synth", "serde"] }
+# The integration tests link against the crate, not against its
+# dependencies, so the few they name themselves are listed again here.
+num-complex.workspace = true
+num-rational.workspace = true
+num-traits.workspace = true
+rustc-hash.workspace = true
 serde_json = "1"
 
 [lints]
