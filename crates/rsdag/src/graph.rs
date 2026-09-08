@@ -648,6 +648,73 @@ impl<K: Field> Graph<K> {
         }
     }
 
+    // --- module interchange (see `crate::module`) ------------------------
+
+    pub(crate) fn nodes_slice(&self) -> &[Node] {
+        &self.nodes
+    }
+    pub(crate) fn consts_slice(&self) -> &[K] {
+        &self.consts
+    }
+    pub(crate) fn arg_pool_slice(&self) -> &[ExprId] {
+        &self.arg_pool
+    }
+    pub(crate) fn funcs_slice(&self) -> &[Function] {
+        &self.funcs
+    }
+    pub(crate) fn call_outputs_slice(&self) -> &[(FuncId, u32)] {
+        &self.outputs
+    }
+
+    /// Re-intern one node of a module in this graph, mapping its operand,
+    /// constant, symbol and call ids through `map` and the module's tables.
+    ///
+    /// The raw interner, not the smart constructors: a module's nodes are
+    /// already in the folded, canonical form the constructors produce, so
+    /// re-running them would be work without an effect, and going through
+    /// the interner reproduces the module exactly.
+    pub(crate) fn rebuild_node(
+        &mut self,
+        node: &Node,
+        map: &crate::module::IdMap,
+        arg_pool: &[ExprId],
+        consts: &[K],
+        call_outputs: &rustc_hash::FxHashMap<OutputId, (FuncId, u32)>,
+    ) -> ExprId {
+        let e = |m: &crate::module::IdMap, x: ExprId| m.exprs[x.0 as usize];
+        let list = |g: &mut Self, m: &crate::module::IdMap, l: ArgList| -> ArgList {
+            let args: Vec<ExprId> = arg_pool[l.start as usize..(l.start + l.len) as usize]
+                .iter()
+                .map(|&x| e(m, x))
+                .collect();
+            g.intern_args(&args)
+        };
+        let n = match *node {
+            Node::Const(c) => return self.konst(consts[c.0 as usize].clone()),
+            Node::Symbol(s) => Node::Symbol(map.symbols[s.0 as usize]),
+            Node::Add(a, b) => Node::Add(e(map, a), e(map, b)),
+            Node::Mul(a, b) => Node::Mul(e(map, a), e(map, b)),
+            Node::Neg(a) => Node::Neg(e(map, a)),
+            Node::Pow(a, k) => Node::Pow(e(map, a), k),
+            Node::Unary(op, a) => Node::Unary(op, e(map, a)),
+            Node::Binary(op, a, b) => Node::Binary(op, e(map, a), e(map, b)),
+            Node::Cmp(op, a, b) => Node::Cmp(op, e(map, a), e(map, b)),
+            Node::Select(c, t, f) => Node::Select(e(map, c), e(map, t), e(map, f)),
+            Node::Reduce(op, l) => Node::Reduce(op, list(self, map, l)),
+            Node::Dot(l) => Node::Dot(list(self, map, l)),
+            Node::Call(out, l) => {
+                let (f, k) = call_outputs[&out];
+                let f = map.funcs[f.0 as usize];
+                let args: Vec<ExprId> = arg_pool[l.start as usize..(l.start + l.len) as usize]
+                    .iter()
+                    .map(|&x| e(map, x))
+                    .collect();
+                return self.call(f, k, &args);
+            }
+        };
+        self.intern(n)
+    }
+
     // --- functions and calls ---------------------------------------------
 
     /// Define a symbolic function: `outputs` are expressions over the formal
