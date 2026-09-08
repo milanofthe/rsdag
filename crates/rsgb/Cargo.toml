@@ -7,6 +7,12 @@ authors.workspace = true
 repository.workspace = true
 description = "Rust symbolic graph backend: hash-consed expression graph, differentiation, tape"
 
+[features]
+# The synthetic program generator (`rsgb::synth`). Off by default: it is
+# there for the parity fuzzers and the benchmarks of this workspace and for
+# consumers that want to fuzz their own pipelines, not for production paths.
+synth = []
+
 [dependencies]
 num-bigint.workspace = true
 num-rational.workspace = true
@@ -15,6 +21,12 @@ num-complex.workspace = true
 rustc-hash.workspace = true
 libm.workspace = true
 egg.workspace = true
+
+[dev-dependencies]
+# The crate's own integration tests and the benchmarks draw synthetic
+# programs; a dev-dependency on self is how a test gets an optional feature
+# of its own crate.
+rsgb = { path = ".", features = ["synth"] }
 
 [lints]
 workspace = true
