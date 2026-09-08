@@ -197,50 +197,20 @@ fn unary_sym(op: UnaryOp) -> Option<&'static str> {
     })
 }
 
-const UNARY_EXT: [UnaryOp; 23] = [
-    UnaryOp::Tan,
-    UnaryOp::Log10,
-    UnaryOp::Log2,
-    UnaryOp::Log1p,
-    UnaryOp::Expm1,
-    UnaryOp::Cbrt,
-    UnaryOp::Abs,
-    UnaryOp::Sign,
-    UnaryOp::Ceil,
-    UnaryOp::Round,
-    UnaryOp::Trunc,
-    UnaryOp::Asin,
-    UnaryOp::Acos,
-    UnaryOp::Asinh,
-    UnaryOp::Acosh,
-    UnaryOp::Atanh,
-    UnaryOp::Erf,
-    UnaryOp::Erfc,
-    UnaryOp::Lgamma,
-    UnaryOp::Tgamma,
-    UnaryOp::Digamma,
-    UnaryOp::Trigamma,
-    UnaryOp::RandUniform,
-];
-
+/// The op codes the trampolines take are the vocabulary's own codes
+/// ([`UnaryOp::code`]), so the JIT carries no second numbering to keep in
+/// step with the enum.
 fn unary_code(op: UnaryOp) -> u32 {
-    UNARY_EXT
-        .iter()
-        .position(|&o| o == op)
-        .expect("an extension op") as u32
+    op.code()
 }
 fn unary_from_code(code: u32) -> UnaryOp {
-    UNARY_EXT[code as usize]
+    UnaryOp::from_code(code)
 }
-const BINARY_OPS: [BinOp; 4] = [BinOp::Powf, BinOp::Mod, BinOp::Atan2, BinOp::Hypot];
 fn binary_code(op: BinOp) -> u32 {
-    BINARY_OPS
-        .iter()
-        .position(|&o| o == op)
-        .expect("a binary op") as u32
+    op.code()
 }
 fn binary_from_code(code: u32) -> BinOp {
-    BINARY_OPS[code as usize]
+    BinOp::from_code(code)
 }
 
 fn reduce_code(op: ReduceOp) -> i64 {
