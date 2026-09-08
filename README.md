@@ -8,6 +8,21 @@ backend, a symbolic layer (determinants, polynomials and rational forms,
 e-graph simplification) and a Python tracer, so that every optimization
 lands in every consumer once.
 
+## Scope
+
+rsgb builds, differentiates and evaluates expression graphs, and stops
+there. It has no ODE integrators, no numeric linear algebra and no solver
+loops: the consumers own those (fastsim and SANE the time stepping and the
+Newton loops, rslab the sparse factorizations), and they call rsgb for the
+residuals, Jacobians and their evaluation. The symbolic `determinant` and
+`rational_form` are expression-level analysis for the linear-symbolic path,
+not a numeric matrix library.
+
+The Python package is the tracer: it turns a Python function into a graph
+once. Evaluation in production happens in Rust through `Tape` or the JIT
+with caller-owned buffers, so the Python call path is a convenience for
+scripts and tests rather than a hot path.
+
 Private for now. Licensed under PolyForm Noncommercial 1.0.0 (see LICENSE).
 
 Development runs through GitHub issues, not documents: the inventory (#1),
@@ -72,6 +87,15 @@ for long reductions. The fuzzers in `crates/rsgb/tests`,
 `crates/rsgb-jit/tests` and `crates/rsgb-c/tests` pin interpreter, JIT,
 lanes, typed evaluation and C against each other on random graphs over the
 whole op vocabulary.
+
+## Benchmarks
+
+`cargo run --release --example bench -p rsgb-jit` (add `quick` for the small
+sizes) times the interpreter, the Cranelift JIT and the lane tape per tape
+op and checks each against the interpreter bit for bit. On an M3 a tape op
+costs about 1.7 to 2 ns interpreted and about 0.35 to 0.5 ns through the
+JIT, which compiles at roughly 0.7 us per op: the crossover sits near a
+thousand evaluations of one program.
 
 ## Build
 
