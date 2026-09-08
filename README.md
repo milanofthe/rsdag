@@ -3,8 +3,7 @@
 Rust symbolic graph backend: the shared expression-graph substrate of SANE
 and fastsim. One hash-consed scalar graph with exact or floating constants,
 symbolic differentiation (forward and reverse), a flat tape with an
-interpreter for `f64`, `f32` and complex values, a Cranelift JIT, a C source
-backend, a symbolic layer (determinants, polynomials and rational forms,
+interpreter for `f64`, `f32` and complex values, a Cranelift JIT, a symbolic layer (determinants, polynomials and rational forms,
 e-graph simplification) and a Python tracer, so that every optimization
 lands in every consumer once.
 
@@ -39,8 +38,6 @@ previous one) live there, with dates, dependencies and history.
   (`determinant`, `collect`, `rational_form`, `simplify_egraph`).
 - `rsdag-jit`: Cranelift chunked JIT (`ChunkedTape`) and SIMD lanes
   (`LaneTape`), bit-identical to the interpreter.
-- `rsdag-c`: C source emission (`emit`) and a compile-and-compare harness
-  (`verify::run_c`).
 - `rsdag-py`: the Python package `rsdag` (`trace`, `jit`, `jacobian`, `grad`,
   `where`, comparison helpers), built with maturin.
 
@@ -71,7 +68,6 @@ def lorenz(x, t):
 f = jit(lorenz, native=True)              # traces on first call, Cranelift
 y = f(np.array([1.0, 2.0, 3.0]), 0.0)
 J = jacobian(lorenz)(np.array([1.0, 2.0, 3.0]), 0.0)   # (3, 3), symbolic
-src = f.c_source(np.zeros(3), 0.0, name="lorenz_rhs")  # C function
 ```
 
 Data-dependent Python control flow is not traceable; use `where(cond, a, b)`
@@ -84,7 +80,7 @@ no fast-math, no fused multiply-add (the C backend emits
 `#pragma STDC FP_CONTRACT OFF` and is verified with `-ffp-contract=off`),
 one reference routine per transcendental, a fixed four-accumulator order
 for long reductions. The fuzzers in `crates/rsdag/tests`,
-`crates/rsdag-jit/tests` and `crates/rsdag-c/tests` pin interpreter, JIT,
+`crates/rsdag-jit/tests` pins interpreter, JIT,
 lanes, typed evaluation and C against each other on random graphs over the
 whole op vocabulary.
 

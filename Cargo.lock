@@ -671,13 +671,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rsdag-c"
-version = "0.1.0"
-dependencies = [
- "rsdag",
-]
-
-[[package]]
 name = "rsdag-jit"
 version = "0.1.0"
 dependencies = [
@@ -697,7 +690,6 @@ version = "0.1.0"
 dependencies = [
  "pyo3",
  "rsdag",
- "rsdag-c",
  "rsdag-jit",
 ]
 
