@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Rust symbolic graph backend: trace Python functions into a graph, differentiate, compile"
 requires-python = ">=3.9"
 dependencies = ["numpy>=1.22"]
-license = { file = "../../LICENSE" }
+license-files = ["LICENSE"]
 
 [tool.maturin]
 python-source = "python"
