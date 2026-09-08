@@ -6,9 +6,61 @@ use num_complex::Complex64;
 use crate::func::{CompiledBody, FuncId, Output};
 use crate::graph::Graph;
 use crate::node::ArgList;
-use crate::node::{
-    binary_f64, cmp_bool, dot_slice, reduce_slice, unary_f64, ExprId, Node, ReduceOp, SymbolId,
-};
+use crate::node::{ExprId, Node, SymbolId};
+use crate::scalar::{dot_slice_t, reduce_slice_t, Scalar};
+
+/// The value of one node from its operands, for any execution scalar.
+///
+/// The single per-node semantics of the arena: the real sweep, the complex
+/// evaluator and (through [`crate::Tape::eval_typed`]) the tape all take
+/// their arithmetic from [`Scalar`] and their fold orders from
+/// [`reduce_slice_t`] and [`dot_slice_t`], so a value cannot depend on which
+/// of them computed it.
+///
+/// `get` reads an operand: an array lookup in the sweep, a memoised
+/// recursion in the lazy evaluator. `Select` calls it only for the branch it
+/// takes, so a lazy caller does not evaluate the other one.
+fn node_value<T: Scalar, K: Field>(
+    ctx: &Graph<K>,
+    node: &Node,
+    mut get: impl FnMut(ExprId) -> T,
+    sym: &mut impl FnMut(SymbolId) -> T,
+    call: &mut impl FnMut(FuncId, u32, ArgList, &[T]) -> T,
+) -> T {
+    match *node {
+        Node::Const(c) => T::from_f64(ctx.const_val(c).to_f64()),
+        Node::Symbol(s) => sym(s),
+        Node::Add(a, b) => get(a).add(get(b)),
+        Node::Mul(a, b) => get(a).mul(get(b)),
+        Node::Neg(a) => get(a).neg(),
+        Node::Pow(a, k) => get(a).powi(k as i32),
+        Node::Unary(op, a) => T::unary(op, get(a)),
+        Node::Binary(op, a, b) => T::binary(op, get(a), get(b)),
+        Node::Cmp(op, a, b) => T::cmp(op, get(a), get(b)),
+        Node::Select(c, t, e) => {
+            if get(c).is_true() {
+                get(t)
+            } else {
+                get(e)
+            }
+        }
+        Node::Reduce(op, l) => {
+            let vals: Vec<T> = ctx.args(l).iter().map(|&a| get(a)).collect();
+            reduce_slice_t(op, &vals)
+        }
+        Node::Dot(l) => {
+            let (a, b) = ctx.dot_args(l);
+            let va: Vec<T> = a.iter().map(|&x| get(x)).collect();
+            let vb: Vec<T> = b.iter().map(|&y| get(y)).collect();
+            dot_slice_t(&va, &vb)
+        }
+        Node::Call(o, l) => {
+            let vals: Vec<T> = ctx.args(l).iter().map(|&a| get(a)).collect();
+            let (f, out) = ctx.output(o);
+            call(f, out, l, &vals)
+        }
+    }
+}
 
 /// Evaluate a set of expression roots over the reals, given numeric symbol
 /// bindings. Single forward sweep over the arena (ascending `ExprId` is already
@@ -34,47 +86,14 @@ pub fn eval_real_all<K: Field>(ctx: &Graph<K>, env: &HashMap<SymbolId, f64>) -> 
     let n = ctx.len();
     let mut w = vec![0.0_f64; n];
     let mut fe = FuncEval::new();
-    let g = |w: &[f64], id: ExprId| w[id.0 as usize];
     for i in 0..n {
-        w[i] = match ctx.node(ExprId(i as u32)) {
-            Node::Const(c) => ctx.const_val(*c).to_f64(),
-            Node::Symbol(s) => env.get(s).copied().unwrap_or(f64::NAN),
-            Node::Add(a, b) => g(&w, *a) + g(&w, *b),
-            Node::Mul(a, b) => g(&w, *a) * g(&w, *b),
-            Node::Neg(a) => -g(&w, *a),
-            Node::Pow(a, k) => g(&w, *a).powi(*k as i32),
-            Node::Unary(op, a) => unary_f64(*op, g(&w, *a)),
-            Node::Binary(op, a, b) => binary_f64(*op, g(&w, *a), g(&w, *b)),
-            Node::Cmp(op, a, b) => {
-                if cmp_bool(*op, g(&w, *a), g(&w, *b)) {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
-            Node::Select(c, t, e) => {
-                if g(&w, *c) != 0.0 {
-                    g(&w, *t)
-                } else {
-                    g(&w, *e)
-                }
-            }
-            Node::Reduce(op, l) => {
-                let vals: Vec<f64> = ctx.args(*l).iter().map(|&a| g(&w, a)).collect();
-                reduce_slice(*op, &vals)
-            }
-            Node::Dot(l) => {
-                let (a, b) = ctx.dot_args(*l);
-                let va: Vec<f64> = a.iter().map(|&x| g(&w, x)).collect();
-                let vb: Vec<f64> = b.iter().map(|&y| g(&w, y)).collect();
-                dot_slice(&va, &vb)
-            }
-            Node::Call(o, l) => {
-                let vals: Vec<f64> = ctx.args(*l).iter().map(|&a| g(&w, a)).collect();
-                let (f, out) = ctx.output(*o);
-                fe.output(ctx, f, out, *l, &vals)
-            }
-        };
+        let node = *ctx.node(ExprId(i as u32));
+        // An unbound symbol is NaN here rather than an error: a diagnostic
+        // sweep over a partially bound graph must still produce a value.
+        let mut sym = |s: SymbolId| env.get(&s).copied().unwrap_or(f64::NAN);
+        let mut call =
+            |f: FuncId, out: u32, l: ArgList, args: &[f64]| fe.output(ctx, f, out, l, args);
+        w[i] = node_value(ctx, &node, |e| w[e.0 as usize], &mut sym, &mut call);
     }
     w
 }
@@ -188,91 +207,35 @@ fn eval_node<K: Field>(
     env: &HashMap<SymbolId, Complex64>,
     memo: &mut HashMap<ExprId, Complex64>,
 ) -> Complex64 {
-    match ctx.node(id) {
-        Node::Const(c) => Complex64::new(ctx.const_val(*c).to_f64(), 0.0),
-        Node::Symbol(s) => *env
-            .get(s)
-            .unwrap_or_else(|| panic!("unbound symbol '{}'", ctx.symbol_name(*s))),
-        Node::Add(a, b) => eval_memo(ctx, *a, env, memo) + eval_memo(ctx, *b, env, memo),
-        Node::Mul(a, b) => eval_memo(ctx, *a, env, memo) * eval_memo(ctx, *b, env, memo),
-        Node::Neg(a) => -eval_memo(ctx, *a, env, memo),
-        Node::Pow(a, n) => eval_memo(ctx, *a, env, memo).powi(*n as i32),
-        Node::Unary(op, a) => {
-            let x = eval_memo(ctx, *a, env, memo);
-            <Complex64 as crate::scalar::Scalar>::unary(*op, x)
+    let node = *ctx.node(id);
+    // Unlike the sweep, an unbound symbol is an error: a transfer function
+    // evaluated with a missing component value is a caller mistake, not a
+    // NaN to propagate.
+    let mut sym = |s: SymbolId| {
+        *env.get(&s)
+            .unwrap_or_else(|| panic!("unbound symbol '{}'", ctx.symbol_name(s)))
+    };
+    // A call with purely real arguments evaluates through its real body, so
+    // the convenience path works on bundled opaques too; a genuinely complex
+    // argument has no real body to call.
+    let mut call = |f: FuncId, out: u32, l: ArgList, args: &[Complex64]| {
+        if args.iter().all(|v| v.im == 0.0) {
+            let re: Vec<f64> = args.iter().map(|v| v.re).collect();
+            Complex64::new(FuncEval::new().output(ctx, f, out, l, &re), 0.0)
+        } else {
+            panic!(
+                "cannot evaluate a call of '{}' over complex arguments",
+                ctx.func(f).name
+            )
         }
-        Node::Binary(op, a, b) => {
-            let x = eval_memo(ctx, *a, env, memo);
-            let y = eval_memo(ctx, *b, env, memo);
-            <Complex64 as crate::scalar::Scalar>::binary(*op, x, y)
-        }
-        Node::Cmp(op, a, b) => {
-            // Compare real parts; result is the indicator 1.0 / 0.0.
-            let (x, y) = (
-                eval_memo(ctx, *a, env, memo).re,
-                eval_memo(ctx, *b, env, memo).re,
-            );
-            Complex64::new(if cmp_bool(*op, x, y) { 1.0 } else { 0.0 }, 0.0)
-        }
-        Node::Select(c, t, e) => {
-            // Short-circuit so an untaken (possibly opaque) branch isn't evaluated.
-            if eval_memo(ctx, *c, env, memo).re != 0.0 {
-                eval_memo(ctx, *t, env, memo)
-            } else {
-                eval_memo(ctx, *e, env, memo)
-            }
-        }
-        Node::Reduce(op, l) => {
-            // Sum / Product compose over the complex field; Min / Max compare
-            // real parts (consistent with `Cmp`), since they only arise in
-            // time-domain region/source logic, not the AC transfer.
-            let vals: Vec<Complex64> = ctx
-                .args(*l)
-                .iter()
-                .map(|&a| eval_memo(ctx, a, env, memo))
-                .collect();
-            let it = vals.into_iter();
-            match op {
-                ReduceOp::Sum => it.fold(Complex64::new(0.0, 0.0), |acc, z| acc + z),
-                ReduceOp::Product => it.fold(Complex64::new(1.0, 0.0), |acc, z| acc * z),
-                ReduceOp::Min => it
-                    .reduce(|acc, z| if z.re < acc.re { z } else { acc })
-                    .unwrap_or(Complex64::new(0.0, 0.0)),
-                ReduceOp::Max => it
-                    .reduce(|acc, z| if z.re > acc.re { z } else { acc })
-                    .unwrap_or(Complex64::new(0.0, 0.0)),
-            }
-        }
-        Node::Dot(l) => {
-            let (a, b) = ctx.dot_args(*l);
-            let mut acc = Complex64::new(0.0, 0.0);
-            for (&x, &y) in a.iter().zip(b.iter()) {
-                acc += eval_memo(ctx, x, env, memo) * eval_memo(ctx, y, env, memo);
-            }
-            acc
-        }
-        // A bundled opaque with purely real arguments evaluates through its
-        // (real-valued) body -- the symbolic-eval convenience path then works
-        // on batched instances too. A genuinely complex argument has no real
-        // body to call, so that stays a loud error.
-        Node::Call(o, l) => {
-            let vals: Vec<Complex64> = ctx
-                .args(*l)
-                .iter()
-                .map(|&a| eval_memo(ctx, a, env, memo))
-                .collect();
-            let (f, out) = ctx.output(*o);
-            if vals.iter().all(|v| v.im == 0.0) {
-                let re: Vec<f64> = vals.iter().map(|v| v.re).collect();
-                Complex64::new(FuncEval::new().output(ctx, f, out, *l, &re), 0.0)
-            } else {
-                panic!(
-                    "cannot evaluate a call of '{}' over complex arguments",
-                    ctx.func(f).name
-                )
-            }
-        }
-    }
+    };
+    node_value(
+        ctx,
+        &node,
+        |e| eval_memo(ctx, e, env, memo),
+        &mut sym,
+        &mut call,
+    )
 }
 
 /// Convenience wrapper: bind symbols by name and evaluate.
