@@ -10,6 +10,7 @@ pub mod extern_fn;
 pub mod field;
 pub mod func;
 pub mod graph;
+pub mod mathfn;
 pub mod module;
 pub mod node;
 pub mod role;
@@ -31,6 +32,7 @@ pub use extern_fn::ExternBundle;
 pub use field::{ratio_powi, Field, F64};
 pub use func::{CompiledBody, FuncId, Function, FunctionBody, Output, OutputId};
 pub use graph::Graph;
+pub use mathfn::lower_call;
 pub use module::{IdMap, Module, MODULE_VERSION};
 pub use node::{
     binary_f64, unary_f64, ArgList, BinOp, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp,
