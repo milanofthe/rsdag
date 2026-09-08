@@ -802,6 +802,120 @@ impl<K: Field> Graph<K> {
         self.funcs[f.0 as usize].output_roles[out as usize] = role;
     }
 
+    /// Inline every call reachable from `roots`, to the bottom.
+    ///
+    /// The static fusion a consumer does before it compiles: a hierarchy of
+    /// blocks or subcircuits becomes one expression per root, so the
+    /// scheduler, the slot allocator and common-subexpression elimination
+    /// see across the instance boundaries that the calls were hiding. The
+    /// price is size -- an instance that was one `Call` becomes a copy of
+    /// its body -- which is why it is a choice and not the default.
+    ///
+    /// Calls into an extern body cannot be inlined (there is no expression
+    /// to inline) and are left as they are.
+    pub fn inline_all(&mut self, roots: &[ExprId]) -> Vec<ExprId> {
+        let mut map: HashMap<ExprId, ExprId> = HashMap::default();
+        roots
+            .iter()
+            .map(|&r| self.inline_rec(r, &mut map))
+            .collect()
+    }
+
+    fn inline_rec(&mut self, e: ExprId, map: &mut HashMap<ExprId, ExprId>) -> ExprId {
+        if let Some(&done) = map.get(&e) {
+            return done;
+        }
+        let node = *self.node(e);
+        // Operands first, so the rebuild below reads them from `map`.
+        let operands: Vec<ExprId> = self.operands(e).to_vec();
+        for a in operands {
+            self.inline_rec(a, map);
+        }
+        let out = match node {
+            Node::Call(o, l) => {
+                let args: Vec<ExprId> = self.args(l).to_vec().iter().map(|a| map[a]).collect();
+                let (f, k) = self.output(o);
+                match self.funcs[f.0 as usize].outputs[k as usize] {
+                    // An extern body stays a call, over inlined arguments.
+                    Output::Slot(_) => self.call(f, k, &args),
+                    Output::Zero => self.zero,
+                    Output::Expr(_) => {
+                        let body = self.inline_outputs(f, &[k], &args)[0];
+                        // The body may itself contain calls.
+                        self.inline_rec(body, map)
+                    }
+                }
+            }
+            _ => {
+                let konst = match node {
+                    Node::Const(c) => self.consts[c.0 as usize].clone(),
+                    _ => K::zero(),
+                };
+                let args: Vec<ExprId> = match node {
+                    Node::Reduce(_, l) | Node::Dot(l) => {
+                        self.args(l).to_vec().iter().map(|a| map[a]).collect()
+                    }
+                    _ => Vec::new(),
+                };
+                // The call table is copied out first: a closure handed to
+                // `rebuild_node` cannot hold a borrow of the graph it builds
+                // in.
+                let call_table = self.outputs.clone();
+                self.rebuild_node(
+                    &node,
+                    Rebuild::Fold,
+                    |_| konst.clone(),
+                    |s| s,
+                    |x| map[&x],
+                    |_| args.clone(),
+                    |o| call_table[o.0 as usize],
+                )
+            }
+        };
+        map.insert(e, out);
+        out
+    }
+
+    /// Which outputs of `f` structurally read which of its parameters:
+    /// `feedthrough(f)[out][param]`.
+    ///
+    /// Structural, not numeric: it asks whether the parameter occurs in the
+    /// output's expression at all, so it costs one walk per output and needs
+    /// no differentiation. That is the question a block scheduler asks --
+    /// direct feedthrough decides the evaluation order, and a cycle among
+    /// the blocks that have it is an algebraic loop.
+    ///
+    /// An extern output is opaque and is reported as reading every
+    /// parameter, which is the safe direction: it can cost an ordering
+    /// constraint, never a missed loop. A zero output reads nothing.
+    pub fn feedthrough(&self, f: FuncId) -> Vec<Vec<bool>> {
+        let func = &self.funcs[f.0 as usize];
+        let index: HashMap<SymbolId, usize> = func
+            .params
+            .iter()
+            .enumerate()
+            .map(|(k, &s)| (s, k))
+            .collect();
+        func.outputs
+            .iter()
+            .map(|out| {
+                let mut row = vec![false; func.params.len()];
+                match *out {
+                    Output::Zero => {}
+                    Output::Slot(_) => row.iter_mut().for_each(|r| *r = true),
+                    Output::Expr(e) => {
+                        for s in self.free_symbols(e) {
+                            if let Some(&k) = index.get(&s) {
+                                row[k] = true;
+                            }
+                        }
+                    }
+                }
+                row
+            })
+            .collect()
+    }
+
     /// Jacobian of the outputs of `f` with a role against its parameters with
     /// a role: `(output index, param index, derivative output index)` for
     /// every structurally nonzero pair, differentiating on demand.
