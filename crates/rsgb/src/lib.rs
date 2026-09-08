@@ -1,6 +1,7 @@
-//! SANE symbolic core: a hash-consed expression DAG over free symbols and
-//! exact rational constants. This is the shared substrate for all analysis
-//! modes (linear-symbolic, DAE extraction, nonlinear transient).
+//! Rust symbolic graph backend: a hash-consed expression DAG over free
+//! symbols and exact or floating constants, with symbolic differentiation, a
+//! flat tape and its interpreter, and a symbolic layer. The shared substrate
+//! of SANE and fastsim, so an optimization here lands in every consumer.
 
 pub mod autodiff;
 pub mod display;
