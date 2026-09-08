@@ -200,9 +200,6 @@ class Compiled:
         """The program traced for these argument shapes."""
         return self._program(args)[0]
 
-    def c_source(self, *args, name="rsdag_fn"):
-        """C source of the program for these argument shapes."""
-        return self._program(args)[0].c_source(name)
 
 
 def trace(func, *example_args, native=False):
