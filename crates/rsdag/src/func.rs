@@ -35,14 +35,17 @@ use crate::node::{ExprId, SymbolId};
 use crate::role::{OutputRole, ParamRole};
 
 /// Index of a function in a [`Graph`](crate::graph::Graph).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct FuncId(pub u32);
 
 /// An interned `(function, output index)` pair -- what a `Call` node names.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct OutputId(pub u32);
 
 /// One output of a function.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Output {
     /// A symbolic expression over the function's parameters.

@@ -14,8 +14,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       # rsdag-py links libpython; it is built and tested by the python job.
-      - run: cargo clippy --workspace --exclude rsdag-py --all-targets --features rsdag/synth -- -D warnings
-      - run: cargo test --workspace --exclude rsdag-py --features rsdag/synth
+      - run: cargo clippy --workspace --exclude rsdag-py --all-targets --features 'rsdag/synth rsdag/serde' -- -D warnings
+      - run: cargo test --workspace --exclude rsdag-py --features 'rsdag/synth rsdag/serde'
+      # The optional features must also build and lint on their own, so a
+      # consumer that takes neither of them still compiles.
+      - run: cargo clippy -p rsdag --all-targets -- -D warnings
   python:
     runs-on: ubuntu-latest
     steps:

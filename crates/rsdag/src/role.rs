@@ -13,6 +13,7 @@
 //! [`Function`]: crate::func::Function
 
 /// What a parameter of a function stands for.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ParamRole {
     /// A symbolic unknown or a formal leaf without further meaning.
@@ -32,6 +33,7 @@ pub enum ParamRole {
 }
 
 /// What an output of a function computes.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum OutputRole {
     /// A value without further meaning (the default).
