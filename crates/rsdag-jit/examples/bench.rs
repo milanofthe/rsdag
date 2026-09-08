@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use rsdag::synth::{build, inputs, Spec, Vocabulary};
 use rsdag::{ExprId, Graph, SymbolId, Tape, F64};
-use rsdag_jit::{ChunkedTape, LaneTape};
+use rsdag_jit::{suggest_lanes, ChunkedTape, LaneTape, LANE_WIDTHS};
 
 /// Mean seconds per call over `reps` calls of `f`.
 fn per_call<F: FnMut()>(mut f: F, reps: usize) -> f64 {
@@ -190,11 +190,21 @@ fn main() {
         );
     }
 
-    // The lane tape evaluates `width` parameter sets per instruction. The
-    // comparison that means anything is per set against the scalar JIT
-    // running the same work twice, and it depends on what the program is
-    // made of: ring arithmetic and the aggregate ops vectorize, the
-    // transcendentals extract their lanes and call the host per lane.
+    // The lane tape evaluates `width` parameter sets per instruction. Which
+    // width pays is a property of the program: a chain leaves the register
+    // file idle and wants many lanes, a wide program already uses it, and
+    // every op that falls back to a per-lane host call gets more expensive
+    // with every lane added. `suggest_lanes` is this table, as a rule.
+    println!();
+    println!(
+        "{:<34} {:>8} {:>6} | {:>10} | {:>32} | {:>9}",
+        "lane speedup per parameter set",
+        "ops",
+        "slots",
+        "jit/set",
+        "width 2      4      8     16",
+        "suggested"
+    );
     let steps = *sizes.last().unwrap();
     for (label, spec) in [
         (
@@ -214,31 +224,37 @@ fn main() {
         let mut g: Graph<F64> = Graph::new();
         let (roots, syms) = build(&mut g, &mut spec);
         let tape = Tape::compile(&g, &roots, &syms);
-        let inputs = inputs(&mut spec.rng(), syms.len());
-        let Ok(lane) = LaneTape::compile(&tape) else {
-            continue;
-        };
+        let row = inputs(&mut spec.rng(), syms.len());
         let Ok(jit) = ChunkedTape::compile(&tape) else {
             continue;
         };
-        let w = lane.width();
-        let wide: Vec<f64> = inputs
-            .iter()
-            .flat_map(|&v| (0..w).map(move |k| v + 0.001 * k as f64))
-            .collect();
-        let (mut lw, mut lo) = (Vec::new(), Vec::new());
-        lane.eval(&wide, &mut lw, &mut lo);
         let (mut jw, mut jo) = (Vec::new(), Vec::new());
-        jit.eval(&inputs, &mut jw, &mut jo);
+        jit.eval(&row, &mut jw, &mut jo);
         let reps = reps_for(tape.n_ops());
-        let t_lane = per_call(|| lane.eval(&wide, &mut lw, &mut lo), reps) / w as f64;
-        let t_jit = per_call(|| jit.eval(&inputs, &mut jw, &mut jo), reps);
-        println!(
-            "lane tape, {label}, {} ops, width {w}: {:.2} ns per set against the scalar jit's {:.2} ns -> {:.2}x",
+        let t_j = per_call(|| jit.eval(&row, &mut jw, &mut jo), reps);
+        print!(
+            "{label:<34} {:>8} {:>6} | {:>7.2} ns |",
             tape.n_ops(),
-            t_lane * 1e9,
-            t_jit * 1e9,
-            t_jit / t_lane,
+            tape.n_slots(),
+            t_j * 1e9
         );
+        for &w in LANE_WIDTHS.iter() {
+            let Ok(lane) = LaneTape::compile_lanes(&tape, w, rsdag_jit::CHUNK_OPS) else {
+                print!("    n/a");
+                continue;
+            };
+            let wide: Vec<f64> = row
+                .iter()
+                .flat_map(|&v| (0..w).map(move |k| v + 1e-3 * k as f64))
+                .collect();
+            let (mut lw, mut lo) = (Vec::new(), Vec::new());
+            lane.eval(&wide, &mut lw, &mut lo);
+            let t_l = per_call(|| lane.eval(&wide, &mut lw, &mut lo), reps) / w as f64;
+            print!(" {:>6.2}x", t_j / t_l);
+        }
+        match suggest_lanes(&tape) {
+            Some(w) => println!(" | {w:>9}"),
+            None => println!(" | {:>9}", "scalar"),
+        }
     }
 }
