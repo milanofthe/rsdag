@@ -89,7 +89,7 @@ fn copy<K: Field>(
     g: &Graph<K>,
     out: &mut Graph<K>,
     e: ExprId,
-    map: &mut Vec<Option<ExprId>>,
+    map: &mut [Option<ExprId>],
 ) -> ExprId {
     if let Some(id) = map[e.0 as usize] {
         return id;
@@ -108,34 +108,20 @@ fn copy<K: Field>(
             }
             continue;
         }
-        let m = |map: &Vec<Option<ExprId>>, c: ExprId| map[c.0 as usize].expect("child copied");
-        let id = match *g.node(cur) {
-            Node::Const(c) => out.konst(g.const_val(c).clone()),
-            Node::Symbol(s) => out.symbol_expr(s),
-            Node::Add(a, b) => out.add(m(map, a), m(map, b)),
-            Node::Mul(a, b) => out.mul(m(map, a), m(map, b)),
-            Node::Neg(a) => out.neg(m(map, a)),
-            Node::Pow(a, n) => out.pow_i(m(map, a), n),
-            Node::Unary(op, a) => out.unary(op, m(map, a)),
-            Node::Binary(op, a, b) => out.binary(op, m(map, a), m(map, b)),
-            Node::Cmp(op, a, b) => out.cmp(op, m(map, a), m(map, b)),
-            Node::Select(c, t, f) => out.select(m(map, c), m(map, t), m(map, f)),
-            Node::Reduce(op, l) => {
-                let args: Vec<ExprId> = g.args(l).iter().map(|&a| m(map, a)).collect();
-                out.reduce(op, args)
-            }
-            Node::Dot(l) => {
-                let (a, b) = g.dot_args(l);
-                let a: Vec<ExprId> = a.iter().map(|&x| m(map, x)).collect();
-                let b: Vec<ExprId> = b.iter().map(|&x| m(map, x)).collect();
-                out.dot(a, b)
-            }
-            Node::Call(o, l) => {
-                let args: Vec<ExprId> = g.args(l).iter().map(|&a| m(map, a)).collect();
-                let (f, k) = g.output(o);
-                out.call(f, k, &args)
-            }
-        };
+        let m = |c: ExprId| map[c.0 as usize].expect("child copied");
+        let node = *g.node(cur);
+        let id = out.rebuild_node(
+            &node,
+            crate::graph::Rebuild::Fold,
+            |n| match *n {
+                Node::Const(c) => g.const_val(c).clone(),
+                _ => unreachable!("only a constant asks for its value"),
+            },
+            |s| s,
+            m,
+            |l| g.args(l).iter().map(|&a| m(a)).collect(),
+            |o| g.output(o),
+        );
         map[cur.0 as usize] = Some(id);
     }
     map[e.0 as usize].expect("root copied")

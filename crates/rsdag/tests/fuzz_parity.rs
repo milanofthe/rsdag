@@ -481,7 +481,15 @@ fn typed_tape_matches_complex_arena_and_f32_is_close() {
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
         let steps = 4 + rng.below(20);
-        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, false, true);
+        // Half the seeds draw operand lists past the four-accumulator
+        // threshold, where a reduction and a dot fold differently from a
+        // naive left fold: that is where the arena and the tape would part
+        // company if they did not share one implementation.
+        let mut spec = Spec::new(rng.next_u64())
+            .steps(steps)
+            .vocab(Vocabulary::Full)
+            .max_list(if seed % 2 == 0 { 20 } else { 4 });
+        let root = build_over(&mut ctx, &mut spec, &syms);
         let tape = Tape::compile(&ctx, &[root], &sym_ids);
         let inputs: Vec<f64> = (0..nsym).map(|_| rng.val()).collect();
         let (mut w, mut o) = (Vec::new(), Vec::new());

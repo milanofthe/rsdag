@@ -53,6 +53,16 @@ pub struct Graph<K: Field = BigRational> {
     memo: Option<Box<Memo>>,
 }
 
+/// How [`Graph::rebuild_node`] builds a node it is given.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Rebuild {
+    /// Intern the node as it stands: a stored module reproduces exactly.
+    Exact,
+    /// Go through the smart constructors: folding and canonical operand
+    /// order run again, which is what a rebuild after a transform wants.
+    Fold,
+}
+
 /// A per-node memo table over the arena, cleared in O(1) by bumping an epoch:
 /// the traversal primitives (`differentiate`, `substitute*`) key their memo by
 /// `ExprId`, and on a hash-consed graph a build pass runs thousands of them
@@ -666,53 +676,85 @@ impl<K: Field> Graph<K> {
         &self.outputs
     }
 
-    /// Re-intern one node of a module in this graph, mapping its operand,
-    /// constant, symbol and call ids through `map` and the module's tables.
+    /// Rebuild `node` in this graph with its operands already mapped.
     ///
-    /// The raw interner, not the smart constructors: a module's nodes are
-    /// already in the folded, canonical form the constructors produce, so
-    /// re-running them would be work without an effect, and going through
-    /// the interner reproduces the module exactly.
+    /// The one place that knows how to walk a [`Node`] into another graph:
+    /// the module loader ([`crate::Module`]) and the rebuild pass
+    /// ([`crate::rebuild`]) both go through it, so a new node variant is one
+    /// edit rather than two that must agree.
+    ///
+    /// The two callers differ only in [`Rebuild`]: a module is re-interned
+    /// exactly as stored, a rebuilt graph goes through the smart
+    /// constructors so identities that only became visible after a transform
+    /// collapse.
     pub(crate) fn rebuild_node(
         &mut self,
         node: &Node,
-        map: &crate::module::IdMap,
-        arg_pool: &[ExprId],
-        consts: &[K],
-        call_outputs: &rustc_hash::FxHashMap<OutputId, (FuncId, u32)>,
+        mode: Rebuild,
+        konst: impl Fn(&Node) -> K,
+        sym: impl Fn(SymbolId) -> SymbolId,
+        operand: impl Fn(ExprId) -> ExprId,
+        args_of: impl Fn(ArgList) -> Vec<ExprId>,
+        call_of: impl Fn(OutputId) -> (FuncId, u32),
     ) -> ExprId {
-        let e = |m: &crate::module::IdMap, x: ExprId| m.exprs[x.0 as usize];
-        let list = |g: &mut Self, m: &crate::module::IdMap, l: ArgList| -> ArgList {
-            let args: Vec<ExprId> = arg_pool[l.start as usize..(l.start + l.len) as usize]
-                .iter()
-                .map(|&x| e(m, x))
-                .collect();
-            g.intern_args(&args)
-        };
-        let n = match *node {
-            Node::Const(c) => return self.konst(consts[c.0 as usize].clone()),
-            Node::Symbol(s) => Node::Symbol(map.symbols[s.0 as usize]),
-            Node::Add(a, b) => Node::Add(e(map, a), e(map, b)),
-            Node::Mul(a, b) => Node::Mul(e(map, a), e(map, b)),
-            Node::Neg(a) => Node::Neg(e(map, a)),
-            Node::Pow(a, k) => Node::Pow(e(map, a), k),
-            Node::Unary(op, a) => Node::Unary(op, e(map, a)),
-            Node::Binary(op, a, b) => Node::Binary(op, e(map, a), e(map, b)),
-            Node::Cmp(op, a, b) => Node::Cmp(op, e(map, a), e(map, b)),
-            Node::Select(c, t, f) => Node::Select(e(map, c), e(map, t), e(map, f)),
-            Node::Reduce(op, l) => Node::Reduce(op, list(self, map, l)),
-            Node::Dot(l) => Node::Dot(list(self, map, l)),
-            Node::Call(out, l) => {
-                let (f, k) = call_outputs[&out];
-                let f = map.funcs[f.0 as usize];
-                let args: Vec<ExprId> = arg_pool[l.start as usize..(l.start + l.len) as usize]
-                    .iter()
-                    .map(|&x| e(map, x))
-                    .collect();
-                return self.call(f, k, &args);
+        let e = &operand;
+        match *node {
+            Node::Const(_) => self.konst(konst(node)),
+            Node::Symbol(s) => {
+                let s = sym(s);
+                match mode {
+                    Rebuild::Exact => self.intern(Node::Symbol(s)),
+                    Rebuild::Fold => self.symbol_expr(s),
+                }
             }
-        };
-        self.intern(n)
+            Node::Call(o, l) => {
+                let args = args_of(l);
+                let (f, k) = call_of(o);
+                self.call(f, k, &args)
+            }
+            _ if mode == Rebuild::Fold => match *node {
+                Node::Add(a, b) => self.add(e(a), e(b)),
+                Node::Mul(a, b) => self.mul(e(a), e(b)),
+                Node::Neg(a) => self.neg(e(a)),
+                Node::Pow(a, n) => self.pow_i(e(a), n),
+                Node::Unary(op, a) => self.unary(op, e(a)),
+                Node::Binary(op, a, b) => self.binary(op, e(a), e(b)),
+                Node::Cmp(op, a, b) => self.cmp(op, e(a), e(b)),
+                Node::Select(c, t, f) => self.select(e(c), e(t), e(f)),
+                Node::Reduce(op, l) => {
+                    let args = args_of(l);
+                    self.reduce(op, args)
+                }
+                Node::Dot(l) => {
+                    let all = args_of(l);
+                    let (a, b) = all.split_at(all.len() / 2);
+                    self.dot(a.to_vec(), b.to_vec())
+                }
+                _ => unreachable!("handled above"),
+            },
+            _ => {
+                let n = match *node {
+                    Node::Add(a, b) => Node::Add(e(a), e(b)),
+                    Node::Mul(a, b) => Node::Mul(e(a), e(b)),
+                    Node::Neg(a) => Node::Neg(e(a)),
+                    Node::Pow(a, k) => Node::Pow(e(a), k),
+                    Node::Unary(op, a) => Node::Unary(op, e(a)),
+                    Node::Binary(op, a, b) => Node::Binary(op, e(a), e(b)),
+                    Node::Cmp(op, a, b) => Node::Cmp(op, e(a), e(b)),
+                    Node::Select(c, t, f) => Node::Select(e(c), e(t), e(f)),
+                    Node::Reduce(op, l) => {
+                        let args = args_of(l);
+                        Node::Reduce(op, self.intern_args(&args))
+                    }
+                    Node::Dot(l) => {
+                        let args = args_of(l);
+                        Node::Dot(self.intern_args(&args))
+                    }
+                    _ => unreachable!("handled above"),
+                };
+                self.intern(n)
+            }
+        }
     }
 
     // --- functions and calls ---------------------------------------------
