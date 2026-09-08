@@ -1257,6 +1257,86 @@ impl<const S: usize> LaneChunkJit<'_, S> {
             self.b.ins().insertlane(z, rs[2 * j + 1], 1)
         })
     }
+    /// `a + b` or `a * b` on every stripe.
+    fn vec_combine(&mut self, op: ReduceOp, a: [Value; S], b: [Value; S]) -> [Value; S] {
+        std::array::from_fn(|j| match op {
+            ReduceOp::Sum => self.b.ins().fadd(a[j], b[j]),
+            _ => self.b.ins().fmul(a[j], b[j]),
+        })
+    }
+
+    /// A `Sum` or `Product` reduction as vector arithmetic, in the exact
+    /// order of [`rsgb::node::reduce_slice`]: four accumulators from
+    /// `REDUCE_SIMD_MIN` operands on, a left fold from the identity below it
+    /// (starting at the identity matters: `0.0 + -0.0` is `+0.0`, folding
+    /// from the first operand would not be).
+    fn fold_lanes(&mut self, op: ReduceOp, args: &[u32]) -> [Value; S] {
+        let ident = self.fsplat(match op {
+            ReduceOp::Sum => 0.0,
+            _ => 1.0,
+        });
+        if args.len() >= REDUCE_SIMD_MIN {
+            let mut acc = [ident; 4];
+            let ch = args.len() / 4;
+            for c in 0..ch {
+                for (k, a) in acc.iter_mut().enumerate() {
+                    let x = self.get(args[4 * c + k]);
+                    *a = self.vec_combine(op, *a, x);
+                }
+            }
+            let l = self.vec_combine(op, acc[0], acc[1]);
+            let r = self.vec_combine(op, acc[2], acc[3]);
+            let mut s = self.vec_combine(op, l, r);
+            for &a in &args[ch * 4..] {
+                let x = self.get(a);
+                s = self.vec_combine(op, s, x);
+            }
+            s
+        } else {
+            let mut acc = ident;
+            for &a in args {
+                let x = self.get(a);
+                acc = self.vec_combine(op, acc, x);
+            }
+            acc
+        }
+    }
+
+    /// An inner product as vector arithmetic, in the order of
+    /// [`rsgb::node::dot_slice`] (two roundings per term, no contraction).
+    fn dot_lanes(&mut self, a: &[u32], b: &[u32]) -> [Value; S] {
+        let zero = self.fsplat(0.0);
+        let term = |s: &mut Self, k: usize| -> [Value; S] {
+            let (x, y) = (s.get(a[k]), s.get(b[k]));
+            std::array::from_fn(|j| s.b.ins().fmul(x[j], y[j]))
+        };
+        if a.len() >= REDUCE_SIMD_MIN {
+            let mut acc = [zero; 4];
+            let ch = a.len() / 4;
+            for c in 0..ch {
+                for k in 0..4 {
+                    let p = term(self, 4 * c + k);
+                    acc[k] = self.vec_combine(ReduceOp::Sum, acc[k], p);
+                }
+            }
+            let l = self.vec_combine(ReduceOp::Sum, acc[0], acc[1]);
+            let r = self.vec_combine(ReduceOp::Sum, acc[2], acc[3]);
+            let mut s = self.vec_combine(ReduceOp::Sum, l, r);
+            for k in ch * 4..a.len() {
+                let p = term(self, k);
+                s = self.vec_combine(ReduceOp::Sum, s, p);
+            }
+            s
+        } else {
+            let mut s = zero;
+            for k in 0..a.len() {
+                let p = term(self, k);
+                s = self.vec_combine(ReduceOp::Sum, s, p);
+            }
+            s
+        }
+    }
+
     /// Vector compare -> per-lane 1.0 / 0.0 via mask bit-select.
     fn cmp_mask(&mut self, cc: FloatCC, x: [Value; S], y: [Value; S]) -> [Value; S] {
         let one = self.fsplat(1.0);
@@ -1415,31 +1495,31 @@ impl<const S: usize> LaneChunkJit<'_, S> {
                 self.set(*dst, v);
             }
             ROp::Reduce(dst, op, args) => {
-                let opc = self.b.ins().iconst(types::I32, reduce_code(*op));
-                let lenv = self.b.ins().iconst(self.ptr_ty, args.len() as i64);
-                let f = self.href["h_reduce"];
-                let rs: Vec<Value> = (0..2 * S)
-                    .map(|l| {
-                        let p = self.spill_lane(args, l);
-                        let c = self.b.ins().call(f, &[opc, p, lenv]);
-                        self.b.inst_results(c)[0]
-                    })
-                    .collect();
-                let v = self.join(&rs);
+                // Sum and Product fold as vector arithmetic in the reference
+                // order, like the scalar backend does. Min and Max keep the
+                // per-lane host call: Cranelift's `fmin`/`fmax` disagree with
+                // `f64::min` on NaN, and the reduction is the *one* place
+                // arrays and matrices reach the backend, so it has to be
+                // bit-exact rather than merely close.
+                let v = if matches!(op, ReduceOp::Sum | ReduceOp::Product) && !args.is_empty() {
+                    self.fold_lanes(*op, args)
+                } else {
+                    let opc = self.b.ins().iconst(types::I32, reduce_code(*op));
+                    let lenv = self.b.ins().iconst(self.ptr_ty, args.len() as i64);
+                    let f = self.href["h_reduce"];
+                    let rs: Vec<Value> = (0..2 * S)
+                        .map(|l| {
+                            let p = self.spill_lane(args, l);
+                            let c = self.b.ins().call(f, &[opc, p, lenv]);
+                            self.b.inst_results(c)[0]
+                        })
+                        .collect();
+                    self.join(&rs)
+                };
                 self.set(*dst, v);
             }
             ROp::Dot(dst, a, bb) => {
-                let lenv = self.b.ins().iconst(self.ptr_ty, a.len() as i64);
-                let f = self.href["h_dot"];
-                let rs: Vec<Value> = (0..2 * S)
-                    .map(|l| {
-                        let pa = self.spill_lane(a, l);
-                        let pb = self.spill_lane(bb, l);
-                        let c = self.b.ins().call(f, &[pa, pb, lenv]);
-                        self.b.inst_results(c)[0]
-                    })
-                    .collect();
-                let v = self.join(&rs);
+                let v = self.dot_lanes(a, bb);
                 self.set(*dst, v);
             }
             ROp::Bundle(..) | ROp::BundleBatch(..) | ROp::Pick(..) => {
