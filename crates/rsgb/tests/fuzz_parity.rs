@@ -1,50 +1,21 @@
-//! Differential parity fuzzer for the evaluation core.
+//! Properties of the tape over synthetic programs: it evaluates like the
+//! arena, a split tape like an unsplit one, a specialization like the choice
+//! it froze, `eval_batch` like the scalar path, and a symbolic derivative
+//! like a finite difference.
 //!
-//! Two invariants, checked over many random hash-consed DAGs. They are the
-//! safety net for the tape optimizations (liveness slot reuse, fused ops, SIMD):
-//! any change that breaks bit-exact agreement or the derivative is caught here.
-//!
-//!   1. `Tape::eval` (flat, compact-slot) == `eval_real` (arena sweep), bit-exact.
-//!   2. `differentiate` == central finite differences, on the smooth fragment.
+//! The programs come from `rsgb::synth`, so every backend's parity suite
+//! draws from the same population and a new op is covered here the moment it
+//! is drawable there.
 
-mod common;
 use std::collections::HashMap;
 
-use rsgb::{differentiate, eval_real, ExprId, Graph, Node, ReduceOp, SymbolId, Tape};
-
-// DETERMINISTIC RNG ====================================================================
-
-/// A tiny xorshift64* generator -- deterministic, no external crate, so failures
-/// reproduce from the seed.
-struct Rng(u64);
-
-impl Rng {
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-    fn below(&mut self, n: usize) -> usize {
-        (self.next_u64() % n as u64) as usize
-    }
-    /// A value in roughly `[-2.5, 2.5]`.
-    fn val(&mut self) -> f64 {
-        (self.next_u64() % 5001) as f64 / 1000.0 - 2.5
-    }
-    /// A positive value in roughly `[0.2, 2.7]` (kinder to `ln` / `sqrt`).
-    fn pos(&mut self) -> f64 {
-        (self.next_u64() % 2501) as f64 / 1000.0 + 0.2
-    }
-}
-
-// HELPERS ==============================================================================
+use rsgb::node::Node;
+use rsgb::synth::{build_over, Rng, Spec, Vocabulary};
+use rsgb::{differentiate, eval_real, ExprId, Graph, ReduceOp, SymbolId, Tape};
 
 fn sym_id(ctx: &Graph, e: ExprId) -> SymbolId {
-    match ctx.node(e) {
-        Node::Symbol(s) => *s,
+    match *ctx.node(e) {
+        Node::Symbol(s) => s,
         _ => unreachable!(),
     }
 }
@@ -53,90 +24,35 @@ fn same_bits(a: f64, b: f64) -> bool {
     a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
 }
 
-// RANDOM DAG CONSTRUCTION ==============================================================
-
-/// Build a random DAG over pre-created symbols. `smooth` restricts to
-/// differentiable ops (no cmp / select / floor) for the AD vs FD check.
+/// One generated expression over `syms`, drawn from the vocabulary the test
+/// asks for.
 fn build_with_syms(
     ctx: &mut Graph,
     rng: &mut Rng,
     syms: &[ExprId],
     steps: usize,
     smooth: bool,
-    ext: bool,
+    extended: bool,
 ) -> ExprId {
-    let mut pool: Vec<ExprId> = syms.to_vec();
-    for _ in 0..2 {
-        let k = ctx.konst_f64(rng.val());
-        pool.push(k);
+    let mut spec = Spec::new(rng.next_u64()).steps(steps).vocab(if extended {
+        Vocabulary::Full
+    } else {
+        Vocabulary::Elementary
+    });
+    if smooth {
+        spec = spec.smooth();
     }
-    // Smooth ops 0..16 (incl. reduce Sum/Product and dot); non-smooth adds
-    // cmp / select / floor and reduce Min/Max.
-    let base = 16;
-    for _ in 0..steps {
-        let a = pool[rng.below(pool.len())];
-        let b = pool[rng.below(pool.len())];
-        let c = pool[rng.below(pool.len())];
-        let rand_list = |rng: &mut Rng, pool: &[ExprId]| -> Vec<ExprId> {
-            let k = 2 + rng.below(3); // 2..4 operands
-            (0..k).map(|_| pool[rng.below(pool.len())]).collect()
-        };
-        let (idx, ext) = common::draw_op(&mut |n| rng.below(n), base + 5, base, smooth, ext);
-        let e = if ext {
-            common::ext_op(ctx, idx, a, b)
-        } else {
-            match idx {
-                0 => ctx.add(a, b),
-                1 => ctx.sub(a, b),
-                2 => ctx.mul(a, b),
-                3 => ctx.neg(a),
-                4 => {
-                    // Negative powers of a constant zero are undefined over the
-                    // exact rationals (0^-1 = 1/0); the smart constructor panics,
-                    // so bump those to a safe exponent.
-                    let mut k = rng.below(6) as i64 - 2; // -2..3
-                    if k < 0 && ctx.is_zero(a) {
-                        k = 2;
-                    }
-                    ctx.pow_i(a, k)
-                }
-                5 => ctx.exp(a),
-                // ln / sqrt of a structural constant zero would make their
-                // derivative divide by zero (recip(0)); steer those to a symbol.
-                6 => {
-                    let arg = if ctx.is_zero(a) { syms[0] } else { a };
-                    ctx.ln(arg)
-                }
-                7 => {
-                    let arg = if ctx.is_zero(a) { syms[0] } else { a };
-                    ctx.sqrt(arg)
-                }
-                8 => ctx.sin(a),
-                9 => ctx.cos(a),
-                10 => ctx.sinh(a),
-                11 => ctx.cosh(a),
-                12 => ctx.tanh(a),
-                13 => ctx.reduce(ReduceOp::Sum, rand_list(rng, &pool)),
-                14 => ctx.reduce(ReduceOp::Product, rand_list(rng, &pool)),
-                15 => {
-                    let la = rand_list(rng, &pool);
-                    let lb: Vec<ExprId> =
-                        (0..la.len()).map(|_| pool[rng.below(pool.len())]).collect();
-                    ctx.dot(la, lb)
-                }
-                16 => {
-                    let op = [rsgb::CmpOp::Gt, rsgb::CmpOp::Le, rsgb::CmpOp::Lt][rng.below(3)];
-                    ctx.cmp(op, a, b)
-                }
-                17 => ctx.select(a, b, c),
-                18 => ctx.floor(a),
-                19 => ctx.reduce(ReduceOp::Min, rand_list(rng, &pool)),
-                _ => ctx.reduce(ReduceOp::Max, rand_list(rng, &pool)),
-            }
-        };
-        pool.push(e);
-    }
-    *pool.last().unwrap()
+    build_over(ctx, &mut spec, syms)
+}
+
+/// As [`build_with_syms`], with guards dense enough that a random walk over
+/// the inputs crosses region boundaries often.
+fn build_branchy(ctx: &mut Graph, rng: &mut Rng, syms: &[ExprId], steps: usize) -> ExprId {
+    let mut spec = Spec::new(rng.next_u64())
+        .steps(steps)
+        .vocab(Vocabulary::Elementary)
+        .selects(25);
+    build_over(ctx, &mut spec, syms)
 }
 
 #[test]
@@ -146,7 +62,7 @@ fn eval_batch_matches_scalar_bit_exact() {
     const L: usize = 4;
     let mut mismatches = 0;
     for seed in 1..600u64 {
-        let mut rng = Rng(seed.wrapping_mul(0x2545_F491_4F6C_DD1D) | 1);
+        let mut rng = Rng::new(seed.wrapping_mul(0x2545_F491_4F6C_DD1D) | 1);
         let mut ctx: Graph = Graph::new();
         let nsym = 1 + rng.below(4);
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
@@ -188,7 +104,7 @@ fn eval_batch_matches_scalar_bit_exact() {
 fn tape_matches_arena_sweep_bit_exact() {
     let mut mismatches = 0;
     for seed in 1..600u64 {
-        let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let mut rng = Rng::new(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         let mut ctx: Graph = Graph::new();
         let nsym = 1 + rng.below(4);
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
@@ -227,7 +143,7 @@ fn tape_matches_arena_sweep_bit_exact() {
 fn split_tape_matches_unsplit_bit_exact() {
     let mut mismatches = 0;
     for seed in 1..400u64 {
-        let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let mut rng = Rng::new(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         let mut ctx: Graph = Graph::new();
         let nsym = 2 + rng.below(4);
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
@@ -306,7 +222,7 @@ fn long_reduce_dot_match_arena_4lane() {
     // Long Reduce / Dot lists exercise the 4-lane path; tape and arena must
     // still agree bit-for-bit (both go through the shared reduce/dot slice fn).
     for seed in 1..200u64 {
-        let mut rng = Rng(seed.wrapping_mul(0xD1B5_4A32_D192_ED03) | 1);
+        let mut rng = Rng::new(seed.wrapping_mul(0xD1B5_4A32_D192_ED03) | 1);
         let mut ctx: Graph = Graph::new();
         let nsym = 3;
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
@@ -399,14 +315,14 @@ fn specialized_tape_matches_full_bit_exact() {
     let mut flips = 0;
     let mut holds = 0;
     for seed in 1..400u64 {
-        let mut rng = Rng(seed.wrapping_mul(0xA076_1D64_78BD_642F) | 1);
+        let mut rng = Rng::new(seed.wrapping_mul(0xA076_1D64_78BD_642F) | 1);
         let mut ctx: Graph = Graph::new();
         let nsym = 1 + rng.below(4);
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
         let steps = 8 + rng.below(24);
-        let r1 = build_with_syms(&mut ctx, &mut rng, &syms, steps, false, false);
-        let r2 = build_with_syms(&mut ctx, &mut rng, &syms, steps, false, false);
+        let r1 = build_branchy(&mut ctx, &mut rng, &syms, steps);
+        let r2 = build_branchy(&mut ctx, &mut rng, &syms, steps);
         let tape = Tape::compile(&ctx, &[r1, r2], &sym_ids);
 
         let mut inputs: Vec<f64> = (0..nsym).map(|_| rng.val()).collect();
@@ -456,7 +372,7 @@ fn specialized_tape_matches_full_bit_exact() {
 fn differentiate_matches_finite_differences() {
     let mut checked = 0;
     for seed in 1..800u64 {
-        let mut rng = Rng(seed.wrapping_mul(0x2545_F491_4F6C_DD1D) | 1);
+        let mut rng = Rng::new(seed.wrapping_mul(0x2545_F491_4F6C_DD1D) | 1);
         let mut ctx: Graph = Graph::new();
         let nsym = 1 + rng.below(3);
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
@@ -504,7 +420,7 @@ fn differentiate_matches_finite_differences() {
 fn partial_specialization_checked_evals_bit_exact() {
     let mut mismatches = 0;
     for seed in 1..500u64 {
-        let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let mut rng = Rng::new(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         let mut ctx: Graph = Graph::new();
         let nsym = 2 + rng.below(3);
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
@@ -559,7 +475,7 @@ fn typed_tape_matches_complex_arena_and_f32_is_close() {
     use num_complex::Complex64;
     let mut checked = 0;
     for seed in 1..300u64 {
-        let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let mut rng = Rng::new(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         let mut ctx: Graph = Graph::new();
         let nsym = 1 + rng.below(4);
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();

@@ -17,5 +17,8 @@ cranelift-jit.workspace = true
 cranelift-module.workspace = true
 cranelift-native.workspace = true
 
+[dev-dependencies]
+rsgb = { workspace = true, features = ["synth"] }
+
 [lints]
 workspace = true

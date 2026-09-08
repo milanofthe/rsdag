@@ -650,6 +650,7 @@ dependencies = [
  "num-complex",
  "num-rational",
  "num-traits",
+ "rsgb",
  "rustc-hash",
 ]
 

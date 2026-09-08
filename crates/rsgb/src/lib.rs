@@ -15,6 +15,8 @@ pub mod role;
 pub mod scalar;
 pub mod simplify;
 pub mod symbolic;
+#[cfg(any(test, feature = "synth"))]
+pub mod synth;
 pub mod tape;
 // Expression substitution is exposed only through the curated `substitute*`
 // re-exports below, not as a module path.
