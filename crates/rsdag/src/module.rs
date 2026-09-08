@@ -156,7 +156,27 @@ impl<K: Field> Graph<K> {
             out_map.insert(OutputId(i as u32), (f, k));
         }
         for (i, node) in module.nodes.iter().enumerate() {
-            let e = self.rebuild_node(node, &map, &module.arg_pool, &module.consts, &out_map);
+            let pool = &module.arg_pool;
+            let e = self.rebuild_node(
+                node,
+                crate::graph::Rebuild::Exact,
+                |n| match *n {
+                    Node::Const(c) => module.consts[c.0 as usize].clone(),
+                    _ => unreachable!("only a constant asks for its value"),
+                },
+                |s| map.symbols[s.0 as usize],
+                |x| map.exprs[x.0 as usize],
+                |l| {
+                    pool[l.start as usize..(l.start + l.len) as usize]
+                        .iter()
+                        .map(|&x| map.exprs[x.0 as usize])
+                        .collect()
+                },
+                |o| {
+                    let (f, k) = out_map[&o];
+                    (map.funcs[f.0 as usize], k)
+                },
+            );
             debug_assert_eq!(map.exprs.len(), i);
             map.exprs.push(e);
         }
