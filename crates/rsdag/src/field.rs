@@ -159,6 +159,29 @@ impl Hash for F64 {
     }
 }
 
+/// `F64` serializes as its IEEE bit pattern, not as a number.
+///
+/// A text format is not a safe container for a `f64`: `serde_json` writes
+/// the shortest representation that round-trips but its parser returns a
+/// neighbouring double for some of them, and JSON cannot represent an
+/// infinity or a NaN at all. A module is the program, so a constant that
+/// comes back one ulp away is a different program. The bit pattern is exact
+/// in every format.
+#[cfg(feature = "serde")]
+impl serde::Serialize for F64 {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_u64(self.0.to_bits())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for F64 {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<F64, D::Error> {
+        let bits = <u64 as serde::Deserialize>::deserialize(de)?;
+        Ok(F64(f64::from_bits(bits)))
+    }
+}
+
 impl Field for F64 {
     fn zero() -> Self {
         F64(0.0)

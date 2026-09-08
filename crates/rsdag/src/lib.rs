@@ -10,9 +10,11 @@ pub mod extern_fn;
 pub mod field;
 pub mod func;
 pub mod graph;
+pub mod module;
 pub mod node;
 pub mod role;
 pub mod scalar;
+pub mod scope;
 pub mod simplify;
 pub mod symbolic;
 #[cfg(any(test, feature = "synth"))]
@@ -29,12 +31,14 @@ pub use extern_fn::ExternBundle;
 pub use field::{ratio_powi, Field, F64};
 pub use func::{CompiledBody, FuncId, Function, FunctionBody, Output, OutputId};
 pub use graph::Graph;
+pub use module::{IdMap, Module, MODULE_VERSION};
 pub use node::{
     binary_f64, unary_f64, ArgList, BinOp, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp,
     SymbolId, UnaryOp,
 };
 pub use role::{OutputRole, ParamRole};
 pub use scalar::Scalar;
+pub use scope::Scope;
 pub use simplify::rebuild;
 pub use symbolic::{collect, determinant, rational_form, simplify_egraph};
 pub use tape::{SchedulePolicy, SpecializedTape, Tape, TapeVisitor};

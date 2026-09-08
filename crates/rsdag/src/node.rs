@@ -4,12 +4,14 @@ use crate::func::OutputId;
 ///
 /// Cheap to copy and compare; identical subexpressions share one `ExprId`
 /// thanks to hash-consing, so structural equality is `O(1)`.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct ExprId(pub u32);
 
 /// Index of an interned exact rational constant in a [`crate::Graph`]'s
 /// constant table. Two equal rationals share one id, so a constant node is a
 /// 4-byte handle and comparing constants is an integer compare.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct ConstId(pub u32);
 
@@ -17,6 +19,7 @@ pub struct ConstId(pub u32);
 /// argument pool. Lists are deduplicated by content, so two structurally equal
 /// variadic nodes carry the *same* `ArgList` and hash-cons to one node. Resolve
 /// to a slice with [`crate::Graph::args`].
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct ArgList {
     pub start: u32,
@@ -33,10 +36,12 @@ impl ArgList {
 }
 
 /// Index of a free symbol (component value, `gm`, the Laplace variable `s`, ...).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct SymbolId(pub u32);
 
 /// Comparison operators; a `Cmp` node evaluates to `1.0` (true) or `0.0`.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub enum CmpOp {
     Gt,
@@ -50,6 +55,7 @@ pub enum CmpOp {
 /// Associative reduction over a variadic operand list. Folds a flat list of
 /// terms in one node, shrinking the tape (KCL current sums become one `Reduce`
 /// instead of an Add-tree) and exposing a vectorizable loop.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub enum ReduceOp {
     Sum,
@@ -159,6 +165,7 @@ pub fn dot_slice(a: &[f64], b: &[f64]) -> f64 {
 
 /// Transcendental / elementary unary functions, needed by nonlinear device
 /// constitutive equations (diode `exp`, EKV/`tanh`, ...).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub enum UnaryOp {
     Exp,
@@ -204,6 +211,7 @@ pub enum UnaryOp {
 /// Binary operations beyond the ring (`Add`, `Mul`, `Neg`, `Pow` are their
 /// own node kinds for the canonical ordering and the reduction fusion; `Sub`
 /// and `Div` are `add(neg)` and `mul(recip)`).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub enum BinOp {
     /// `a^b` for real exponents (`Pow` covers integer exponents).
@@ -712,6 +720,7 @@ pub fn cmp_bool<T: PartialOrd>(op: CmpOp, x: T, y: T) -> bool {
 /// heap allocation, and the arena is one dense array the caches like -- the
 /// build passes (differentiation, substitution, tape compilation) are bound by
 /// exactly this per-node cost.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Node {
     /// Exact rational constant, by id into the context's constant table (kept
