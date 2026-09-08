@@ -3,13 +3,63 @@
 
 use rsdag::synth::{cases, Spec, Vocabulary};
 use rsdag::{Graph, Tape};
-use rsdag_jit::{LaneTape, LANES};
+use rsdag_jit::{suggest_lanes, LaneTape, LANES, LANE_WIDTHS};
 
 /// The symbol behind a symbol node, for the hand-written case below.
 fn symbol_of(g: &Graph, e: rsdag::ExprId) -> rsdag::SymbolId {
     match *g.node(e) {
         rsdag::Node::Symbol(s) => s,
         _ => unreachable!(),
+    }
+}
+
+/// Lane `k` computes the same bits at every width: a wider tape is more
+/// parameter sets per pass, never a different arithmetic. This is what makes
+/// the width a tuning knob rather than a semantic choice.
+#[test]
+fn every_width_agrees_with_every_other() {
+    for case in cases(0..40, |seed| {
+        let spec = Spec::new(seed).steps(30 + (seed as usize % 40)).params(3);
+        match seed % 3 {
+            0 => spec.vocab(Vocabulary::Ring).max_list(20),
+            1 => spec.vocab(Vocabulary::Elementary),
+            _ => spec.vocab(Vocabulary::Full),
+        }
+    }) {
+        let n_in = case.syms.len();
+        let want = case.reference();
+        for width in LANE_WIDTHS {
+            let Ok(lane) = LaneTape::compile_lanes(&case.tape, width, rsdag_jit::CHUNK_OPS) else {
+                continue;
+            };
+            assert_eq!(lane.width(), width);
+            // Row `l % rows` into lane `l`, so every lane carries a
+            // different parameter set at every width.
+            let rows = case.rows.len();
+            let mut interleaved = Vec::with_capacity(n_in * width);
+            for k in 0..n_in {
+                for l in 0..width {
+                    interleaved.push(case.rows[l % rows][k]);
+                }
+            }
+            let (mut w, mut o) = (Vec::new(), Vec::new());
+            lane.eval(&interleaved, &mut w, &mut o);
+            for l in 0..width {
+                let expect = &want[l % rows];
+                for (j, &e) in expect.iter().enumerate() {
+                    let got = o[j * width + l];
+                    assert!(
+                        got.to_bits() == e.to_bits() || (got.is_nan() && e.is_nan()),
+                        "seed {}, width {width}, lane {l}, output {j}: {e:?} vs {got:?}",
+                        case.seed
+                    );
+                }
+            }
+        }
+        // The suggestion is one of the widths, or "use the scalar backend".
+        if let Some(w) = suggest_lanes(&case.tape) {
+            assert!(LANE_WIDTHS.contains(&w), "suggested width {w}");
+        }
     }
 }
 
