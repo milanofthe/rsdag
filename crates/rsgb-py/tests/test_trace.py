@@ -111,3 +111,27 @@ def test_program_reports_ops_and_dump():
     p = f.program(1.0)
     assert p.n_inputs == 1 and p.n_outputs == 1 and p.n_ops >= 3
     assert "Input" in p.dump()
+
+
+def test_tracer_defers_to_arrays_on_the_left():
+    """A traced scalar times an array of tracers broadcasts elementwise: the
+    binary operators return NotImplemented for an operand they cannot trace,
+    so numpy's reflected operator runs."""
+    import numpy as np
+    from rsgb import Scope
+
+    s = Scope()
+    k = s.input()
+    arr = np.array([s.input(), s.input()], dtype=object)
+    for left, right in [(k * arr, arr * k), (k + arr, arr + k)]:
+        assert isinstance(left, np.ndarray) and left.shape == (2,)
+        assert [e.expr() for e in left] == [e.expr() for e in right]
+    prog = s.compile(list(np.exp(arr / 4.0) * k) + list(k * arr) + list(k - arr))
+    out = prog.eval([2.0, 0.5, 1.5])
+    assert out == pytest.approx(
+        [np.exp(0.125) * 2, np.exp(0.375) * 2, 1.0, 3.0, 1.5, 0.5]
+    )
+
+    # a genuinely untraceable operand still raises, from Python's own message
+    with pytest.raises(TypeError):
+        k * "no"
