@@ -10,5 +10,8 @@ description = "C source backend for rsgb programs, with a compile-and-compare ve
 [dependencies]
 rsgb.workspace = true
 
+[dev-dependencies]
+rsgb = { workspace = true, features = ["synth"] }
+
 [lints]
 workspace = true

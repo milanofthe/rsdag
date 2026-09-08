@@ -14,8 +14,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       # rsgb-py links libpython; it is built and tested by the python job.
-      - run: cargo clippy --workspace --exclude rsgb-py --all-targets -- -D warnings
-      - run: cargo test --workspace --exclude rsgb-py
+      - run: cargo clippy --workspace --exclude rsgb-py --all-targets --features rsgb/synth -- -D warnings
+      - run: cargo test --workspace --exclude rsgb-py --features rsgb/synth
   python:
     runs-on: ubuntu-latest
     steps:

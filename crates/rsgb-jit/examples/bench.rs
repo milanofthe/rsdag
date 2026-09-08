@@ -17,6 +17,7 @@
 
 use std::time::Instant;
 
+use rsgb::synth::{build, inputs, Spec, Vocabulary};
 use rsgb::{ExprId, Graph, SymbolId, Tape, F64};
 use rsgb_jit::{ChunkedTape, LaneTape};
 
@@ -60,49 +61,24 @@ fn lorenz(g: &mut Graph<F64>) -> (Vec<ExprId>, Vec<SymbolId>) {
     )
 }
 
-/// A coupled nonlinear residual of `n` rows over `n` unknowns, each row
-/// touching three of them through an exponential, a square root and a
-/// rational term: the shape of a circuit or FEM residual, and the shape that
-/// makes a Jacobian sparse.
-fn residual(g: &mut Graph<F64>, n: usize) -> (Vec<ExprId>, Vec<SymbolId>) {
-    let xs: Vec<_> = (0..n).map(|i| g.sym(&format!("x{i}"))).collect();
-    let vt = g.konst_f64(0.025);
-    let is = g.konst_f64(1e-14);
-    let mut outs = Vec::with_capacity(n);
-    for i in 0..n {
-        let (a, b, c) = (xs[i], xs[(i + 1) % n], xs[(i + 7) % n]);
-        let diode = {
-            let q = g.div(a, vt);
-            let e = g.exp(q);
-            let one = g.one();
-            let m = g.sub(e, one);
-            g.mul(is, m)
-        };
-        let root = {
-            let s = g.add(a, b);
-            let p = g.mul(s, s);
-            g.sqrt(p)
-        };
-        let rational = {
-            let s = g.sub(b, c);
-            let l = g.mul(s, s);
-            let one = g.one();
-            let den = g.add(one, l);
-            g.div(s, den)
-        };
-        let row = {
-            let u = g.add(diode, root);
-            g.add(u, rational)
-        };
-        outs.push(row);
-    }
-    (outs, (0..n as u32).map(SymbolId).collect())
-}
-
-/// Inputs inside the domain of every row (the exponential would overflow far
-/// outside it, which says nothing about the kernels).
-fn sample_inputs(n: usize) -> Vec<f64> {
-    (0..n).map(|i| 0.05 + 0.4 * (i % 7) as f64 / 7.0).collect()
+/// A program of about `steps` nodes drawn from `vocab`, with the inputs to
+/// evaluate it over. The generator is the one the parity suite fuzzes with,
+/// so the benchmark prices the same population the tests check.
+fn synthetic(seed: u64, steps: usize, vocab: Vocabulary) -> (Graph<F64>, Tape, Vec<f64>) {
+    let mut g: Graph<F64> = Graph::new();
+    let mut spec = Spec::new(seed)
+        .steps(steps)
+        .params(8)
+        .outputs(4)
+        .vocab(vocab)
+        // Short lists: a `Reduce` of 20 is one op doing twenty flops, which
+        // makes a per-op number meaningless. The fuzzers cover the long
+        // ones; the benchmark prices ops.
+        .max_list(4);
+    let (roots, syms) = build(&mut g, &mut spec);
+    let tape = Tape::compile(&g, &roots, &syms);
+    let inputs = inputs(&mut spec.rng(), syms.len());
+    (g, tape, inputs)
 }
 
 /// Time one program through the interpreter and the JIT, and check that they
@@ -140,7 +116,7 @@ fn row(name: &str, tape: &Tape, inputs: &[f64]) {
 
 fn main() {
     let quick = std::env::args().any(|a| a == "quick");
-    let sizes: &[usize] = if quick { &[32] } else { &[32, 256, 1024] };
+    let sizes: &[usize] = if quick { &[64] } else { &[64, 512, 4096] };
 
     println!(
         "{:<24} {:>7} | {:>21} | {:>21} | {:>6} | {:>11}",
@@ -177,18 +153,25 @@ fn main() {
         native * 1e9
     );
 
-    for &n in sizes {
+    for &vocab in &[Vocabulary::Ring, Vocabulary::Elementary, Vocabulary::Full] {
+        for &steps in sizes {
+            let (_, tape, inputs) = synthetic(steps as u64, steps, vocab);
+            row(&format!("{vocab:?} {steps} nodes"), &tape, &inputs);
+        }
+    }
+
+    // The Jacobian of a smooth synthetic program: what it costs to build the
+    // derivative graph, and what the derivative program then costs to run.
+    for &steps in sizes {
         let mut g: Graph<F64> = Graph::new();
-        let (outs, syms) = residual(&mut g, n);
-        let inputs = sample_inputs(n);
-
+        let mut spec = Spec::new(steps as u64)
+            .steps(steps)
+            .params(8)
+            .outputs(4)
+            .smooth();
+        let (roots, syms) = build(&mut g, &mut spec);
         let t0 = Instant::now();
-        let tape = Tape::compile(&g, &outs, &syms);
-        let tape_ms = t0.elapsed().as_secs_f64() * 1e3;
-        row(&format!("residual n={n}"), &tape, &inputs);
-
-        let t0 = Instant::now();
-        let jac = rsgb::jacobian(&mut g, &outs, &syms);
+        let jac = rsgb::jacobian(&mut g, &roots, &syms);
         let jac_ms = t0.elapsed().as_secs_f64() * 1e3;
         let nz: Vec<ExprId> = jac
             .iter()
@@ -197,22 +180,20 @@ fn main() {
             .filter(|&e| !g.is_zero(e))
             .collect();
         let jtape = Tape::compile(&g, &nz, &syms);
-        row(&format!("residual n={n} jacobian"), &jtape, &inputs);
+        let inputs = inputs(&mut spec.rng(), syms.len());
+        row(&format!("jacobian of {steps} nodes"), &jtape, &inputs);
         println!(
-            "  graph {} nodes, tape compile {tape_ms:.2} ms | jacobian {} of {} entries nonzero, built in {jac_ms:.2} ms",
-            g.len(),
+            "  {} nonzero of {} entries, differentiated in {jac_ms:.2} ms, graph {} nodes",
             nz.len(),
-            n * n,
+            roots.len() * syms.len(),
+            g.len(),
         );
     }
 
     // The lane tape evaluates `width` parameter sets per instruction. Report
     // it per set, which is the only comparison that means anything.
-    let n = *sizes.last().unwrap();
-    let mut g: Graph<F64> = Graph::new();
-    let (outs, syms) = residual(&mut g, n);
-    let tape = Tape::compile(&g, &outs, &syms);
-    let inputs = sample_inputs(n);
+    let steps = *sizes.last().unwrap();
+    let (_, tape, inputs) = synthetic(steps as u64, steps, Vocabulary::Elementary);
     if let Ok(lane) = LaneTape::compile(&tape) {
         let w = lane.width();
         // Lane k gets the k-th parameter set; set 0 repeats the scalar run,
@@ -235,7 +216,7 @@ fn main() {
         let t_lane = per_call(|| lane.eval(&wide, &mut lw, &mut lout), reps);
         let t_scalar = per_call(|| tape.eval(&inputs, &mut sw, &mut sout), reps);
         println!(
-            "lane tape (residual n={n}, width {w}): {:.2} ns for {w} sets, {:.2} ns per set against the interpreter's {:.2} ns -> {:.2}x",
+            "lane tape ({steps} nodes, width {w}): {:.2} ns for {w} sets, {:.2} ns per set against the interpreter's {:.2} ns -> {:.2}x",
             t_lane * 1e9,
             t_lane * 1e9 / w as f64,
             t_scalar * 1e9,
