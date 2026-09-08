@@ -641,7 +641,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rsgb"
+name = "rsdag"
 version = "0.1.0"
 dependencies = [
  "egg",
@@ -650,19 +650,19 @@ dependencies = [
  "num-complex",
  "num-rational",
  "num-traits",
- "rsgb",
+ "rsdag",
  "rustc-hash",
 ]
 
 [[package]]
-name = "rsgb-c"
+name = "rsdag-c"
 version = "0.1.0"
 dependencies = [
- "rsgb",
+ "rsdag",
 ]
 
 [[package]]
-name = "rsgb-jit"
+name = "rsdag-jit"
 version = "0.1.0"
 dependencies = [
  "cranelift-codegen",
@@ -671,18 +671,18 @@ dependencies = [
  "cranelift-module",
  "cranelift-native",
  "rayon",
- "rsgb",
+ "rsdag",
  "rustc-hash",
 ]
 
 [[package]]
-name = "rsgb-py"
+name = "rsdag-py"
 version = "0.1.0"
 dependencies = [
  "pyo3",
- "rsgb",
- "rsgb-c",
- "rsgb-jit",
+ "rsdag",
+ "rsdag-c",
+ "rsdag-jit",
 ]
 
 [[package]]
