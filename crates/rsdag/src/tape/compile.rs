@@ -1,6 +1,18 @@
-//! Tape compilation: reachability, register-pressure list scheduling,
-//! superinstruction fusion, liveness-driven slot allocation and the
-//! parameter-pure prolog split. See the module docs of [`super`] for the IR.
+//! Tape compilation, in five passes over the reachable forest:
+//!
+//! 1. [`Forest::analyze`] -- reachability, parameter-purity for the prolog
+//!    split, use counts, and superinstruction fusion.
+//! 2. [`Forest::schedule`] -- register-pressure list scheduling into an
+//!    instruction order, and the position tables over it.
+//! 3. [`Forest::liveness`] -- last-use positions and the pins that keep a
+//!    root or a prolog value alive.
+//! 4. [`batch_groups`] -- the instance-batching pre-scan.
+//! 5. [`Forest::emit`] -- slot allocation and the instruction stream.
+//!
+//! Each pass reads only what the ones before it produced, which is what
+//! makes them separable, and each names its output in a struct rather than
+//! in a dozen parallel vectors of a single long function. See the module
+//! docs of [`super`] for the IR itself.
 
 use crate::field::Field;
 use std::collections::BTreeSet;
@@ -61,6 +73,71 @@ impl Tape {
         input_syms: &[SymbolId],
         pure_inputs: Option<&[bool]>,
     ) -> Tape {
+        // Five passes over the reachable forest, each reading only what the
+        // ones before it produced: analysis marks and counts, scheduling
+        // picks an order, liveness turns that order into lifetimes, the
+        // batch scan groups repeated calls, and emission allocates slots and
+        // writes the instruction stream.
+        let forest = Forest::analyze(ctx, roots, input_syms, pure_inputs);
+        let schedule = forest.schedule(ctx);
+        let liveness = forest.liveness(ctx, roots, &schedule, pure_inputs.is_some());
+        let batch_group_args = batch_groups(ctx, &schedule.order);
+        forest.emit(ctx, roots, &schedule, &liveness, &batch_group_args)
+    }
+}
+
+/// The reachable forest of one compilation, in dependency order, with the
+/// tables the later passes index by *base position* (the index into
+/// [`Forest::base`], not the arena id).
+struct Forest {
+    /// Reachable nodes in ascending arena id, which is a dependency order.
+    base: Vec<ExprId>,
+    /// Base position by arena id; `u32::MAX` for an unreachable node.
+    bpos: Vec<u32>,
+    /// Input index of each mapped symbol.
+    input_of: HashMap<SymbolId, u32>,
+    /// Parameter-purity for the prolog split; all false without one.
+    pure: Vec<bool>,
+    /// `fused_into_b[p]` is the base position of the `Add` that absorbed the
+    /// node at `p` as a superinstruction operand.
+    fused_into_b: Vec<Option<usize>>,
+}
+
+/// The instruction order, and the tables indexed by *schedule position*.
+struct Schedule {
+    order: Vec<ExprId>,
+    /// First position of the main (impure) phase.
+    boundary: usize,
+    /// Schedule position by arena id.
+    pos: Vec<u32>,
+    /// The consuming op's schedule position, for a fused operand.
+    fused_into: Vec<Option<usize>>,
+}
+
+/// Lifetimes over the schedule.
+struct Liveness {
+    /// Highest position that reads each position's value; `usize::MAX` for a
+    /// root, or for a prolog value the main phase reads.
+    last: Vec<usize>,
+    pinned: Vec<bool>,
+    /// Which positions belong to the prolog; empty without a split.
+    is_pure: Vec<bool>,
+}
+
+impl Forest {
+    /// Base position of a reachable node.
+    #[inline]
+    fn pos(&self, e: ExprId) -> usize {
+        self.bpos[e.0 as usize] as usize
+    }
+
+    /// Pass 1: reachability, purity, use counts and superinstruction fusion.
+    fn analyze<K: Field>(
+        ctx: &Graph<K>,
+        roots: &[ExprId],
+        input_syms: &[SymbolId],
+        pure_inputs: Option<&[bool]>,
+    ) -> Forest {
         let mut input_of: HashMap<SymbolId, u32> =
             HashMap::with_capacity_and_hasher(input_syms.len(), Default::default());
         for (k, &s) in input_syms.iter().enumerate() {
@@ -146,6 +223,23 @@ impl Tape {
             }
         }
 
+        Forest {
+            base,
+            bpos,
+            input_of,
+            pure,
+            fused_into_b,
+        }
+    }
+
+    /// Pass 2: the instruction order, and the position tables over it.
+    fn schedule<K: Field>(&self, ctx: &Graph<K>) -> Schedule {
+        let base = &self.base;
+        let pure = &self.pure;
+        let fused_into_b = &self.fused_into_b;
+        let m = base.len();
+        let n_arena = self.bpos.len();
+        let bp = |e: ExprId| self.pos(e);
         // ---- schedule: register-pressure-driven list scheduling -------------
         //
         // Ascending id (creation order) is a valid schedule but a poor one:
@@ -336,7 +430,6 @@ impl Tape {
         }
         debug_assert_eq!(order.len(), m, "list scheduler must emit every node");
         let boundary = boundary.unwrap_or(order.len());
-
         // Dense position table over the schedule, and the per-position views.
         // The prolog is exactly the emitted prefix before `boundary`: a pure
         // leaf first demanded by a main-phase op is (re)materialised there,
@@ -347,15 +440,39 @@ impl Tape {
         }
         let pos = pos_t;
         let p = |e: ExprId| pos[e.0 as usize] as usize;
-        let mut is_pure: Vec<bool> = Vec::new();
-        if pure_inputs.is_some() {
-            is_pure = (0..m).map(|i| i < boundary).collect();
-        }
-        let n_pure_nodes = boundary;
         let fused_into: Vec<Option<usize>> = order
             .iter()
             .map(|id| fused_into_b[bp(*id)].map(|c| p(base[c])))
             .collect();
+
+        Schedule {
+            order,
+            boundary,
+            pos,
+            fused_into,
+        }
+    }
+
+    /// Pass 3: lifetimes and pins.
+    fn liveness<K: Field>(
+        &self,
+        ctx: &Graph<K>,
+        roots: &[ExprId],
+        schedule: &Schedule,
+        split: bool,
+    ) -> Liveness {
+        let m = self.base.len();
+        let order = &schedule.order;
+        let boundary = schedule.boundary;
+        let fused_into = &schedule.fused_into;
+        let p = |e: ExprId| schedule.pos[e.0 as usize] as usize;
+        // The prolog is exactly the emitted prefix before `boundary`.
+        let is_pure: Vec<bool> = if split {
+            (0..m).map(|i| i < boundary).collect()
+        } else {
+            Vec::new()
+        };
+        let n_pure_nodes = boundary;
 
         let mut pinned = vec![false; m];
         for r in roots {
@@ -390,14 +507,35 @@ impl Tape {
             }
         }
 
-        // Instance batching pre-scan: for every context bundle referenced by
-        // >= 2 distinct argument groups whose arguments are ALL plain
-        // inputs/constants, the per-group calls coalesce into one
-        // `BundleBatch` at the first call site (the leaf arguments can always
-        // be materialised there). Groups keyed and ordered by first encounter.
-        // Per function: the evaluating bundle and its output->slot map -- the
-        // solver's registered body, the extern body, or an interpreted body
-        // built here (so a tape is total without any registration).
+        Liveness {
+            last,
+            pinned,
+            is_pure,
+        }
+    }
+
+    /// Pass 5: slot allocation and the instruction stream.
+    fn emit<K: Field>(
+        &self,
+        ctx: &Graph<K>,
+        roots: &[ExprId],
+        schedule: &Schedule,
+        liveness: &Liveness,
+        batch_group_args: &HashMap<u32, Vec<Vec<ExprId>>>,
+    ) -> Tape {
+        let base = &self.base;
+        let input_of = &self.input_of;
+        let m = base.len();
+        let order = &schedule.order;
+        let fused_into = &schedule.fused_into;
+        let p = |e: ExprId| schedule.pos[e.0 as usize] as usize;
+        let last = &liveness.last;
+        let pinned = &liveness.pinned;
+        let is_pure = &liveness.is_pure;
+        let n_pure_nodes = schedule.boundary;
+        // Per function: the evaluating bundle and its output-to-slot map --
+        // the solver's registered body, the extern body, or an interpreted
+        // body built here, so a tape is total without any registration.
         let mut evaluators: HashMap<u32, (Arc<dyn ExternBundle>, Vec<Option<u32>>)> =
             HashMap::default();
         let mut evaluator = |ctx: &Graph<K>, f: FuncId, out: u32| {
@@ -428,27 +566,6 @@ impl Tape {
             let (b, slot_of) = &evaluators[&fi];
             (b.clone(), slot_of.get(out as usize).copied().flatten())
         };
-        let mut batch_group_args: HashMap<u32, Vec<Vec<ExprId>>> = HashMap::default();
-        {
-            let mut seen: BTreeSet<(u32, Vec<ExprId>)> = BTreeSet::new();
-            for id in &order {
-                if let Node::Call(o, l) = *ctx.node(*id) {
-                    let (f, _) = ctx.output(o);
-                    let args = ctx.args(l);
-                    if seen.insert((f.0, args.to_vec())) {
-                        batch_group_args.entry(f.0).or_default().push(args.to_vec());
-                    }
-                }
-            }
-            batch_group_args.retain(|_, groups| {
-                groups.len() >= 2
-                    && groups.iter().all(|g| g.len() == groups[0].len())
-                    && groups
-                        .iter()
-                        .flatten()
-                        .all(|a| matches!(ctx.node(*a), Node::Const(_) | Node::Symbol(_)))
-            });
-        }
         let mut emitted = vec![false; m];
 
         // Allocate slots with a LIFO free list; free an op's dying operands
@@ -694,6 +811,36 @@ impl Tape {
             prolog_ops,
         }
     }
+}
+
+/// Pass 4: instance batching pre-scan. For every function referenced by at
+/// least two distinct argument groups whose arguments are all plain inputs
+/// or constants, the per-group calls can coalesce into one batched call at
+/// the first call site.
+fn batch_groups<K: Field>(ctx: &Graph<K>, order: &[ExprId]) -> HashMap<u32, Vec<Vec<ExprId>>> {
+    // Groups are keyed and ordered by first encounter, so the batched call
+    // lands at the first call site, where the leaf arguments can always be
+    // materialised.
+    let mut batch_group_args: HashMap<u32, Vec<Vec<ExprId>>> = HashMap::default();
+    let mut seen: BTreeSet<(u32, Vec<ExprId>)> = BTreeSet::new();
+    for id in order {
+        if let Node::Call(o, l) = *ctx.node(*id) {
+            let (f, _) = ctx.output(o);
+            let args = ctx.args(l);
+            if seen.insert((f.0, args.to_vec())) {
+                batch_group_args.entry(f.0).or_default().push(args.to_vec());
+            }
+        }
+    }
+    batch_group_args.retain(|_, groups| {
+        groups.len() >= 2
+            && groups.iter().all(|g| g.len() == groups[0].len())
+            && groups
+                .iter()
+                .flatten()
+                .all(|a| matches!(ctx.node(*a), Node::Const(_) | Node::Symbol(_)))
+    });
+    batch_group_args
 }
 
 /// The scheduling policy of the tape compiler. Register-pressure list
