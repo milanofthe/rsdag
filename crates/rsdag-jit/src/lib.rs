@@ -1136,8 +1136,14 @@ impl ChunkedTape {
 // error; callers fall back to per-group scalar evaluation.
 // ============================================================================
 
-/// Number of SIMD lanes of the lane backend (f64x2: two instances per pass).
+/// Number of SIMD lanes of the lane backend's default width (f64x2: two
+/// instances per pass).
 pub const LANES: usize = 2;
+
+/// The lane counts [`LaneTape::compile_lanes`] accepts. Each is a whole
+/// number of f64x2 stripes per value, so lane `k` of a wider tape computes
+/// exactly what lane `k` of a narrower one does.
+pub const LANE_WIDTHS: [usize; 4] = [2, 4, 8, 16];
 
 /// `S` f64x2 stripes per work slot (lane width = `2*S`). Slot `s` occupies
 /// `S*16` bytes at byte offset `s*S*16`; inputs/outputs are lane-interleaved
@@ -1678,6 +1684,116 @@ pub struct LaneTape {
     width: usize,
 }
 
+/// Counts the ops that the lane backend cannot vectorise, so they cost one
+/// host call *per lane* and get more expensive as the width grows: the
+/// elementary functions, the binary functions beyond the ring, and the
+/// ordered reductions (see the `Reduce` arm of the lane lowering).
+#[derive(Default)]
+struct HostCallCount {
+    host: usize,
+    total: usize,
+}
+
+impl TapeVisitor for HostCallCount {
+    fn constant(&mut self, _: u32, _: f64) {
+        self.total += 1;
+    }
+    fn input(&mut self, _: u32, _: u32) {
+        self.total += 1;
+    }
+    fn add(&mut self, _: u32, _: u32, _: u32) {
+        self.total += 1;
+    }
+    fn mul(&mut self, _: u32, _: u32, _: u32) {
+        self.total += 1;
+    }
+    fn mul_add(&mut self, _: u32, _: u32, _: u32, _: u32) {
+        self.total += 1;
+    }
+    fn sub(&mut self, _: u32, _: u32, _: u32) {
+        self.total += 1;
+    }
+    fn neg(&mut self, _: u32, _: u32) {
+        self.total += 1;
+    }
+    fn powi(&mut self, _: u32, _: u32, _: i32) {
+        self.total += 1;
+    }
+    fn unary(&mut self, _: u32, _: UnaryOp, _: u32) {
+        self.total += 1;
+        self.host += 1;
+    }
+    fn binary(&mut self, _: u32, _: BinOp, _: u32, _: u32) {
+        self.total += 1;
+        self.host += 1;
+    }
+    fn cmp(&mut self, _: u32, _: CmpOp, _: u32, _: u32) {
+        self.total += 1;
+    }
+    fn select(&mut self, _: u32, _: u32, _: u32, _: u32) {
+        self.total += 1;
+    }
+    fn reduce(&mut self, _: u32, op: ReduceOp, _: &[u32]) {
+        self.total += 1;
+        if matches!(op, ReduceOp::Min | ReduceOp::Max) {
+            self.host += 1;
+        }
+    }
+    fn dot(&mut self, _: u32, _: &[u32], _: &[u32]) {
+        self.total += 1;
+    }
+    fn bundle_call(&mut self, _: &Arc<dyn ExternBundle>, _: &[u32], _: u32) {
+        self.total += 1;
+        self.host += 1;
+    }
+    fn bundle_batch(&mut self, _: &Arc<dyn ExternBundle>, _: &[u32], _: u32, _: u32, _: u32) {
+        self.total += 1;
+        self.host += 1;
+    }
+    fn bundle_pick(&mut self, _: u32, _: u32) {
+        self.total += 1;
+    }
+}
+
+/// The lane width to compile this tape at, or `None` when no width beats
+/// running the scalar program once per parameter set.
+///
+/// Two properties of the program decide it, and both were measured rather
+/// than reasoned (the `bench` example prints the table):
+///
+/// - How many values are live at once. A chain of dependent ops leaves the
+///   register file idle and gains the most from lanes -- 15x per set at
+///   eight lanes on a pure mul/add chain, because the lanes fill a pipeline
+///   that was stalling. A program with hundreds of live values already uses
+///   the registers, and wide lanes spill them: the same chain with 512 live
+///   values gives 1.9x at four lanes and 0.8x at sixteen.
+/// - How much of the program the lane backend cannot vectorise. Every
+///   elementary function and every ordered reduction costs one host call per
+///   lane, so their cost grows with the width instead of shrinking: a
+///   transcendental-heavy program is already at 0.8x with two lanes and 0.4x
+///   with sixteen.
+pub fn suggest_lanes(tape: &Tape) -> Option<usize> {
+    let mut count = HostCallCount::default();
+    tape.lower(&mut count);
+    if count.total == 0 {
+        return None;
+    }
+    let host = count.host as f64 / count.total as f64;
+    if host > 0.25 {
+        // Dominated by per-lane host calls: the scalar backend wins.
+        return None;
+    }
+    if host > 0.05 {
+        // Some per-lane calls: two lanes still pay, wider ones do not.
+        return Some(2);
+    }
+    match tape.n_slots() {
+        0..=255 => Some(8),
+        256..=1023 => Some(4),
+        _ => Some(2),
+    }
+}
+
 impl LaneTape {
     /// Compile the pair (2-lane) backend; fails on tapes containing bundle
     /// calls (see module docs).
@@ -1693,6 +1809,30 @@ impl LaneTape {
     /// [`compile_wide`](Self::compile_wide) with an explicit chunk size.
     pub fn compile_wide_with(tape: &Tape, chunk_ops: usize) -> Result<LaneTape, JitError> {
         Self::compile_stripes::<2>(tape, chunk_ops)
+    }
+
+    /// Compile for an explicit lane count: 2, 4, 8 or 16 parameter sets per
+    /// pass, held as `lanes / 2` vector registers per live value.
+    ///
+    /// Which width pays depends on the program, not on the machine alone. A
+    /// program with few live values at a time (a chain) has registers to
+    /// spare and gains from more lanes; a wide program already keeps the
+    /// register file busy, and more lanes spill it. [`LANE_WIDTHS`] lists
+    /// what is available, and the `bench` example prices them.
+    pub fn compile_lanes(
+        tape: &Tape,
+        lanes: usize,
+        chunk_ops: usize,
+    ) -> Result<LaneTape, JitError> {
+        match lanes {
+            2 => Self::compile_stripes::<1>(tape, chunk_ops),
+            4 => Self::compile_stripes::<2>(tape, chunk_ops),
+            8 => Self::compile_stripes::<4>(tape, chunk_ops),
+            16 => Self::compile_stripes::<8>(tape, chunk_ops),
+            _ => Err(JitError::Codegen(format!(
+                "lane count {lanes} is not one of {LANE_WIDTHS:?}"
+            ))),
+        }
     }
 
     pub fn compile_with(tape: &Tape, chunk_ops: usize) -> Result<LaneTape, JitError> {
