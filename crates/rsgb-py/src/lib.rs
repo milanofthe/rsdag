@@ -39,6 +39,26 @@ pub struct Tracer {
     id: ExprId,
 }
 
+/// The result of a binary operator on a tracer: a traced value, or Python's
+/// `NotImplemented` when the other operand is neither a tracer nor a number.
+/// Returning `NotImplemented` instead of raising is what lets the
+/// interpreter try the other operand's reflected method, so a numpy array of
+/// tracers on the right of a tracer (`k * np.exp(x)`) broadcasts elementwise
+/// instead of failing.
+enum BinOut {
+    Value(Tracer),
+    NotImplemented,
+}
+
+impl IntoPy<PyObject> for BinOut {
+    fn into_py(self, py: Python<'_>) -> PyObject {
+        match self {
+            BinOut::Value(t) => t.into_py(py),
+            BinOut::NotImplemented => py.NotImplemented(),
+        }
+    }
+}
+
 impl Tracer {
     fn wrap(&self, id: ExprId) -> Tracer {
         Tracer {
@@ -46,22 +66,36 @@ impl Tracer {
             id,
         }
     }
-    /// Coerce a Python operand (tracer, int, float) into an expression.
-    fn operand(&self, other: &Bound<'_, PyAny>) -> PyResult<ExprId> {
+    /// Coerce a Python operand (tracer, int, float) into an expression;
+    /// `None` when it is neither, so a binary operator can hand the pair
+    /// back to Python (see [`BinOut`]).
+    fn operand_opt(&self, other: &Bound<'_, PyAny>) -> PyResult<Option<ExprId>> {
         if let Ok(t) = other.downcast::<Tracer>() {
             let t = t.borrow();
             if !Rc::ptr_eq(&t.g, &self.g) {
                 return Err(PyValueError::new_err("tracers from different scopes"));
             }
-            return Ok(t.id);
+            return Ok(Some(t.id));
         }
         if let Ok(v) = other.extract::<f64>() {
-            return Ok(self.g.borrow_mut().konst_f64(v));
+            return Ok(Some(self.g.borrow_mut().konst_f64(v)));
         }
-        Err(PyTypeError::new_err(format!(
-            "unsupported operand for a traced value: {}",
-            other.get_type().name()?
-        )))
+        Ok(None)
+    }
+    /// As [`Self::operand_opt`], raising for an operand that cannot be
+    /// traced. For the named ufunc methods, which numpy calls elementwise
+    /// with scalar operands, so there is nothing to defer to.
+    fn operand(&self, other: &Bound<'_, PyAny>) -> PyResult<ExprId> {
+        self.operand_opt(other)?.ok_or_else(|| {
+            PyTypeError::new_err(format!(
+                "unsupported operand for a traced value: {}",
+                other
+                    .get_type()
+                    .name()
+                    .map(|n| n.to_string())
+                    .unwrap_or_default()
+            ))
+        })
     }
     fn unary(&self, op: UnaryOp) -> Tracer {
         let id = self.g.borrow_mut().unary(op, self.id);
@@ -174,60 +208,76 @@ impl Tracer {
     fn __repr__(&self) -> String {
         format!("Tracer({})", rsgb::to_string(&self.g.borrow(), self.id))
     }
-    fn __add__(&self, other: &Bound<'_, PyAny>) -> PyResult<Tracer> {
-        let o = self.operand(other)?;
+    fn __add__(&self, other: &Bound<'_, PyAny>) -> PyResult<BinOut> {
+        let Some(o) = self.operand_opt(other)? else {
+            return Ok(BinOut::NotImplemented);
+        };
         let id = self.g.borrow_mut().add(self.id, o);
-        Ok(self.wrap(id))
+        Ok(BinOut::Value(self.wrap(id)))
     }
-    fn __radd__(&self, other: &Bound<'_, PyAny>) -> PyResult<Tracer> {
+    fn __radd__(&self, other: &Bound<'_, PyAny>) -> PyResult<BinOut> {
         self.__add__(other)
     }
-    fn __sub__(&self, other: &Bound<'_, PyAny>) -> PyResult<Tracer> {
-        let o = self.operand(other)?;
+    fn __sub__(&self, other: &Bound<'_, PyAny>) -> PyResult<BinOut> {
+        let Some(o) = self.operand_opt(other)? else {
+            return Ok(BinOut::NotImplemented);
+        };
         let id = self.g.borrow_mut().sub(self.id, o);
-        Ok(self.wrap(id))
+        Ok(BinOut::Value(self.wrap(id)))
     }
-    fn __rsub__(&self, other: &Bound<'_, PyAny>) -> PyResult<Tracer> {
-        let o = self.operand(other)?;
+    fn __rsub__(&self, other: &Bound<'_, PyAny>) -> PyResult<BinOut> {
+        let Some(o) = self.operand_opt(other)? else {
+            return Ok(BinOut::NotImplemented);
+        };
         let id = self.g.borrow_mut().sub(o, self.id);
-        Ok(self.wrap(id))
+        Ok(BinOut::Value(self.wrap(id)))
     }
-    fn __mul__(&self, other: &Bound<'_, PyAny>) -> PyResult<Tracer> {
-        let o = self.operand(other)?;
+    fn __mul__(&self, other: &Bound<'_, PyAny>) -> PyResult<BinOut> {
+        let Some(o) = self.operand_opt(other)? else {
+            return Ok(BinOut::NotImplemented);
+        };
         let id = self.g.borrow_mut().mul(self.id, o);
-        Ok(self.wrap(id))
+        Ok(BinOut::Value(self.wrap(id)))
     }
-    fn __rmul__(&self, other: &Bound<'_, PyAny>) -> PyResult<Tracer> {
+    fn __rmul__(&self, other: &Bound<'_, PyAny>) -> PyResult<BinOut> {
         self.__mul__(other)
     }
-    fn __truediv__(&self, other: &Bound<'_, PyAny>) -> PyResult<Tracer> {
-        let o = self.operand(other)?;
+    fn __truediv__(&self, other: &Bound<'_, PyAny>) -> PyResult<BinOut> {
+        let Some(o) = self.operand_opt(other)? else {
+            return Ok(BinOut::NotImplemented);
+        };
         let id = self.g.borrow_mut().div(self.id, o);
-        Ok(self.wrap(id))
+        Ok(BinOut::Value(self.wrap(id)))
     }
-    fn __rtruediv__(&self, other: &Bound<'_, PyAny>) -> PyResult<Tracer> {
-        let o = self.operand(other)?;
+    fn __rtruediv__(&self, other: &Bound<'_, PyAny>) -> PyResult<BinOut> {
+        let Some(o) = self.operand_opt(other)? else {
+            return Ok(BinOut::NotImplemented);
+        };
         let id = self.g.borrow_mut().div(o, self.id);
-        Ok(self.wrap(id))
+        Ok(BinOut::Value(self.wrap(id)))
     }
-    fn __floordiv__(&self, other: &Bound<'_, PyAny>) -> PyResult<Tracer> {
-        let o = self.operand(other)?;
+    fn __floordiv__(&self, other: &Bound<'_, PyAny>) -> PyResult<BinOut> {
+        let Some(o) = self.operand_opt(other)? else {
+            return Ok(BinOut::NotImplemented);
+        };
         let mut g = self.g.borrow_mut();
         let q = g.div(self.id, o);
         let id = g.unary(UnaryOp::Floor, q);
         drop(g);
-        Ok(self.wrap(id))
+        Ok(BinOut::Value(self.wrap(id)))
     }
-    fn __mod__(&self, other: &Bound<'_, PyAny>) -> PyResult<Tracer> {
+    fn __mod__(&self, other: &Bound<'_, PyAny>) -> PyResult<BinOut> {
         // Python's floored modulo: a - b * floor(a / b).
-        let o = self.operand(other)?;
+        let Some(o) = self.operand_opt(other)? else {
+            return Ok(BinOut::NotImplemented);
+        };
         let mut g = self.g.borrow_mut();
         let q = g.div(self.id, o);
         let f = g.unary(UnaryOp::Floor, q);
         let bf = g.mul(o, f);
         let id = g.sub(self.id, bf);
         drop(g);
-        Ok(self.wrap(id))
+        Ok(BinOut::Value(self.wrap(id)))
     }
     fn __neg__(&self) -> Tracer {
         let id = self.g.borrow_mut().neg(self.id);
@@ -243,26 +293,32 @@ impl Tracer {
         &self,
         other: &Bound<'_, PyAny>,
         _modulo: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Tracer> {
+    ) -> PyResult<BinOut> {
         if let Ok(n) = other.extract::<i64>() {
             let id = self.g.borrow_mut().pow_i(self.id, n);
-            return Ok(self.wrap(id));
+            return Ok(BinOut::Value(self.wrap(id)));
         }
-        let o = self.operand(other)?;
+        let Some(o) = self.operand_opt(other)? else {
+            return Ok(BinOut::NotImplemented);
+        };
         let id = self.g.borrow_mut().binary(BinOp::Powf, self.id, o);
-        Ok(self.wrap(id))
+        Ok(BinOut::Value(self.wrap(id)))
     }
     fn __rpow__(
         &self,
         other: &Bound<'_, PyAny>,
         _modulo: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Tracer> {
-        let o = self.operand(other)?;
+    ) -> PyResult<BinOut> {
+        let Some(o) = self.operand_opt(other)? else {
+            return Ok(BinOut::NotImplemented);
+        };
         let id = self.g.borrow_mut().binary(BinOp::Powf, o, self.id);
-        Ok(self.wrap(id))
+        Ok(BinOut::Value(self.wrap(id)))
     }
-    fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: CompareOp) -> PyResult<Tracer> {
-        let o = self.operand(other)?;
+    fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: CompareOp) -> PyResult<BinOut> {
+        let Some(o) = self.operand_opt(other)? else {
+            return Ok(BinOut::NotImplemented);
+        };
         let c = match op {
             CompareOp::Lt => CmpOp::Lt,
             CompareOp::Le => CmpOp::Le,
@@ -272,7 +328,7 @@ impl Tracer {
             CompareOp::Ne => CmpOp::Ne,
         };
         let id = self.g.borrow_mut().cmp(c, self.id, o);
-        Ok(self.wrap(id))
+        Ok(BinOut::Value(self.wrap(id)))
     }
     fn __bool__(&self) -> PyResult<bool> {
         Err(PyTypeError::new_err(
@@ -311,7 +367,17 @@ impl Tracer {
         Ok(self.wrap(id))
     }
     fn power(&self, other: &Bound<'_, PyAny>) -> PyResult<Tracer> {
-        self.__pow__(other, None)
+        match self.__pow__(other, None)? {
+            BinOut::Value(t) => Ok(t),
+            BinOut::NotImplemented => Err(PyTypeError::new_err(format!(
+                "unsupported operand for a traced value: {}",
+                other
+                    .get_type()
+                    .name()
+                    .map(|n| n.to_string())
+                    .unwrap_or_default()
+            ))),
+        }
     }
     /// `cond != 0 ? self : other` (the select node).
     fn select(&self, cond: &Bound<'_, PyAny>, other: &Bound<'_, PyAny>) -> PyResult<Tracer> {
