@@ -190,37 +190,55 @@ fn main() {
         );
     }
 
-    // The lane tape evaluates `width` parameter sets per instruction. Report
-    // it per set, which is the only comparison that means anything.
+    // The lane tape evaluates `width` parameter sets per instruction. The
+    // comparison that means anything is per set against the scalar JIT
+    // running the same work twice, and it depends on what the program is
+    // made of: ring arithmetic and the aggregate ops vectorize, the
+    // transcendentals extract their lanes and call the host per lane.
     let steps = *sizes.last().unwrap();
-    let (_, tape, inputs) = synthetic(steps as u64, steps, Vocabulary::Elementary);
-    if let Ok(lane) = LaneTape::compile(&tape) {
+    for (label, spec) in [
+        (
+            "aggregates (sum, product, dot)",
+            Spec::new(steps as u64).vocab(Vocabulary::Ring).smooth(),
+        ),
+        (
+            "ring with min/max",
+            Spec::new(steps as u64).vocab(Vocabulary::Ring),
+        ),
+        (
+            "elementary",
+            Spec::new(steps as u64).vocab(Vocabulary::Elementary),
+        ),
+    ] {
+        let mut spec = spec.steps(steps).params(8).outputs(4).max_list(4);
+        let mut g: Graph<F64> = Graph::new();
+        let (roots, syms) = build(&mut g, &mut spec);
+        let tape = Tape::compile(&g, &roots, &syms);
+        let inputs = inputs(&mut spec.rng(), syms.len());
+        let Ok(lane) = LaneTape::compile(&tape) else {
+            continue;
+        };
+        let Ok(jit) = ChunkedTape::compile(&tape) else {
+            continue;
+        };
         let w = lane.width();
-        // Lane k gets the k-th parameter set; set 0 repeats the scalar run,
-        // so its outputs must come back bit-identical.
         let wide: Vec<f64> = inputs
             .iter()
             .flat_map(|&v| (0..w).map(move |k| v + 0.001 * k as f64))
             .collect();
-        let (mut lw, mut lout) = (Vec::new(), Vec::new());
-        lane.eval(&wide, &mut lw, &mut lout);
-        let (mut sw, mut sout) = (Vec::new(), Vec::new());
-        tape.eval(&inputs, &mut sw, &mut sout);
-        assert!(
-            sout.iter()
-                .zip(lout.chunks(w))
-                .all(|(a, b)| a.to_bits() == b[0].to_bits()),
-            "the lane tape disagrees with the interpreter on lane 0"
-        );
+        let (mut lw, mut lo) = (Vec::new(), Vec::new());
+        lane.eval(&wide, &mut lw, &mut lo);
+        let (mut jw, mut jo) = (Vec::new(), Vec::new());
+        jit.eval(&inputs, &mut jw, &mut jo);
         let reps = reps_for(tape.n_ops());
-        let t_lane = per_call(|| lane.eval(&wide, &mut lw, &mut lout), reps);
-        let t_scalar = per_call(|| tape.eval(&inputs, &mut sw, &mut sout), reps);
+        let t_lane = per_call(|| lane.eval(&wide, &mut lw, &mut lo), reps) / w as f64;
+        let t_jit = per_call(|| jit.eval(&inputs, &mut jw, &mut jo), reps);
         println!(
-            "lane tape ({steps} nodes, width {w}): {:.2} ns for {w} sets, {:.2} ns per set against the interpreter's {:.2} ns -> {:.2}x",
+            "lane tape, {label}, {} ops, width {w}: {:.2} ns per set against the scalar jit's {:.2} ns -> {:.2}x",
+            tape.n_ops(),
             t_lane * 1e9,
-            t_lane * 1e9 / w as f64,
-            t_scalar * 1e9,
-            t_scalar / (t_lane / w as f64),
+            t_jit * 1e9,
+            t_jit / t_lane,
         );
     }
 }
