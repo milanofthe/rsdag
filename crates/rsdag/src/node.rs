@@ -627,6 +627,13 @@ impl UnaryOp {
     pub fn from_code(code: u32) -> UnaryOp {
         UNARY_OPS[code as usize].op
     }
+    /// The op a frontend's function name denotes, by [`UnarySpec::name`].
+    pub fn from_name(name: &str) -> Option<UnaryOp> {
+        UNARY_OPS
+            .iter()
+            .find(|spec| spec.name == name)
+            .map(|spec| spec.op)
+    }
 }
 
 /// As [`UnarySpec`], for the binary ops beyond the ring.
@@ -690,6 +697,13 @@ impl BinOp {
     #[inline]
     pub fn from_code(code: u32) -> BinOp {
         BINARY_OPS[code as usize].op
+    }
+    /// The op a frontend's function name denotes, by [`BinarySpec::name`].
+    pub fn from_name(name: &str) -> Option<BinOp> {
+        BINARY_OPS
+            .iter()
+            .find(|spec| spec.name == name)
+            .map(|spec| spec.op)
     }
 }
 
