@@ -547,10 +547,6 @@ impl Program {
         self.native = Some(c);
         Ok(())
     }
-    /// The program as a C function of the given name.
-    fn c_source(&self, name: &str) -> PyResult<String> {
-        rsdag_c::emit(&self.tape, name).map_err(|e| PyValueError::new_err(e.to_string()))
-    }
     #[getter]
     fn n_inputs(&self) -> usize {
         self.n_in

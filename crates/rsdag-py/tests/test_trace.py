@@ -57,12 +57,10 @@ def test_where_and_comparisons():
     assert np.array_equal(v(np.array([0.5, 2.0])), np.array([0.0, 2.0]))
 
 
-def test_native_and_c_source():
+def test_native_matches_the_interpreter():
     f = jit(lorenz, native=True)
     x = np.array([1.0, 2.0, 3.0])
     assert np.allclose(f(x, 0.0), lorenz(x, 0.0), rtol=1e-15)
-    src = f.c_source(x, 0.0, name="lorenz_rhs")
-    assert "void lorenz_rhs(" in src and "rsdag_powi" in src or "void lorenz_rhs(" in src
 
 
 def test_control_flow_is_rejected():
