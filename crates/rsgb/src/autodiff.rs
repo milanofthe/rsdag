@@ -395,7 +395,24 @@ pub fn jacobian<K: Field>(
 ) -> Vec<Vec<ExprId>> {
     residuals
         .iter()
-        .map(|&r| wrt.iter().map(|&s| differentiate(ctx, r, s)).collect())
+        .map(|&r| {
+            // Only the symbols the row actually contains can have a nonzero
+            // derivative, and one `free_symbols` walk over the row is far
+            // cheaper than a differentiation sweep per symbol. Without the
+            // filter the cost is `n_rows * n_wrt` sweeps even when each row
+            // touches a handful of symbols, which is quadratic on the sparse
+            // residuals this is built for.
+            let free = ctx.free_symbols(r);
+            wrt.iter()
+                .map(|&s| {
+                    if free.contains(&s) {
+                        differentiate(ctx, r, s)
+                    } else {
+                        ctx.zero()
+                    }
+                })
+                .collect()
+        })
         .collect()
 }
 
