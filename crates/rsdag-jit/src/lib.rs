@@ -53,9 +53,13 @@ impl std::fmt::Display for JitError {
 }
 impl std::error::Error for JitError {}
 
+#[cfg(target_arch = "aarch64")]
+pub mod emit;
 mod host;
 mod lanes;
 mod scalar;
 
+#[cfg(target_arch = "aarch64")]
+pub use emit::EmittedTape;
 pub use lanes::{suggest_lanes, LaneTape, LANES, LANE_WIDTHS};
 pub use scalar::ChunkedTape;

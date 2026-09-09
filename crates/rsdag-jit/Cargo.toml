@@ -16,6 +16,7 @@ cranelift-frontend.workspace = true
 cranelift-jit.workspace = true
 cranelift-module.workspace = true
 cranelift-native.workspace = true
+libc = "0.2"
 
 [dev-dependencies]
 rsdag = { workspace = true, features = ["synth"] }
