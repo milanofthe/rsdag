@@ -159,7 +159,7 @@ fn classify<K: Field>(
     if let Some(c) = memo.get(&expr) {
         return c.clone();
     }
-    let mut sub = |e: ExprId, memo: &mut HashMap<ExprId, Nonlinearity>| classify(g, e, vars, memo);
+    let sub = |e: ExprId, memo: &mut HashMap<ExprId, Nonlinearity>| classify(g, e, vars, memo);
     let out = match *g.node(expr) {
         Node::Const(_) => Nonlinearity::constant(),
         Node::Symbol(s) => {
