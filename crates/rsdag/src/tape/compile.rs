@@ -78,11 +78,20 @@ impl Tape {
         // picks an order, liveness turns that order into lifetimes, the
         // batch scan groups repeated calls, and emission allocates slots and
         // writes the instruction stream.
-        let forest = Forest::analyze(ctx, roots, input_syms, pure_inputs);
-        let schedule = forest.schedule(ctx);
-        let liveness = forest.liveness(ctx, roots, &schedule, pure_inputs.is_some());
-        let batch_group_args = batch_groups(ctx, &schedule.order);
-        forest.emit(ctx, roots, &schedule, &liveness, &batch_group_args)
+        // Each pass reports its time through `hooks` at debug level, which
+        // is what a consumer's pipeline profile reads.
+        use crate::hooks::timed;
+        let forest = timed("tape analyze", || {
+            Forest::analyze(ctx, roots, input_syms, pure_inputs)
+        });
+        let schedule = timed("tape schedule", || forest.schedule(ctx));
+        let liveness = timed("tape liveness", || {
+            forest.liveness(ctx, roots, &schedule, pure_inputs.is_some())
+        });
+        let batch_group_args = timed("tape batch scan", || batch_groups(ctx, &schedule.order));
+        timed("tape emit", || {
+            forest.emit(ctx, roots, &schedule, &liveness, &batch_group_args)
+        })
     }
 }
 
