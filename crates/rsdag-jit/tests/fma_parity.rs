@@ -32,11 +32,14 @@ fn backends_agree_on_a_contracted_program() {
         let jit = ChunkedTape::compile_with(&tape, [3, CHUNK_OPS][seed as usize % 2]).unwrap();
         let (mut jw, mut jo) = (Vec::new(), Vec::new());
         jit.eval(&row, &mut jw, &mut jo);
+        let bits = |v: &[f64]| -> Vec<String> {
+            v.iter().map(|x| format!("{:016x}", x.to_bits())).collect()
+        };
         assert!(
-            want.iter()
-                .zip(&jo)
-                .all(|(a, b)| a.to_bits() == b.to_bits()),
-            "seed {seed}: jit {jo:?} vs interpreter {want:?}"
+            want.iter().zip(&jo).all(|(&a, &b)| same(a, b)),
+            "seed {seed}: jit {jo:?} {:?} vs interpreter {want:?} {:?}",
+            bits(&jo),
+            bits(&want)
         );
 
         for &width in LANE_WIDTHS.iter() {
