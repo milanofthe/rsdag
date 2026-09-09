@@ -4,6 +4,7 @@
 //! of SANE and fastsim, so an optimization here lands in every consumer.
 
 pub mod autodiff;
+pub mod builder;
 pub mod display;
 pub mod eval;
 pub mod extern_fn;
@@ -26,6 +27,7 @@ pub mod tape;
 pub(crate) mod transform;
 
 pub use autodiff::{differentiate, gradient, hessian, jacobian, sparsity, time_derivative};
+pub use builder::{Builder, Numeric};
 pub use display::to_string;
 pub use eval::{eval, eval_named, eval_real, eval_real_all};
 pub use extern_fn::ExternBundle;
