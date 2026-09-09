@@ -6,6 +6,13 @@ use rsdag::synth::{build, inputs, Spec, Vocabulary};
 use rsdag::{CompileOptions, Graph, Tape, F64};
 use rsdag_jit::{ChunkedTape, LaneTape, CHUNK_OPS, LANE_WIDTHS};
 
+/// NaN is equal to NaN here: a fused multiply-add that produces one carries
+/// whatever payload the platform's instruction or `fma` routine gives it,
+/// and the payload is no part of any guarantee.
+fn same(a: f64, b: f64) -> bool {
+    a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
+}
+
 #[test]
 fn backends_agree_on_a_contracted_program() {
     for seed in 0..40u64 {
