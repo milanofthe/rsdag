@@ -5,7 +5,7 @@
 //! allocate and dispatch at run time because it knows nothing about the
 //! matrix until it sees it. Here the matrix is a graph whose sparsity pattern
 //! is fixed at build time, so the elimination is a fixed sequence of ring
-//! ops: a DAG like any other. [`lu_static`] builds it, [`solve_static`] the
+//! ops: a DAG like any other. [`lu_static`] builds it, [`StaticLu::solve_static`] the
 //! two triangular solves, and [`newton_step`] composes residual, Jacobian,
 //! factorization, solve and update into one expression per unknown, which
 //! then compiles to one native function with the rest of the model.
