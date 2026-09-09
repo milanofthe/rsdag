@@ -291,7 +291,7 @@ pub const EXP_LIMIT: f64 = 80.0;
 pub const LN_FLOOR: f64 = 1e-30;
 
 /// Evaluate a unary op on a real argument. Single source of truth shared by the
-/// arena evaluator ([`crate::eval`]) and the compiled tape ([`crate::tape`]).
+/// arena evaluator ([`crate::eval`](mod@crate::eval)) and the compiled tape ([`crate::tape`]).
 ///
 /// `exp`/`ln`/`sqrt` are domain-guarded (limited exponential, log floor, and
 /// `sqrt` of a negative argument clamped to 0): on an out-of-range intermediate

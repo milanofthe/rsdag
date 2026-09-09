@@ -23,7 +23,7 @@
 //!
 //! An *extern* function has no symbolic body: its outputs, including the
 //! derivative outputs it can supply, are slots of a numeric
-//! [`ExternBundle`](crate::extern_fn::ExternBundle) (a compiled OSDI model).
+//! [`crate::extern_fn::ExternBundle`] (a compiled OSDI model).
 //! A derivative an extern cannot supply is the zero output.
 
 use std::sync::Arc;

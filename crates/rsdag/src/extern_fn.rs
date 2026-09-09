@@ -1,12 +1,11 @@
-//! Compiled multi-output bodies backing [`Node::Opaque`](crate::node::Node::Opaque).
+//! Compiled multi-output bodies behind extern functions.
 //!
-//! An [`ExternId`](crate::node::ExternId) names an opaque operator in a
-//! [`Graph`](crate::graph::Graph). On its own that operator has no body and
-//! evaluates to `NaN` (its partial-derivative markers still give a Jacobian its
-//! structure); binding it to an output slot of an [`ExternBundle`] gives it a
-//! numeric implementation, so the eval paths (arena sweep and compiled
-//! [`Tape`](crate::tape::Tape)) call the bundle instead. This is the seam a
-//! device template body or an externally-compiled model plugs into.
+//! An extern function (see [`Graph::define_extern_func`](crate::graph::Graph::define_extern_func))
+//! has no expressions for its outputs: each output is a slot of an
+//! [`ExternBundle`], and a [`Node::Call`](crate::node::Node::Call) to it is
+//! evaluated by calling the bundle. Both evaluation paths (the arena sweep
+//! and the compiled [`Tape`](crate::tape::Tape)) do that, so a device
+//! template body or an externally compiled model plugs in here.
 //!
 //! The trait is object-safe and shared as `Arc<dyn ExternBundle>`, so a
 //! compiled body survives `Graph` mutation and crosses thread boundaries with
@@ -16,12 +15,10 @@
 ///
 /// A compiled multi-output body typically produces many correlated outputs at
 /// once: a device's terminal currents *and* the entries of its Jacobian.
-/// Computing them in one call (the shared interior runs once) is the whole point of
-/// compilation, so several `Opaque` operators are bound to slots of a single
-/// `ExternBundle`. The [`Graph`](crate::graph::Graph) records, per
-/// [`ExternId`](crate::node::ExternId), which bundle and which output slot it
-/// reads; the compiled tape then calls the bundle once and scatters its outputs
-/// to all sibling operators that share the same arguments.
+/// Computing them in one call (the shared interior runs once) is the whole
+/// point of compilation, so the outputs of one extern function are slots of a
+/// single `ExternBundle`. The compiled tape calls the bundle once per distinct
+/// argument list and scatters its outputs to every call that reads one.
 pub trait ExternBundle: Send + Sync {
     /// Number of outputs this bundle writes.
     fn n_outputs(&self) -> usize;

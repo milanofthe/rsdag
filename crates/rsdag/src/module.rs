@@ -26,6 +26,9 @@
 use rustc_hash::FxHashMap as HashMap;
 
 use crate::field::Field;
+use std::sync::Arc;
+
+use crate::extern_fn::ExternBundle;
 use crate::func::{FuncId, FunctionBody, Output, OutputId};
 use crate::graph::Graph;
 use crate::node::{ExprId, Node, SymbolId};
@@ -40,8 +43,8 @@ pub struct FunctionData {
     pub param_roles: Vec<ParamRole>,
     pub outputs: Vec<Output>,
     pub output_roles: Vec<OutputRole>,
-    /// An extern function names the body it expects; the consumer re-binds
-    /// it by name after loading (see [`Graph::bind_extern`]).
+    /// An extern function names the body it expects; the loader is handed
+    /// the bodies by name (see [`Graph::load_module_with`]).
     pub extern_body: Option<String>,
 }
 
@@ -131,24 +134,50 @@ impl<K: Field> Graph<K> {
     }
 
     /// Load a module into this graph, returning how its ids map onto it.
+    ///
+    /// Panics if the module has an extern function: the body is not part of
+    /// a module, so a module with externs is loaded through
+    /// [`Graph::load_module_with`], which is handed the bodies by name.
     pub fn load_module(&mut self, module: &Module<K>) -> IdMap {
+        self.load_module_with(module, |name| {
+            panic!("module has an extern function '{name}'; load it with `load_module_with`")
+        })
+    }
+
+    /// As [`Graph::load_module`], with `externs(name)` supplying the body of
+    /// each extern function the module declares.
+    ///
+    /// Nodes are re-interned in id order, which is a dependency order, so a
+    /// node's operands are already mapped when it is built. A symbol is
+    /// created when its node is met, and a function is defined the first
+    /// time a `Call` to it is met (its outputs are nodes with smaller ids,
+    /// so they are already mapped by then) or otherwise at the end. So
+    /// symbols, functions and calls interleave exactly as they did when the
+    /// module was built, and a module loaded into a fresh graph reproduces
+    /// its own id layout: `Graph::from_module(&m).0.to_module() == m`.
+    ///
+    /// Re-interning rather than copying the arena means a module loaded into
+    /// a graph that already holds equal subexpressions shares them, exactly
+    /// as if it had been built there.
+    pub fn load_module_with(
+        &mut self,
+        module: &Module<K>,
+        mut externs: impl FnMut(&str) -> Arc<dyn ExternBundle>,
+    ) -> IdMap {
         assert_eq!(
             module.version, MODULE_VERSION,
             "module format version {} cannot be read by this build (expects {MODULE_VERSION})",
             module.version
         );
-        let mut map = IdMap {
+        let mut map = LoadMap {
             exprs: Vec::with_capacity(module.nodes.len()),
-            symbols: Vec::with_capacity(module.symbols.len()),
-            funcs: Vec::with_capacity(module.funcs.len()),
+            // A symbol is created when its node is met in the sweep, not up
+            // front: `sym` interns the node at creation, so that is where
+            // the original put it, and a fresh graph then reproduces the
+            // module's id layout exactly.
+            symbols: vec![SymbolId(u32::MAX); module.symbols.len()],
+            funcs: vec![None; module.funcs.len()],
         };
-        for name in &module.symbols {
-            let e = self.sym(name);
-            map.symbols.push(match self.node(e) {
-                Node::Symbol(s) => *s,
-                _ => unreachable!("sym returns a symbol node"),
-            });
-        }
         // Output ids are interned on demand by `call`, so the `Call` nodes
         // are remapped through the module's own table.
         let mut out_map: HashMap<OutputId, (FuncId, u32)> = HashMap::default();
@@ -156,6 +185,22 @@ impl<K: Field> Graph<K> {
             out_map.insert(OutputId(i as u32), (f, k));
         }
         for (i, node) in module.nodes.iter().enumerate() {
+            match node {
+                Node::Symbol(s) => {
+                    let e = self.sym(&module.symbols[s.0 as usize]);
+                    map.symbols[s.0 as usize] = match self.node(e) {
+                        Node::Symbol(t) => *t,
+                        _ => unreachable!("sym returns a symbol node"),
+                    };
+                    map.exprs.push(e);
+                    continue;
+                }
+                Node::Call(o, _) => {
+                    let (f, _) = out_map[o];
+                    self.define_loaded(module, f, &mut map, &mut externs);
+                }
+                _ => {}
+            }
             let pool = &module.arg_pool;
             let e = self.rebuild_node(
                 node,
@@ -174,32 +219,90 @@ impl<K: Field> Graph<K> {
                 },
                 |o| {
                     let (f, k) = out_map[&o];
-                    (map.funcs[f.0 as usize], k)
+                    (
+                        map.funcs[f.0 as usize].expect("callee defined before its call"),
+                        k,
+                    )
                 },
             );
             debug_assert_eq!(map.exprs.len(), i);
             map.exprs.push(e);
         }
-        for f in &module.funcs {
-            let params: Vec<SymbolId> =
-                f.params.iter().map(|s| map.symbols[s.0 as usize]).collect();
-            let outputs: Vec<ExprId> = f
-                .outputs
-                .iter()
-                .filter_map(|o| match o {
-                    Output::Expr(e) => Some(map.exprs[e.0 as usize]),
-                    _ => None,
-                })
-                .collect();
-            let id = self.define_func(&f.name, params, outputs);
-            for (k, r) in f.param_roles.iter().enumerate() {
-                self.set_param_role(id, k as u32, *r);
-            }
-            for (k, r) in f.output_roles.iter().enumerate() {
-                self.set_output_role(id, k as u32, *r);
-            }
-            map.funcs.push(id);
+        for f in 0..module.funcs.len() {
+            self.define_loaded(module, FuncId(f as u32), &mut map, &mut externs);
         }
-        map
+        IdMap {
+            exprs: map.exprs,
+            symbols: map.symbols,
+            funcs: map
+                .funcs
+                .into_iter()
+                .map(|f| f.expect("every function defined"))
+                .collect(),
+        }
     }
+
+    /// Define function `f` of a module being loaded, once.
+    fn define_loaded(
+        &mut self,
+        module: &Module<K>,
+        f: FuncId,
+        map: &mut LoadMap,
+        externs: &mut impl FnMut(&str) -> Arc<dyn ExternBundle>,
+    ) {
+        if map.funcs[f.0 as usize].is_some() {
+            return;
+        }
+        let data = &module.funcs[f.0 as usize];
+        let params: Vec<SymbolId> = data
+            .params
+            .iter()
+            .map(|s| map.symbols[s.0 as usize])
+            .collect();
+        let outputs: Vec<Output> = data
+            .outputs
+            .iter()
+            .map(|o| match *o {
+                Output::Expr(e) => Output::Expr(map.exprs[e.0 as usize]),
+                other => other,
+            })
+            .collect();
+        let id = match &data.extern_body {
+            Some(name) => {
+                self.define_extern_func_with_params(&data.name, params, externs(name), outputs)
+            }
+            None => {
+                let exprs: Vec<ExprId> = outputs
+                    .iter()
+                    .map(|o| match o {
+                        Output::Expr(e) => *e,
+                        _ => self.zero(),
+                    })
+                    .collect();
+                let id = self.define_func(&data.name, params, exprs);
+                // A zero output stays a zero output.
+                for (k, o) in outputs.iter().enumerate() {
+                    if matches!(o, Output::Zero) {
+                        self.func_mut(id).outputs[k] = Output::Zero;
+                    }
+                }
+                id
+            }
+        };
+        for (k, r) in data.param_roles.iter().enumerate() {
+            self.set_param_role(id, k as u32, *r);
+        }
+        for (k, r) in data.output_roles.iter().enumerate() {
+            self.set_output_role(id, k as u32, *r);
+        }
+        map.funcs[f.0 as usize] = Some(id);
+    }
+}
+
+/// The id map while a load is in progress: functions are defined on
+/// demand, so their entries are optional until the end.
+struct LoadMap {
+    exprs: Vec<ExprId>,
+    symbols: Vec<SymbolId>,
+    funcs: Vec<Option<FuncId>>,
 }
