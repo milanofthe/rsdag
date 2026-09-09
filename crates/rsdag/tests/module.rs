@@ -108,3 +108,120 @@ fn a_module_survives_json() {
     Tape::compile(&loaded, &roots2, &syms2).eval(&row, &mut w2, &mut o2);
     assert!(o.iter().zip(&o2).all(|(a, b)| a.to_bits() == b.to_bits()));
 }
+
+/// A module with functions and calls to them, nested: the loader has to
+/// define a function before it rebuilds the first call to it, and the
+/// function's outputs are nodes it has already rebuilt by then.
+#[test]
+fn calls_and_nested_functions_round_trip() {
+    let mut g: Graph<F64> = Graph::new();
+    let mut s = rsdag::Scope::new(&mut g, "gain");
+    let u = s.param("u");
+    let k = s.param("k");
+    let y = s.mul(k, u);
+    let gain = s.close(vec![y]);
+
+    let mut s = rsdag::Scope::new(&mut g, "chain");
+    let x = s.param("x");
+    let a = s.konst_f64(2.0);
+    let b = s.konst_f64(3.0);
+    let mid = s.call(gain, 0, &[x, a]);
+    let out = s.call(gain, 0, &[mid, b]);
+    let e = s.exp(out);
+    let chain = s.close(vec![e]);
+    let root = match g.func(chain).outputs[0] {
+        rsdag::Output::Expr(e) => e,
+        _ => unreachable!(),
+    };
+    let params = g.func(chain).params.clone();
+
+    let module = g.to_module();
+    let (loaded, map) = Graph::from_module(&module);
+    assert_eq!(map.funcs.len(), 2);
+    let root2 = map.exprs[root.0 as usize];
+    let params2: Vec<SymbolId> = params.iter().map(|p| map.symbols[p.0 as usize]).collect();
+
+    let (mut w, mut o) = (Vec::new(), Vec::new());
+    Tape::compile(&g, &[root], &params).eval(&[0.5], &mut w, &mut o);
+    let (mut w2, mut o2) = (Vec::new(), Vec::new());
+    Tape::compile(&loaded, &[root2], &params2).eval(&[0.5], &mut w2, &mut o2);
+    assert_eq!(
+        o[0].to_bits(),
+        o2[0].to_bits(),
+        "exp(2 * 3 * 0.5) through two calls"
+    );
+    assert_eq!(loaded.to_module(), module);
+}
+
+/// A body of `[a + b, a * b]` over `[a, b]`.
+struct Pair;
+impl rsdag::ExternBundle for Pair {
+    fn n_outputs(&self) -> usize {
+        2
+    }
+    fn call(&self, args: &[f64], out: &mut [f64]) {
+        out[0] = args[0] + args[1];
+        out[1] = args[0] * args[1];
+    }
+}
+
+/// An extern function keeps its name and its slot layout in the module; the
+/// body comes back through the loader's resolver.
+#[test]
+fn an_extern_function_round_trips_with_its_body_resolved_by_name() {
+    use std::sync::Arc;
+    let mut g: Graph<F64> = Graph::new();
+    let x = g.sym("x");
+    let y = g.sym("y");
+    let f = g.define_extern_func(
+        "pair",
+        2,
+        Arc::new(Pair),
+        vec![
+            rsdag::Output::Slot(0),
+            rsdag::Output::Slot(1),
+            rsdag::Output::Zero,
+        ],
+    );
+    let sum = g.call(f, 0, &[x, y]);
+    let prod = g.call(f, 1, &[x, y]);
+    let zero = g.call(f, 2, &[x, y]);
+    let root = {
+        let t = g.add(sum, prod);
+        g.add(t, zero)
+    };
+    let syms: Vec<SymbolId> = [x, y]
+        .iter()
+        .map(|&e| match g.node(e) {
+            rsdag::Node::Symbol(s) => *s,
+            _ => unreachable!(),
+        })
+        .collect();
+
+    let module = g.to_module();
+    assert_eq!(module.funcs[0].extern_body.as_deref(), Some("pair"));
+
+    let mut loaded: Graph<F64> = Graph::new();
+    let map = loaded.load_module_with(&module, |name| {
+        assert_eq!(name, "pair");
+        Arc::new(Pair)
+    });
+    let root2 = map.exprs[root.0 as usize];
+    let syms2: Vec<SymbolId> = syms.iter().map(|s| map.symbols[s.0 as usize]).collect();
+    let (mut w, mut o) = (Vec::new(), Vec::new());
+    Tape::compile(&loaded, &[root2], &syms2).eval(&[2.0, 5.0], &mut w, &mut o);
+    assert_eq!(o[0], 7.0 + 10.0 + 0.0);
+    assert_eq!(loaded.to_module(), module);
+}
+
+#[test]
+#[should_panic(expected = "load_module_with")]
+fn loading_a_module_with_externs_without_bodies_says_so() {
+    use std::sync::Arc;
+    let mut g: Graph<F64> = Graph::new();
+    let x = g.sym("x");
+    let f = g.define_extern_func("pair", 2, Arc::new(Pair), vec![rsdag::Output::Slot(0)]);
+    let _ = g.call(f, 0, &[x, x]);
+    let module = g.to_module();
+    let _ = Graph::from_module(&module);
+}

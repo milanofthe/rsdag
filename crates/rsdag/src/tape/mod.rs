@@ -56,7 +56,7 @@ enum Op {
     BundlePick(u32),
 }
 
-/// Layout of one [`Op::BundleBatch`]: `n_groups` argument groups of `n_args`
+/// Layout of one batched bundle call: `n_groups` argument groups of `n_args`
 /// slots each at `arg_pool[start ..]` (group-major); group `g`'s outputs go to
 /// `bundle_scratch[base0 + g*n_out ..]`.
 #[derive(Clone, Copy, Debug)]

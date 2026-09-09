@@ -19,6 +19,10 @@ jobs:
       # The optional features must also build and lint on their own, so a
       # consumer that takes neither of them still compiles.
       - run: cargo clippy -p rsdag --all-targets -- -D warnings
+      # A dangling doc link is a stale doc: fail on it.
+      - run: cargo doc --no-deps --workspace --exclude rsdag-py --features 'rsdag/synth rsdag/serde'
+        env:
+          RUSTDOCFLAGS: -D warnings
   python:
     runs-on: ubuntu-latest
     steps:
