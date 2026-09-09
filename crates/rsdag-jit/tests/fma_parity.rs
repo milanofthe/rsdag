@@ -42,10 +42,10 @@ fn backends_agree_on_a_contracted_program() {
             lane.eval(&wide, &mut lw, &mut lo);
             for (j, &e) in want.iter().enumerate() {
                 for l in 0..width {
-                    assert_eq!(
-                        lo[j * width + l].to_bits(),
-                        e.to_bits(),
-                        "seed {seed}, width {width}, lane {l}, output {j}"
+                    assert!(
+                        same(lo[j * width + l], e),
+                        "seed {seed}, width {width}, lane {l}, output {j}: {} vs {e}",
+                        lo[j * width + l]
                     );
                 }
             }
