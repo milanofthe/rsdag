@@ -68,13 +68,22 @@ fn synthetic(seed: u64, steps: usize, vocab: Vocabulary) -> (Graph<F64>, Tape, V
     let mut g: Graph<F64> = Graph::new();
     let mut spec = Spec::new(seed)
         .steps(steps)
-        .params(8)
-        .outputs(4)
+        // Inputs scale with the program: an assembled residual has one row
+        // per unknown, so its rows are independent and the graph is wide.
+        // A handful of symbols would make every row share them and collapse
+        // the program under hash-consing instead.
+        .params((steps / 8).max(4))
+        .outputs((steps / 32).max(2))
         .vocab(vocab)
         // Short lists: a `Reduce` of 20 is one op doing twenty flops, which
         // makes a per-op number meaningless. The fuzzers cover the long
         // ones; the benchmark prices ops.
-        .max_list(4);
+        .max_list(4)
+        // Wide, like an assembled residual or Jacobian: those are thousands
+        // of nodes at a depth of seven to ten, one level per row. A narrow
+        // draw builds chains no consumer produces and prices the wrong
+        // thing (see `Spec::width`).
+        .width(steps);
     let (roots, syms) = build(&mut g, &mut spec);
     let tape = Tape::compile(&g, &roots, &syms);
     let inputs = inputs(&mut spec.rng(), syms.len());
