@@ -40,7 +40,8 @@ pub struct EmittedTape {
 
 /// One executable chunk.
 struct Code {
-    map: Mapping,
+    /// Kept alive for the code it holds; `func` points into it.
+    _map: Mapping,
     func: extern "C" fn(*mut f64, *const f64, *const u8),
 }
 // The mapping is immutable after `finish`, so calling the code from any
@@ -220,7 +221,7 @@ impl Emitter {
 
     /// `ldr Dt, [Xn, #off]`, any offset.
     fn ldr(&mut self, dt: u32, xn: u32, off: usize) {
-        if off % 8 == 0 && off / 8 < 4096 {
+        if off.is_multiple_of(8) && off / 8 < 4096 {
             self.w(0xFD40_0000 | (((off / 8) as u32) << 10) | (xn << 5) | dt);
         } else {
             self.mov_imm(9, off as u64);
@@ -229,7 +230,7 @@ impl Emitter {
     }
     /// `str Dt, [Xn, #off]`, any offset.
     fn str(&mut self, dt: u32, xn: u32, off: usize) {
-        if off % 8 == 0 && off / 8 < 4096 {
+        if off.is_multiple_of(8) && off / 8 < 4096 {
             self.w(0xFD00_0000 | (((off / 8) as u32) << 10) | (xn << 5) | dt);
         } else {
             self.mov_imm(9, off as u64);
@@ -562,7 +563,7 @@ fn emit_chunk(ops: &[ROp]) -> Result<Code, JitError> {
     let map = Mapping::new(&e.code)?;
     let func: extern "C" fn(*mut f64, *const f64, *const u8) =
         unsafe { std::mem::transmute(map.ptr) };
-    Ok(Code { map, func })
+    Ok(Code { _map: map, func })
 }
 
 // --- executable memory -----------------------------------------------------------
