@@ -683,11 +683,13 @@ impl ChunkJit<'_> {
             }
             ROp::Unary(dst, op, a) => {
                 let av = self.get(*a);
-                // Floor is an IEEE-exact hardware op. SANE's Sqrt carries the
-                // Newton guard `x > 0 ? sqrt(x) : 0` (see `unary_f64`); the
-                // hardware sqrt is IEEE-correct on the taken side and the
-                // negative side selects the exact 0.0, so the pair stays
-                // bit-identical to the host call -- minus the call.
+                // The ops a machine does in one instruction are emitted, not
+                // called: rounding to integral is IEEE-exact, `fabs` clears a
+                // bit, and the guarded `sqrt` (`x > 0 ? sqrt(x) : 0`, see
+                // `unary_f64`) is a compare, a hardware sqrt and a select.
+                // All of them stay bit-identical to the host routine, minus
+                // the call. `round` is not among them: the reference rounds
+                // half away from zero, Cranelift's `nearest` rounds to even.
                 let v = match op {
                     UnaryOp::Sqrt => {
                         let zero = self.fconst(0.0);
@@ -696,6 +698,21 @@ impl ChunkJit<'_> {
                         self.b.ins().select(pos, sq, zero)
                     }
                     UnaryOp::Floor => self.b.ins().floor(av),
+                    UnaryOp::Ceil => self.b.ins().ceil(av),
+                    UnaryOp::Trunc => self.b.ins().trunc(av),
+                    UnaryOp::Abs => self.b.ins().fabs(av),
+                    // `sign` is the reference's own cascade: `+-0.0` and NaN
+                    // fall through unchanged because neither comparison
+                    // holds for them.
+                    UnaryOp::Sign => {
+                        let zero = self.fconst(0.0);
+                        let one = self.fconst(1.0);
+                        let minus = self.fconst(-1.0);
+                        let pos = self.b.ins().fcmp(FloatCC::GreaterThan, av, zero);
+                        let neg = self.b.ins().fcmp(FloatCC::LessThan, av, zero);
+                        let n = self.b.ins().select(neg, minus, av);
+                        self.b.ins().select(pos, one, n)
+                    }
                     _ => match unary_sym(*op) {
                         Some(sym) => self.call(sym, &[av]),
                         None => {
@@ -1461,6 +1478,22 @@ impl<const S: usize> LaneChunkJit<'_, S> {
                         })
                     }
                     UnaryOp::Floor => std::array::from_fn(|j| self.b.ins().floor(av[j])),
+                    UnaryOp::Ceil => std::array::from_fn(|j| self.b.ins().ceil(av[j])),
+                    UnaryOp::Trunc => std::array::from_fn(|j| self.b.ins().trunc(av[j])),
+                    UnaryOp::Abs => std::array::from_fn(|j| self.b.ins().fabs(av[j])),
+                    UnaryOp::Sign => {
+                        let zero = self.fsplat(0.0);
+                        let one = self.fsplat(1.0);
+                        let minus = self.fsplat(-1.0);
+                        std::array::from_fn(|j| {
+                            let pos = self.b.ins().fcmp(FloatCC::GreaterThan, av[j], zero[j]);
+                            let pm = self.b.ins().bitcast(types::F64X2, MemFlags::new(), pos);
+                            let neg = self.b.ins().fcmp(FloatCC::LessThan, av[j], zero[j]);
+                            let nm = self.b.ins().bitcast(types::F64X2, MemFlags::new(), neg);
+                            let n = self.b.ins().bitselect(nm, minus[j], av[j]);
+                            self.b.ins().bitselect(pm, one[j], n)
+                        })
+                    }
                     _ => match unary_sym(*op) {
                         Some(sym) => self.per_lane(sym, av),
                         None => {

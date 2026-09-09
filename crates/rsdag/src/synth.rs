@@ -95,6 +95,16 @@ pub struct Spec {
     pub vocab: Vocabulary,
     /// Percent of drawn ops that are variadic (`Reduce`, `Dot`).
     pub list_percent: usize,
+    /// How wide the generated programs are.
+    ///
+    /// Operands are drawn from the last `width` nodes built, so 1 is a
+    /// chain and a number past the program size is a uniform draw over
+    /// everything so far. This is the knob that decides whether a corpus
+    /// looks like real work: an assembled residual or Jacobian is very
+    /// wide -- 8196 nodes at depth 7, one level per row -- while a uniform
+    /// draw over a growing pool builds deep chains that no consumer
+    /// produces. The fuzzers want both; a benchmark wants the wide end.
+    pub width: usize,
     /// Percent of drawn ops that are a `Select` over a fresh comparison.
     /// The knob a region or specialization test turns up: those need
     /// programs whose guards actually flip as the inputs move.
@@ -113,6 +123,7 @@ impl Spec {
             n_outputs: 1,
             smooth: false,
             vocab: Vocabulary::Full,
+            width: RECENT,
             list_percent: 15,
             select_percent: 0,
             max_list: 4,
@@ -134,6 +145,11 @@ impl Spec {
     /// check wants lists on both sides of it.
     pub fn max_list(mut self, n: usize) -> Spec {
         self.max_list = n;
+        self
+    }
+    /// How far back operands are drawn (see [`Spec::width`]).
+    pub fn width(mut self, n: usize) -> Spec {
+        self.width = n.max(1);
         self
     }
     /// Draw a guarded `Select` for this percentage of the nodes.
@@ -239,10 +255,10 @@ fn symbol_of<K: Field>(g: &Graph<K>, e: ExprId) -> SymbolId {
 /// the generated programs both larger and deeper for the same draw count.
 const RECENT: usize = 12;
 
-fn pick(rng: &mut Rng, pool: &[ExprId]) -> ExprId {
+fn pick(rng: &mut Rng, pool: &[ExprId], width: usize) -> ExprId {
     let n = pool.len();
-    if n > RECENT && rng.chance(66) {
-        pool[n - 1 - rng.below(RECENT)]
+    if n > width && rng.chance(66) {
+        pool[n - 1 - rng.below(width)]
     } else {
         pool[rng.below(n)]
     }
@@ -250,10 +266,11 @@ fn pick(rng: &mut Rng, pool: &[ExprId]) -> ExprId {
 
 /// Draw and build one node over the current pool.
 fn draw<K: Field>(g: &mut Graph<K>, spec: &mut Spec, pool: &[ExprId], syms: &[ExprId]) -> ExprId {
+    let spec_width = spec.width;
     let rng = &mut spec.rng;
-    let a = pick(rng, pool);
-    let b = pick(rng, pool);
-    let c = pick(rng, pool);
+    let a = pick(rng, pool, spec_width);
+    let b = pick(rng, pool, spec_width);
+    let c = pick(rng, pool, spec_width);
     if !spec.smooth && rng.chance(spec.select_percent) {
         // A select over a fresh comparison of two pool values: a guard that
         // moves when the inputs move, which is what a region test needs.
@@ -263,7 +280,7 @@ fn draw<K: Field>(g: &mut Graph<K>, spec: &mut Spec, pool: &[ExprId], syms: &[Ex
     }
     if rng.chance(spec.list_percent) {
         let len = 2 + rng.below(spec.max_list.max(3) - 1);
-        let list: Vec<ExprId> = (0..len).map(|_| pick(rng, pool)).collect();
+        let list: Vec<ExprId> = (0..len).map(|_| pick(rng, pool, spec_width)).collect();
         let kind = if spec.smooth {
             rng.below(3)
         } else {
@@ -273,7 +290,9 @@ fn draw<K: Field>(g: &mut Graph<K>, spec: &mut Spec, pool: &[ExprId], syms: &[Ex
             0 => g.reduce(ReduceOp::Sum, list),
             1 => g.reduce(ReduceOp::Product, list),
             2 => {
-                let rhs: Vec<ExprId> = (0..list.len()).map(|_| pick(rng, pool)).collect();
+                let rhs: Vec<ExprId> = (0..list.len())
+                    .map(|_| pick(rng, pool, spec_width))
+                    .collect();
                 g.dot(list, rhs)
             }
             3 => g.reduce(ReduceOp::Min, list),

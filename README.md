@@ -73,10 +73,16 @@ has to reproduce.
 
 `cargo run --release --example bench -p rsdag-jit` (add `quick` for the
 small sizes) prices the interpreter, the JIT and the lane widths per tape
-op and checks each against the interpreter bit for bit. On an M3 a tape op
-costs about 1.7 to 2 ns interpreted and 0.3 to 0.5 ns through the JIT;
-lanes add up to 2x per parameter set on programs the lane backend can
-vectorise.
+op and checks each against the interpreter bit for bit. Its corpus is wide,
+like an assembled residual or Jacobian: those are thousands of nodes at a
+depth of seven to ten, one level per row, and a narrow corpus prices a
+shape no consumer produces.
+
+On an M3 a ring op costs about 0.3 to 0.9 ns through the JIT and 3 to 4 ns
+interpreted; an elementary function adds about 1 ns on top of that, because
+it is a call into the same routine the interpreter uses. Lanes pay on
+narrow programs and on batched instances, not on a wide residual, where
+they measure between 0.97x and 1.19x per parameter set.
 
 ## Build
 
