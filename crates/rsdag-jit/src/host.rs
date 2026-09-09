@@ -2,10 +2,8 @@
 //! emit itself, bit-identical to the interpreter's, and the table that
 //! resolves them by name.
 
-use cranelift_codegen::ir::InstBuilder;
 use rsdag::extern_fn::ExternBundle;
 use rsdag::node::{binary_f64, dot_slice, reduce_slice, unary_f64, BinOp, ReduceOp, UnaryOp};
-use rsdag::TapeVisitor;
 use std::sync::Arc;
 
 // --- host trampolines: bit-identical to the interpreter's elementary ops ----

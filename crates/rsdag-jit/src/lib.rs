@@ -1,6 +1,6 @@
-//! Chunked Cranelift JIT backend for SANE's evaluation [`Tape`].
+//! Chunked Cranelift JIT backend for the evaluation [`Tape`](rsdag::Tape).
 //!
-//! The tape is SANE's single evaluation IR; [`Tape::eval`] is the interpreting
+//! The tape is the evaluation IR; [`Tape::eval`](rsdag::Tape::eval) is the interpreting
 //! backend and this crate is the native one. The previous JIT lowered a tape to
 //! *one* Cranelift function and died on BSIM4-amplifier tapes (~500k ops):
 //! register allocation on a single huge straight-line function is superlinear,
@@ -15,12 +15,9 @@
 //! Bit-exactness is a hard invariant: the same IEEE operation sequence as the
 //! interpreter (no fast-math, no FMA contraction -- `MulAdd` lowers to `fmul`
 //! + `fadd`), and every transcendental routes through the *same*
-//! [`unary_f64`] host trampolines, so the domain guards (limexp, ln-floor,
+//! [`unary_f64`](rsdag::node::unary_f64) host trampolines, so the domain guards (limexp, ln-floor,
 //! sqrt-clamp) hold identically. `tests/parity.rs` fuzzes arena == tape ==
 //! chunked-JIT to the bit.
-
-use rsdag::extern_fn::ExternBundle;
-use rsdag::TapeVisitor;
 
 /// Instructions per compiled function for the solver's outer tapes (residual
 /// and Jacobian over the whole circuit). Bounds Cranelift's superlinear
