@@ -41,12 +41,35 @@ pub enum SchedulePolicy {
     CreationOrder,
 }
 
+/// What [`Tape::compile_with`] may do beyond a faithful lowering.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CompileOptions {
+    /// Contract `a*b + c` into one fused multiply-add ([`Op::Fma`]). Fewer
+    /// roundings and one instruction instead of two, at the price of the
+    /// last bit against the uncontracted program. Off by default: the
+    /// uncontracted tape is the reference every backend agrees with to the
+    /// bit, and a consumer that solves with tolerances turns this on.
+    pub contract: bool,
+}
+
 impl Tape {
+    /// [`compile`](Self::compile) with [`CompileOptions`]; `pure_inputs` as
+    /// in [`compile_split`](Self::compile_split).
+    pub fn compile_with<K: Field>(
+        ctx: &Graph<K>,
+        roots: &[ExprId],
+        input_syms: &[SymbolId],
+        pure_inputs: Option<&[bool]>,
+        opts: CompileOptions,
+    ) -> Tape {
+        Self::compile_inner(ctx, roots, input_syms, pure_inputs, opts)
+    }
+
     /// Compile a tape computing `roots`, where `inputs[k]` (passed to
     /// [`eval`](Self::eval)) is the value of symbol `input_syms[k]`. Symbols not
     /// listed evaluate to `NaN`.
     pub fn compile<K: Field>(ctx: &Graph<K>, roots: &[ExprId], input_syms: &[SymbolId]) -> Tape {
-        Self::compile_inner(ctx, roots, input_syms, None)
+        Self::compile_inner(ctx, roots, input_syms, None, CompileOptions::default())
     }
 
     /// [`compile`](Self::compile) with a prolog split: `pure_inputs[k]` marks
@@ -64,7 +87,13 @@ impl Tape {
         input_syms: &[SymbolId],
         pure_inputs: &[bool],
     ) -> Tape {
-        Self::compile_inner(ctx, roots, input_syms, Some(pure_inputs))
+        Self::compile_inner(
+            ctx,
+            roots,
+            input_syms,
+            Some(pure_inputs),
+            CompileOptions::default(),
+        )
     }
 
     fn compile_inner<K: Field>(
@@ -72,6 +101,7 @@ impl Tape {
         roots: &[ExprId],
         input_syms: &[SymbolId],
         pure_inputs: Option<&[bool]>,
+        opts: CompileOptions,
     ) -> Tape {
         // Five passes over the reachable forest, each reading only what the
         // ones before it produced: analysis marks and counts, scheduling
@@ -90,7 +120,7 @@ impl Tape {
         });
         let batch_group_args = timed("tape batch scan", || batch_groups(ctx, &schedule.order));
         timed("tape emit", || {
-            forest.emit(ctx, roots, &schedule, &liveness, &batch_group_args)
+            forest.emit(ctx, roots, &schedule, &liveness, &batch_group_args, opts)
         })
     }
 }
@@ -531,6 +561,7 @@ impl Forest {
         schedule: &Schedule,
         liveness: &Liveness,
         batch_group_args: &HashMap<u32, Vec<Vec<ExprId>>>,
+        opts: CompileOptions,
     ) -> Tape {
         let base = &self.base;
         let input_of = &self.input_of;
@@ -695,6 +726,7 @@ impl Forest {
                         Some(f) => {
                             let other = if f == a { b } else { a };
                             match ctx.node(*f) {
+                                Node::Mul(x, y) if opts.contract => Op::Fma(s(x), s(y), s(other)),
                                 Node::Mul(x, y) => Op::MulAdd(s(x), s(y), s(other)),
                                 Node::Neg(x) => Op::Sub(s(other), s(x)),
                                 _ => unreachable!("only Mul/Neg operands are fused"),

@@ -341,6 +341,7 @@ enum ROp {
     Add(u32, u32, u32),
     Mul(u32, u32, u32),
     MulAdd(u32, u32, u32, u32),
+    Fma(u32, u32, u32, u32),
     Sub(u32, u32, u32),
     Neg(u32, u32),
     Powi(u32, u32, i32),
@@ -365,6 +366,7 @@ impl ROp {
             | ROp::Add(d, _, _)
             | ROp::Mul(d, _, _)
             | ROp::MulAdd(d, _, _, _)
+            | ROp::Fma(d, _, _, _)
             | ROp::Sub(d, _, _)
             | ROp::Neg(d, _)
             | ROp::Powi(d, _, _)
@@ -391,7 +393,7 @@ impl ROp {
                 f(*a);
                 f(*b);
             }
-            ROp::MulAdd(_, a, b, c) | ROp::Select(_, a, b, c) => {
+            ROp::MulAdd(_, a, b, c) | ROp::Fma(_, a, b, c) | ROp::Select(_, a, b, c) => {
                 f(*a);
                 f(*b);
                 f(*c);
@@ -465,6 +467,9 @@ impl TapeVisitor for Recorder {
     }
     fn mul_add(&mut self, dst: u32, a: u32, b: u32, c: u32) {
         self.ops.push(ROp::MulAdd(dst, a, b, c));
+    }
+    fn fma(&mut self, dst: u32, a: u32, b: u32, c: u32) {
+        self.ops.push(ROp::Fma(dst, a, b, c));
     }
     fn sub(&mut self, dst: u32, a: u32, b: u32) {
         self.ops.push(ROp::Sub(dst, a, b));
@@ -637,6 +642,11 @@ impl ChunkJit<'_> {
                 let m = self.b.ins().fmul(x, y);
                 let z = self.get(*c);
                 let v = self.b.ins().fadd(m, z);
+                self.set(*dst, v);
+            }
+            ROp::Fma(dst, a, b, c) => {
+                let (x, y, z) = (self.get(*a), self.get(*b), self.get(*c));
+                let v = self.b.ins().fma(x, y, z);
                 self.set(*dst, v);
             }
             ROp::Sub(dst, a, b) => {
@@ -1407,6 +1417,11 @@ impl<const S: usize> LaneChunkJit<'_, S> {
                 let m = self.map2(x, y, |t, p, q| t.b.ins().fmul(p, q));
                 let z = self.get(*c);
                 let v = self.map2(m, z, |t, p, q| t.b.ins().fadd(p, q));
+                self.set(*dst, v);
+            }
+            ROp::Fma(dst, a, b, c) => {
+                let (x, y, z) = (self.get(*a), self.get(*b), self.get(*c));
+                let v = std::array::from_fn(|j| self.b.ins().fma(x[j], y[j], z[j]));
                 self.set(*dst, v);
             }
             ROp::Sub(dst, a, b) => {
