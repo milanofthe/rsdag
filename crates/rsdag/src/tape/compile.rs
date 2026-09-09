@@ -44,7 +44,7 @@ pub enum SchedulePolicy {
 /// What [`Tape::compile_with`] may do beyond a faithful lowering.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CompileOptions {
-    /// Contract `a*b + c` into one fused multiply-add ([`Op::Fma`]). Fewer
+    /// Contract `a*b + c` into one fused multiply-add. Fewer
     /// roundings and one instruction instead of two, at the price of the
     /// last bit against the uncontracted program. Off by default: the
     /// uncontracted tape is the reference every backend agrees with to the
