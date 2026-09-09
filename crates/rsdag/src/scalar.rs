@@ -25,6 +25,10 @@ pub trait Scalar: Copy + Send + Sync + std::fmt::Debug + 'static {
     fn add(self, o: Self) -> Self;
     fn sub(self, o: Self) -> Self;
     fn mul(self, o: Self) -> Self;
+    /// `self * b + c` with one rounding where the type has a fused
+    /// multiply-add (`f64`, `f32`); a complex product has no single
+    /// rounding, so it is the multiply and the add.
+    fn mul_add(self, b: Self, c: Self) -> Self;
     fn neg(self) -> Self;
     fn powi(self, n: i32) -> Self;
     fn unary(op: UnaryOp, x: Self) -> Self;
@@ -58,6 +62,9 @@ impl Scalar for f64 {
     }
     fn mul(self, o: Self) -> Self {
         self * o
+    }
+    fn mul_add(self, b: Self, c: Self) -> Self {
+        f64::mul_add(self, b, c)
     }
     fn neg(self) -> Self {
         -self
@@ -110,6 +117,9 @@ impl Scalar for f32 {
     }
     fn mul(self, o: Self) -> Self {
         self * o
+    }
+    fn mul_add(self, b: Self, c: Self) -> Self {
+        f32::mul_add(self, b, c)
     }
     fn neg(self) -> Self {
         -self
@@ -164,6 +174,9 @@ impl Scalar for Complex64 {
     }
     fn mul(self, o: Self) -> Self {
         self * o
+    }
+    fn mul_add(self, b: Self, c: Self) -> Self {
+        self * b + c
     }
     fn neg(self) -> Self {
         -self
