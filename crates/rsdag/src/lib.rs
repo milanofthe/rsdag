@@ -14,6 +14,7 @@ pub mod graph;
 pub mod mathfn;
 pub mod module;
 pub mod node;
+pub mod nonlinearity;
 pub mod role;
 pub mod scalar;
 pub mod scope;
@@ -40,6 +41,7 @@ pub use node::{
     binary_f64, unary_f64, ArgList, BinOp, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp,
     SymbolId, UnaryOp,
 };
+pub use nonlinearity::{nonlinearity, nonlinearity_of, Degree, Nonlinearity};
 pub use role::{OutputRole, ParamRole};
 pub use scalar::Scalar;
 pub use scope::Scope;
