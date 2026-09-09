@@ -65,6 +65,14 @@ pub trait Builder {
     fn reduce(&mut self, op: ReduceOp, args: &[Self::N]) -> Self::N;
     /// `sum_i a[i] * b[i]`.
     fn dot(&mut self, a: &[Self::N], b: &[Self::N]) -> Self::N;
+    /// `x` with `A x = b`, for a square `a` given by rows.
+    ///
+    /// The implicit step a block writes in the same code as its model: the
+    /// numeric builder solves with a pivoted dense LU, the recording builder
+    /// builds a static-pivot LU in a fill-reducing order as graph ops (see
+    /// [`crate::symbolic::solve`]), so the recorded twin carries the solve
+    /// and differentiates through it.
+    fn solve(&mut self, a: &[Vec<Self::N>], b: &[Self::N]) -> Vec<Self::N>;
 
     // --- the ring, spelled the way a model reads ---------------------------
 
@@ -274,6 +282,37 @@ impl Builder for Numeric {
     fn dot(&mut self, a: &[f64], b: &[f64]) -> f64 {
         dot_slice(a, b)
     }
+    fn solve(&mut self, a: &[Vec<f64>], b: &[f64]) -> Vec<f64> {
+        // Dense LU with partial pivoting: the numeric twin may pivot, the
+        // recorded one cannot, so the two agree to a rounding rather than
+        // to the bit, which is the tolerance an implicit step lives with.
+        let n = b.len();
+        let mut m: Vec<Vec<f64>> = a.to_vec();
+        let mut r = b.to_vec();
+        for k in 0..n {
+            let p = (k..n)
+                .max_by(|&i, &j| m[i][k].abs().partial_cmp(&m[j][k].abs()).unwrap())
+                .unwrap();
+            m.swap(k, p);
+            r.swap(k, p);
+            for i in k + 1..n {
+                let l = m[i][k] / m[k][k];
+                for j in k..n {
+                    m[i][j] -= l * m[k][j];
+                }
+                r[i] -= l * r[k];
+            }
+        }
+        let mut x = vec![0.0; n];
+        for i in (0..n).rev() {
+            let mut s = r[i];
+            for j in i + 1..n {
+                s -= m[i][j] * x[j];
+            }
+            x[i] = s / m[i][i];
+        }
+        x
+    }
 }
 
 /// The builder that records: every op is the graph's smart constructor, so
@@ -315,5 +354,11 @@ impl<K: Field> Builder for Graph<K> {
     }
     fn dot(&mut self, a: &[ExprId], b: &[ExprId]) -> ExprId {
         Graph::dot(self, a.to_vec(), b.to_vec())
+    }
+    fn solve(&mut self, a: &[Vec<ExprId>], b: &[ExprId]) -> Vec<ExprId> {
+        use crate::symbolic::solve::{lu_static, ordering, pattern_of};
+        let order = ordering(&pattern_of(self, a));
+        let lu = lu_static(self, a, &order);
+        lu.solve_static(self, b)
     }
 }

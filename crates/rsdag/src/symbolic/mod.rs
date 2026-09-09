@@ -10,9 +10,11 @@
 pub mod det;
 pub mod egraph;
 pub mod poly;
+pub mod solve;
 
 pub use det::{count_det_terms, determinant};
 pub use egraph::simplify_egraph;
 pub use poly::{
     collect, expand_terms, poly_add, poly_mul, poly_to_expr, prune_poly, rational_form,
 };
+pub use solve::{lu_static, newton_step, ordering, pattern_of, Pattern, StaticLu};
