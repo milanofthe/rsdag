@@ -1,7 +1,7 @@
 //! A linear solve as graph ops: correct against a pivoted dense solve, the
 //! ordering keeps fill down, and a Newton step composed of it converges.
 
-use rsdag::symbolic::solve::{lu_static, ordering, pattern_of, Pattern};
+use rsdag::symbolic::solve::{lu_static, ordering, pattern_of, Pattern, SparseRows};
 use rsdag::synth::Spec;
 use rsdag::{newton_step, Builder, ExprId, Graph, Node, Numeric, Scope, SymbolId, Tape, F64};
 
@@ -38,19 +38,14 @@ fn residual(g: &mut Graph<F64>, n: usize) -> (Vec<ExprId>, Vec<SymbolId>) {
 }
 
 fn fill_of(pattern: &Pattern, order: &[usize]) -> usize {
-    // Count fill by running the structural elimination on ones.
-    let n = pattern.len();
+    // Count fill by running the structural elimination on symbols.
     let mut g: Graph<F64> = Graph::new();
-    let m: Vec<Vec<ExprId>> = (0..n)
-        .map(|i| {
-            (0..n)
-                .map(|j| {
-                    if pattern[i][j] {
-                        g.sym(&format!("a{i}_{j}"))
-                    } else {
-                        g.zero()
-                    }
-                })
+    let m: SparseRows = pattern
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            row.iter()
+                .map(|&j| (j, g.sym(&format!("a{i}_{j}"))))
                 .collect()
         })
         .collect();
@@ -61,8 +56,8 @@ fn fill_of(pattern: &Pattern, order: &[usize]) -> usize {
 fn the_ordering_reduces_fill() {
     let mut g: Graph<F64> = Graph::new();
     let (f, syms) = residual(&mut g, 128);
-    let jac = rsdag::jacobian(&mut g, &f, &syms);
-    let pattern = pattern_of(&g, &jac);
+    let jac = rsdag::sparse_jacobian(&mut g, &f, &syms);
+    let pattern = pattern_of(&jac);
     let natural: Vec<usize> = (0..128).collect();
     let md = ordering(&pattern);
     let (a, b) = (fill_of(&pattern, &natural), fill_of(&pattern, &md));

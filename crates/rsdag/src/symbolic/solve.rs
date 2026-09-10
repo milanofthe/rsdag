@@ -15,26 +15,27 @@
 //! arithmetic, but from everything a generic solver does per call and this
 //! form does once, at build time.
 //!
-//! What it is not: a replacement for a sparse solver on a large system. Every
-//! flop of the factorization is a node, so the program grows with the
-//! factorization's cost; a fill-reducing [`ordering`] keeps that near the
-//! pattern for the structures a circuit or a mesh produces, but a hundred
-//! thousand unknowns with heavy fill are a program of millions of nodes.
-//! And the pivot order is fixed at build time -- static pivoting -- so a
-//! system whose pivots need reordering at run time is not a candidate. The
-//! intended place is the small and mid-sized solve: a block's implicit
-//! update, a device's internal nodes, a subsystem of a few thousand
-//! unknowns, with the large sparse top level left to a solver built for it.
+//! Everything here is sparse: the Jacobian comes as [`SparseRows`], the
+//! [`Pattern`] is the columns of each row, the [`ordering`] is minimum
+//! degree over the adjacency with a degree queue, and the elimination
+//! touches only structural nonzeros. So the cost of the build is the cost
+//! of the factorization's fill, as for any direct solver, and a million
+//! unknowns with a banded or circuit-like pattern is a program of a few
+//! tens of ops per unknown. Every flop of the factorization is a node, so a
+//! pattern with heavy fill is a large program, and the pivot order is fixed
+//! at build time -- static pivoting -- so a system whose pivots need
+//! reordering at run time is not a candidate.
 
-use rustc_hash::FxHashMap as HashMap;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
+pub use crate::autodiff::SparseRows;
 use crate::field::Field;
 use crate::graph::Graph;
 use crate::node::ExprId;
 
-/// The structural pattern of a square matrix: `pattern[i][j]` is whether
-/// entry `(i, j)` is present.
-pub type Pattern = Vec<Vec<bool>>;
+/// The structural pattern of a square matrix: the columns present in each
+/// row, ascending.
+pub type Pattern = Vec<Vec<usize>>;
 
 /// A static LU factorization as graph ops, in a given elimination order.
 pub struct StaticLu {
@@ -54,29 +55,33 @@ pub struct StaticLu {
 /// adds the fill its elimination creates.
 ///
 /// Symmetric in the structure (it works on `A + A^T`), which is what fill
-/// depends on. Quadratic in the size, which is fine for the sizes this module
-/// is for, and it runs once per pattern at build time.
+/// depends on. A degree queue picks the next vertex, and an elimination
+/// touches only the neighbours it connects, so the cost is the fill's, not
+/// the size's. Ties go to the lower index, so the order is stable.
 pub fn ordering(pattern: &Pattern) -> Vec<usize> {
     let n = pattern.len();
-    let mut adj: Vec<std::collections::BTreeSet<usize>> = (0..n)
-        .map(|i| {
-            (0..n)
-                .filter(|&j| j != i && (pattern[i][j] || pattern[j][i]))
-                .collect()
-        })
-        .collect();
-    let mut alive: Vec<bool> = vec![true; n];
+    let mut adj: Vec<HashSet<usize>> = vec![HashSet::default(); n];
+    for (i, row) in pattern.iter().enumerate() {
+        for &j in row {
+            if j != i {
+                adj[i].insert(j);
+                adj[j].insert(i);
+            }
+        }
+    }
+    let mut queue: std::collections::BTreeSet<(usize, usize)> =
+        (0..n).map(|i| (adj[i].len(), i)).collect();
     let mut order = Vec::with_capacity(n);
-    for _ in 0..n {
-        // Fewest live neighbours; ties by index so the order is stable.
-        let k = (0..n)
-            .filter(|&i| alive[i])
-            .min_by_key(|&i| (adj[i].iter().filter(|&&j| alive[j]).count(), i))
-            .expect("a live vertex remains");
-        alive[k] = false;
+    while let Some(&(d, k)) = queue.iter().next() {
+        queue.remove(&(d, k));
         order.push(k);
+        let mut nb: Vec<usize> = adj[k].drain().collect();
+        nb.sort_unstable();
+        for &a in &nb {
+            queue.remove(&(adj[a].len(), a));
+            adj[a].remove(&k);
+        }
         // Eliminating k connects its neighbours pairwise: that is the fill.
-        let nb: Vec<usize> = adj[k].iter().copied().filter(|&j| alive[j]).collect();
         for &a in &nb {
             for &b in &nb {
                 if a != b {
@@ -84,15 +89,31 @@ pub fn ordering(pattern: &Pattern) -> Vec<usize> {
                 }
             }
         }
+        for &a in &nb {
+            queue.insert((adj[a].len(), a));
+        }
     }
     order
 }
 
-/// The pattern of a matrix of expressions: an entry is present when it is
-/// not the structural zero.
-pub fn pattern_of<K: Field>(g: &Graph<K>, m: &[Vec<ExprId>]) -> Pattern {
+/// The pattern of sparse rows: the column of every entry.
+pub fn pattern_of(m: &SparseRows) -> Pattern {
     m.iter()
-        .map(|row| row.iter().map(|&e| !g.is_zero(e)).collect())
+        .map(|row| row.iter().map(|&(j, _)| j).collect())
+        .collect()
+}
+
+/// A dense matrix of expressions as sparse rows: every entry that is not
+/// the structural zero.
+pub fn sparse_rows<K: Field>(g: &Graph<K>, m: &[Vec<ExprId>]) -> SparseRows {
+    m.iter()
+        .map(|row| {
+            row.iter()
+                .enumerate()
+                .filter(|&(_, &e)| !g.is_zero(e))
+                .map(|(j, &e)| (j, e))
+                .collect()
+        })
         .collect()
 }
 
@@ -104,7 +125,7 @@ pub fn pattern_of<K: Field>(g: &Graph<K>, m: &[Vec<ExprId>]) -> Pattern {
 /// flow through the pattern's op sequence; a pivot that is numerically zero
 /// at evaluation time gives an infinite multiplier, exactly as an
 /// unpivoted elimination would.
-pub fn lu_static<K: Field>(g: &mut Graph<K>, m: &[Vec<ExprId>], order: &[usize]) -> StaticLu {
+pub fn lu_static<K: Field>(g: &mut Graph<K>, m: &SparseRows, order: &[usize]) -> StaticLu {
     let n = m.len();
     assert_eq!(order.len(), n, "one order entry per unknown");
     // Position of an original index in the order.
@@ -112,28 +133,31 @@ pub fn lu_static<K: Field>(g: &mut Graph<K>, m: &[Vec<ExprId>], order: &[usize])
     for (k, &i) in order.iter().enumerate() {
         pos[i] = k;
     }
-    // The working matrix in permuted coordinates, structurally nonzero only.
+    // The working matrix in permuted coordinates, structurally nonzero only,
+    // with row and column occupancy so a step touches only what is nonzero.
     let mut a: HashMap<(usize, usize), ExprId> = HashMap::default();
+    let mut in_row: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut in_col: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (i, row) in m.iter().enumerate() {
-        for (j, &e) in row.iter().enumerate() {
-            if !g.is_zero(e) {
-                a.insert((pos[i], pos[j]), e);
+        for &(j, e) in row {
+            let (r, c) = (pos[i], pos[j]);
+            if a.insert((r, c), e).is_none() {
+                in_row[r].push(c);
+                in_col[c].push(r);
             }
         }
     }
-    // Row and column occupancy, so a step touches only what is nonzero.
-    let mut in_row: Vec<Vec<usize>> = vec![Vec::new(); n];
-    let mut in_col: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for &(r, c) in a.keys() {
-        in_row[r].push(c);
-        in_col[c].push(r);
-    }
     let mut fill = 0usize;
     for k in 0..n {
-        let pivot = a[&(k, k)];
+        let pivot = *a
+            .get(&(k, k))
+            .expect("a structurally nonzero diagonal in the pivot position");
         let inv = g.recip(pivot);
-        let row_k: Vec<usize> = in_row[k].iter().copied().filter(|&c| c > k).collect();
-        let col_k: Vec<usize> = in_col[k].iter().copied().filter(|&r| r > k).collect();
+        // Ascending, so the program is the same for the same pattern.
+        let mut row_k: Vec<usize> = in_row[k].iter().copied().filter(|&c| c > k).collect();
+        let mut col_k: Vec<usize> = in_col[k].iter().copied().filter(|&r| r > k).collect();
+        row_k.sort_unstable();
+        col_k.sort_unstable();
         for &i in &col_k {
             let aik = a[&(i, k)];
             let l = g.mul(aik, inv);
@@ -222,8 +246,8 @@ pub fn newton_step<K: Field>(
     f: &[ExprId],
     x: &[crate::node::SymbolId],
 ) -> (Vec<ExprId>, usize) {
-    let jac = crate::autodiff::jacobian(g, f, x);
-    let pattern = pattern_of(g, &jac);
+    let jac = crate::autodiff::sparse_jacobian(g, f, x);
+    let pattern = pattern_of(&jac);
     let order = ordering(&pattern);
     let lu = lu_static(g, &jac, &order);
     let dx = lu.solve_static(g, f);
