@@ -77,7 +77,7 @@ fn smooth_programs_differentiate_and_evaluate_like_the_arena() {
         tape.eval(&row, &mut w, &mut out);
         let env: std::collections::HashMap<_, _> =
             syms.iter().copied().zip(row.iter().copied()).collect();
-        let want = rsdag::eval_real(&g, &env, &[roots[0], d]);
+        let want = rsdag::eval(&g, &[roots[0], d], &env);
         assert!(
             out.iter()
                 .zip(&want)

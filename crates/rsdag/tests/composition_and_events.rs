@@ -11,8 +11,7 @@ use rustc_hash::FxHashMap as HashMap;
 
 use rsdag::synth::{build, inputs, Spec};
 use rsdag::{
-    differentiate, substitute_many_all, ExprId, Graph, OutputRole, ParamRole, Scope, SymbolId,
-    Tape, F64,
+    differentiate, substitute, ExprId, Graph, OutputRole, ParamRole, Scope, SymbolId, Tape, F64,
 };
 
 /// A first-order lag: `y = x`, `dx/dt = (u - x) / tau`. Built in its own
@@ -83,7 +82,7 @@ fn separate_blocks_compose_into_one_graph() {
     // saturation reads (its own `u`, `k`) stays a system input.
     let mut wire: HashMap<SymbolId, ExprId> = HashMap::default();
     wire.insert(lag_u, sat_y);
-    let dx = substitute_many_all(&mut sys, &[lag_dx], &wire)[0];
+    let dx = substitute(&mut sys, &[lag_dx], &wire)[0];
 
     // The composed derivative reads exactly the surviving system symbols.
     let free = sys.free_symbols(dx);

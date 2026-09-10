@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use rsdag::node::Node;
 use rsdag::synth::{build_over, Rng, Spec, Vocabulary};
-use rsdag::{differentiate, eval_real, ExprId, Graph, ReduceOp, SymbolId, Tape};
+use rsdag::{differentiate, eval, ExprId, Graph, ReduceOp, SymbolId, Tape};
 
 fn sym_id(ctx: &Graph, e: ExprId) -> SymbolId {
     match *ctx.node(e) {
@@ -75,7 +75,7 @@ fn tape_matches_arena_sweep_bit_exact() {
             .zip(inputs.iter().copied())
             .collect();
 
-        let want = eval_real(&ctx, &env, &[root])[0];
+        let want = eval(&ctx, &[root], &env)[0];
 
         let tape = Tape::compile(&ctx, &[root], &sym_ids);
         let (mut work, mut out) = (Vec::new(), Vec::new());
@@ -201,7 +201,7 @@ fn long_reduce_dot_match_arena_4lane() {
             .copied()
             .zip(inputs.iter().copied())
             .collect();
-        let want = eval_real(&ctx, &env, &[root])[0];
+        let want = eval(&ctx, &[root], &env)[0];
 
         let tape = Tape::compile(&ctx, &[root], &sym_ids);
         let (mut work, mut out) = (Vec::new(), Vec::new());
@@ -348,14 +348,14 @@ fn differentiate_matches_finite_differences() {
         let mut env: HashMap<SymbolId, f64> =
             sym_ids.iter().copied().zip(point.iter().copied()).collect();
 
-        let ad = eval_real(&ctx, &env, &[d])[0];
+        let ad = eval(&ctx, &[d], &env)[0];
 
         // Central finite difference of the original.
         let h = 1e-6;
         env.insert(sym_ids[wrt], point[wrt] + h);
-        let fp = eval_real(&ctx, &env, &[root])[0];
+        let fp = eval(&ctx, &[root], &env)[0];
         env.insert(sym_ids[wrt], point[wrt] - h);
-        let fm = eval_real(&ctx, &env, &[root])[0];
+        let fm = eval(&ctx, &[root], &env)[0];
         let fd = (fp - fm) / (2.0 * h);
 
         // Skip samples that landed on a domain edge or blew up numerically.
@@ -465,7 +465,7 @@ fn typed_tape_matches_complex_arena_and_f32_is_close() {
         for (k, &s) in sym_ids.iter().enumerate() {
             env.insert(s, cin[k]);
         }
-        let arena = rsdag::eval(&ctx, root, &env);
+        let arena = rsdag::eval(&ctx, &[root], &env)[0];
         assert!(
             same_bits(oc[0].re, arena.re) && same_bits(oc[0].im, arena.im),
             "seed {seed}: complex tape {:?} vs arena {:?}",

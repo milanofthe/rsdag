@@ -424,28 +424,6 @@ pub fn sparse_jacobian<K: Field>(
         .collect()
 }
 
-/// The Jacobian as a dense matrix, `jac[i][j] = d(residuals[i]) / d(wrt[j])`,
-/// with the structural zero where the row does not touch the symbol. The
-/// dense form of [`sparse_jacobian`]; for a large sparse system use that
-/// directly, since a dense `n * n` of ids is what does not scale.
-pub fn jacobian<K: Field>(
-    ctx: &mut Graph<K>,
-    residuals: &[ExprId],
-    wrt: &[SymbolId],
-) -> Vec<Vec<ExprId>> {
-    let zero = ctx.zero();
-    sparse_jacobian(ctx, residuals, wrt)
-        .into_iter()
-        .map(|row| {
-            let mut dense = vec![zero; wrt.len()];
-            for (j, e) in row {
-                dense[j] = e;
-            }
-            dense
-        })
-        .collect()
-}
-
 /// Reverse-mode symbolic gradient: `d(f)/d(wrt[j])` for every `j`, built in ONE
 /// adjoint sweep over the reachable sub-DAG instead of one forward sweep per
 /// symbol -- the right shape for a scalar objective over many leaves (a
@@ -630,13 +608,5 @@ pub fn hessian<K: Field>(ctx: &mut Graph<K>, f: ExprId, wrt: &[SymbolId]) -> Vec
     let grad = gradient(ctx, f, wrt);
     grad.iter()
         .map(|&g| wrt.iter().map(|&s| differentiate(ctx, g, s)).collect())
-        .collect()
-}
-
-/// Structural sparsity pattern of a Jacobian: `true` where the entry is not the
-/// constant zero.
-pub fn sparsity<K: Field>(ctx: &Graph<K>, jac: &[Vec<ExprId>]) -> Vec<Vec<bool>> {
-    jac.iter()
-        .map(|row| row.iter().map(|&e| !ctx.is_zero(e)).collect())
         .collect()
 }

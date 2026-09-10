@@ -40,7 +40,7 @@ fn cancels_and_factors() {
     let mut env = std::collections::HashMap::new();
     env.insert(rsdag::node::SymbolId(0), 1.5);
     env.insert(rsdag::node::SymbolId(1), -2.0);
-    let v = rsdag::eval::eval_real(&g, &env, &[e, out]);
+    let v = rsdag::eval(&g, &[e, out], &env);
     assert_eq!(v[0], v[1]);
     // x * (1/x) -> 1
     let inv = g.recip(x);

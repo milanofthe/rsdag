@@ -113,13 +113,13 @@ fn evaluates_admittance_like_expression() {
     // R=1k, C=1u, omega=1000 rad/s  ->  Y = 1e-3 + j*1e-3
     let val = eval_named(
         &mut ctx,
-        y,
+        &[y],
         &[
             ("R", Complex64::new(1000.0, 0.0)),
             ("C", Complex64::new(1e-6, 0.0)),
             ("s", Complex64::new(0.0, 1000.0)),
         ],
-    );
+    )[0];
     assert!((val.re - 1e-3).abs() < 1e-12);
     assert!((val.im - 1e-3).abs() < 1e-12);
 }
@@ -142,12 +142,12 @@ fn unary_folding_and_eval() {
     let e = ctx.exp(arg);
     let got = eval_named(
         &mut ctx,
-        e,
+        &[e],
         &[
             ("v", Complex64::new(0.5, 0.0)),
             ("Vt", Complex64::new(0.025, 0.0)),
         ],
-    );
+    )[0];
     let want = (0.5_f64 / 0.025).exp();
     assert!((got.re - want).abs() <= want * 1e-12);
 }

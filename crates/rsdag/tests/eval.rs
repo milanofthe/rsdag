@@ -21,6 +21,6 @@ fn complex_eval_is_linear_on_shared_dag() {
     };
     let mut env = HashMap::new();
     env.insert(sid, Complex64::new(1.0, 0.0));
-    let v = eval(&ctx, e, &env);
+    let v = eval(&ctx, &[e], &env)[0];
     assert!((v.re - 2f64.powi(40)).abs() < 1.0, "got {}", v.re);
 }

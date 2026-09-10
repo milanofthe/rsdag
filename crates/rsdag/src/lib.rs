@@ -29,15 +29,14 @@ pub mod tape;
 pub(crate) mod transform;
 
 pub use autodiff::{
-    differentiate, gradient, hessian, jacobian, sparse_jacobian, sparsity, time_derivative,
-    SparseRows,
+    differentiate, gradient, hessian, sparse_jacobian, time_derivative, SparseRows,
 };
 pub use builder::{Builder, Numeric};
 pub use display::to_string;
-pub use eval::{eval, eval_named, eval_real, eval_real_all};
+pub use eval::{eval, eval_named};
 pub use extern_fn::ExternBundle;
 pub use field::{ratio_powi, Field, F64};
-pub use func::{CompiledBody, FuncId, Function, FunctionBody, Output, OutputId};
+pub use func::{Body, FuncId, Function, FunctionBody, Output, OutputId};
 pub use graph::Graph;
 pub use mathfn::lower_call;
 pub use module::{IdMap, Module, MODULE_VERSION};
@@ -56,4 +55,4 @@ pub use tape::{NoTrace, SpecializedTape, Tape, TapeVisitor, TraceSink};
 /// tape evaluated in a [`Scalar`] `T`; the storage is `f64`, the typed
 /// evaluators convert once).
 pub type Program = Tape;
-pub use transform::{substitute, substitute_expr, substitute_many, substitute_many_all};
+pub use transform::substitute;

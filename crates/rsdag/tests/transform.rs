@@ -11,7 +11,7 @@ fn sid<K: Field>(ctx: &mut Graph<K>, name: &str) -> SymbolId {
 }
 
 #[test]
-fn substitute_many_is_simultaneous() {
+fn substitution_is_simultaneous() {
     // Swap x<->y in x - y: simultaneous, so the result is y - x (not 0).
     let mut ctx: Graph = Graph::new();
     let x = ctx.sym("x");
@@ -21,7 +21,7 @@ fn substitute_many_is_simultaneous() {
     let mut map: HashMap<SymbolId, ExprId> = HashMap::default();
     map.insert(xs, y);
     map.insert(ys, x);
-    let g = substitute_many(&mut ctx, f, &map);
+    let g = substitute(&mut ctx, &[f], &map)[0];
     let want = ctx.sub(y, x);
     assert_eq!(g, want);
 }

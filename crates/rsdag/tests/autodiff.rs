@@ -48,11 +48,11 @@ fn derivative_matches_finite_difference() {
     let h = 1e-6;
     for &x0 in &[-0.1, 0.0, 0.1, 0.3] {
         env.insert(v_id, Complex64::new(x0, 0.0));
-        let analytic = eval(&ctx, df, &env).re;
+        let analytic = eval(&ctx, &[df], &env)[0].re;
         env.insert(v_id, Complex64::new(x0 + h, 0.0));
-        let fp = eval(&ctx, f, &env).re;
+        let fp = eval(&ctx, &[f], &env)[0].re;
         env.insert(v_id, Complex64::new(x0 - h, 0.0));
-        let fm = eval(&ctx, f, &env).re;
+        let fm = eval(&ctx, &[f], &env)[0].re;
         let numeric = (fp - fm) / (2.0 * h);
         assert!(
             (analytic - numeric).abs() <= 1e-4 * (1.0 + analytic.abs()),
@@ -77,7 +77,7 @@ fn exp_derivative_shares_primal_and_matches_limexp_tail() {
     let mut env: HashMap<SymbolId, f64> = HashMap::new();
     for &xv in &[-3.0, 0.0, 10.0, EXP_LIMIT, EXP_LIMIT + 5.0, 500.0] {
         env.insert(xid, xv);
-        let v = rsdag::eval::eval_real(&ctx, &env, &[de])[0];
+        let v = rsdag::eval(&ctx, &[de], &env)[0];
         let want = if xv <= EXP_LIMIT {
             xv.exp()
         } else {
@@ -104,7 +104,7 @@ fn select_and_opaque_autodiff() {
     let eval_at = |ctx: &Graph, e: ExprId, xv: f64| {
         let mut env = HashMap::new();
         env.insert(xid, Complex64::new(xv, 0.0));
-        eval(ctx, e, &env).re
+        eval(ctx, &[e], &env)[0].re
     };
     assert!((eval_at(&ctx, df, 3.0) - 6.0).abs() < 1e-9); // 2*3
     assert!((eval_at(&ctx, df, -2.0) + 1.0).abs() < 1e-9); // -1
@@ -168,8 +168,8 @@ fn gradient_matches_forward_mode() {
         env.insert(ys, Complex64::new(yv, 0.0));
         env.insert(zs, Complex64::new(zv, 0.0));
         for (g, d) in grad.iter().zip(&fwd) {
-            let gv = eval(&ctx, *g, &env).re;
-            let dv = eval(&ctx, *d, &env).re;
+            let gv = eval(&ctx, &[*g], &env)[0].re;
+            let dv = eval(&ctx, &[*d], &env)[0].re;
             assert!(
                 (gv - dv).abs() <= 1e-12 * (1.0 + dv.abs()),
                 "at ({xv},{yv},{zv}): reverse={gv} forward={dv}"
@@ -217,8 +217,8 @@ fn hessian_is_symmetric_and_correct() {
     env.insert(ys, Complex64::new(-0.8, 0.0));
     let (xv, yv) = (0.6_f64, -0.8_f64);
     let want_xy = (xv * yv).exp() * (1.0 + xv * yv) + 3.0 * xv * xv;
-    let h01 = eval(&ctx, h[0][1], &env).re;
-    let h10 = eval(&ctx, h[1][0], &env).re;
+    let h01 = eval(&ctx, &[h[0][1]], &env)[0].re;
+    let h10 = eval(&ctx, &[h[1][0]], &env)[0].re;
     assert!((h01 - want_xy).abs() <= 1e-12 * (1.0 + want_xy.abs()));
     assert!((h10 - want_xy).abs() <= 1e-12 * (1.0 + want_xy.abs()));
     // Third order by repeated application: d3f/dx3 = 6y + y^3*exp(xy).
@@ -226,12 +226,12 @@ fn hessian_is_symmetric_and_correct() {
     let gxx = differentiate(&mut ctx, gx, xs);
     let gxxx = differentiate(&mut ctx, gxx, xs);
     let want3 = 6.0 * yv + yv.powi(3) * (xv * yv).exp();
-    let got3 = eval(&ctx, gxxx, &env).re;
+    let got3 = eval(&ctx, &[gxxx], &env)[0].re;
     assert!((got3 - want3).abs() <= 1e-12 * (1.0 + want3.abs()));
 }
 
 #[test]
-fn jacobian_and_sparsity() {
+fn the_jacobian_is_sparse() {
     let mut ctx: Graph = Graph::new();
     // r0 = a*x + b*y ; r1 = x  (so dr1/dy = 0)
     let x = ctx.sym("x");
@@ -245,7 +245,12 @@ fn jacobian_and_sparsity() {
 
     let x_id = sid(&mut ctx, "x");
     let y_id = sid(&mut ctx, "y");
-    let jac = jacobian(&mut ctx, &[r0, r1], &[x_id, y_id]);
-    let sp = sparsity(&ctx, &jac);
-    assert_eq!(sp, vec![vec![true, true], vec![true, false]]);
+    let jac = sparse_jacobian(&mut ctx, &[r0, r1], &[x_id, y_id]);
+    let pattern: Vec<Vec<usize>> = jac
+        .iter()
+        .map(|row| row.iter().map(|&(j, _)| j).collect())
+        .collect();
+    assert_eq!(pattern, vec![vec![0, 1], vec![0]]);
+    assert_eq!(jac[0][0].1, a);
+    assert_eq!(jac[1][0].1, ctx.one());
 }

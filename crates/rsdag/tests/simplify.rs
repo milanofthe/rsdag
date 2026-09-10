@@ -1,4 +1,4 @@
-use rsdag::eval::eval_real;
+use rsdag::eval;
 use rsdag::*;
 use std::collections::HashMap;
 
@@ -14,11 +14,11 @@ fn rebuild_drops_dead_nodes_and_keeps_values() {
     let n_before = g.len();
     let (h, roots) = rebuild(&g, &[root]);
     assert!(h.len() < n_before, "{} < {n_before}", h.len());
-    let mut env = HashMap::new();
+    let mut env: HashMap<SymbolId, f64> = HashMap::new();
     env.insert(rsdag::node::SymbolId(0), 0.7);
     env.insert(rsdag::node::SymbolId(1), -1.3);
-    let a = eval_real(&g, &env, &[root]);
-    let b = eval_real(&h, &env, &roots);
+    let a = eval(&g, &[root], &env);
+    let b = eval(&h, &roots, &env);
     assert_eq!(a[0].to_bits(), b[0].to_bits());
     assert_eq!(h.symbol_name(rsdag::node::SymbolId(1)), "y");
 }
@@ -37,8 +37,8 @@ fn rebuild_carries_functions_and_calls() {
     let c = g.call(f, 0, &[x]);
     let root = g.add(c, x);
     let (h, roots) = rebuild(&g, &[root]);
-    let mut env = HashMap::new();
+    let mut env: HashMap<SymbolId, f64> = HashMap::new();
     env.insert(rsdag::node::SymbolId(1), 3.0);
-    assert_eq!(eval_real(&h, &env, &roots)[0], 12.0);
+    assert_eq!(eval(&h, &roots, &env)[0], 12.0);
     assert_eq!(h.n_funcs(), 1);
 }

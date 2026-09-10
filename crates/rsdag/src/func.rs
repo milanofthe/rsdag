@@ -17,7 +17,7 @@
 //!   the differential reference (every instance as its own graph) is produced;
 //! - **evaluation** runs the body once per distinct argument list and reads
 //!   the outputs, in the arena evaluator through a per-function tape and in a
-//!   compiled tape through the body the solver registers (its native forms
+//!   compiled tape through its body (its native forms
 //!   and lane batching); a batch of calls into one function is what the SIMD
 //!   lanes evaluate.
 //!
@@ -58,17 +58,17 @@ pub enum Output {
 
 /// How a function's outputs are computed.
 pub enum FunctionBody {
-    /// Outputs are expressions over the parameters; a solver may register a
-    /// compiled body for them (see [`Function::compiled`]).
+    /// Outputs are expressions over the parameters.
     Symbolic,
     /// Outputs are slots of a numeric bundle.
     Extern(Arc<dyn ExternBundle>),
 }
 
-/// A compiled body registered for a symbolic function: which output each
-/// bundle slot carries, so a tape can pick outputs without the symbolic
-/// expressions.
-pub struct CompiledBody {
+/// A function as something to call: a bundle and which of its slots
+/// carries each output, so a tape or a sweep picks outputs without the
+/// symbolic expressions. An extern function is its bundle; a symbolic one
+/// is its interpreted body.
+pub struct Body {
     pub bundle: Arc<dyn ExternBundle>,
     /// `slot_of[out]` is the bundle slot holding output `out`, `None` when
     /// the body was compiled without it.
@@ -88,8 +88,6 @@ pub struct Function {
     pub body: FunctionBody,
     /// Derivative output `d outputs[out] / d params[param]`, by index.
     pub(crate) deriv_index: HashMap<(u32, u32), u32>,
-    /// The solver's compiled body (symbolic functions only).
-    pub compiled: Option<CompiledBody>,
 }
 
 /// A function body evaluated by the interpreter: the fallback every consumer
@@ -121,14 +119,23 @@ impl ExternBundle for InterpretedBody {
 }
 
 impl Function {
-    /// An evaluator for every symbolic output of the function, interpreted
-    /// (see [`InterpretedBody`]); `None` for an extern function.
-    pub fn interpreted_body<K: crate::field::Field>(
-        &self,
-        ctx: &crate::graph::Graph<K>,
-    ) -> Option<CompiledBody> {
-        if self.is_extern() {
-            return None;
+    /// The function as something to call: an extern function is its bundle
+    /// with the slot of each output, a symbolic one is its body compiled to
+    /// a tape and interpreted (see [`InterpretedBody`]), every expression
+    /// output a slot.
+    pub fn body<K: crate::field::Field>(&self, ctx: &crate::graph::Graph<K>) -> Body {
+        if let FunctionBody::Extern(b) = &self.body {
+            return Body {
+                bundle: b.clone(),
+                slot_of: self
+                    .outputs
+                    .iter()
+                    .map(|o| match o {
+                        Output::Slot(k) => Some(*k),
+                        _ => None,
+                    })
+                    .collect(),
+            };
         }
         let mut roots = Vec::new();
         let mut slot_of = Vec::with_capacity(self.outputs.len());
@@ -142,13 +149,13 @@ impl Function {
             }
         }
         let tape = crate::tape::Tape::compile(ctx, &roots, &self.params);
-        Some(CompiledBody {
+        Body {
             bundle: Arc::new(InterpretedBody {
                 tape,
                 n_out: roots.len(),
             }),
             slot_of,
-        })
+        }
     }
 
     /// Indices of the parameters carrying `role`, in argument order.
@@ -167,26 +174,5 @@ impl Function {
 
     pub fn is_extern(&self) -> bool {
         matches!(self.body, FunctionBody::Extern(_))
-    }
-
-    /// The bundle evaluating this function and the slot of each output:
-    /// the extern body itself, or the compiled body a solver registered.
-    pub fn evaluator(&self) -> Option<(&Arc<dyn ExternBundle>, Vec<Option<u32>>)> {
-        match &self.body {
-            FunctionBody::Extern(b) => Some((
-                b,
-                self.outputs
-                    .iter()
-                    .map(|o| match o {
-                        Output::Slot(k) => Some(*k),
-                        _ => None,
-                    })
-                    .collect(),
-            )),
-            FunctionBody::Symbolic => self
-                .compiled
-                .as_ref()
-                .map(|c| (&c.bundle, c.slot_of.clone())),
-        }
     }
 }

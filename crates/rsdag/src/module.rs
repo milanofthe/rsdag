@@ -202,9 +202,8 @@ impl<K: Field> Graph<K> {
                 _ => {}
             }
             let pool = &module.arg_pool;
-            let e = self.rebuild_node(
+            let e = self.intern_node(
                 node,
-                crate::graph::Rebuild::Exact,
                 |n| match *n {
                     Node::Const(c) => module.consts[c.0 as usize].clone(),
                     _ => unreachable!("only a constant asks for its value"),

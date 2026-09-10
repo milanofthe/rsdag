@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::eval::eval_real;
+use crate::eval::eval;
 use crate::field::Field;
 use crate::graph::Graph;
 use crate::node::{ExprId, Node, ReduceOp, SymbolId};
@@ -291,7 +291,7 @@ pub fn prune_poly<K: Field>(
     let mut terms: Vec<(usize, ExprId, f64)> = Vec::new();
     for (k, &coeff) in poly.iter().enumerate() {
         for t in expand_terms(g, coeff) {
-            let v = eval_real(g, env, &[t])[0];
+            let v = eval(g, &[t], env)[0];
             terms.push((k, t, v.abs() * w0.powi(k as i32)));
         }
     }

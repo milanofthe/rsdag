@@ -37,19 +37,18 @@ fn ring(g: &mut Graph<F64>, n: usize) -> (Vec<ExprId>, Vec<SymbolId>) {
 }
 
 #[test]
-fn the_sparse_jacobian_is_the_dense_one() {
+fn the_sparse_jacobian_holds_every_nonzero_derivative() {
     let mut g: Graph<F64> = Graph::new();
     let (f, syms) = ring(&mut g, 40);
     let sparse = sparse_jacobian(&mut g, &f, &syms);
-    let dense = rsdag::jacobian(&mut g, &f, &syms);
     for (i, row) in sparse.iter().enumerate() {
         assert_eq!(row.len(), 3, "row {i} touches three unknowns");
-        for &(j, e) in row {
-            assert_eq!(e, dense[i][j]);
-        }
-        for (j, &e) in dense[i].iter().enumerate() {
-            let present = row.iter().any(|&(c, _)| c == j);
-            assert_eq!(!g.is_zero(e), present, "entry ({i}, {j})");
+        for (j, &s) in syms.iter().enumerate() {
+            let d = rsdag::differentiate(&mut g, f[i], s);
+            match row.iter().find(|&&(c, _)| c == j) {
+                Some(&(_, e)) => assert_eq!(e, d, "entry ({i}, {j})"),
+                None => assert!(g.is_zero(d), "entry ({i}, {j}) is missing"),
+            }
         }
     }
 }

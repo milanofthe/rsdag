@@ -480,7 +480,7 @@ impl Case {
             .map(|row| {
                 let env: std::collections::HashMap<SymbolId, f64> =
                     self.syms.iter().copied().zip(row.iter().copied()).collect();
-                crate::eval_real(&self.graph, &env, &self.roots)
+                crate::eval(&self.graph, &self.roots, &env)
             })
             .collect()
     }

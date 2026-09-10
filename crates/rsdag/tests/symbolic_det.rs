@@ -12,7 +12,7 @@ fn determinant_of_a_diagonal_and_a_2x2() {
     for (i, v) in [2.0, 3.0, 5.0].iter().enumerate() {
         env.insert(rsdag::node::SymbolId(i as u32), *v);
     }
-    assert_eq!(rsdag::eval::eval_real(&g, &env, &[det])[0], 30.0);
+    assert_eq!(rsdag::eval(&g, &[det], &env)[0], 30.0);
     let det2 = determinant(&mut g, &[vec![a, b], vec![c, d]]);
     assert_eq!(to_string(&g, det2), "(a*d + -b*c)");
     assert_eq!(

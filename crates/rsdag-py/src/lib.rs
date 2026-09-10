@@ -448,8 +448,16 @@ impl Scope {
         let ids = self.output_ids(outputs)?;
         let wrt = self.wrt_symbols(&wrt)?;
         let mut g = self.g.borrow_mut();
-        let rows = rsdag::jacobian(&mut g, &ids, &wrt);
-        let flat: Vec<ExprId> = rows.into_iter().flatten().collect();
+        let zero = g.zero();
+        let rows = rsdag::sparse_jacobian(&mut g, &ids, &wrt);
+        let mut flat: Vec<ExprId> = Vec::with_capacity(ids.len() * wrt.len());
+        for row in rows {
+            let mut dense = vec![zero; wrt.len()];
+            for (j, e) in row {
+                dense[j] = e;
+            }
+            flat.extend(dense);
+        }
         let tape = Tape::compile(&g, &flat, &self.inputs);
         Ok(Program::new(tape, self.inputs.len(), flat.len()))
     }
