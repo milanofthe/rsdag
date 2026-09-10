@@ -75,10 +75,7 @@ impl NativeTape {
 
     /// Compile with `chunk_ops` ops per emitted function.
     pub fn compile_with(tape: &Tape, chunk_ops: usize) -> Result<NativeTape, JitError> {
-        if !cfg!(any(
-            target_arch = "aarch64",
-            all(target_arch = "x86_64", unix)
-        )) {
+        if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
             return Err(JitError::Unsupported);
         }
         let mut rec = Recorder::default();
