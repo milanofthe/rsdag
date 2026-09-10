@@ -26,12 +26,12 @@ use rustc_hash::FxHashMap;
 
 use crate::host::{self, Bundles};
 use crate::ir::{ROp, Recorder};
-use crate::isa::{Arith, Base, IArg, Isa, Round};
+use crate::isa::{Arg, Arith, Base, IArg, Isa, Round};
 use crate::{JitError, CHUNK_OPS};
 
 #[cfg(target_arch = "aarch64")]
 type Arch = crate::aarch64::A64;
-#[cfg(all(target_arch = "x86_64", unix))]
+#[cfg(target_arch = "x86_64")]
 type Arch = crate::x86_64::X64;
 
 type ChunkFn = extern "C" fn(*mut f64, *const f64, *const Bundles);
@@ -75,10 +75,7 @@ impl NativeTape {
 
     /// Compile with `chunk_ops` ops per emitted function.
     pub fn compile_with(tape: &Tape, chunk_ops: usize) -> Result<NativeTape, JitError> {
-        if !cfg!(any(
-            target_arch = "aarch64",
-            all(target_arch = "x86_64", unix)
-        )) {
+        if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
             return Err(JitError::Unsupported);
         }
         let mut rec = Recorder::default();
@@ -307,15 +304,15 @@ impl<I: Isa> Emitter<I> {
         r
     }
     /// A host call; the caller-saved part of the cache is gone afterwards.
-    fn call(&mut self, addr: *const (), fargs: &[u8], iargs: &[IArg]) {
-        self.isa.call(addr, fargs, iargs);
+    fn call(&mut self, addr: *const (), args: &[Arg]) {
+        self.isa.call(addr, args);
         for i in I::SAVED..I::CACHE.len() {
             self.drop_index(i);
         }
     }
     /// A host call whose result is the value of `dst`.
-    fn call_into(&mut self, dst: u32, addr: *const (), fargs: &[u8], iargs: &[IArg]) {
-        self.call(addr, fargs, iargs);
+    fn call_into(&mut self, dst: u32, addr: *const (), args: &[Arg]) {
+        self.call(addr, args);
         let r = self.fresh();
         self.isa.mov(r, I::RESULT);
         self.put(dst, r);
@@ -371,7 +368,11 @@ impl<I: Isa> Emitter<I> {
                 if self.isa.fma(r, x, y, z) {
                     self.put(dst, r);
                 } else {
-                    self.call_into(dst, host::h_fma as *const (), &[x, y, z], &[]);
+                    self.call_into(
+                        dst,
+                        host::h_fma as *const (),
+                        &[Arg::F(x), Arg::F(y), Arg::F(z)],
+                    );
                 }
             }
             ROp::Neg(dst, a) => {
@@ -394,16 +395,19 @@ impl<I: Isa> Emitter<I> {
                     self.call_into(
                         dst,
                         host::h_powi as *const (),
-                        &[x],
-                        &[IArg::Imm(n as i64 as u64)],
+                        &[Arg::F(x), Arg::I(IArg::Imm(n as i64 as u64))],
                     );
                 }
             },
             ROp::Unary(dst, uop, a) => self.unary(dst, uop, a),
             ROp::Binary(dst, bop, a, b) => {
                 let (x, y) = (self.get(a), self.get(b));
-                let code = IArg::Imm(BinOp::code(bop) as u64);
-                self.call_into(dst, host::h_binary as *const (), &[x, y], &[code]);
+                let code = Arg::I(IArg::Imm(BinOp::code(bop) as u64));
+                self.call_into(
+                    dst,
+                    host::h_binary as *const (),
+                    &[code, Arg::F(x), Arg::F(y)],
+                );
             }
             ROp::Cmp(dst, cop, a, b) => {
                 let (x, y) = (self.get(a), self.get(b));
@@ -430,12 +434,12 @@ impl<I: Isa> Emitter<I> {
                 }
                 ReduceOp::Min | ReduceOp::Max => {
                     let at = self.gather(args);
-                    let iargs = [
-                        IArg::Imm(host::reduce_code(rop)),
-                        IArg::WorkAddr(at),
-                        IArg::Imm(args.len() as u64),
+                    let args = [
+                        Arg::I(IArg::Imm(host::reduce_code(rop))),
+                        Arg::I(IArg::WorkAddr(at)),
+                        Arg::I(IArg::Imm(args.len() as u64)),
                     ];
-                    self.call_into(dst, host::h_reduce as *const (), &[], &iargs);
+                    self.call_into(dst, host::h_reduce as *const (), &args);
                 }
             },
             ROp::Dot(dst, ref a, ref b) => {
@@ -445,27 +449,27 @@ impl<I: Isa> Emitter<I> {
             ROp::Bundle(idx, ref args, base) => {
                 let at = self.gather(args);
                 let out = (self.layout.scratch + base as usize) * 8;
-                let iargs = [
-                    IArg::Bundles,
-                    IArg::Imm(idx as u64),
-                    IArg::WorkAddr(at),
-                    IArg::Imm(args.len() as u64),
-                    IArg::WorkAddr(out),
+                let args = [
+                    Arg::I(IArg::Bundles),
+                    Arg::I(IArg::Imm(idx as u64)),
+                    Arg::I(IArg::WorkAddr(at)),
+                    Arg::I(IArg::Imm(args.len() as u64)),
+                    Arg::I(IArg::WorkAddr(out)),
                 ];
-                self.call(host::h_bundle as *const (), &[], &iargs);
+                self.call(host::h_bundle as *const (), &args);
             }
             ROp::BundleBatch(idx, ref args, n_groups, n_args, base0) => {
                 let at = self.gather(args);
                 let out = (self.layout.scratch + base0 as usize) * 8;
-                let iargs = [
-                    IArg::Bundles,
-                    IArg::Imm(idx as u64),
-                    IArg::WorkAddr(at),
-                    IArg::Imm(n_groups as u64),
-                    IArg::Imm(n_args as u64),
-                    IArg::WorkAddr(out),
+                let args = [
+                    Arg::I(IArg::Bundles),
+                    Arg::I(IArg::Imm(idx as u64)),
+                    Arg::I(IArg::WorkAddr(at)),
+                    Arg::I(IArg::Imm(n_groups as u64)),
+                    Arg::I(IArg::Imm(n_args as u64)),
+                    Arg::I(IArg::WorkAddr(out)),
                 ];
-                self.call(host::h_bundle_batch as *const (), &[], &iargs);
+                self.call(host::h_bundle_batch as *const (), &args);
             }
             ROp::Pick(dst, idx) => {
                 let r = self.fresh();
@@ -517,8 +521,13 @@ impl<I: Isa> Emitter<I> {
             self.put(dst, r);
         } else {
             let (addr, code) = host::unary_addr(uop);
-            let iargs: Vec<IArg> = code.into_iter().map(|c| IArg::Imm(c as u64)).collect();
-            self.call_into(dst, addr, &[x], &iargs);
+            // The coded routine takes the op first: `h_unary_ext(op, x)`.
+            let args: Vec<Arg> = code
+                .into_iter()
+                .map(|c| Arg::I(IArg::Imm(c as u64)))
+                .chain([Arg::F(x)])
+                .collect();
+            self.call_into(dst, addr, &args);
         }
     }
 
@@ -596,9 +605,12 @@ fn emit_chunk(ops: &[ROp], layout: Layout) -> Result<Code, JitError> {
 
 struct Mapping {
     ptr: *mut u8,
+    /// `VirtualFree` releases by base address alone; `munmap` wants the length.
+    #[cfg_attr(windows, allow(dead_code))]
     len: usize,
 }
 
+#[cfg(unix)]
 impl Mapping {
     fn new(bytes: &[u8]) -> Result<Mapping, JitError> {
         let len = bytes.len().max(1);
@@ -644,6 +656,7 @@ impl Mapping {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Mapping {
     fn drop(&mut self) {
         unsafe {
@@ -657,7 +670,51 @@ extern "C" {
     fn pthread_jit_write_protect_np(enabled: libc::c_int);
     fn sys_icache_invalidate(start: *mut libc::c_void, len: libc::size_t);
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 extern "C" {
     fn __clear_cache(start: *mut libc::c_char, end: *mut libc::c_char);
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn VirtualAlloc(addr: *mut u8, size: usize, kind: u32, protect: u32) -> *mut u8;
+    fn VirtualFree(addr: *mut u8, size: usize, kind: u32) -> i32;
+    fn GetCurrentProcess() -> isize;
+    fn FlushInstructionCache(process: isize, addr: *const u8, size: usize) -> i32;
+}
+
+#[cfg(windows)]
+impl Mapping {
+    fn new(bytes: &[u8]) -> Result<Mapping, JitError> {
+        const MEM_COMMIT_RESERVE: u32 = 0x1000 | 0x2000;
+        const PAGE_EXECUTE_READWRITE: u32 = 0x40;
+        let len = bytes.len().max(1);
+        unsafe {
+            let ptr = VirtualAlloc(
+                std::ptr::null_mut(),
+                len,
+                MEM_COMMIT_RESERVE,
+                PAGE_EXECUTE_READWRITE,
+            );
+            if ptr.is_null() {
+                return Err(JitError::Codegen(
+                    "VirtualAlloc of executable memory failed".into(),
+                ));
+            }
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+            FlushInstructionCache(GetCurrentProcess(), ptr, bytes.len());
+            Ok(Mapping { ptr, len })
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Mapping {
+    fn drop(&mut self) {
+        const MEM_RELEASE: u32 = 0x8000;
+        unsafe {
+            VirtualFree(self.ptr, 0, MEM_RELEASE);
+        }
+    }
 }

@@ -31,6 +31,14 @@ pub(crate) enum IArg {
     Bundles,
 }
 
+/// One argument of a host call, in the routine's signature order: the
+/// conventions differ in whether floats and integers are counted together.
+#[derive(Clone, Copy)]
+pub(crate) enum Arg {
+    F(u8),
+    I(IArg),
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Arith {
     Add,
@@ -84,7 +92,7 @@ pub(crate) trait Isa {
     /// `d = (c != 0) ? t : e` (a NaN condition selects `t`).
     fn select_nz(&mut self, c: u8, t: u8, e: u8, d: u8);
 
-    /// Call `addr` with the float arguments in `fargs` (in order) and the
-    /// integer arguments in `iargs` (in order); an f64 result is in `RESULT`.
-    fn call(&mut self, addr: *const (), fargs: &[u8], iargs: &[IArg]);
+    /// Call `addr` with `args` in signature order; an f64 result is in
+    /// `RESULT`.
+    fn call(&mut self, addr: *const (), args: &[Arg]);
 }

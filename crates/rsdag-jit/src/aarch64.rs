@@ -1,4 +1,4 @@
-//! AArch64 encodings (AAPCS64).
+//! AArch64 encodings (AAPCS64, which Windows on ARM shares).
 //!
 //! `x19` work, `x20` inputs, `x21` bundles; `x9` and `x16` scratch; `d0`
 //! and `d1` carry call arguments and `d0` the result. The cache is `d8` to
@@ -185,22 +185,30 @@ impl Isa for A64 {
         self.fcsel(d as u32, t as u32, e as u32, COND_NE);
     }
 
-    fn call(&mut self, addr: *const (), fargs: &[u8], iargs: &[IArg]) {
-        for (k, &r) in fargs.iter().enumerate() {
-            self.mov(k as u8, r);
-        }
-        for (k, arg) in iargs.iter().enumerate() {
-            let xk = k as u32;
+    fn call(&mut self, addr: *const (), args: &[Arg]) {
+        // Floats and integers are counted apart: d0.. and x0.. in order.
+        let (mut nf, mut ni) = (0u8, 0u32);
+        for arg in args {
             match *arg {
-                IArg::Imm(v) => self.mov_imm(xk, v),
-                IArg::WorkAddr(off) if off < 4096 => {
-                    self.w(0x9100_0000 | ((off as u32) << 10) | (WORK << 5) | xk);
+                Arg::F(r) => {
+                    self.mov(nf, r);
+                    nf += 1;
                 }
-                IArg::WorkAddr(off) => {
-                    self.mov_imm(9, off as u64);
-                    self.w(0x8B00_0000 | (9 << 16) | (WORK << 5) | xk);
+                Arg::I(iarg) => {
+                    let xk = ni;
+                    ni += 1;
+                    match iarg {
+                        IArg::Imm(v) => self.mov_imm(xk, v),
+                        IArg::WorkAddr(off) if off < 4096 => {
+                            self.w(0x9100_0000 | ((off as u32) << 10) | (WORK << 5) | xk);
+                        }
+                        IArg::WorkAddr(off) => {
+                            self.mov_imm(9, off as u64);
+                            self.w(0x8B00_0000 | (9 << 16) | (WORK << 5) | xk);
+                        }
+                        IArg::Bundles => self.w(0xAA00_03E0 | (BUNDLES << 16) | xk),
+                    }
                 }
-                IArg::Bundles => self.w(0xAA00_03E0 | (BUNDLES << 16) | xk),
             }
         }
         self.mov_imm(16, addr as usize as u64);
