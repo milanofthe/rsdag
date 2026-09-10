@@ -3,7 +3,7 @@
 A hash-consed expression graph with symbolic differentiation and a compiled
 evaluator. One graph over exact rational or floating constants, forward and
 reverse derivatives, a flat tape with an interpreter for `f64`, `f32` and
-complex values, a Cranelift JIT with SIMD lanes, a symbolic layer
+complex values, a native code backend, a symbolic layer
 (determinants, polynomials and rational forms, e-graph simplification) and a
 Python tracer.
 
@@ -20,9 +20,9 @@ Design decisions and phases live in the GitHub issues.
   `differentiate`, `gradient` (reverse mode), `jacobian`, `hessian`,
   `rebuild`, `Tape` (interpreter, `eval_typed`, choice specialization) and
   `symbolic` (`determinant`, `collect`, `rational_form`, `simplify_egraph`).
-- `rsdag-jit`: chunked Cranelift JIT (`ChunkedTape`) and SIMD lanes
-  (`LaneTape`, 2 to 16 parameter sets per pass), bit-identical to the
-  interpreter.
+- `rsdag-jit`: the native backend (`NativeTape`), machine code emitted
+  straight from the tape for AArch64 and x86-64, bit-identical to the
+  interpreter, with `eval_many` for instances in parallel.
 - `rsdag-py`: the Python package `rsdag` (`trace`, `jit`, `jacobian`,
   `grad`, `where`, comparison helpers), built with maturin.
 

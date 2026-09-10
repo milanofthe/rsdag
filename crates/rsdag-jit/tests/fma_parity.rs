@@ -1,10 +1,10 @@
-//! With contraction on, the interpreter, the chunked JIT and every lane
-//! width fuse the same multiply-adds with a real fused instruction, so they
-//! still agree with each other bit for bit.
+//! With contraction on, the interpreter and the native backend fuse the
+//! same multiply-adds with a real fused instruction, so they still agree
+//! with each other bit for bit.
 
 use rsdag::synth::{build, inputs, Spec, Vocabulary};
 use rsdag::{CompileOptions, Graph, Tape, F64};
-use rsdag_jit::{ChunkedTape, LaneTape, CHUNK_OPS, LANE_WIDTHS};
+use rsdag_jit::{NativeTape, CHUNK_OPS};
 
 /// NaN is equal to NaN here: a fused multiply-add that produces one carries
 /// whatever payload the platform's instruction or `fma` routine gives it,
@@ -29,7 +29,7 @@ fn backends_agree_on_a_contracted_program() {
         let (mut w, mut want) = (Vec::new(), Vec::new());
         tape.eval(&row, &mut w, &mut want);
 
-        let jit = ChunkedTape::compile_with(&tape, [3, CHUNK_OPS][seed as usize % 2]).unwrap();
+        let jit = NativeTape::compile_with(&tape, [3, CHUNK_OPS][seed as usize % 2]).unwrap();
         let (mut jw, mut jo) = (Vec::new(), Vec::new());
         jit.eval(&row, &mut jw, &mut jo);
         let bits = |v: &[f64]| -> Vec<String> {
@@ -41,24 +41,5 @@ fn backends_agree_on_a_contracted_program() {
             bits(&jo),
             bits(&want)
         );
-
-        for &width in LANE_WIDTHS.iter() {
-            let lane = LaneTape::compile_lanes(&tape, width, CHUNK_OPS).unwrap();
-            let wide: Vec<f64> = row
-                .iter()
-                .flat_map(|&v| std::iter::repeat_n(v, width))
-                .collect();
-            let (mut lw, mut lo) = (Vec::new(), Vec::new());
-            lane.eval(&wide, &mut lw, &mut lo);
-            for (j, &e) in want.iter().enumerate() {
-                for l in 0..width {
-                    assert!(
-                        same(lo[j * width + l], e),
-                        "seed {seed}, width {width}, lane {l}, output {j}: {} vs {e}",
-                        lo[j * width + l]
-                    );
-                }
-            }
-        }
     }
 }

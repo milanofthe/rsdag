@@ -5,17 +5,12 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Cranelift JIT backend for rsdag programs"
+description = "Native code backend for rsdag programs"
 
 [dependencies]
 rsdag.workspace = true
 rustc-hash.workspace = true
 rayon.workspace = true
-cranelift-codegen.workspace = true
-cranelift-frontend.workspace = true
-cranelift-jit.workspace = true
-cranelift-module.workspace = true
-cranelift-native.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
