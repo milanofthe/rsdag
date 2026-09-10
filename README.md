@@ -61,28 +61,27 @@ with `gt`, `lt`, ... for elementwise conditions on arrays.
 ## Bit-exactness
 
 Every backend computes the same IEEE operation sequence as the interpreter:
-no fast-math, no fused multiply-add, one reference routine per
-transcendental, a fixed four-accumulator order for long reductions.
-`rsdag::synth` generates random programs over the whole op vocabulary, and
-the suites in `crates/rsdag/tests` and `crates/rsdag-jit/tests` pin the
-arena sweep, the tape, the JIT, every lane width and typed evaluation
-against each other on them. `TapeVisitor` documents what a further backend
-has to reproduce.
+no fast-math, fused multiply-add only when asked for (`CompileOptions`),
+one reference routine per transcendental, a fixed four-accumulator order
+for long reductions. `rsdag::synth` generates random programs over the
+whole op vocabulary, and the suites in `crates/rsdag/tests` and
+`crates/rsdag-jit/tests` pin the arena sweep, the tape, the native code and
+typed evaluation against each other on them. `TapeVisitor` documents what
+a further backend has to reproduce.
 
 ## Benchmarks
 
-`cargo run --release --example bench -p rsdag-jit` (add `quick` for the
-small sizes) prices the interpreter, the JIT and the lane widths per tape
-op and checks each against the interpreter bit for bit. Its corpus is wide,
-like an assembled residual or Jacobian: those are thousands of nodes at a
-depth of seven to ten, one level per row, and a narrow corpus prices a
-shape no consumer produces.
+`cargo run --release --example bench -p rsdag-jit --features rsdag/synth`
+prices the interpreter and the native code per tape op, and the compile
+time per op, and checks the two against each other bit for bit. Its corpus
+is wide, like an assembled residual or Jacobian: those are thousands of
+nodes at a depth of seven to ten, one level per row, and a narrow corpus
+prices a shape no consumer produces.
 
-On an M3 a ring op costs about 0.3 to 0.9 ns through the JIT and 3 to 4 ns
-interpreted; an elementary function adds about 1 ns on top of that, because
-it is a call into the same routine the interpreter uses. Lanes pay on
-narrow programs and on batched instances, not on a wide residual, where
-they measure between 0.97x and 1.19x per parameter set.
+On an M3 a ring op costs about 0.5 ns natively and 10 ns interpreted; an
+elementary function adds a call into the same routine the interpreter
+uses. Emitting costs 30 to 60 ns per op on a large program, so a program
+compiles in about the time of a handful of evaluations.
 
 ## Build
 
