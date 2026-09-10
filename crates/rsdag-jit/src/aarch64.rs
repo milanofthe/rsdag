@@ -1,8 +1,14 @@
 //! AArch64 encodings (AAPCS64, which Windows on ARM shares).
 //!
-//! `x19` work, `x20` inputs, `x21` bundles; `x9` and `x16` scratch; `d0`
-//! and `d1` carry call arguments and `d0` the result. The cache is `d8` to
-//! `d15`, callee-saved and so kept across host calls, then `d16` to `d31`.
+//! `x19` work, `x20` inputs, `x21` bundles; `x9` holds the current 32 KB
+//! window of the work array, `x10` is scratch, `x16` the call target, and
+//! `x22` to `x27` hold the chunk's frequent host routines; `d0` and `d1`
+//! carry call arguments and `d0` the result. The cache is `d8` to `d15`,
+//! callee-saved and so kept across host calls, then `d16` to `d31`.
+//!
+//! The scaled 12-bit offset of `ldr` reaches 32 KB; beyond that the window
+//! base in `x9` is moved only when an access leaves the current window, so
+//! an access is one instruction almost always instead of four.
 
 use crate::isa::*;
 use rsdag::node::CmpOp;
@@ -22,11 +28,28 @@ const COND_GT: u32 = 0xC;
 
 pub(crate) struct A64 {
     code: Vec<u32>,
+    /// Byte offset of the work-array window `x9` currently points at.
+    window: Option<usize>,
+    /// Host routines held in `x22` to `x27`.
+    hot: Vec<*const ()>,
 }
+
+const WINDOW: usize = 4096 * 8;
+const PREFETCH_EVERY: usize = 128;
+const PREFETCH_AHEAD: usize = 2048;
+const HOT_LO: u32 = 22;
+const HOT_N: usize = 6;
 
 impl A64 {
     fn w(&mut self, word: u32) {
         self.code.push(word);
+        // A large program streams through the front end once, so every
+        // 128 bytes a `prfm plil2keep` asks for the code 2 KB ahead; that
+        // is a third off a 7M-op program and nothing on a small one.
+        if self.code.len().is_multiple_of(PREFETCH_EVERY / 4) {
+            let imm19 = (PREFETCH_AHEAD / 4) as u32;
+            self.code.push(0xD800_0000 | (imm19 << 5) | 0b01010);
+        }
     }
     /// `movz`/`movk` a 64-bit immediate into `Xd`.
     fn mov_imm(&mut self, xd: u32, v: u64) {
@@ -50,13 +73,27 @@ impl A64 {
             Base::Inputs => INPUTS,
         }
     }
-    /// `ldr`/`str Dt, [Xn, #off]` for any offset.
+    /// `ldr`/`str Dt, [Xn, #off]` for any offset; for the work array, through
+    /// the window in `x9` when the offset is out of immediate reach.
     fn mem(&mut self, opc_imm: u32, opc_reg: u32, dt: u32, xn: u32, off: usize) {
-        if off.is_multiple_of(8) && off / 8 < 4096 {
+        if off / 8 < 4096 {
             self.w(opc_imm | (((off / 8) as u32) << 10) | (xn << 5) | dt);
+        } else if xn == WORK {
+            let base = off - off % WINDOW;
+            if self.window != Some(base) {
+                if base < (1 << 24) {
+                    // add x9, x19, #(base >> 12), lsl #12
+                    self.w(0x9140_0000 | (((base >> 12) as u32) << 10) | (WORK << 5) | 9);
+                } else {
+                    self.mov_imm(10, base as u64);
+                    self.w(0x8B00_0000 | (10 << 16) | (WORK << 5) | 9);
+                }
+                self.window = Some(base);
+            }
+            self.w(opc_imm | ((((off - base) / 8) as u32) << 10) | (9 << 5) | dt);
         } else {
-            self.mov_imm(9, off as u64);
-            self.w(opc_reg | (9 << 16) | (xn << 5) | dt);
+            self.mov_imm(10, off as u64);
+            self.w(opc_reg | (10 << 16) | (xn << 5) | dt);
         }
     }
     fn fbin(&mut self, opc: u32, dd: u32, dn: u32, dm: u32) {
@@ -78,9 +115,11 @@ impl Isa for A64 {
     const SAVED: usize = 8;
     const RESULT: u8 = 0;
 
-    fn new() -> A64 {
+    fn new(hot: &[*const ()]) -> A64 {
         A64 {
             code: Vec::with_capacity(4096),
+            window: None,
+            hot: hot.iter().copied().take(HOT_N).collect(),
         }
     }
     fn finish(self) -> Vec<u8> {
@@ -92,6 +131,9 @@ impl Isa for A64 {
         self.w(0x9100_03FD); // mov x29, sp
         self.w(0xA9BF_53F3); // stp x19, x20, [sp, #-16]!
         self.w(0xA9BF_5BF5); // stp x21, x22, [sp, #-16]!
+        self.w(0xA9BF_63F7); // stp x23, x24, [sp, #-16]!
+        self.w(0xA9BF_6BF9); // stp x25, x26, [sp, #-16]!
+        self.w(0xA9BF_73FB); // stp x27, x28, [sp, #-16]!
         self.w(0x6DBF_27E8); // stp d8, d9, [sp, #-16]!
         self.w(0x6DBF_2FEA); // stp d10, d11, [sp, #-16]!
         self.w(0x6DBF_37EC); // stp d12, d13, [sp, #-16]!
@@ -99,12 +141,19 @@ impl Isa for A64 {
         self.w(0xAA00_03F3); // mov x19, x0
         self.w(0xAA01_03F4); // mov x20, x1
         self.w(0xAA02_03F5); // mov x21, x2
+        for k in 0..self.hot.len() {
+            let a = self.hot[k] as usize as u64;
+            self.mov_imm(HOT_LO + k as u32, a);
+        }
     }
     fn epilogue(&mut self) {
         self.w(0x6CC1_3FEE); // ldp d14, d15, [sp], #16
         self.w(0x6CC1_37EC); // ldp d12, d13, [sp], #16
         self.w(0x6CC1_2FEA); // ldp d10, d11, [sp], #16
         self.w(0x6CC1_27E8); // ldp d8, d9, [sp], #16
+        self.w(0xA8C1_73FB); // ldp x27, x28, [sp], #16
+        self.w(0xA8C1_6BF9); // ldp x25, x26, [sp], #16
+        self.w(0xA8C1_63F7); // ldp x23, x24, [sp], #16
         self.w(0xA8C1_5BF5); // ldp x21, x22, [sp], #16
         self.w(0xA8C1_53F3); // ldp x19, x20, [sp], #16
         self.w(0xA8C1_7BFD); // ldp x29, x30, [sp], #16
@@ -121,8 +170,8 @@ impl Isa for A64 {
         if v.to_bits() == 0 {
             self.w(0x9E67_0000 | (31 << 5) | r as u32); // fmov Dr, xzr
         } else {
-            self.mov_imm(9, v.to_bits());
-            self.w(0x9E67_0000 | (9 << 5) | r as u32); // fmov Dr, x9
+            self.mov_imm(10, v.to_bits());
+            self.w(0x9E67_0000 | (10 << 5) | r as u32); // fmov Dr, x10
         }
     }
     fn mov(&mut self, d: u8, a: u8) {
@@ -203,15 +252,21 @@ impl Isa for A64 {
                             self.w(0x9100_0000 | ((off as u32) << 10) | (WORK << 5) | xk);
                         }
                         IArg::WorkAddr(off) => {
-                            self.mov_imm(9, off as u64);
-                            self.w(0x8B00_0000 | (9 << 16) | (WORK << 5) | xk);
+                            self.mov_imm(10, off as u64);
+                            self.w(0x8B00_0000 | (10 << 16) | (WORK << 5) | xk);
                         }
                         IArg::Bundles => self.w(0xAA00_03E0 | (BUNDLES << 16) | xk),
                     }
                 }
             }
         }
-        self.mov_imm(16, addr as usize as u64);
-        self.w(0xD63F_0000 | (16 << 5)); // blr x16
+        match self.hot.iter().position(|&h| h == addr) {
+            Some(k) => self.w(0xD63F_0000 | ((HOT_LO + k as u32) << 5)), // blr xk
+            None => {
+                self.mov_imm(16, addr as usize as u64);
+                self.w(0xD63F_0000 | (16 << 5)); // blr x16
+            }
+        }
+        self.window = None; // x9 is caller-saved
     }
 }

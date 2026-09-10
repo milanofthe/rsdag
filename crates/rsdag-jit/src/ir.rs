@@ -35,6 +35,50 @@ pub(crate) enum ROp {
 }
 
 impl ROp {
+    /// Every work slot the op reads.
+    pub(crate) fn for_each_read(&self, mut f: impl FnMut(u32)) {
+        match self {
+            ROp::Const(..) | ROp::Input(..) | ROp::Pick(..) => {}
+            ROp::Neg(_, a) | ROp::Powi(_, a, _) | ROp::Unary(_, _, a) => f(*a),
+            ROp::Add(_, a, b)
+            | ROp::Mul(_, a, b)
+            | ROp::Sub(_, a, b)
+            | ROp::Cmp(_, _, a, b)
+            | ROp::Binary(_, _, a, b) => {
+                f(*a);
+                f(*b);
+            }
+            ROp::MulAdd(_, a, b, c) | ROp::Fma(_, a, b, c) | ROp::Select(_, a, b, c) => {
+                f(*a);
+                f(*b);
+                f(*c);
+            }
+            ROp::Reduce(_, _, args) | ROp::Bundle(_, args, _) | ROp::BundleBatch(_, args, ..) => {
+                args.iter().copied().for_each(f)
+            }
+            ROp::Dot(_, a, b) => a.iter().chain(b).copied().for_each(f),
+        }
+    }
+    /// The host routine the op calls, if any.
+    pub(crate) fn host(&self) -> Option<*const ()> {
+        Some(match self {
+            ROp::Unary(_, op, _) => match op {
+                UnaryOp::Sqrt
+                | UnaryOp::Floor
+                | UnaryOp::Ceil
+                | UnaryOp::Trunc
+                | UnaryOp::Abs
+                | UnaryOp::Sign => return None,
+                _ => crate::host::unary_addr(*op).0,
+            },
+            ROp::Binary(..) => crate::host::h_binary as *const (),
+            ROp::Powi(_, _, n) if *n != -1 && *n != 2 => crate::host::h_powi as *const (),
+            ROp::Reduce(_, ReduceOp::Min | ReduceOp::Max, _) => crate::host::h_reduce as *const (),
+            ROp::Bundle(..) => crate::host::h_bundle as *const (),
+            ROp::BundleBatch(..) => crate::host::h_bundle_batch as *const (),
+            _ => return None,
+        })
+    }
     /// How many slots the op hands to a host routine through the gather
     /// area of the work array.
     pub(crate) fn gather_len(&self) -> usize {

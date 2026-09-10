@@ -62,7 +62,10 @@ pub(crate) trait Isa {
     /// Where a host call leaves its f64 result.
     const RESULT: u8;
 
-    fn new() -> Self;
+    /// `hot` lists host routines the chunk calls often, most frequent first;
+    /// an architecture keeps as many of them in callee-saved registers as it
+    /// has to spare, so those calls need no address immediate.
+    fn new(hot: &[*const ()]) -> Self;
     fn finish(self) -> Vec<u8>;
 
     /// Function entry: `fn(work: *mut f64, inputs: *const f64, bundles: *const _)`
