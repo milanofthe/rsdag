@@ -194,11 +194,7 @@ impl NativeTape {
     /// with a work buffer per thread; this is what a batch of identical
     /// devices, a parameter sweep or an ensemble amounts to.
     pub fn eval_many(&self, inputs: &[f64], stride: usize, out: &mut Vec<f64>) {
-        let n = if stride == 0 {
-            0
-        } else {
-            inputs.len() / stride
-        };
+        let n = inputs.len().checked_div(stride).unwrap_or(0);
         let n_out = self.outputs.len();
         out.clear();
         out.resize(n * n_out, 0.0);
