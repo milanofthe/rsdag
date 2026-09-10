@@ -52,8 +52,11 @@ fn compiled_specialized_tape_matches_the_interpreter() {
     for (i, case) in corpus(1000..1150).enumerate() {
         let row = &case.rows[0];
         let (mut w, mut o, mut choices) = (Vec::new(), Vec::new(), Vec::new());
-        case.tape.eval_traced(row, &mut w, &mut o, &mut choices);
-        let spec = case.tape.specialize(&choices);
+        choices.clear();
+        case.tape.eval_with(row, &mut w, &mut o, &mut choices);
+        let spec = case
+            .tape
+            .specialize(&choices, &vec![true; case.tape.n_selects()]);
         let jit = NativeTape::compile_with(spec.tape(), [3, rsdag_jit::CHUNK_OPS][i % 2])
             .expect("compile specialized tape");
 
@@ -109,16 +112,16 @@ fn function_call_and_short_input_parity() {
 
     let (mut w1, mut o1) = (Vec::new(), Vec::new());
     let (mut w2, mut o2) = (Vec::new(), Vec::new());
-    tape.eval(&[0.5, 2.0], &mut w1, &mut o1);
-    jit.eval(&[0.5, 2.0], &mut w2, &mut o2);
+    tape.eval(&[0.5f64, 2.0], &mut w1, &mut o1);
+    jit.eval(&[0.5f64, 2.0], &mut w2, &mut o2);
     assert_eq!(o1[1], 0.25 + 1.0 + 2.0);
     assert_eq!(o1[0].to_bits(), o2[0].to_bits());
     assert_eq!(o1[1].to_bits(), o2[1].to_bits());
 
     // Short input array: interpreter yields NaN for the missing input; the
     // JIT's padding must reproduce that instead of reading out of bounds.
-    tape.eval(&[0.5], &mut w1, &mut o1);
-    jit.eval(&[0.5], &mut w2, &mut o2);
+    tape.eval(&[0.5f64], &mut w1, &mut o1);
+    jit.eval(&[0.5f64], &mut w2, &mut o2);
     assert!(o1[0].is_nan() && o2[0].is_nan());
     assert!(o1[1].is_nan() && o2[1].is_nan());
 }

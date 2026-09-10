@@ -95,7 +95,7 @@ fn the_lowered_values_are_the_expected_ones() {
         let e = lower_call(&mut g, name, &[xe, ye]).unwrap();
         let tape = Tape::compile(&g, &[e], &[s, sy]);
         let (mut w, mut o) = (Vec::new(), Vec::new());
-        tape.eval(&[4.0, 1.0], &mut w, &mut o);
+        tape.eval(&[4.0f64, 1.0], &mut w, &mut o);
         assert_eq!(o[0], want, "{name}");
     }
 }
@@ -124,6 +124,6 @@ fn a_lowered_call_differentiates() {
     };
     let tape = Tape::compile(&g, &[dm], &[s, sy]);
     let (mut w, mut o) = (Vec::new(), Vec::new());
-    tape.eval(&[1.0, 5.0], &mut w, &mut o);
+    tape.eval(&[1.0f64, 5.0], &mut w, &mut o);
     assert_eq!(o[0], 1.0, "d min(x, y)/dx with x below y");
 }

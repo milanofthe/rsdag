@@ -1,6 +1,6 @@
 //! Properties of the tape over synthetic programs: it evaluates like the
 //! arena, a split tape like an unsplit one, a specialization like the choice
-//! it froze, `eval_batch` like the scalar path, and a symbolic derivative
+//! it froze, and a symbolic derivative
 //! like a finite difference.
 //!
 //! The programs come from `rsdag::synth`, so every backend's parity suite
@@ -53,51 +53,6 @@ fn build_branchy(ctx: &mut Graph, rng: &mut Rng, syms: &[ExprId], steps: usize) 
         .vocab(Vocabulary::Elementary)
         .selects(25);
     build_over(ctx, &mut spec, syms)
-}
-
-#[test]
-fn eval_batch_matches_scalar_bit_exact() {
-    // The 4-lane SoA `eval_batch` must reproduce the scalar `eval` exactly: lane
-    // `l` of the batch output equals the scalar evaluation of input set `l`.
-    const L: usize = 4;
-    let mut mismatches = 0;
-    for seed in 1..600u64 {
-        let mut rng = Rng::new(seed.wrapping_mul(0x2545_F491_4F6C_DD1D) | 1);
-        let mut ctx: Graph = Graph::new();
-        let nsym = 1 + rng.below(4);
-        let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
-        let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
-        let steps = 6 + rng.below(20);
-        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, false, true);
-        let tape = Tape::compile(&ctx, &[root], &sym_ids);
-
-        // L distinct input sets; scalar eval each, then one batched eval.
-        let sets: Vec<Vec<f64>> = (0..L)
-            .map(|_| (0..nsym).map(|_| rng.val()).collect())
-            .collect();
-        let mut scalar = [0.0f64; L];
-        let (mut w, mut o) = (Vec::new(), Vec::new());
-        for (l, s) in sets.iter().enumerate() {
-            tape.eval(s, &mut w, &mut o);
-            scalar[l] = o[0];
-        }
-        let batch_in: Vec<[f64; L]> = (0..nsym)
-            .map(|k| std::array::from_fn(|l| sets[l][k]))
-            .collect();
-        let (mut wb, mut ob) = (Vec::new(), Vec::new());
-        tape.eval_batch::<L>(&batch_in, &mut wb, &mut ob);
-
-        for l in 0..L {
-            if !same_bits(scalar[l], ob[0][l]) {
-                mismatches += 1;
-                eprintln!(
-                    "seed {seed} lane {l}: scalar={:?} batch={:?}",
-                    scalar[l], ob[0][l]
-                );
-            }
-        }
-    }
-    assert_eq!(mismatches, 0, "eval_batch diverged from scalar eval");
 }
 
 #[test]
@@ -212,7 +167,7 @@ fn liveness_reuses_slots_on_deep_chains() {
 
     // ... and it still evaluates correctly: x + sum(0..200).
     let (mut work, mut out) = (Vec::new(), Vec::new());
-    tape.eval(&[3.0], &mut work, &mut out);
+    tape.eval(&[3.0f64], &mut work, &mut out);
     let expect = 3.0 + (0..200).map(|i| i as f64).sum::<f64>();
     assert_eq!(out[0], expect);
 }
@@ -276,10 +231,11 @@ fn specialize_pins_and_guards() {
 
     let (mut w, mut o) = (Vec::new(), Vec::new());
     let mut choices = Vec::new();
-    tape.eval_traced(&[1.0], &mut w, &mut o, &mut choices);
+    choices.clear();
+    tape.eval_with(&[1.0f64], &mut w, &mut o, &mut choices);
     assert_eq!(choices, vec![1]);
 
-    let spec = tape.specialize(&choices);
+    let spec = tape.specialize(&choices, &vec![true; tape.n_selects()]);
     assert!(
         spec.n_ops() < tape.n_ops(),
         "select pinning must shorten the tape"
@@ -298,9 +254,10 @@ fn specialize_pins_and_guards() {
         "guard must fire across the branch"
     );
 
-    tape.eval_traced(&[-1.0], &mut w, &mut o, &mut choices);
+    choices.clear();
+    tape.eval_with(&[-1.0f64], &mut w, &mut o, &mut choices);
     assert_eq!(choices, vec![0]);
-    let spec = tape.specialize(&choices);
+    let spec = tape.specialize(&choices, &vec![true; tape.n_selects()]);
     assert!(spec.eval_checked(&[-1.0], &mut w, &mut os));
     assert!(same_bits(os[0], 1.0));
 }
@@ -328,20 +285,22 @@ fn specialized_tape_matches_full_bit_exact() {
         let mut inputs: Vec<f64> = (0..nsym).map(|_| rng.val()).collect();
         let (mut w, mut of, mut os) = (Vec::new(), Vec::new(), Vec::new());
         let mut choices = Vec::new();
-        tape.eval_traced(&inputs, &mut w, &mut of, &mut choices);
-        let mut spec = tape.specialize(&choices);
+        choices.clear();
+        tape.eval_with(&inputs, &mut w, &mut of, &mut choices);
+        let mut spec = tape.specialize(&choices, &vec![true; tape.n_selects()]);
 
         for _ in 0..30 {
             for v in inputs.iter_mut() {
                 // Steps large enough to cross comparison boundaries regularly.
                 *v += rng.val();
             }
-            tape.eval_traced(&inputs, &mut w, &mut of, &mut choices);
+            choices.clear();
+            tape.eval_with(&inputs, &mut w, &mut of, &mut choices);
             if spec.eval_checked(&inputs, &mut w, &mut os) {
                 holds += 1;
             } else {
                 flips += 1;
-                spec = tape.specialize(&choices);
+                spec = tape.specialize(&choices, &vec![true; tape.n_selects()]);
                 assert!(
                     spec.eval_checked(&inputs, &mut w, &mut os),
                     "seed {seed}: fresh trace must validate at its own point"
@@ -434,9 +393,10 @@ fn partial_specialization_checked_evals_bit_exact() {
 
         let inputs: Vec<f64> = (0..nsym).map(|_| rng.val()).collect();
         let (mut w, mut o, mut choices) = (Vec::new(), Vec::new(), Vec::new());
-        tape.eval_traced(&inputs, &mut w, &mut o, &mut choices);
+        choices.clear();
+        tape.eval_with(&inputs, &mut w, &mut o, &mut choices);
         let pin: Vec<bool> = (0..tape.n_selects()).map(|_| rng.below(2) == 0).collect();
-        let spec = tape.specialize_partial(&choices, &pin);
+        let spec = tape.specialize(&choices, &pin);
 
         let (mut wf, mut of) = (Vec::new(), Vec::new());
         let (mut ws, mut os) = (Vec::new(), Vec::new());
@@ -500,7 +460,7 @@ fn typed_tape_matches_complex_arena_and_f32_is_close() {
         // complex: tape vs arena
         let cin: Vec<Complex64> = inputs.iter().map(|&x| Complex64::new(x, 0.0)).collect();
         let (mut wc, mut oc) = (Vec::new(), Vec::new());
-        tape.eval_typed(&cin, &mut wc, &mut oc);
+        tape.eval(&cin, &mut wc, &mut oc);
         let mut env = HashMap::new();
         for (k, &s) in sym_ids.iter().enumerate() {
             env.insert(s, cin[k]);
@@ -515,7 +475,7 @@ fn typed_tape_matches_complex_arena_and_f32_is_close() {
         // f32: within single precision of the f64 value (relative)
         let fin: Vec<f32> = inputs.iter().map(|&x| x as f32).collect();
         let (mut wf, mut of) = (Vec::new(), Vec::new());
-        tape.eval_typed(&fin, &mut wf, &mut of);
+        tape.eval(&fin, &mut wf, &mut of);
         let (a, b) = (o[0], of[0] as f64);
         if a.abs() < 1e6 && b.is_finite() {
             let tol = 1e-3 * (1.0 + a.abs());

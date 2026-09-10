@@ -58,7 +58,7 @@ fn every_in_crate_path_matches_the_arena() {
         });
         let (mut tw, mut to) = (Vec::new(), Vec::new());
         case.expect_bits("typed tape (f64)", |row| {
-            case.tape.eval_typed::<f64>(row, &mut tw, &mut to);
+            case.tape.eval(row, &mut tw, &mut to);
             to.clone()
         });
     }

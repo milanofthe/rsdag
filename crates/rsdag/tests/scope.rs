@@ -42,7 +42,7 @@ fn a_symbol_used_but_not_asked_for_still_becomes_a_parameter() {
     assert_eq!(names, ["x", "t"]);
     let tape = Tape::compile(&g, &[e], &g.func(f).params.clone());
     let (mut w, mut o) = (Vec::new(), Vec::new());
-    tape.eval(&[2.0, 3.0], &mut w, &mut o);
+    tape.eval(&[2.0f64, 3.0], &mut w, &mut o);
     assert_eq!(o[0], 5.0);
 }
 

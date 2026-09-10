@@ -173,7 +173,7 @@ fn an_event_is_a_guard_output_and_a_state_write() {
     };
     let tape = Tape::compile(&g, &[guard, dgdt, gravity, v_new_expr], &[h_sym, v_sym]);
     let (mut w, mut o) = (Vec::new(), Vec::new());
-    tape.eval(&[0.25, -3.0], &mut w, &mut o);
+    tape.eval(&[0.25f64, -3.0], &mut w, &mut o);
     assert_eq!(o[0], 0.25, "guard value");
     assert_eq!(o[1], -3.0, "guard rate is v");
     assert_eq!(o[2], -9.81, "gravity");
@@ -196,14 +196,15 @@ fn a_region_flip_is_reported_by_the_specialization() {
 
     // Trace inside the linear region and specialize there.
     let (mut w, mut o, mut choices) = (Vec::new(), Vec::new(), Vec::new());
-    tape.eval_traced(&[0.05, 10.0], &mut w, &mut o, &mut choices);
-    let spec = tape.specialize(&choices);
+    choices.clear();
+    tape.eval_with(&[0.05f64, 10.0], &mut w, &mut o, &mut choices);
+    let spec = tape.specialize(&choices, &vec![true; tape.n_selects()]);
     assert!(spec.n_ops() < tape.n_ops(), "the specialization is shorter");
 
     // Still inside: the guards hold and the value matches the full tape.
     let (mut sw, mut so) = (Vec::new(), Vec::new());
     assert!(spec.eval_checked(&[0.06, 10.0], &mut sw, &mut so));
-    tape.eval(&[0.06, 10.0], &mut w, &mut o);
+    tape.eval(&[0.06f64, 10.0], &mut w, &mut o);
     assert_eq!(so[0].to_bits(), o[0].to_bits());
 
     // Past the cap: the guard reports the flip instead of returning a wrong

@@ -12,7 +12,7 @@ use crate::scalar::{dot_slice_t, reduce_slice_t, Scalar};
 /// The value of one node from its operands, for any execution scalar.
 ///
 /// The single per-node semantics of the arena: the real sweep, the complex
-/// evaluator and (through [`crate::Tape::eval_typed`]) the tape all take
+/// evaluator and (through [`crate::Tape::eval`]) the tape all take
 /// their arithmetic from [`Scalar`] and their fold orders from
 /// [`reduce_slice_t`] and [`dot_slice_t`], so a value cannot depend on which
 /// of them computed it.

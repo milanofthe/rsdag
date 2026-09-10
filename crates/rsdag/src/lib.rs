@@ -51,7 +51,7 @@ pub use scalar::Scalar;
 pub use scope::Scope;
 pub use simplify::rebuild;
 pub use symbolic::{collect, determinant, newton_step, rational_form, simplify_egraph};
-pub use tape::{SpecializedTape, Tape, TapeVisitor};
+pub use tape::{NoTrace, SpecializedTape, Tape, TapeVisitor, TraceSink};
 /// The execution form of a function (see the design: `Program<T>` is the
 /// tape evaluated in a [`Scalar`] `T`; the storage is `f64`, the typed
 /// evaluators convert once).

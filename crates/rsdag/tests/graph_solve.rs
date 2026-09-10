@@ -177,7 +177,7 @@ fn a_block_with_an_implicit_update_records_and_computes_the_same() {
     let params = g.func(f).params.clone();
     let tape = Tape::compile(&g, &out, &params);
     let (mut w, mut o) = (Vec::new(), Vec::new());
-    tape.eval(&[3.0, 0.5], &mut w, &mut o);
+    tape.eval(&[3.0f64, 0.5], &mut w, &mut o);
     let want = implicit(&mut Numeric, 3.0, 0.5);
     for (p, q) in want.iter().zip(&o) {
         assert!((p - q).abs() <= 1e-14 * (1.0 + p.abs()), "{p} vs {q}");
@@ -185,7 +185,7 @@ fn a_block_with_an_implicit_update_records_and_computes_the_same() {
     // And it differentiates through the solve.
     let d = rsdag::differentiate(&mut g, out[0], params[1]);
     let dt = Tape::compile(&g, &[d], &params);
-    dt.eval(&[3.0, 0.5], &mut w, &mut o);
+    dt.eval(&[3.0f64, 0.5], &mut w, &mut o);
     let h = 1e-6;
     let fd = (implicit(&mut Numeric, 3.0, 0.5 + h)[0] - implicit(&mut Numeric, 3.0, 0.5 - h)[0])
         / (2.0 * h);
