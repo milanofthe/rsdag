@@ -683,7 +683,7 @@ fn hot_routines(ops: &[ROp]) -> Vec<*const ()> {
             }
         }
     }
-    count.sort_by(|a, b| b.1.cmp(&a.1));
+    count.sort_by_key(|a| std::cmp::Reverse(a.1));
     count.into_iter().map(|(a, _)| a).collect()
 }
 
