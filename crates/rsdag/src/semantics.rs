@@ -262,8 +262,38 @@ pub fn cmp_bool<T: PartialOrd>(op: CmpOp, x: T, y: T) -> bool {
 /// `m` rows, each row the same fold as [`dot_slice_t`], so a fused product
 /// is bit-identical to its rows as separate dots.
 pub fn gemv_t<T: Scalar>(a: &[T], x: &[T], m: usize, n: usize, out: &mut [T]) {
-    for i in 0..m {
-        out[i] = dot_slice_t(&a[i * n..(i + 1) * n], x);
+    // Four rows at a time, each with its own four accumulators: sixteen
+    // independent chains for the core, and every row's fold is exactly
+    // `dot_slice_t`'s.
+    let ch = n / 4;
+    let mut i = 0;
+    while i + 4 <= m {
+        let rows = [
+            &a[i * n..(i + 1) * n],
+            &a[(i + 1) * n..(i + 2) * n],
+            &a[(i + 2) * n..(i + 3) * n],
+            &a[(i + 3) * n..(i + 4) * n],
+        ];
+        let mut acc = [[T::zero(); 4]; 4];
+        for c in 0..ch {
+            for (r, row) in rows.iter().enumerate() {
+                for l in 0..4 {
+                    acc[r][l] = acc[r][l].add(row[4 * c + l].mul(x[4 * c + l]));
+                }
+            }
+        }
+        for (r, row) in rows.iter().enumerate() {
+            let a4 = acc[r];
+            let mut s = (a4[0].add(a4[1])).add(a4[2].add(a4[3]));
+            for k in ch * 4..n {
+                s = s.add(row[k].mul(x[k]));
+            }
+            out[i + r] = s;
+        }
+        i += 4;
+    }
+    for r in i..m {
+        out[r] = dot_slice_t(&a[r * n..(r + 1) * n], x);
     }
 }
 
