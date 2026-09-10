@@ -36,6 +36,7 @@ pub fn amd(adj: &[Vec<usize>]) -> Vec<usize> {
         }
     }
     let mut mark = vec![usize::MAX; n];
+    let mut next_stamp = n;
     let mut order = Vec::with_capacity(n);
     let eliminate = |p: usize,
                      vars: &mut Vec<HashSet<usize>>,
@@ -43,7 +44,8 @@ pub fn amd(adj: &[Vec<usize>]) -> Vec<usize> {
                      members: &mut Vec<Vec<usize>>,
                      degree: &mut Vec<usize>,
                      queue: &mut BTreeSet<(usize, usize)>,
-                     mark: &mut Vec<usize>| {
+                     mark: &mut Vec<usize>,
+                     stamp: &mut usize| {
         // The new element: p's variables and the members of p's elements.
         mark[p] = p;
         let mut new: Vec<usize> = Vec::new();
@@ -81,8 +83,10 @@ pub fn amd(adj: &[Vec<usize>]) -> Vec<usize> {
         // Exact external degrees of the touched variables.
         for &v in &new {
             queue.remove(&(degree[v], v));
-            mark[v] = usize::MAX - 1 - v; // a stamp unique to this count
-            let stamp = mark[v];
+            // A stamp unique to this count; vertex ids stay below `n`.
+            *stamp += 1;
+            let stamp = *stamp;
+            mark[v] = stamp;
             let mut d = 0;
             for &w in &vars[v] {
                 if mark[w] != stamp {
@@ -113,6 +117,7 @@ pub fn amd(adj: &[Vec<usize>]) -> Vec<usize> {
             &mut degree,
             &mut queue,
             &mut mark,
+            &mut next_stamp,
         );
     }
     // The deferred hubs, by their degree at the end.
@@ -128,6 +133,7 @@ pub fn amd(adj: &[Vec<usize>]) -> Vec<usize> {
             &mut degree,
             &mut queue,
             &mut mark,
+            &mut next_stamp,
         );
     }
     order
