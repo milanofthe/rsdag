@@ -13,7 +13,7 @@
 //! the interpreter (`MulAdd` is a multiply and an add, two roundings, on
 //! every backend), reductions folded in the reference
 //! order, and every transcendental through the same
-//! [`unary_f64`](rsdag::node::unary_f64) host routine, so the domain
+//! [`unary_f64`](rsdag::semantics::unary_f64) host routine, so the domain
 //! guards hold identically. `tests/parity.rs` fuzzes arena == tape ==
 //! native to the bit.
 

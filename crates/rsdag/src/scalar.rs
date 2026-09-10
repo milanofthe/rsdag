@@ -14,7 +14,8 @@
 
 use num_complex::Complex64;
 
-use crate::node::{binary_f64, cmp_bool, unary_f64, BinOp, CmpOp, ReduceOp, UnaryOp};
+use crate::node::{BinOp, CmpOp, ReduceOp, UnaryOp};
+use crate::semantics::{binary_f64, cmp_bool, unary_f64};
 
 pub trait Scalar: Copy + Send + Sync + std::fmt::Debug + 'static {
     fn zero() -> Self;
@@ -290,69 +291,4 @@ impl Scalar for Complex64 {
             self
         }
     }
-}
-
-/// The reduction of a slice in `T`, with the same fixed order as the `f64`
-/// reference (`reduce_slice`): four accumulators, then the tail.
-pub fn reduce_slice_t<T: Scalar>(op: ReduceOp, xs: &[T]) -> T {
-    match op {
-        ReduceOp::Sum => {
-            let mut a = [T::zero(); 4];
-            let ch = xs.len() / 4;
-            for c in 0..ch {
-                for l in 0..4 {
-                    a[l] = a[l].add(xs[4 * c + l]);
-                }
-            }
-            let mut acc = (a[0].add(a[1])).add(a[2].add(a[3]));
-            for &x in &xs[ch * 4..] {
-                acc = acc.add(x);
-            }
-            acc
-        }
-        ReduceOp::Product => {
-            let mut a = [T::one(); 4];
-            let ch = xs.len() / 4;
-            for c in 0..ch {
-                for l in 0..4 {
-                    a[l] = a[l].mul(xs[4 * c + l]);
-                }
-            }
-            let mut acc = (a[0].mul(a[1])).mul(a[2].mul(a[3]));
-            for &x in &xs[ch * 4..] {
-                acc = acc.mul(x);
-            }
-            acc
-        }
-        ReduceOp::Min => {
-            let mut it = xs.iter();
-            match it.next() {
-                None => T::from_f64(f64::INFINITY),
-                Some(&f) => it.fold(f, |acc, &x| acc.min(x)),
-            }
-        }
-        ReduceOp::Max => {
-            let mut it = xs.iter();
-            match it.next() {
-                None => T::from_f64(f64::NEG_INFINITY),
-                Some(&f) => it.fold(f, |acc, &x| acc.max(x)),
-            }
-        }
-    }
-}
-
-/// The inner product in `T`, same order as `dot_slice`.
-pub fn dot_slice_t<T: Scalar>(a: &[T], b: &[T]) -> T {
-    let mut acc = [T::zero(); 4];
-    let ch = a.len() / 4;
-    for c in 0..ch {
-        for l in 0..4 {
-            acc[l] = acc[l].add(a[4 * c + l].mul(b[4 * c + l]));
-        }
-    }
-    let mut s = (acc[0].add(acc[1])).add(acc[2].add(acc[3]));
-    for k in ch * 4..a.len() {
-        s = s.add(a[k].mul(b[k]));
-    }
-    s
 }

@@ -19,6 +19,7 @@ pub mod nonlinearity;
 pub mod role;
 pub mod scalar;
 pub mod scope;
+pub mod semantics;
 pub mod simplify;
 pub mod symbolic;
 #[cfg(any(test, feature = "synth"))]
@@ -41,13 +42,15 @@ pub use graph::Graph;
 pub use mathfn::lower_call;
 pub use module::{IdMap, Module, MODULE_VERSION};
 pub use node::{
-    binary_f64, unary_f64, ArgList, BinOp, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp,
-    SymbolId, UnaryOp,
+    ArgList, BinOp, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp, SymbolId, UnaryOp,
 };
 pub use nonlinearity::{nonlinearity, nonlinearity_of, Degree, Nonlinearity};
 pub use role::{OutputRole, ParamRole};
 pub use scalar::Scalar;
 pub use scope::Scope;
+pub use semantics::{
+    binary_f64, cmp_bool, dot_slice, reduce_slice, unary_f64, EXP_LIMIT, LN_FLOOR,
+};
 pub use simplify::rebuild;
 pub use symbolic::{collect, determinant, newton_step, rational_form, simplify_egraph};
 pub use tape::{NoTrace, SpecializedTape, Tape, TapeVisitor, TraceSink};

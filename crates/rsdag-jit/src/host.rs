@@ -1,10 +1,11 @@
 //! Host routines: what the emitted code calls for everything that is not
 //! an instruction. Every transcendental goes through the same
-//! [`unary_f64`](rsdag::node::unary_f64) as the interpreter, so the domain
+//! [`unary_f64`](rsdag::semantics::unary_f64) as the interpreter, so the domain
 //! guards hold identically and the backends agree to the bit.
 
 use rsdag::extern_fn::ExternBundle;
-use rsdag::node::{binary_f64, reduce_slice, unary_f64, BinOp, ReduceOp, UnaryOp};
+use rsdag::node::{BinOp, ReduceOp, UnaryOp};
+use rsdag::semantics::{binary_f64, reduce_slice, unary_f64};
 use std::sync::Arc;
 
 pub(crate) type Bundles = Vec<Arc<dyn ExternBundle>>;

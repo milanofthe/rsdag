@@ -40,10 +40,8 @@
 
 use crate::field::Field;
 use crate::graph::Graph;
-use crate::node::{
-    binary_f64, cmp_bool, dot_slice, reduce_slice, unary_f64, BinOp, CmpOp, ExprId, ReduceOp,
-    UnaryOp,
-};
+use crate::node::{BinOp, CmpOp, ExprId, ReduceOp, UnaryOp};
+use crate::semantics::{binary_f64, cmp_bool, dot_slice, reduce_slice, unary_f64};
 
 /// The op vocabulary as a trait. See the module docs.
 pub trait Builder {

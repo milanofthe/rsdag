@@ -16,7 +16,8 @@ use crate::func::{Body, FuncId, Output};
 use crate::graph::Graph;
 use crate::node::ArgList;
 use crate::node::{ExprId, Node, SymbolId};
-use crate::scalar::{dot_slice_t, reduce_slice_t, Scalar};
+use crate::scalar::Scalar;
+use crate::semantics::{dot_slice_t, reduce_slice_t};
 
 /// The value of one node from its operands.
 fn node_value<T: Scalar, K: Field>(

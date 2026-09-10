@@ -133,20 +133,20 @@ pub struct Tape {
 /// crate, which is what makes a generator a walk over this trait rather than
 /// a re-derivation:
 ///
-/// - **The domain guards.** [`crate::node::unary_f64`] is the reference for
-///   every unary op, including the `exp` cap at [`crate::node::EXP_LIMIT`],
-///   the `ln` floor at [`crate::node::LN_FLOOR`] and the `sqrt` clamp. An
+/// - **The domain guards.** [`crate::semantics::unary_f64`] is the reference for
+///   every unary op, including the `exp` cap at [`crate::semantics::EXP_LIMIT`],
+///   the `ln` floor at [`crate::semantics::LN_FLOOR`] and the `sqrt` clamp. An
 ///   unguarded `exp` diverges on the first out-of-range Newton iterate.
 /// - **The op names.** [`crate::UnaryOp::c_fn`] and [`crate::BinOp::c_fn`]
 ///   give the conventional C callee per op, and `name()` the spelling for
 ///   any other target; a guarded op names an `rsdag_` helper the generator
 ///   supplies from the reference above.
-/// - **The special functions.** [`crate::node::digamma`],
-///   [`crate::node::trigamma`] and [`crate::node::rand_uniform`] are defined
+/// - **The special functions.** [`crate::semantics::digamma`],
+///   [`crate::semantics::trigamma`] and [`crate::semantics::rand_uniform`] are defined
 ///   here, not taken from a platform library, so a generator ports these
 ///   exact series.
-/// - **The fold orders.** [`crate::node::reduce_slice`] and
-///   [`crate::node::dot_slice`] fold with four accumulators merged as
+/// - **The fold orders.** [`crate::semantics::reduce_slice`] and
+///   [`crate::semantics::dot_slice`] fold with four accumulators merged as
 ///   `(a0 + a1) + (a2 + a3)`, then the tail in order. A different
 ///   association gives different bits.
 /// - **No contraction.** [`TapeVisitor::mul_add`] is a fused *dispatch*, not
@@ -312,7 +312,7 @@ impl Tape {
         hi: usize,
         sink: &mut S,
     ) {
-        use crate::scalar::{dot_slice_t, reduce_slice_t};
+        use crate::semantics::{dot_slice_t, reduce_slice_t};
         // Two scratch regions at the tail of `work`, so nothing is allocated
         // per call: the transient gather for variadic and bundle arguments,
         // the persistent bundle-output region (written by a `BundleCall`,

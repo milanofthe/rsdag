@@ -91,5 +91,6 @@ compiles in about the time of a handful of evaluations.
 
 ```
 cargo test --workspace
+scripts/ci.sh                                            # the CI gate, locally
 maturin build --release -m crates/rsdag-py/Cargo.toml   # the Python wheel
 ```
