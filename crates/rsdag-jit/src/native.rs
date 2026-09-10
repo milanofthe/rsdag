@@ -4,12 +4,20 @@
 //! code over a work array of slots, with every value's lifetime computed.
 //! So this backend does the least a compiler can do: for each op, operands
 //! come from a small register cache or a load from the work array, one
-//! instruction computes, and the result is stored back and cached. Storing
-//! through means a chunk boundary needs no special handling, a host call
-//! (which clobbers the caller-saved part of the cache) just forgets that
-//! part, and nothing is ever spilled anywhere but where the interpreter
-//! keeps it anyway. Compile time is linear in the op count, around 40 ns
-//! per op; chunks are emitted in parallel.
+//! instruction computes, and the result stays in the cache. It is written
+//! to its slot in the work array only when it has to be: on eviction, at a
+//! host call (which clobbers the caller-saved part of the cache) and at the
+//! chunk's end, and then only if some later op still reads it, which the
+//! last-use table knows. A value that dies inside the chunk never touches
+//! memory; nothing is ever spilled anywhere but where the interpreter keeps
+//! it anyway. Compile time is linear in the op count, around 40 ns per op;
+//! chunks are emitted in parallel.
+//!
+//! A large program is executed once per evaluation, straight through, so
+//! its cost is instruction fetch: the bytes per op. That is why nothing is
+//! stored that need not be, why the frequent host routines sit in
+//! callee-saved registers, and why the AArch64 side addresses the work
+//! array through a moving window.
 //!
 //! Everything that is not one instruction goes to a host routine: the
 //! transcendentals, `Min`/`Max` reductions and bundle calls, the last two
@@ -35,6 +43,11 @@ type Arch = crate::aarch64::A64;
 type Arch = crate::x86_64::X64;
 
 type ChunkFn = extern "C" fn(*mut f64, *const f64, *const Bundles);
+
+/// A value read more than this many ops ahead goes to a callee-saved
+/// register, where a host call in between does not cost it a store and a
+/// reload. Elementary-heavy programs call every three to five ops.
+const KEEP_HORIZON: u32 = 4;
 
 /// A tape compiled to native code. Evaluation mirrors [`Tape`]: a
 /// caller-owned work buffer, inputs padded with NaN, and the prolog/main
@@ -91,6 +104,14 @@ impl NativeTape {
             .unwrap_or(0);
         let gather_len = rec.ops.iter().map(ROp::gather_len).max().unwrap_or(0);
         let n_work = tape.n_work();
+        // The last op reading each slot; outputs are read after the program.
+        let mut last_use = vec![0u32; n_work.max(1)];
+        for (i, op) in rec.ops.iter().enumerate() {
+            op.for_each_read(|s| last_use[s as usize] = i as u32);
+        }
+        for &o in tape.outputs() {
+            last_use[o as usize] = u32::MAX;
+        }
         let scratch = n_work;
         let gather = scratch + tape.bundle_scratch_len();
         let layout = Layout {
@@ -108,8 +129,19 @@ impl NativeTape {
             .chain(main.chunks(chunk_ops))
             .collect();
         let prolog_chunks = pro.chunks(chunk_ops).count();
-        let chunks: Result<Vec<Code>, JitError> =
-            jobs.par_iter().map(|ops| emit_chunk(ops, layout)).collect();
+        let starts: Vec<usize> = jobs
+            .iter()
+            .scan(0, |acc, ops| {
+                let s = *acc;
+                *acc += ops.len();
+                Some(s)
+            })
+            .collect();
+        let chunks: Result<Vec<Code>, JitError> = jobs
+            .par_iter()
+            .zip(&starts)
+            .map(|(ops, &start)| emit_chunk(ops, start, layout, &last_use))
+            .collect();
         Ok(NativeTape {
             chunks: chunks?,
             prolog_chunks,
@@ -210,58 +242,105 @@ impl NativeTape {
 // --- the emitter --------------------------------------------------------------
 
 /// The value cache over an architecture's instruction layer: which slot
-/// each cache register holds, and which registers the current op still
-/// needs. Every operand `get` pins its register and every temporary is
-/// pinned by its maker, so an op can never evict what it is about to use;
-/// the pins clear when the op is done.
-struct Emitter<I: Isa> {
+/// each cache register holds, whether memory has it yet, and which
+/// registers the current op still needs. Every operand `get` pins its
+/// register and every temporary is pinned by its maker, so an op can never
+/// evict what it is about to use; the pins clear when the op is done.
+struct Emitter<'a, I: Isa> {
     isa: I,
     layout: Layout,
+    /// Global index of the last op reading each slot.
+    last_use: &'a [u32],
+    /// Global index of the op being emitted.
+    pos: u32,
     /// Slot held by each cache register (by cache index).
     held: Vec<Option<u32>>,
+    /// Whether the register's value is newer than the slot in memory.
+    dirty: Vec<bool>,
     /// Cache index holding each slot.
     at: FxHashMap<u32, usize>,
     /// Cache index of each register number.
     index: [u8; 32],
-    next: usize,
+    /// Round-robin victim pointers of the callee-saved and caller-saved pools.
+    next: [usize; 2],
     pinned: Vec<bool>,
 }
 
-impl<I: Isa> Emitter<I> {
-    fn new(layout: Layout) -> Emitter<I> {
+impl<'a, I: Isa> Emitter<'a, I> {
+    fn new(layout: Layout, last_use: &'a [u32], hot: &[*const ()]) -> Emitter<'a, I> {
         let mut index = [0u8; 32];
         for (i, &r) in I::CACHE.iter().enumerate() {
             index[r as usize] = i as u8;
         }
         Emitter {
-            isa: I::new(),
+            isa: I::new(hot),
             layout,
+            last_use,
+            pos: 0,
             held: vec![None; I::CACHE.len()],
+            dirty: vec![false; I::CACHE.len()],
             at: Default::default(),
             index,
-            next: 0,
+            next: [0, 0],
             pinned: vec![false; I::CACHE.len()],
         }
     }
 
+    /// Forget what cache index `i` holds, writing it back first if memory
+    /// does not have it and some later op reads it. The current op counts
+    /// as later: an operand it has not fetched yet may be what is evicted
+    /// to make room for another.
     fn drop_index(&mut self, i: usize) {
         if let Some(s) = self.held[i].take() {
+            if self.dirty[i] && self.last_use[s as usize] >= self.pos {
+                self.isa.store(I::CACHE[i], Base::Work, s as usize * 8);
+            }
+            self.dirty[i] = false;
             self.at.remove(&s);
         }
     }
-    /// A register to write a new value into: the next unpinned one round
+    /// Write back everything still owed to memory (the chunk's end).
+    fn flush(&mut self) {
+        for i in 0..I::CACHE.len() {
+            self.drop_index(i);
+        }
+    }
+    /// A register to write a temporary into: the next unpinned one round
     /// robin, evicting whatever it held; pinned for the rest of the op.
     fn fresh(&mut self) -> u8 {
+        self.fresh_in(I::SAVED..I::CACHE.len())
+    }
+    /// A register for the value of `slot`: the callee-saved pool when the
+    /// value is read far enough ahead that a host call is likely to come
+    /// first, the caller-saved pool otherwise. Either pool falls back to the
+    /// other when every register of its own is pinned.
+    fn fresh_for(&mut self, slot: u32) -> u8 {
+        let far = self.last_use[slot as usize].saturating_sub(self.pos) > KEEP_HORIZON;
+        if far && I::SAVED > 0 {
+            self.fresh_in(0..I::SAVED)
+        } else {
+            self.fresh_in(I::SAVED..I::CACHE.len())
+        }
+    }
+    fn fresh_in(&mut self, pool: std::ops::Range<usize>) -> u8 {
         let n = I::CACHE.len();
-        for _ in 0..n {
-            let i = self.next;
-            self.next = (self.next + 1) % n;
-            if self.pinned[i] {
-                continue;
+        let (lo, len) = (pool.start, pool.len().max(1));
+        let cursor = &mut self.next[usize::from(lo != 0 || I::SAVED == 0)];
+        for _ in 0..len {
+            let i = lo + *cursor % len;
+            *cursor = (*cursor + 1) % len;
+            if !self.pinned[i] {
+                self.drop_index(i);
+                self.pinned[i] = true;
+                return I::CACHE[i];
             }
-            self.drop_index(i);
-            self.pinned[i] = true;
-            return I::CACHE[i];
+        }
+        for i in 0..n {
+            if !self.pinned[i] {
+                self.drop_index(i);
+                self.pinned[i] = true;
+                return I::CACHE[i];
+            }
         }
         unreachable!("an op pins fewer than {n} registers");
     }
@@ -279,41 +358,45 @@ impl<I: Isa> Emitter<I> {
             self.pinned[i] = true;
             return I::CACHE[i];
         }
-        let r = self.fresh();
+        let r = self.fresh_for(slot);
         self.isa.load(r, Base::Work, slot as usize * 8);
         self.bind(r, slot);
         r
     }
     fn bind(&mut self, r: u8, slot: u32) {
+        // A slot rebound to a new value: the old one is dead by the tape's
+        // construction, so it is dropped without a write-back.
         if let Some(i) = self.at.remove(&slot) {
             self.held[i] = None;
+            self.dirty[i] = false;
         }
         let i = self.index[r as usize] as usize;
         self.drop_index(i);
         self.held[i] = Some(slot);
         self.at.insert(slot, i);
     }
-    /// Store `r` as the value of `slot` and remember it.
+    /// `r` is the value of `slot` now; memory will get it when it must.
     fn put(&mut self, slot: u32, r: u8) {
-        self.isa.store(r, Base::Work, slot as usize * 8);
         self.bind(r, slot);
+        self.dirty[self.index[r as usize] as usize] = true;
     }
     fn fconst(&mut self, v: f64) -> u8 {
         let r = self.fresh();
         self.isa.fconst(r, v);
         r
     }
-    /// A host call; the caller-saved part of the cache is gone afterwards.
+    /// A host call; the caller-saved part of the cache is written back
+    /// where owed before, and gone afterwards.
     fn call(&mut self, addr: *const (), args: &[Arg]) {
-        self.isa.call(addr, args);
         for i in I::SAVED..I::CACHE.len() {
             self.drop_index(i);
         }
+        self.isa.call(addr, args);
     }
     /// A host call whose result is the value of `dst`.
     fn call_into(&mut self, dst: u32, addr: *const (), args: &[Arg]) {
         self.call(addr, args);
-        let r = self.fresh();
+        let r = self.fresh_for(dst);
         self.isa.mov(r, I::RESULT);
         self.put(dst, r);
     }
@@ -343,7 +426,7 @@ impl<I: Isa> Emitter<I> {
                 let r = if k == u32::MAX {
                     self.fconst(f64::NAN)
                 } else {
-                    let r = self.fresh();
+                    let r = self.fresh_for(dst);
                     self.isa.load(r, Base::Inputs, k as usize * 8);
                     r
                 };
@@ -358,13 +441,13 @@ impl<I: Isa> Emitter<I> {
                 let m = self.fresh();
                 self.isa.arith(Arith::Mul, m, x, y);
                 let z = self.get(c);
-                let r = self.fresh();
+                let r = self.fresh_for(dst);
                 self.isa.arith(Arith::Add, r, m, z);
                 self.put(dst, r);
             }
             ROp::Fma(dst, a, b, c) => {
                 let (x, y, z) = (self.get(a), self.get(b), self.get(c));
-                let r = self.fresh();
+                let r = self.fresh_for(dst);
                 if self.isa.fma(r, x, y, z) {
                     self.put(dst, r);
                 } else {
@@ -377,7 +460,7 @@ impl<I: Isa> Emitter<I> {
             }
             ROp::Neg(dst, a) => {
                 let x = self.get(a);
-                let r = self.fresh();
+                let r = self.fresh_for(dst);
                 self.isa.neg(r, x);
                 self.put(dst, r);
             }
@@ -385,7 +468,7 @@ impl<I: Isa> Emitter<I> {
                 -1 => {
                     let x = self.get(a);
                     let one = self.fconst(1.0);
-                    let r = self.fresh();
+                    let r = self.fresh_for(dst);
                     self.isa.arith(Arith::Div, r, one, x);
                     self.put(dst, r);
                 }
@@ -413,13 +496,13 @@ impl<I: Isa> Emitter<I> {
                 let (x, y) = (self.get(a), self.get(b));
                 let one = self.fconst(1.0);
                 let zero = self.fconst(0.0);
-                let r = self.fresh();
+                let r = self.fresh_for(dst);
                 self.isa.cmp_select(cop, x, y, one, zero, r);
                 self.put(dst, r);
             }
             ROp::Select(dst, c, t, e) => {
                 let (cv, tv, ev) = (self.get(c), self.get(t), self.get(e));
-                let r = self.fresh();
+                let r = self.fresh_for(dst);
                 self.isa.select_nz(cv, tv, ev, r);
                 self.put(dst, r);
             }
@@ -472,7 +555,7 @@ impl<I: Isa> Emitter<I> {
                 self.call(host::h_bundle_batch as *const (), &args);
             }
             ROp::Pick(dst, idx) => {
-                let r = self.fresh();
+                let r = self.fresh_for(dst);
                 let off = (self.layout.scratch + idx as usize) * 8;
                 self.isa.load(r, Base::Work, off);
                 self.put(dst, r);
@@ -482,14 +565,14 @@ impl<I: Isa> Emitter<I> {
 
     fn bin2(&mut self, op: Arith, dst: u32, a: u32, b: u32) {
         let (x, y) = (self.get(a), self.get(b));
-        let r = self.fresh();
+        let r = self.fresh_for(dst);
         self.isa.arith(op, r, x, y);
         self.put(dst, r);
     }
 
     fn unary(&mut self, dst: u32, uop: UnaryOp, a: u32) {
         let x = self.get(a);
-        let r = self.fresh();
+        let r = self.fresh_for(dst);
         let inline = match uop {
             UnaryOp::Sqrt => {
                 // x > 0 ? sqrt(x) : 0, the reference's guard.
@@ -589,12 +672,35 @@ impl<I: Isa> Emitter<I> {
     }
 }
 
-fn emit_chunk(ops: &[ROp], layout: Layout) -> Result<Code, JitError> {
-    let mut e: Emitter<Arch> = Emitter::new(layout);
-    e.isa.prologue();
+/// The host routines a chunk calls, most frequent first.
+fn hot_routines(ops: &[ROp]) -> Vec<*const ()> {
+    let mut count: Vec<(*const (), usize)> = Vec::new();
     for op in ops {
+        if let Some(h) = op.host() {
+            match count.iter_mut().find(|(a, _)| *a == h) {
+                Some(c) => c.1 += 1,
+                None => count.push((h, 1)),
+            }
+        }
+    }
+    count.sort_by(|a, b| b.1.cmp(&a.1));
+    count.into_iter().map(|(a, _)| a).collect()
+}
+
+fn emit_chunk(
+    ops: &[ROp],
+    start: usize,
+    layout: Layout,
+    last_use: &[u32],
+) -> Result<Code, JitError> {
+    let hot = hot_routines(ops);
+    let mut e: Emitter<Arch> = Emitter::new(layout, last_use, &hot);
+    e.isa.prologue();
+    for (k, op) in ops.iter().enumerate() {
+        e.pos = (start + k) as u32;
         e.op(op);
     }
+    e.flush();
     e.isa.epilogue();
     let map = Mapping::new(&e.isa.finish())?;
     let func: ChunkFn = unsafe { std::mem::transmute(map.ptr) };

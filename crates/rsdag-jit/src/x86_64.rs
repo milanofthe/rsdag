@@ -21,9 +21,9 @@ const INT_ARGS: [u8; 6] = if WIN {
 } else {
     [7, 6, 2, 1, 8, 9]
 };
-/// The Windows frame below the pushes: 32 bytes of shadow space, two
-/// stack argument slots, then `xmm6` to `xmm15`.
-const WIN_FRAME: i32 = 208;
+/// The Windows frame below the six pushes: 32 bytes of shadow space, two
+/// stack argument slots, `xmm6` to `xmm15`, and 8 bytes of alignment.
+const WIN_FRAME: i32 = 216;
 const WIN_STACK_ARGS: i32 = 32;
 const WIN_XMM_SAVE: i32 = 48;
 
@@ -31,7 +31,11 @@ pub(crate) struct X64 {
     code: Vec<u8>,
     sse41: bool,
     fma: bool,
+    /// Host routines held in `r12` and `r15`.
+    hot: Vec<*const ()>,
 }
+
+const HOT_REGS: [u8; 2] = [12, 15];
 
 impl X64 {
     fn b(&mut self, byte: u8) {
@@ -160,7 +164,7 @@ impl Isa for X64 {
     const SAVED: usize = if WIN { 10 } else { 0 };
     const RESULT: u8 = 0;
 
-    fn new() -> X64 {
+    fn new(hot: &[*const ()]) -> X64 {
         #[cfg(target_arch = "x86_64")]
         let (sse41, fma) = (
             is_x86_feature_detected!("sse4.1"),
@@ -172,6 +176,7 @@ impl Isa for X64 {
             code: Vec::with_capacity(8192),
             sse41,
             fma,
+            hot: hot.iter().copied().take(HOT_REGS.len()).collect(),
         }
     }
     fn finish(self) -> Vec<u8> {
@@ -179,9 +184,9 @@ impl Isa for X64 {
     }
 
     fn prologue(&mut self) {
-        // Five pushes: the stack is 16-byte aligned at every call below.
+        // Six pushes and the frame: 16-byte aligned at every call below.
         self.bytes(&[0x55, 0x48, 0x89, 0xE5]); // push rbp; mov rbp, rsp
-        self.bytes(&[0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56]); // push rbx r12 r13 r14
+        self.bytes(&[0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57]); // push rbx r12 r13 r14 r15
         if WIN {
             self.bytes(&[0x48, 0x81, 0xEC]); // sub rsp, WIN_FRAME
             self.bytes(&WIN_FRAME.to_le_bytes());
@@ -192,9 +197,14 @@ impl Isa for X64 {
             self.bytes(&[0x49, 0x89, 0xD5]); // mov r13, rdx
             self.bytes(&[0x4D, 0x89, 0xC6]); // mov r14, r8
         } else {
+            self.bytes(&[0x48, 0x83, 0xEC, 0x08]); // sub rsp, 8
             self.bytes(&[0x48, 0x89, 0xFB]); // mov rbx, rdi
             self.bytes(&[0x49, 0x89, 0xF5]); // mov r13, rsi
             self.bytes(&[0x49, 0x89, 0xD6]); // mov r14, rdx
+        }
+        for k in 0..self.hot.len() {
+            let a = self.hot[k] as usize as u64;
+            self.mov_imm(HOT_REGS[k], a);
         }
     }
     fn epilogue(&mut self) {
@@ -204,8 +214,12 @@ impl Isa for X64 {
             }
             self.bytes(&[0x48, 0x81, 0xC4]); // add rsp, WIN_FRAME
             self.bytes(&WIN_FRAME.to_le_bytes());
+        } else {
+            self.bytes(&[0x48, 0x83, 0xC4, 0x08]); // add rsp, 8
         }
-        self.bytes(&[0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5B, 0x5D, 0xC3]);
+        self.bytes(&[
+            0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5B, 0x5D, 0xC3,
+        ]);
     }
 
     fn load(&mut self, r: u8, base: Base, off: usize) {
@@ -338,7 +352,12 @@ impl Isa for X64 {
                 }
             }
         }
-        self.mov_imm(0, addr as usize as u64);
-        self.bytes(&[0xFF, 0xD0]); // call rax
+        match self.hot.iter().position(|&h| h == addr) {
+            Some(k) => self.bytes(&[0x41, 0xFF, 0xD0 | (HOT_REGS[k] & 7)]), // call r12 / r15
+            None => {
+                self.mov_imm(0, addr as usize as u64);
+                self.bytes(&[0xFF, 0xD0]); // call rax
+            }
+        }
     }
 }
