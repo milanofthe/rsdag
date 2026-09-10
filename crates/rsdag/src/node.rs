@@ -86,18 +86,12 @@ impl ReduceOp {
     }
 }
 
-/// Operand lists at least this long reduce with a 4-lane multi-accumulator
-/// (breaks the serial dependency chain, so the compiler auto-vectorizes);
-/// shorter lists fold sequentially, identical to the plain loop. Sized so the
-/// short common case (low-degree KCL) is untouched and only dense nodes pay.
-pub const REDUCE_SIMD_MIN: usize = 16;
-
 /// Canonical evaluation of a [`ReduceOp`] over a value slice. The single
 /// reference used by both the arena sweep and the tape, so their results agree
 /// bit-for-bit; the 4-lane path uses a fixed `(l0+l1)+(l2+l3)` merge.
 pub fn reduce_slice(op: ReduceOp, xs: &[f64]) -> f64 {
     match op {
-        ReduceOp::Sum if xs.len() >= REDUCE_SIMD_MIN => {
+        ReduceOp::Sum => {
             let mut a = [0.0f64; 4];
             let ch = xs.len() / 4;
             for c in 0..ch {
@@ -112,7 +106,7 @@ pub fn reduce_slice(op: ReduceOp, xs: &[f64]) -> f64 {
             }
             acc
         }
-        ReduceOp::Product if xs.len() >= REDUCE_SIMD_MIN => {
+        ReduceOp::Product => {
             let mut a = [1.0f64; 4];
             let ch = xs.len() / 4;
             for c in 0..ch {
@@ -140,27 +134,18 @@ pub fn reduce_slice(op: ReduceOp, xs: &[f64]) -> f64 {
 /// Canonical inner product `Σ a[i]*b[i]` (4-lane for long lists). Shared by the
 /// arena sweep and the tape; the lists must be equal length.
 pub fn dot_slice(a: &[f64], b: &[f64]) -> f64 {
-    if a.len() >= REDUCE_SIMD_MIN {
-        let mut acc = [0.0f64; 4];
-        let ch = a.len() / 4;
-        for c in 0..ch {
-            acc[0] += a[4 * c] * b[4 * c];
-            acc[1] += a[4 * c + 1] * b[4 * c + 1];
-            acc[2] += a[4 * c + 2] * b[4 * c + 2];
-            acc[3] += a[4 * c + 3] * b[4 * c + 3];
+    let mut acc = [0.0f64; 4];
+    let ch = a.len() / 4;
+    for c in 0..ch {
+        for l in 0..4 {
+            acc[l] += a[4 * c + l] * b[4 * c + l];
         }
-        let mut s = (acc[0] + acc[1]) + (acc[2] + acc[3]);
-        for k in ch * 4..a.len() {
-            s += a[k] * b[k];
-        }
-        s
-    } else {
-        let mut s = 0.0;
-        for (&x, &y) in a.iter().zip(b.iter()) {
-            s += x * y;
-        }
-        s
     }
+    let mut s = (acc[0] + acc[1]) + (acc[2] + acc[3]);
+    for k in ch * 4..a.len() {
+        s += a[k] * b[k];
+    }
+    s
 }
 
 /// Transcendental / elementary unary functions, needed by nonlinear device

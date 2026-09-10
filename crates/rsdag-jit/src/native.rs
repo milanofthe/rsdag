@@ -28,7 +28,7 @@
 //! transcendental through the same host function.
 
 use rayon::prelude::*;
-use rsdag::node::{BinOp, CmpOp, ReduceOp, UnaryOp, REDUCE_SIMD_MIN};
+use rsdag::node::{BinOp, CmpOp, ReduceOp, UnaryOp};
 use rsdag::{ExternBundle, Tape};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
@@ -549,19 +549,6 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 self.isa.arith(Arith::Add, r, m, z);
                 self.put(dst, r);
             }
-            ROp::Fma(dst, a, b, c) => {
-                let (x, y, z) = (self.get(a), self.get(b), self.get(c));
-                let r = self.fresh_for(dst);
-                if self.isa.fma(r, x, y, z) {
-                    self.put(dst, r);
-                } else {
-                    self.call_into(
-                        dst,
-                        host::h_fma as *const (),
-                        &[Arg::F(x), Arg::F(y), Arg::F(z)],
-                    );
-                }
-            }
             ROp::Neg(dst, a) => {
                 let x = self.get(a);
                 let r = self.fresh_for(dst);
@@ -718,48 +705,36 @@ impl<'a, I: Isa> Emitter<'a, I> {
         }
     }
 
-    /// A reduction (or, with `b`, a dot) in the reference order: a left fold
-    /// from the identity below `REDUCE_SIMD_MIN`, four accumulators above.
+    /// A reduction (or, with `b`, a dot) in the reference order: four
+    /// accumulators, merged as `(a0 + a1) + (a2 + a3)`, then the tail.
     /// Accumulators stay pinned across the terms; a term's registers are
     /// released once it is folded in, so a long list needs seven registers,
     /// not one per operand.
     fn fold(&mut self, op: Arith, ident: f64, a: &[u32], b: Option<&[u32]>) -> u8 {
         let n = a.len();
-        if n >= REDUCE_SIMD_MIN {
-            let acc: [u8; 4] = std::array::from_fn(|_| self.fconst(ident));
-            let ch = n / 4;
-            for c in 0..ch {
-                for (k, &ak) in acc.iter().enumerate() {
-                    let t = self.term(a, b, 4 * c + k);
-                    self.isa.arith(op, ak, ak, t);
-                    self.release_except(&acc);
-                }
+        let acc: [u8; 4] = std::array::from_fn(|_| self.fconst(ident));
+        let ch = n / 4;
+        for c in 0..ch {
+            for (k, &ak) in acc.iter().enumerate() {
+                let t = self.term(a, b, 4 * c + k);
+                self.isa.arith(op, ak, ak, t);
+                self.release_except(&acc);
             }
-            let l = self.fresh();
-            self.isa.arith(op, l, acc[0], acc[1]);
-            let r = self.fresh();
-            self.isa.arith(op, r, acc[2], acc[3]);
-            let mut s = self.fresh();
-            self.isa.arith(op, s, l, r);
-            for k in ch * 4..n {
-                let t = self.term(a, b, k);
-                let s2 = self.fresh();
-                self.isa.arith(op, s2, s, t);
-                s = s2;
-                self.release_except(&[s]);
-            }
-            s
-        } else {
-            let mut acc = self.fconst(ident);
-            for k in 0..n {
-                let t = self.term(a, b, k);
-                let s = self.fresh();
-                self.isa.arith(op, s, acc, t);
-                acc = s;
-                self.release_except(&[acc]);
-            }
-            acc
         }
+        let l = self.fresh();
+        self.isa.arith(op, l, acc[0], acc[1]);
+        let r = self.fresh();
+        self.isa.arith(op, r, acc[2], acc[3]);
+        let mut s = self.fresh();
+        self.isa.arith(op, s, l, r);
+        for k in ch * 4..n {
+            let t = self.term(a, b, k);
+            let s2 = self.fresh();
+            self.isa.arith(op, s2, s, t);
+            s = s2;
+            self.release_except(&[s]);
+        }
+        s
     }
 
     /// Term `k` of a fold: the operand, or the product for a dot.

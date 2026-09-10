@@ -26,50 +26,12 @@ use crate::func::{CompiledBody, FuncId, Output};
 use crate::graph::Graph;
 use crate::node::{ExprId, Node, SymbolId};
 
-/// How [`Tape::compile`] orders the instruction stream.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum SchedulePolicy {
-    /// Register-pressure list scheduling (default): the live set stays one
-    /// device's worth, which is what makes native chunks cheap to compile and
-    /// fast to run. Costs the *interpreter* some instruction-level
-    /// parallelism (consecutive ops chain through the slot memory).
-    Pressure,
-    /// Creation order (pure-first partition): the interpreter's friendliest
-    /// order (independent ops interleave, ~25% faster per op) at the price of
-    /// a live set the size of the primal forest. The right choice for a host
-    /// with no native backend (wasm).
-    CreationOrder,
-}
-
-/// What [`Tape::compile_with`] may do beyond a faithful lowering.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct CompileOptions {
-    /// Contract `a*b + c` into one fused multiply-add. Fewer
-    /// roundings and one instruction instead of two, at the price of the
-    /// last bit against the uncontracted program. Off by default: the
-    /// uncontracted tape is the reference every backend agrees with to the
-    /// bit, and a consumer that solves with tolerances turns this on.
-    pub contract: bool,
-}
-
 impl Tape {
-    /// [`compile`](Self::compile) with [`CompileOptions`]; `pure_inputs` as
-    /// in [`compile_split`](Self::compile_split).
-    pub fn compile_with<K: Field>(
-        ctx: &Graph<K>,
-        roots: &[ExprId],
-        input_syms: &[SymbolId],
-        pure_inputs: Option<&[bool]>,
-        opts: CompileOptions,
-    ) -> Tape {
-        Self::compile_inner(ctx, roots, input_syms, pure_inputs, opts)
-    }
-
     /// Compile a tape computing `roots`, where `inputs[k]` (passed to
     /// [`eval`](Self::eval)) is the value of symbol `input_syms[k]`. Symbols not
     /// listed evaluate to `NaN`.
     pub fn compile<K: Field>(ctx: &Graph<K>, roots: &[ExprId], input_syms: &[SymbolId]) -> Tape {
-        Self::compile_inner(ctx, roots, input_syms, None, CompileOptions::default())
+        Self::compile_inner(ctx, roots, input_syms, None)
     }
 
     /// [`compile`](Self::compile) with a prolog split: `pure_inputs[k]` marks
@@ -87,13 +49,7 @@ impl Tape {
         input_syms: &[SymbolId],
         pure_inputs: &[bool],
     ) -> Tape {
-        Self::compile_inner(
-            ctx,
-            roots,
-            input_syms,
-            Some(pure_inputs),
-            CompileOptions::default(),
-        )
+        Self::compile_inner(ctx, roots, input_syms, Some(pure_inputs))
     }
 
     fn compile_inner<K: Field>(
@@ -101,7 +57,6 @@ impl Tape {
         roots: &[ExprId],
         input_syms: &[SymbolId],
         pure_inputs: Option<&[bool]>,
-        opts: CompileOptions,
     ) -> Tape {
         // Five passes over the reachable forest, each reading only what the
         // ones before it produced: analysis marks and counts, scheduling
@@ -120,7 +75,7 @@ impl Tape {
         });
         let batch_group_args = timed("tape batch scan", || batch_groups(ctx, &schedule.order));
         timed("tape emit", || {
-            forest.emit(ctx, roots, &schedule, &liveness, &batch_group_args, opts)
+            forest.emit(ctx, roots, &schedule, &liveness, &batch_group_args)
         })
     }
 }
@@ -374,22 +329,6 @@ impl Forest {
         let mut emitted = vec![false; m];
         // First position of the main (impure) phase, once known.
         let mut boundary: Option<usize> = None;
-        // Creation order (pure-first partition): the interpreter-friendly
-        // schedule, see `SchedulePolicy`.
-        if schedule_policy() == SchedulePolicy::CreationOrder {
-            heap.clear();
-            for phase_pure in [true, false] {
-                for i in 0..m {
-                    if pure[i] == phase_pure {
-                        if !phase_pure && boundary.is_none() {
-                            boundary = Some(order.len());
-                        }
-                        emitted[i] = true;
-                        order.push(base[i]);
-                    }
-                }
-            }
-        }
         // The op emitted last (base index), for the interleave below.
         let mut last_op: Option<usize> = None;
         while let Some(top) = heap.pop() {
@@ -561,7 +500,6 @@ impl Forest {
         schedule: &Schedule,
         liveness: &Liveness,
         batch_group_args: &HashMap<u32, Vec<Vec<ExprId>>>,
-        opts: CompileOptions,
     ) -> Tape {
         let base = &self.base;
         let input_of = &self.input_of;
@@ -726,7 +664,6 @@ impl Forest {
                         Some(f) => {
                             let other = if f == a { b } else { a };
                             match ctx.node(*f) {
-                                Node::Mul(x, y) if opts.contract => Op::Fma(s(x), s(y), s(other)),
                                 Node::Mul(x, y) => Op::MulAdd(s(x), s(y), s(other)),
                                 Node::Neg(x) => Op::Sub(s(other), s(x)),
                                 _ => unreachable!("only Mul/Neg operands are fused"),
@@ -882,15 +819,4 @@ fn batch_groups<K: Field>(ctx: &Graph<K>, order: &[ExprId]) -> HashMap<u32, Vec<
                 .all(|a| matches!(ctx.node(*a), Node::Const(_) | Node::Symbol(_)))
     });
     batch_group_args
-}
-
-/// The scheduling policy of the tape compiler. Register-pressure list
-/// scheduling by default; `RSDAG_SCHEDULE=creation` keeps creation order
-/// (the debugging escape hatch SANE's config carried).
-pub fn schedule_policy() -> SchedulePolicy {
-    static POLICY: std::sync::OnceLock<SchedulePolicy> = std::sync::OnceLock::new();
-    *POLICY.get_or_init(|| match std::env::var("RSDAG_SCHEDULE").as_deref() {
-        Ok("creation") => SchedulePolicy::CreationOrder,
-        _ => SchedulePolicy::Pressure,
-    })
 }

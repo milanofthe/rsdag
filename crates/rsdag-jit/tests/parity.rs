@@ -2,8 +2,8 @@
 //!
 //! Arena sweep, tape interpreter and native code must agree on every program
 //! the generator draws. Chunk sizes down to 3 ops force values across chunk
-//! boundaries constantly, so the work-array store-through contract is
-//! exercised hard rather than incidentally.
+//! boundaries constantly, so the write-back to the work array is exercised
+//! hard rather than incidentally.
 
 use rsdag::synth::{cases, Spec, Vocabulary};
 use rsdag::{Graph, Tape};

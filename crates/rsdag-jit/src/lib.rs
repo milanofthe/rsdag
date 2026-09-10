@@ -10,8 +10,8 @@
 //! in the work array.
 //!
 //! Bit-exactness is a hard invariant: the same IEEE operation sequence as
-//! the interpreter (`MulAdd` is a multiply and an add; [`fma`](rsdag::TapeVisitor::fma)
-//! is one instruction on both sides), reductions folded in the reference
+//! the interpreter (`MulAdd` is a multiply and an add, two roundings, on
+//! every backend), reductions folded in the reference
 //! order, and every transcendental through the same
 //! [`unary_f64`](rsdag::node::unary_f64) host routine, so the domain
 //! guards hold identically. `tests/parity.rs` fuzzes arena == tape ==
