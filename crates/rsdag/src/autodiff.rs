@@ -387,31 +387,61 @@ fn diff<K: Field>(ctx: &mut Graph<K>, expr: ExprId, wrt: SymbolId, memo: &mut Me
     d
 }
 
-/// Jacobian matrix: `jac[i][j] = d(residuals[i]) / d(wrt[j])`.
+/// A sparse matrix of expressions: for each row, the `(column, entry)`
+/// pairs that are not the structural zero, in ascending column order.
+pub type SparseRows = Vec<Vec<(usize, ExprId)>>;
+
+/// The Jacobian `d(residuals[i]) / d(wrt[j])` as sparse rows.
+///
+/// Only the symbols a row actually contains can have a nonzero derivative,
+/// so each row costs one free-symbol walk plus one differentiation per
+/// symbol it touches: linear in the residual's size and the pattern's
+/// nonzeros, never in `n_rows * n_wrt`. A row that touches a handful of
+/// unknowns out of a million is a handful of entries.
+pub fn sparse_jacobian<K: Field>(
+    ctx: &mut Graph<K>,
+    residuals: &[ExprId],
+    wrt: &[SymbolId],
+) -> SparseRows {
+    let col: rustc_hash::FxHashMap<SymbolId, usize> =
+        wrt.iter().enumerate().map(|(j, &s)| (s, j)).collect();
+    residuals
+        .iter()
+        .map(|&r| {
+            let touched: Vec<(usize, SymbolId)> = ctx
+                .free_symbols(r)
+                .into_iter()
+                .filter_map(|s| col.get(&s).map(|&j| (j, s)))
+                .collect();
+            let mut row: Vec<(usize, ExprId)> = touched
+                .into_iter()
+                .map(|(j, s)| (j, differentiate(ctx, r, s)))
+                .collect();
+            row.retain(|&(_, e)| !ctx.is_zero(e));
+            row.sort_by_key(|&(j, _)| j);
+            row
+        })
+        .collect()
+}
+
+/// The Jacobian as a dense matrix, `jac[i][j] = d(residuals[i]) / d(wrt[j])`,
+/// with the structural zero where the row does not touch the symbol. The
+/// dense form of [`sparse_jacobian`]; for a large sparse system use that
+/// directly, since a dense `n * n` of ids is what does not scale.
 pub fn jacobian<K: Field>(
     ctx: &mut Graph<K>,
     residuals: &[ExprId],
     wrt: &[SymbolId],
 ) -> Vec<Vec<ExprId>> {
-    residuals
-        .iter()
-        .map(|&r| {
-            // Only the symbols the row actually contains can have a nonzero
-            // derivative, and one `free_symbols` walk over the row is far
-            // cheaper than a differentiation sweep per symbol. Without the
-            // filter the cost is `n_rows * n_wrt` sweeps even when each row
-            // touches a handful of symbols, which is quadratic on the sparse
-            // residuals this is built for.
-            let free = ctx.free_symbols(r);
-            wrt.iter()
-                .map(|&s| {
-                    if free.contains(&s) {
-                        differentiate(ctx, r, s)
-                    } else {
-                        ctx.zero()
-                    }
-                })
-                .collect()
+    let zero = ctx.zero();
+    sparse_jacobian(ctx, residuals, wrt)
+        .into_iter()
+        .map(|row| {
+            let mut dense = vec![zero; wrt.len()];
+            for (j, e) in row {
+                dense[j] = e;
+            }
+            dense
         })
         .collect()
 }

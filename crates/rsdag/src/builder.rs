@@ -356,9 +356,10 @@ impl<K: Field> Builder for Graph<K> {
         Graph::dot(self, a.to_vec(), b.to_vec())
     }
     fn solve(&mut self, a: &[Vec<ExprId>], b: &[ExprId]) -> Vec<ExprId> {
-        use crate::symbolic::solve::{lu_static, ordering, pattern_of};
-        let order = ordering(&pattern_of(self, a));
-        let lu = lu_static(self, a, &order);
+        use crate::symbolic::solve::{lu_static, ordering, pattern_of, sparse_rows};
+        let rows = sparse_rows(self, a);
+        let order = ordering(&pattern_of(&rows));
+        let lu = lu_static(self, &rows, &order);
         lu.solve_static(self, b)
     }
 }

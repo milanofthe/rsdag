@@ -28,7 +28,10 @@ pub mod tape;
 // re-exports below, not as a module path.
 pub(crate) mod transform;
 
-pub use autodiff::{differentiate, gradient, hessian, jacobian, sparsity, time_derivative};
+pub use autodiff::{
+    differentiate, gradient, hessian, jacobian, sparse_jacobian, sparsity, time_derivative,
+    SparseRows,
+};
 pub use builder::{Builder, Numeric};
 pub use display::to_string;
 pub use eval::{eval, eval_named, eval_real, eval_real_all};
