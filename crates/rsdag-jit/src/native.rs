@@ -34,7 +34,7 @@ use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 use crate::host::{self, Bundles};
-use crate::ir::{ROp, Recorder};
+use crate::ir::{Dense, ROp, Recorder};
 use crate::isa::{Arg, Arith, Base, IArg, Isa, Round};
 use crate::{JitError, CHUNK_OPS};
 
@@ -180,9 +180,16 @@ impl NativeTape {
         let n_inputs = rec
             .ops
             .iter()
-            .filter_map(|op| match op {
-                ROp::Input(_, k) if *k != u32::MAX => Some(*k as usize + 1),
-                _ => None,
+            .flat_map(|op| match op {
+                ROp::Input(_, k) if *k != u32::MAX => vec![*k as usize + 1],
+                ROp::Gemv { a, x, m, n, .. } => [(a, m * n), (x, *n)]
+                    .into_iter()
+                    .filter_map(|(d, len)| match d {
+                        Dense::Inputs(k) => Some(*k as usize + len as usize),
+                        Dense::Slots(_) => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
             })
             .max()
             .unwrap_or(0);
@@ -506,7 +513,12 @@ impl<'a, I: Isa> Emitter<'a, I> {
     }
     /// Copy `slots` into the gather area; its byte offset.
     fn gather(&mut self, slots: &[u32]) -> usize {
-        let base = self.layout.gather * 8;
+        self.gather_at(slots, 0)
+    }
+    /// Copy `slots` into the gather area from element `at` on; the byte
+    /// offset of the copy.
+    fn gather_at(&mut self, slots: &[u32], at: usize) -> usize {
+        let base = (self.layout.gather + at) * 8;
         for (k, &s) in slots.iter().enumerate() {
             let r = self.get(s);
             self.isa.store(r, Base::Work, base + k * 8);
@@ -644,6 +656,32 @@ impl<'a, I: Isa> Emitter<'a, I> {
                     Arg::I(IArg::WorkAddr(out)),
                 ];
                 self.call(host::h_bundle_batch as *const (), &args);
+            }
+            ROp::Gemv {
+                ref a,
+                ref x,
+                m,
+                n,
+                base,
+            } => {
+                let (ma, mn) = (m as usize, n as usize);
+                let a_arg = match a {
+                    Dense::Inputs(k) => IArg::InputAddr(*k as usize * 8),
+                    Dense::Slots(s) => IArg::WorkAddr(self.gather_at(s, 0)),
+                };
+                let x_arg = match x {
+                    Dense::Inputs(k) => IArg::InputAddr(*k as usize * 8),
+                    Dense::Slots(s) => IArg::WorkAddr(self.gather_at(s, ma * mn)),
+                };
+                let out = (self.layout.scratch + base as usize) * 8;
+                let args = [
+                    Arg::I(a_arg),
+                    Arg::I(x_arg),
+                    Arg::I(IArg::Imm(m as u64)),
+                    Arg::I(IArg::Imm(n as u64)),
+                    Arg::I(IArg::WorkAddr(out)),
+                ];
+                self.call(host::h_gemv as *const (), &args);
             }
             ROp::Pick(dst, idx) => {
                 let r = self.fresh_for(dst);

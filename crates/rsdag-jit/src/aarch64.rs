@@ -246,6 +246,13 @@ impl Isa for A64 {
                             self.mov_imm(10, off as u64);
                             self.w(0x8B00_0000 | (10 << 16) | (WORK << 5) | xk);
                         }
+                        IArg::InputAddr(off) if off < 4096 => {
+                            self.w(0x9100_0000 | ((off as u32) << 10) | (INPUTS << 5) | xk);
+                        }
+                        IArg::InputAddr(off) => {
+                            self.mov_imm(10, off as u64);
+                            self.w(0x8B00_0000 | (10 << 16) | (INPUTS << 5) | xk);
+                        }
                         IArg::Bundles => self.w(0xAA00_03E0 | (BUNDLES << 16) | xk),
                     }
                 }

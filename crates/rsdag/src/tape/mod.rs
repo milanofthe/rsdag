@@ -53,6 +53,39 @@ enum Op {
     BundleBatch(u32, u32),
     /// Read one already-computed bundle output from `bundle_scratch[idx]`.
     BundlePick(u32),
+    /// A dense matrix-vector product, table `gemvs[t]`: `m` rows of `n`
+    /// against a vector of `n`, the rows written to `bundle_scratch[base..]`
+    /// and read back by `BundlePick`s. Fused by `compile` from the rows'
+    /// `Dot`s, and bit-identical to them.
+    Gemv(u32),
+}
+
+/// Where a dense operand's `len` values live.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Src {
+    /// Consecutive inputs from index `k`: a parameter matrix or a state
+    /// vector, read in place.
+    Inputs(u32),
+    /// Slots listed in the arg pool from `start`, gathered.
+    Slots(u32),
+}
+
+/// One fused matrix-vector product.
+#[derive(Clone, Copy, Debug)]
+pub struct GemvTable {
+    pub a: Src,
+    pub x: Src,
+    pub m: u32,
+    pub n: u32,
+    /// First bundle-scratch index of the `m` results.
+    pub base: u32,
+}
+
+/// A dense operand as a backend sees it.
+#[derive(Clone, Copy, Debug)]
+pub enum Operand<'a> {
+    Inputs(u32),
+    Slots(&'a [u32]),
 }
 
 /// Layout of one batched bundle call: `n_groups` argument groups of `n_args`
@@ -102,6 +135,8 @@ pub struct Tape {
     /// Widest flat argument gather any `BundleBatch` needs
     /// (`max n_groups*n_args`), carved from the tail of `work` like `max_args`.
     batch_args_len: usize,
+    /// The fused matrix-vector products (see [`Op::Gemv`]).
+    gemvs: Vec<GemvTable>,
     /// Instruction count of the parameter-pure prolog prefix (0 = no split; see
     /// [`compile_split`](Self::compile_split)).
     prolog_ops: usize,
@@ -187,6 +222,10 @@ pub trait TapeVisitor {
     );
     /// Copy one already-computed bundle output from `bundle_scratch[idx]`.
     fn bundle_pick(&mut self, dst: u32, idx: u32);
+    /// A dense matrix-vector product: `m` rows of `n` in `a` against `x`,
+    /// results to `bundle_scratch[base .. base + m]`, each row the fold of
+    /// [`dot`](Self::dot) (see [`crate::semantics::gemv_t`]).
+    fn gemv(&mut self, a: Operand<'_>, x: Operand<'_>, m: u32, n: u32, base: u32);
 }
 
 /// Observer of `Select` decisions during evaluation: [`NoTrace`] costs
@@ -392,6 +431,56 @@ impl Tape {
                     T::zero() // sink
                 }
                 Op::BundlePick(idx) => bscratch[idx as usize],
+                Op::Gemv(t) => {
+                    let tb = self.gemvs[t as usize];
+                    let (m, n) = (tb.m as usize, tb.n as usize);
+                    // A dense operand in the inputs is read in place when the
+                    // inputs reach; otherwise, and for slots, it is gathered.
+                    let mut at = 0usize;
+                    let mut place =
+                        |src: Src, len: usize, scratch: &mut [T]| -> std::ops::Range<usize> {
+                            let r = at..at + len;
+                            match src {
+                                Src::Inputs(k) if inputs.len() >= k as usize + len => {
+                                    return usize::MAX..k as usize
+                                }
+                                Src::Inputs(k) => {
+                                    for j in 0..len {
+                                        scratch[at + j] =
+                                            inputs.get(k as usize + j).copied().unwrap_or(T::nan());
+                                    }
+                                }
+                                Src::Slots(start) => {
+                                    for j in 0..len {
+                                        scratch[at + j] =
+                                            work[self.arg_pool[start as usize + j] as usize];
+                                    }
+                                }
+                            }
+                            at += len;
+                            r
+                        };
+                    let ra = place(tb.a, m * n, scratch);
+                    let rx = place(tb.x, n, scratch);
+                    let a: &[T] = if ra.start == usize::MAX {
+                        &inputs[ra.end..ra.end + m * n]
+                    } else {
+                        &scratch[ra]
+                    };
+                    let x: &[T] = if rx.start == usize::MAX {
+                        &inputs[rx.end..rx.end + n]
+                    } else {
+                        &scratch[rx]
+                    };
+                    crate::semantics::gemv_t(
+                        a,
+                        x,
+                        m,
+                        n,
+                        &mut bscratch[tb.base as usize..tb.base as usize + m],
+                    );
+                    T::zero() // sink
+                }
             };
             work[self.dst[i] as usize] = v;
         }
@@ -447,6 +536,20 @@ impl Tape {
                     );
                 }
                 Op::BundlePick(idx) => v.bundle_pick(dst, idx),
+                Op::Gemv(t) => {
+                    let tb = self.gemvs[t as usize];
+                    let operand = |src: Src, len: u32| match src {
+                        Src::Inputs(k) => Operand::Inputs(k),
+                        Src::Slots(start) => Operand::Slots(ap(start, len)),
+                    };
+                    v.gemv(
+                        operand(tb.a, tb.m * tb.n),
+                        operand(tb.x, tb.n),
+                        tb.m,
+                        tb.n,
+                        tb.base,
+                    );
+                }
             }
         }
     }

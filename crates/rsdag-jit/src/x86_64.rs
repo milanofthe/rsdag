@@ -120,6 +120,11 @@ impl X64 {
                 self.b(0x8D); // lea rk, [rbx + off]
                 self.modrm_mem(rk, WORK, off);
             }
+            IArg::InputAddr(off) => {
+                self.rex(true, rk, INPUTS);
+                self.b(0x8D); // lea rk, [r13 + off]
+                self.modrm_mem(rk, INPUTS, off);
+            }
             IArg::Bundles => {
                 self.rex(true, BUNDLES, rk);
                 self.b(0x89); // mov rk, r14
