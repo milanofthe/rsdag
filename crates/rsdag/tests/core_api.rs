@@ -58,7 +58,7 @@ fn f64_field_builds_folds_and_evaluates() {
     let e = g.add(x, c);
     let tape = Tape::compile(&g, &[e], &[SymbolId(0)]);
     let (mut work, mut out) = (Vec::new(), Vec::new());
-    tape.eval(&[2.0], &mut work, &mut out);
+    tape.eval(&[2.0f64], &mut work, &mut out);
     assert_eq!(out[0], 2.125);
     assert_eq!(to_string(&g, e), "(x + 0.125)");
 }

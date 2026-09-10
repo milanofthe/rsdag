@@ -10,9 +10,8 @@
 use std::sync::Arc;
 
 use crate::extern_fn::ExternBundle;
-use crate::node::{
-    binary_f64, cmp_bool, dot_slice, reduce_slice, unary_f64, BinOp, CmpOp, ReduceOp, UnaryOp,
-};
+use crate::node::{BinOp, CmpOp, ReduceOp, UnaryOp};
+use crate::scalar::Scalar;
 
 #[derive(Clone, Copy, Debug)]
 enum Op {
@@ -190,24 +189,23 @@ pub trait TapeVisitor {
     fn bundle_pick(&mut self, dst: u32, idx: u32);
 }
 
-/// Observer of `Select` decisions during evaluation. The no-op sink keeps the
-/// plain [`Tape::eval`] monomorphization free of any tracing cost.
-trait TraceSink {
+/// Observer of `Select` decisions during evaluation: [`NoTrace`] costs
+/// nothing, a `Vec<u8>` records one byte per `Select` in op order (`1` =
+/// then-arm taken), the trace [`Tape::specialize`] takes.
+pub trait TraceSink {
     fn select(&mut self, taken: bool);
 }
 
-struct NoTrace;
+pub struct NoTrace;
 impl TraceSink for NoTrace {
     #[inline(always)]
     fn select(&mut self, _taken: bool) {}
 }
 
-/// Records one byte per `Select` in op order (`1` = then-arm taken).
-struct RecordTrace<'a>(&'a mut Vec<u8>);
-impl TraceSink for RecordTrace<'_> {
+impl TraceSink for Vec<u8> {
     #[inline(always)]
     fn select(&mut self, taken: bool) {
-        self.0.push(taken as u8);
+        self.push(taken as u8);
     }
 }
 
@@ -241,73 +239,97 @@ impl Tape {
         self.n_selects
     }
 
-    /// Evaluate the tape. `work` is resized to `n_slots()` and reused; outputs
-    /// are written into `out` (resized to `n_outputs()`).
-    pub fn eval(&self, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
-        self.eval_impl(inputs, work, out, &mut NoTrace);
+    /// Evaluate the tape in any execution scalar (`f64`, `f32`,
+    /// `Complex<f64>`): constants convert from their `f64` lowering, every
+    /// op goes through [`Scalar`]'s reference arithmetic for `T`, so a value
+    /// cannot depend on which scalar computed it beyond the scalar itself.
+    /// `work` is resized and reused; `out` receives one value per output.
+    pub fn eval<T: Scalar>(&self, inputs: &[T], work: &mut Vec<T>, out: &mut Vec<T>) {
+        self.eval_with(inputs, work, out, &mut NoTrace);
     }
 
-    /// [`eval`](Self::eval), additionally recording each `Select`'s taken arm
-    /// into `choices` (cleared first; one entry per `Select` in op order, `1` =
-    /// then-arm). The trace feeds [`specialize`](Self::specialize).
-    pub fn eval_traced(
+    /// [`eval`](Self::eval) with every `Select` decision reported to `sink`;
+    /// a `Vec<u8>` sink is the choice trace [`specialize`](Self::specialize)
+    /// takes (the caller clears it first).
+    pub fn eval_with<T: Scalar, S: TraceSink>(
         &self,
-        inputs: &[f64],
-        work: &mut Vec<f64>,
-        out: &mut Vec<f64>,
-        choices: &mut Vec<u8>,
-    ) {
-        choices.clear();
-        choices.reserve(self.n_selects);
-        self.eval_impl(inputs, work, out, &mut RecordTrace(choices));
-    }
-
-    #[inline(always)]
-    fn eval_impl<S: TraceSink>(
-        &self,
-        inputs: &[f64],
-        work: &mut Vec<f64>,
-        out: &mut Vec<f64>,
+        inputs: &[T],
+        work: &mut Vec<T>,
+        out: &mut Vec<T>,
         sink: &mut S,
     ) {
         work.clear();
-        work.resize(
-            self.n_work + self.max_args + self.bundle_scratch_len + self.batch_args_len,
-            0.0,
-        );
+        work.resize(self.buffer_len(), T::zero());
         self.run_range(inputs, work, 0, self.ops.len(), sink);
         out.clear();
         let w = &work[..self.n_work];
         out.extend(self.outputs.iter().map(|&o| w[o as usize]));
     }
 
+    /// The work buffer: the slots, then the gather scratch, the bundle
+    /// outputs and the batch arguments.
+    fn buffer_len(&self) -> usize {
+        self.n_work + self.max_args + self.bundle_scratch_len + self.batch_args_len
+    }
+
     /// Instruction count of the parameter-pure prolog (0 when compiled without
     /// [`compile_split`](Self::compile_split)).
-    /// Evaluate the whole tape in another execution scalar (`f32`,
-    /// `Complex<f64>`): constants convert from their `f64` lowering, every
-    /// op goes through [`Scalar`](crate::scalar::Scalar)'s reference
-    /// implementation for `T`. Tapes with bundle calls are `f64` only.
-    pub fn eval_typed<T: crate::scalar::Scalar>(
+    pub fn prolog_len(&self) -> usize {
+        self.prolog_ops
+    }
+
+    /// Evaluate the parameter-pure prolog into `work` (sized/cleared here).
+    /// A Newton loop calls this once per parameter binding, then
+    /// [`eval_main`](Self::eval_main) per iteration over the *same* buffer.
+    pub fn eval_prolog<T: Scalar>(&self, inputs: &[T], work: &mut Vec<T>) {
+        work.clear();
+        work.resize(self.buffer_len(), T::zero());
+        self.run_range(inputs, work, 0, self.prolog_ops, &mut NoTrace);
+    }
+
+    /// Evaluate the main phase over a `work` buffer prepared by
+    /// [`eval_prolog`](Self::eval_prolog) (prolog results are pinned slots, so
+    /// repeated main passes may not clear or resize the buffer).
+    pub fn eval_main<T: Scalar>(&self, inputs: &[T], work: &mut [T], out: &mut Vec<T>) {
+        assert_eq!(
+            work.len(),
+            self.buffer_len(),
+            "eval_main requires a work buffer prepared by eval_prolog"
+        );
+        self.run_range(inputs, work, self.prolog_ops, self.ops.len(), &mut NoTrace);
+        out.clear();
+        let w = &work[..self.n_work];
+        out.extend(self.outputs.iter().map(|&o| w[o as usize]));
+    }
+
+    /// Execute ops `lo..hi` over a fully-sized work buffer, feeding each
+    /// `Select` decision to `sink` (the no-op sink costs nothing).
+    fn run_range<T: Scalar, S: TraceSink>(
         &self,
         inputs: &[T],
-        work: &mut Vec<T>,
-        out: &mut Vec<T>,
+        work: &mut [T],
+        lo: usize,
+        hi: usize,
+        sink: &mut S,
     ) {
         use crate::scalar::{dot_slice_t, reduce_slice_t};
-        assert!(
-            self.bundles.is_empty(),
-            "eval_typed: tapes with bundle calls evaluate in f64 only"
-        );
-        work.clear();
-        work.resize(self.n_work + self.max_args, T::zero());
-        let (w, scratch) = work.split_at_mut(self.n_work);
-        for i in 0..self.ops.len() {
-            let g = |k: u32| w[k as usize];
+        // Two scratch regions at the tail of `work`, so nothing is allocated
+        // per call: the transient gather for variadic and bundle arguments,
+        // the persistent bundle-output region (written by a `BundleCall`,
+        // read by its `BundlePick`s later, possibly in a later main pass),
+        // and the batch argument block.
+        let (work, rest) = work.split_at_mut(self.n_work);
+        let (scratch, rest) = rest.split_at_mut(self.max_args);
+        let (bscratch, batch_scratch) = rest.split_at_mut(self.bundle_scratch_len);
+        for i in lo..hi {
+            let g = |k: u32| work[k as usize];
             let v = match self.ops[i] {
                 Op::Const(v) => T::from_f64(v),
                 Op::Input(k) => inputs.get(k as usize).copied().unwrap_or(T::nan()),
                 Op::Add(a, b) => g(a).add(g(b)),
                 Op::Mul(a, b) => g(a).mul(g(b)),
+                // The product and the sum round separately: a fused
+                // dispatch, not a fused rounding.
                 Op::MulAdd(a, b, c) => g(a).mul(g(b)).add(g(c)),
                 Op::Sub(a, b) => g(a).sub(g(b)),
                 Op::Neg(a) => g(a).neg(),
@@ -316,7 +338,9 @@ impl Tape {
                 Op::Binary(op, a, b) => T::binary(op, g(a), g(b)),
                 Op::Cmp(op, a, b) => T::cmp(op, g(a), g(b)),
                 Op::Select(c, t, e) => {
-                    if g(c).is_true() {
+                    let taken = g(c).is_true();
+                    sink.select(taken);
+                    if taken {
                         g(t)
                     } else {
                         g(e)
@@ -337,378 +361,42 @@ impl Tape {
                         &scratch[len as usize..2 * len as usize],
                     )
                 }
-                Op::BundleCall(..) | Op::BundleBatch(..) | Op::BundlePick(..) => {
-                    unreachable!("no bundles")
+                Op::BundleCall(bidx, start, len, base) => {
+                    for k in 0..len {
+                        scratch[k as usize] = g(self.arg_pool[(start + k) as usize]);
+                    }
+                    let b = &*self.bundles[bidx as usize];
+                    let n = b.n_outputs();
+                    T::call_bundle(
+                        b,
+                        &scratch[..len as usize],
+                        &mut bscratch[base as usize..base as usize + n],
+                    );
+                    T::zero() // written to the never-read sink slot
                 }
+                Op::BundleBatch(bidx, tidx) => {
+                    let t = self.batches[tidx as usize];
+                    let flat = (t.n_groups * t.n_args) as usize;
+                    for k in 0..flat {
+                        batch_scratch[k] = g(self.arg_pool[(t.start as usize) + k]);
+                    }
+                    let b = &*self.bundles[bidx as usize];
+                    let w = (t.n_groups * t.n_out) as usize;
+                    T::call_bundle_batch(
+                        b,
+                        &batch_scratch[..flat],
+                        t.n_groups as usize,
+                        t.n_args as usize,
+                        &mut bscratch[t.base0 as usize..t.base0 as usize + w],
+                    );
+                    T::zero() // sink
+                }
+                Op::BundlePick(idx) => bscratch[idx as usize],
             };
-            w[self.dst[i] as usize] = v;
-        }
-        out.clear();
-        out.extend(self.outputs.iter().map(|&o| w[o as usize]));
-    }
-
-    pub fn prolog_len(&self) -> usize {
-        self.prolog_ops
-    }
-
-    /// Evaluate the parameter-pure prolog into `work` (sized/cleared here).
-    /// A Newton loop calls this once per parameter binding, then
-    /// [`eval_main`](Self::eval_main) per iteration over the *same* buffer.
-    pub fn eval_prolog(&self, inputs: &[f64], work: &mut Vec<f64>) {
-        work.clear();
-        work.resize(
-            self.n_work + self.max_args + self.bundle_scratch_len + self.batch_args_len,
-            0.0,
-        );
-        self.run_range(inputs, work, 0, self.prolog_ops, &mut NoTrace);
-    }
-
-    /// Evaluate the main phase over a `work` buffer prepared by
-    /// [`eval_prolog`](Self::eval_prolog) (prolog results are pinned slots, so
-    /// repeated main passes may not clear or resize the buffer).
-    pub fn eval_main(&self, inputs: &[f64], work: &mut [f64], out: &mut Vec<f64>) {
-        assert_eq!(
-            work.len(),
-            self.n_work + self.max_args + self.bundle_scratch_len + self.batch_args_len,
-            "eval_main requires a work buffer prepared by eval_prolog"
-        );
-        self.run_range(inputs, work, self.prolog_ops, self.ops.len(), &mut NoTrace);
-        out.clear();
-        let w = &work[..self.n_work];
-        out.extend(self.outputs.iter().map(|&o| w[o as usize]));
-    }
-
-    /// Execute ops `lo..hi` over a fully-sized work buffer, feeding each
-    /// `Select` decision to `sink` (the no-op sink costs nothing).
-    fn run_range<S: TraceSink>(
-        &self,
-        inputs: &[f64],
-        work: &mut [f64],
-        lo: usize,
-        hi: usize,
-        sink: &mut S,
-    ) {
-        // Carve two scratch regions out of the tail of `work` so no buffer is
-        // allocated per call: `scratch` is the transient variadic/bundle-arg
-        // gather, `bscratch` the persistent bundle-output region (written by a
-        // `BundleCall`, read by its `BundlePick`s later -- possibly in a later
-        // main pass, which is why it sits in the caller's persistent buffer).
-        let (work, rest) = work.split_at_mut(self.n_work);
-        let (scratch, rest) = rest.split_at_mut(self.max_args);
-        let (bscratch, batch_scratch) = rest.split_at_mut(self.bundle_scratch_len);
-        // SAFETY: every slot index in the tape is `< n_work` by construction in
-        // `compile` (each `dst`, op operand, `arg_pool` entry and output slot is a
-        // freshly allocated or reused work slot), the variadic gathers stay within
-        // the `max_args`-wide `scratch`, the bundle region within `bscratch`, and
-        // `ops.len() == dst.len()`. So the data-dependent indices below (which the
-        // compiler cannot prove in bounds, unlike the `0..len` loop counters) are
-        // always valid, and the bounds checks they would otherwise cost per op in
-        // this hot inner loop are elided.
-        unsafe {
-            for i in lo..hi {
-                let g = |k: u32| *work.get_unchecked(k as usize);
-                let v = match *self.ops.get_unchecked(i) {
-                    Op::Const(v) => v,
-                    Op::Input(k) => inputs.get(k as usize).copied().unwrap_or(f64::NAN),
-                    Op::Add(a, b) => g(a) + g(b),
-                    Op::Mul(a, b) => g(a) * g(b),
-                    // separate mul + add on purpose (no `mul_add` contraction):
-                    // the superinstruction fuses the dispatch, not the rounding
-                    Op::MulAdd(a, b, c) => g(a) * g(b) + g(c),
-                    Op::Sub(a, b) => g(a) - g(b),
-                    Op::Neg(a) => -g(a),
-                    Op::Powi(a, n) => g(a).powi(n),
-                    Op::Unary(op, a) => unary_f64(op, g(a)),
-                    Op::Binary(op, a, b) => binary_f64(op, g(a), g(b)),
-                    Op::Cmp(op, a, b) => {
-                        if cmp_bool(op, g(a), g(b)) {
-                            1.0
-                        } else {
-                            0.0
-                        }
-                    }
-                    Op::Select(c, t, e) => {
-                        let taken = g(c) != 0.0;
-                        sink.select(taken);
-                        if taken {
-                            g(t)
-                        } else {
-                            g(e)
-                        }
-                    }
-                    Op::Reduce(op, start, len) => {
-                        for k in 0..len {
-                            *scratch.get_unchecked_mut(k as usize) =
-                                g(*self.arg_pool.get_unchecked((start + k) as usize));
-                        }
-                        reduce_slice(op, scratch.get_unchecked(..len as usize))
-                    }
-                    Op::Dot(start, len) => {
-                        for k in 0..2 * len {
-                            *scratch.get_unchecked_mut(k as usize) =
-                                g(*self.arg_pool.get_unchecked((start + k) as usize));
-                        }
-                        dot_slice(
-                            scratch.get_unchecked(..len as usize),
-                            scratch.get_unchecked(len as usize..2 * len as usize),
-                        )
-                    }
-                    Op::BundleCall(bidx, start, len, base) => {
-                        for k in 0..len {
-                            *scratch.get_unchecked_mut(k as usize) =
-                                g(*self.arg_pool.get_unchecked((start + k) as usize));
-                        }
-                        let b = self.bundles.get_unchecked(bidx as usize);
-                        let n = b.n_outputs();
-                        b.call(
-                            scratch.get_unchecked(..len as usize),
-                            bscratch.get_unchecked_mut(base as usize..base as usize + n),
-                        );
-                        0.0 // written to the never-read sink slot
-                    }
-                    Op::BundleBatch(bidx, tidx) => {
-                        let t = *self.batches.get_unchecked(tidx as usize);
-                        let flat = (t.n_groups * t.n_args) as usize;
-                        for k in 0..flat {
-                            *batch_scratch.get_unchecked_mut(k) =
-                                g(*self.arg_pool.get_unchecked((t.start as usize) + k));
-                        }
-                        let b = self.bundles.get_unchecked(bidx as usize);
-                        let w = (t.n_groups * t.n_out) as usize;
-                        b.call_batch(
-                            batch_scratch.get_unchecked(..flat),
-                            t.n_groups as usize,
-                            t.n_args as usize,
-                            bscratch.get_unchecked_mut(t.base0 as usize..t.base0 as usize + w),
-                        );
-                        0.0 // sink
-                    }
-                    Op::BundlePick(idx) => *bscratch.get_unchecked(idx as usize),
-                };
-                *work.get_unchecked_mut(*self.dst.get_unchecked(i) as usize) = v;
-            }
+            work[self.dst[i] as usize] = v;
         }
     }
 
-    /// Evaluate the tape on `L` independent input sets at once (structure-of-arrays
-    /// batching). Slot `s` holds an `[f64; L]` lane vector; the pointwise ops
-    /// (`Add`/`Mul`/`Neg`/`Cmp`/`Select`/...) are written as length-`L` loops the
-    /// compiler auto-vectorises into one SIMD instruction, so one tape walk does
-    /// `L` evaluations. Transcendentals (`Unary`), variadic reductions and extern
-    /// device callbacks have no SIMD form and fall back to per-lane scalar.
-    ///
-    /// `inputs[k]` is the lane vector for input `k`; `out` is filled with one lane
-    /// vector per tape output. This is the batched kernel for parameter sweeps,
-    /// Monte Carlo and finite-difference / directional sensitivity, and the SoA
-    /// layout a GPU backend would dispatch over.
-    ///
-    /// Runtime dispatch: on x86 with AVX2+FMA the length-`L` pointwise loops are
-    /// compiled as 256-bit vector ops (one `vmulpd`/`vaddpd` for `L = 4` f64 rather
-    /// than the two SSE2 halves the portable baseline emits), roughly doubling batch
-    /// throughput. The AVX2 body is bit-identical to the scalar fallback: the tape's
-    /// mul and add are separate ops through distinct slots, so no fused-multiply
-    /// contraction (and no rounding change) occurs — FMA only widens, never fuses.
-    /// On aarch64 no dispatch is needed: NEON is part of the baseline target, so
-    /// the same generic lane loops vectorise directly (measured ~2.1–2.6x per-lane
-    /// over scalar `eval` on an Apple M3; see `examples/batch_bench.rs`).
-    pub fn eval_batch<const L: usize>(
-        &self,
-        inputs: &[[f64; L]],
-        work: &mut Vec<[f64; L]>,
-        out: &mut Vec<[f64; L]>,
-    ) {
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        {
-            if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-                // SAFETY: the target features are confirmed present at runtime just
-                // above; `eval_batch_avx2` requires nothing else.
-                unsafe {
-                    self.eval_batch_avx2::<L>(inputs, work, out);
-                }
-                return;
-            }
-        }
-        self.eval_batch_inner::<L>(inputs, work, out);
-    }
-
-    /// AVX2+FMA copy of [`eval_batch_inner`](Self::eval_batch_inner). The
-    /// `#[inline(always)]` inner body is codegen'd with these features enabled so the
-    /// SoA lane loops vectorise to 256-bit ops. Guarded by runtime detection in
-    /// [`eval_batch`](Self::eval_batch).
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    #[target_feature(enable = "avx2,fma")]
-    unsafe fn eval_batch_avx2<const L: usize>(
-        &self,
-        inputs: &[[f64; L]],
-        work: &mut Vec<[f64; L]>,
-        out: &mut Vec<[f64; L]>,
-    ) {
-        self.eval_batch_inner::<L>(inputs, work, out);
-    }
-
-    #[inline(always)]
-    fn eval_batch_inner<const L: usize>(
-        &self,
-        inputs: &[[f64; L]],
-        work: &mut Vec<[f64; L]>,
-        out: &mut Vec<[f64; L]>,
-    ) {
-        work.clear();
-        work.resize(
-            self.n_work + self.max_args + self.bundle_scratch_len + self.batch_args_len,
-            [0.0; L],
-        );
-        let (work, rest) = work.split_at_mut(self.n_work);
-        // Only the bundle-output region is carved here; variadic/extern args are
-        // gathered per lane into the scalar `sc` buffer below.
-        let (_args, bscratch) = rest.split_at_mut(self.max_args);
-        // Scalar gather buffer for the per-lane fallback ops (reduce/dot/extern).
-        let mut sc = vec![0.0f64; self.max_args.max(1)];
-        // SAFETY: identical invariant to [`eval`] -- every slot index (op operand,
-        // `dst`, `arg_pool` entry, output) is `< n_work` and the gathers stay
-        // within `sc`/`bscratch` by construction in `compile`, so the
-        // data-dependent indexing is in bounds and its per-op bounds checks (paid
-        // once per operand per op in this hot loop) are elided. The `0..L` /
-        // `0..len` counters keep their provable checks.
-        unsafe {
-            for i in 0..self.ops.len() {
-                let w = |k: u32| *work.get_unchecked(k as usize);
-                let mut v = [0.0f64; L];
-                match *self.ops.get_unchecked(i) {
-                    Op::Const(c) => v = [c; L],
-                    Op::Input(k) => v = inputs.get(k as usize).copied().unwrap_or([f64::NAN; L]),
-                    Op::Add(a, b) => {
-                        let (wa, wb) = (w(a), w(b));
-                        for l in 0..L {
-                            v[l] = wa[l] + wb[l];
-                        }
-                    }
-                    Op::Mul(a, b) => {
-                        let (wa, wb) = (w(a), w(b));
-                        for l in 0..L {
-                            v[l] = wa[l] * wb[l];
-                        }
-                    }
-                    // Written as separate mul + add on purpose (no `mul_add`):
-                    // the superinstruction fuses the dispatch, never the rounding.
-                    Op::MulAdd(a, b, c) => {
-                        let (wa, wb, wc) = (w(a), w(b), w(c));
-                        for l in 0..L {
-                            v[l] = wa[l] * wb[l] + wc[l];
-                        }
-                    }
-                    Op::Sub(a, b) => {
-                        let (wa, wb) = (w(a), w(b));
-                        for l in 0..L {
-                            v[l] = wa[l] - wb[l];
-                        }
-                    }
-                    Op::Neg(a) => {
-                        let wa = w(a);
-                        for l in 0..L {
-                            v[l] = -wa[l];
-                        }
-                    }
-                    Op::Powi(a, n) => {
-                        let wa = w(a);
-                        for l in 0..L {
-                            v[l] = wa[l].powi(n);
-                        }
-                    }
-                    Op::Unary(op, a) => {
-                        let wa = w(a);
-                        for l in 0..L {
-                            v[l] = unary_f64(op, wa[l]);
-                        }
-                    }
-                    Op::Binary(op, a, b) => {
-                        let (wa, wb) = (w(a), w(b));
-                        for l in 0..L {
-                            v[l] = binary_f64(op, wa[l], wb[l]);
-                        }
-                    }
-                    Op::Cmp(op, a, b) => {
-                        let (wa, wb) = (w(a), w(b));
-                        for l in 0..L {
-                            v[l] = if cmp_bool(op, wa[l], wb[l]) { 1.0 } else { 0.0 };
-                        }
-                    }
-                    Op::Select(c, t, e) => {
-                        let (wc, wt, we) = (w(c), w(t), w(e));
-                        for l in 0..L {
-                            v[l] = if wc[l] != 0.0 { wt[l] } else { we[l] };
-                        }
-                    }
-                    Op::Reduce(op, start, len) => {
-                        for l in 0..L {
-                            for k in 0..len {
-                                *sc.get_unchecked_mut(k as usize) =
-                                    w(*self.arg_pool.get_unchecked((start + k) as usize))[l];
-                            }
-                            v[l] = reduce_slice(op, sc.get_unchecked(..len as usize));
-                        }
-                    }
-                    Op::Dot(start, len) => {
-                        for l in 0..L {
-                            for k in 0..2 * len {
-                                *sc.get_unchecked_mut(k as usize) =
-                                    w(*self.arg_pool.get_unchecked((start + k) as usize))[l];
-                            }
-                            v[l] = dot_slice(
-                                sc.get_unchecked(..len as usize),
-                                sc.get_unchecked(len as usize..2 * len as usize),
-                            );
-                        }
-                    }
-                    Op::BundleCall(bidx, start, len, base) => {
-                        let b = self.bundles.get_unchecked(bidx as usize);
-                        let n = b.n_outputs();
-                        let mut obuf = vec![0.0f64; n];
-                        for l in 0..L {
-                            for k in 0..len {
-                                *sc.get_unchecked_mut(k as usize) =
-                                    w(*self.arg_pool.get_unchecked((start + k) as usize))[l];
-                            }
-                            b.call(sc.get_unchecked(..len as usize), &mut obuf);
-                            for (j, &o) in obuf.iter().enumerate() {
-                                bscratch.get_unchecked_mut(base as usize + j)[l] = o;
-                            }
-                        }
-                        v = [0.0; L]; // sink slot
-                    }
-                    Op::BundleBatch(bidx, tidx) => {
-                        let t = *self.batches.get_unchecked(tidx as usize);
-                        let b = self.bundles.get_unchecked(bidx as usize);
-                        let (ng, na, no) =
-                            (t.n_groups as usize, t.n_args as usize, t.n_out as usize);
-                        let mut abuf = vec![0.0f64; ng * na];
-                        let mut obuf = vec![0.0f64; ng * no];
-                        for l in 0..L {
-                            for k in 0..ng * na {
-                                abuf[k] =
-                                    w(*self.arg_pool.get_unchecked((t.start as usize) + k))[l];
-                            }
-                            b.call_batch(&abuf, ng, na, &mut obuf);
-                            for (j, &o) in obuf.iter().enumerate() {
-                                bscratch.get_unchecked_mut(t.base0 as usize + j)[l] = o;
-                            }
-                        }
-                        v = [0.0; L]; // sink
-                    }
-                    Op::BundlePick(idx) => v = *bscratch.get_unchecked(idx as usize),
-                }
-                *work.get_unchecked_mut(*self.dst.get_unchecked(i) as usize) = v;
-            }
-        }
-        out.clear();
-        out.extend(
-            self.outputs
-                .iter()
-                .map(|&o| unsafe { *work.get_unchecked(o as usize) }),
-        );
-    }
-
-    /// Work-array width an alternative backend must provide (slot count).
     pub fn n_work(&self) -> usize {
         self.n_work
     }

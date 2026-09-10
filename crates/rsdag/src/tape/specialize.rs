@@ -4,37 +4,13 @@
 use super::{BatchTable, Op, Tape};
 
 impl Tape {
-    /// Shorten the tape against a recorded choice trace (fidget-style tape
-    /// specialization): every `Select` is pinned to its traced arm and drops out
-    /// of the instruction stream, ops reachable only through untaken arms die,
-    /// and work slots are reallocated for the surviving subsequence. Each live
-    /// `Select`'s condition survives as a *guard output*, so
-    /// [`SpecializedTape::eval_checked`] can detect a region flip and demand a
-    /// re-trace on the full tape.
-    ///
-    /// Why point guards are sound: take the earliest (op-order) live `Select`
-    /// whose condition truth at the new inputs differs from the trace. Its
-    /// condition chain contains only earlier ops, all of whose pinned `Select`s
-    /// are still valid, so that guard value is computed exactly as the full
-    /// tape would compute it -- the first flip is always detected.
-    ///
-    /// The surviving ops are the identical instructions in the identical order,
-    /// so a checked evaluation is bit-exact against [`eval`](Self::eval).
-    ///
-    /// `choices` must be a trace of this tape from
-    /// [`eval_traced`](Self::eval_traced) (`len == n_selects()`).
-    pub fn specialize(&self, choices: &[u8]) -> SpecializedTape {
-        self.specialize_partial(choices, &vec![true; self.n_selects])
-    }
-
-    /// [`specialize`](Self::specialize) with per-`Select` control: `pin[k]`
-    /// pins select `k` to its traced arm (guarded); an unpinned select stays a
-    /// real `Select` in the shortened tape -- both arms live, no guard. A
-    /// caller that observes a select flipping across respecializations unpins
-    /// it, so periodically region-hopping devices (a driven transient) stop
-    /// costing a respecialization per period while the stable bias structure
-    /// stays shortened.
-    pub fn specialize_partial(&self, choices: &[u8], pin: &[bool]) -> SpecializedTape {
+    /// A shortened tape for the region a choice trace describes: `choices`
+    /// is one byte per `Select` as recorded by [`Tape::eval_with`] with a
+    /// `Vec<u8>` sink (`len == n_selects()`); `pin[k]` pins select `k` to
+    /// its traced arm, guarded, and an unpinned select stays a real `Select`
+    /// in the shortened tape, both arms live, no guard. A guarded tape
+    /// reports through its checks whether the region still holds.
+    pub fn specialize(&self, choices: &[u8], pin: &[bool]) -> SpecializedTape {
         assert_eq!(
             choices.len(),
             self.n_selects,
@@ -384,7 +360,7 @@ impl SpecializedTape {
     /// Evaluate the shortened tape. Returns `true` if every pinned choice still
     /// holds, in which case `out` is bit-exact against the full tape. On
     /// `false` a region flipped and `out` is NOT valid -- re-trace on the full
-    /// tape ([`Tape::eval_traced`]) and respecialize.
+    /// tape ([`Tape::eval_with`]) and respecialize.
     pub fn eval_checked(&self, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) -> bool {
         self.tape.eval(inputs, work, out);
         let ok = out[self.n_real..]

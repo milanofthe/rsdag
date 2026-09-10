@@ -60,7 +60,7 @@ fn bundle_scatters_and_runs_once() {
     let tape = Tape::compile(&ctx, &[o_sum, o_prod, o_diff, root], &[xs, ys]);
     let mut work = Vec::new();
     let mut out = Vec::new();
-    tape.eval(&[3.0, 4.0], &mut work, &mut out);
+    tape.eval(&[3.0f64, 4.0], &mut work, &mut out);
 
     assert_eq!(out[0], 7.0, "a+b");
     assert_eq!(out[1], 12.0, "a*b");
@@ -70,7 +70,7 @@ fn bundle_scatters_and_runs_once() {
     assert_eq!(calls.load(Ordering::Relaxed), 1, "bundle ran once per eval");
 
     // Second eval reuses the compiled tape; one more call, fresh values.
-    tape.eval(&[1.0, 2.0], &mut work, &mut out);
+    tape.eval(&[1.0f64, 2.0], &mut work, &mut out);
     assert_eq!(out[1], 2.0);
     assert_eq!(calls.load(Ordering::Relaxed), 2);
 }

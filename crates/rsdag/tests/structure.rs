@@ -80,7 +80,7 @@ fn subsystems_nest_and_instances_keep_their_parameters() {
     let params = g.func(sys).params.clone();
     let tape = Tape::compile(&g, &[expr_of(&g, sys, 0)], &params);
     let (mut w, mut o) = (Vec::new(), Vec::new());
-    tape.eval(&[5.0], &mut w, &mut o);
+    tape.eval(&[5.0f64], &mut w, &mut o);
     assert_eq!(o[0], 30.0, "2 * 3 * 5 through two levels of calls");
 
     // `inline_outputs` opens one level: the system's call becomes the
@@ -98,7 +98,7 @@ fn subsystems_nest_and_instances_keep_their_parameters() {
     assert!(!contains_call(&g, flat), "fully inlined");
     let tape = Tape::compile(&g, &[flat], &params);
     let (mut w, mut o) = (Vec::new(), Vec::new());
-    tape.eval(&[5.0], &mut w, &mut o);
+    tape.eval(&[5.0f64], &mut w, &mut o);
     assert_eq!(o[0], 30.0);
 }
 

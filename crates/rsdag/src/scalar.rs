@@ -35,9 +35,52 @@ pub trait Scalar: Copy + Send + Sync + std::fmt::Debug + 'static {
     fn is_true(self) -> bool;
     fn min(self, o: Self) -> Self;
     fn max(self, o: Self) -> Self;
+    /// The value as the real number a bundle takes; a bundle is a real
+    /// function, so a scalar without a real value refuses.
+    fn to_f64(self) -> f64;
+    /// Call a bundle on arguments in `Self`, its outputs back in `Self`.
+    /// The default converts through `f64` buffers; `f64` calls directly.
+    fn call_bundle(b: &dyn crate::extern_fn::ExternBundle, args: &[Self], out: &mut [Self]) {
+        let a: Vec<f64> = args.iter().map(|&x| x.to_f64()).collect();
+        let mut o = vec![0.0; out.len()];
+        b.call(&a, &mut o);
+        for (dst, v) in out.iter_mut().zip(o) {
+            *dst = Self::from_f64(v);
+        }
+    }
+    /// [`call_bundle`](Self::call_bundle) for `n_groups` argument groups.
+    fn call_bundle_batch(
+        b: &dyn crate::extern_fn::ExternBundle,
+        args: &[Self],
+        n_groups: usize,
+        n_args: usize,
+        out: &mut [Self],
+    ) {
+        let a: Vec<f64> = args.iter().map(|&x| x.to_f64()).collect();
+        let mut o = vec![0.0; out.len()];
+        b.call_batch(&a, n_groups, n_args, &mut o);
+        for (dst, v) in out.iter_mut().zip(o) {
+            *dst = Self::from_f64(v);
+        }
+    }
 }
 
 impl Scalar for f64 {
+    fn to_f64(self) -> f64 {
+        self
+    }
+    fn call_bundle(b: &dyn crate::extern_fn::ExternBundle, args: &[f64], out: &mut [f64]) {
+        b.call(args, out);
+    }
+    fn call_bundle_batch(
+        b: &dyn crate::extern_fn::ExternBundle,
+        args: &[f64],
+        n_groups: usize,
+        n_args: usize,
+        out: &mut [f64],
+    ) {
+        b.call_batch(args, n_groups, n_args, out);
+    }
     fn zero() -> Self {
         0.0
     }
@@ -90,6 +133,9 @@ impl Scalar for f64 {
 }
 
 impl Scalar for f32 {
+    fn to_f64(self) -> f64 {
+        self as f64
+    }
     fn zero() -> Self {
         0.0
     }
@@ -144,6 +190,10 @@ impl Scalar for f32 {
 }
 
 impl Scalar for Complex64 {
+    fn to_f64(self) -> f64 {
+        assert!(self.im == 0.0, "a bundle call takes real arguments");
+        self.re
+    }
     fn zero() -> Self {
         Complex64::new(0.0, 0.0)
     }

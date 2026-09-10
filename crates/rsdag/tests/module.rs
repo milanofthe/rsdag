@@ -142,9 +142,9 @@ fn calls_and_nested_functions_round_trip() {
     let params2: Vec<SymbolId> = params.iter().map(|p| map.symbols[p.0 as usize]).collect();
 
     let (mut w, mut o) = (Vec::new(), Vec::new());
-    Tape::compile(&g, &[root], &params).eval(&[0.5], &mut w, &mut o);
+    Tape::compile(&g, &[root], &params).eval(&[0.5f64], &mut w, &mut o);
     let (mut w2, mut o2) = (Vec::new(), Vec::new());
-    Tape::compile(&loaded, &[root2], &params2).eval(&[0.5], &mut w2, &mut o2);
+    Tape::compile(&loaded, &[root2], &params2).eval(&[0.5f64], &mut w2, &mut o2);
     assert_eq!(
         o[0].to_bits(),
         o2[0].to_bits(),
@@ -209,7 +209,7 @@ fn an_extern_function_round_trips_with_its_body_resolved_by_name() {
     let root2 = map.exprs[root.0 as usize];
     let syms2: Vec<SymbolId> = syms.iter().map(|s| map.symbols[s.0 as usize]).collect();
     let (mut w, mut o) = (Vec::new(), Vec::new());
-    Tape::compile(&loaded, &[root2], &syms2).eval(&[2.0, 5.0], &mut w, &mut o);
+    Tape::compile(&loaded, &[root2], &syms2).eval(&[2.0f64, 5.0], &mut w, &mut o);
     assert_eq!(o[0], 7.0 + 10.0 + 0.0);
     assert_eq!(loaded.to_module(), module);
 }
