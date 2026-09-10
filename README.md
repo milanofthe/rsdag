@@ -8,7 +8,9 @@ complex values, a native code backend, a symbolic layer
 Python tracer.
 
 It builds, differentiates and evaluates graphs, and stops there: no
-integrators, no solver loops, no numeric linear algebra.
+integrators, no solver loops, no numeric linear algebra library. A linear
+solve on a system the graph knows the structure of can be emitted as graph
+ops (`symbolic::solve`), so a Newton step is one program.
 
 Private for now. Licensed under PolyForm Noncommercial 1.0.0 (see LICENSE).
 Design decisions and phases live in the GitHub issues.
@@ -19,7 +21,8 @@ Design decisions and phases live in the GitHub issues.
   building one incrementally, `Module` as the serializable form,
   `differentiate`, `gradient` (reverse mode), `jacobian`, `hessian`,
   `rebuild`, `Tape` (interpreter, `eval_typed`, choice specialization) and
-  `symbolic` (`determinant`, `collect`, `rational_form`, `simplify_egraph`).
+  `symbolic` (`determinant`, `collect`, `rational_form`, `simplify_egraph`,
+  `solve` with static LU and `newton_step`).
 - `rsdag-jit`: the native backend (`NativeTape`), machine code emitted
   straight from the tape for AArch64 and x86-64, bit-identical to the
   interpreter, with `eval_many` for instances in parallel.
