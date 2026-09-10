@@ -3,7 +3,7 @@
 A hash-consed expression graph with symbolic differentiation and a compiled
 evaluator. One graph over exact rational or floating constants, forward and
 reverse derivatives, a flat tape with an interpreter for `f64`, `f32` and
-complex values, a Cranelift JIT with SIMD lanes, a symbolic layer
+complex values, a native code backend, a symbolic layer
 (determinants, polynomials and rational forms, e-graph simplification) and a
 Python tracer.
 
@@ -20,9 +20,9 @@ Design decisions and phases live in the GitHub issues.
   `differentiate`, `gradient` (reverse mode), `jacobian`, `hessian`,
   `rebuild`, `Tape` (interpreter, `eval_typed`, choice specialization) and
   `symbolic` (`determinant`, `collect`, `rational_form`, `simplify_egraph`).
-- `rsdag-jit`: chunked Cranelift JIT (`ChunkedTape`) and SIMD lanes
-  (`LaneTape`, 2 to 16 parameter sets per pass), bit-identical to the
-  interpreter.
+- `rsdag-jit`: the native backend (`NativeTape`), machine code emitted
+  straight from the tape for AArch64 and x86-64, bit-identical to the
+  interpreter, with `eval_many` for instances in parallel.
 - `rsdag-py`: the Python package `rsdag` (`trace`, `jit`, `jacobian`,
   `grad`, `where`, comparison helpers), built with maturin.
 
@@ -61,28 +61,27 @@ with `gt`, `lt`, ... for elementwise conditions on arrays.
 ## Bit-exactness
 
 Every backend computes the same IEEE operation sequence as the interpreter:
-no fast-math, no fused multiply-add, one reference routine per
-transcendental, a fixed four-accumulator order for long reductions.
-`rsdag::synth` generates random programs over the whole op vocabulary, and
-the suites in `crates/rsdag/tests` and `crates/rsdag-jit/tests` pin the
-arena sweep, the tape, the JIT, every lane width and typed evaluation
-against each other on them. `TapeVisitor` documents what a further backend
-has to reproduce.
+no fast-math, fused multiply-add only when asked for (`CompileOptions`),
+one reference routine per transcendental, a fixed four-accumulator order
+for long reductions. `rsdag::synth` generates random programs over the
+whole op vocabulary, and the suites in `crates/rsdag/tests` and
+`crates/rsdag-jit/tests` pin the arena sweep, the tape, the native code and
+typed evaluation against each other on them. `TapeVisitor` documents what
+a further backend has to reproduce.
 
 ## Benchmarks
 
-`cargo run --release --example bench -p rsdag-jit` (add `quick` for the
-small sizes) prices the interpreter, the JIT and the lane widths per tape
-op and checks each against the interpreter bit for bit. Its corpus is wide,
-like an assembled residual or Jacobian: those are thousands of nodes at a
-depth of seven to ten, one level per row, and a narrow corpus prices a
-shape no consumer produces.
+`cargo run --release --example bench -p rsdag-jit --features rsdag/synth`
+prices the interpreter and the native code per tape op, and the compile
+time per op, and checks the two against each other bit for bit. Its corpus
+is wide, like an assembled residual or Jacobian: those are thousands of
+nodes at a depth of seven to ten, one level per row, and a narrow corpus
+prices a shape no consumer produces.
 
-On an M3 a ring op costs about 0.3 to 0.9 ns through the JIT and 3 to 4 ns
-interpreted; an elementary function adds about 1 ns on top of that, because
-it is a call into the same routine the interpreter uses. Lanes pay on
-narrow programs and on batched instances, not on a wide residual, where
-they measure between 0.97x and 1.19x per parameter set.
+On an M3 a ring op costs about 0.5 ns natively and 10 ns interpreted; an
+elementary function adds a call into the same routine the interpreter
+uses. Emitting costs 30 to 60 ns per op on a large program, so a program
+compiles in about the time of a handful of evaluations.
 
 ## Build
 

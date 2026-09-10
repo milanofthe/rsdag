@@ -1,0 +1,663 @@
+//! The native backend: the op stream emitted straight to machine code.
+//!
+//! The tape already knows what a code generator needs: it is straight-line
+//! code over a work array of slots, with every value's lifetime computed.
+//! So this backend does the least a compiler can do: for each op, operands
+//! come from a small register cache or a load from the work array, one
+//! instruction computes, and the result is stored back and cached. Storing
+//! through means a chunk boundary needs no special handling, a host call
+//! (which clobbers the caller-saved part of the cache) just forgets that
+//! part, and nothing is ever spilled anywhere but where the interpreter
+//! keeps it anyway. Compile time is linear in the op count, around 40 ns
+//! per op; chunks are emitted in parallel.
+//!
+//! Everything that is not one instruction goes to a host routine: the
+//! transcendentals, `Min`/`Max` reductions and bundle calls, the last two
+//! with their operands gathered into a scratch area at the end of the work
+//! array, so no chunk ever touches the stack beyond its own frame.
+//! Bit-exactness against the interpreter is the invariant: the same IEEE
+//! operation sequence, reductions folded in the reference order, every
+//! transcendental through the same host function.
+
+use rayon::prelude::*;
+use rsdag::node::{BinOp, CmpOp, ReduceOp, UnaryOp, REDUCE_SIMD_MIN};
+use rsdag::Tape;
+use rustc_hash::FxHashMap;
+
+use crate::host::{self, Bundles};
+use crate::ir::{ROp, Recorder};
+use crate::isa::{Arith, Base, IArg, Isa, Round};
+use crate::{JitError, CHUNK_OPS};
+
+#[cfg(target_arch = "aarch64")]
+type Arch = crate::aarch64::A64;
+#[cfg(all(target_arch = "x86_64", unix))]
+type Arch = crate::x86_64::X64;
+
+type ChunkFn = extern "C" fn(*mut f64, *const f64, *const Bundles);
+
+/// A tape compiled to native code. Evaluation mirrors [`Tape`]: a
+/// caller-owned work buffer, inputs padded with NaN, and the prolog/main
+/// split of a specialized tape.
+pub struct NativeTape {
+    chunks: Vec<Code>,
+    prolog_chunks: usize,
+    bundles: Bundles,
+    outputs: Vec<u32>,
+    layout: Layout,
+    n_inputs: usize,
+}
+
+/// The work array: the tape's slots, then the bundle scratch, then the
+/// gather area for host calls.
+#[derive(Clone, Copy)]
+struct Layout {
+    scratch: usize,
+    gather: usize,
+    total: usize,
+}
+
+/// One executable chunk.
+struct Code {
+    /// Kept alive for the code it holds; `func` points into it.
+    _map: Mapping,
+    func: ChunkFn,
+}
+// The mapping is immutable after `Mapping::new`, so calling the code from
+// any thread is sound and the chunks can be built on a rayon pool.
+unsafe impl Send for Code {}
+unsafe impl Sync for Code {}
+
+impl NativeTape {
+    pub fn compile(tape: &Tape) -> Result<NativeTape, JitError> {
+        Self::compile_with(tape, CHUNK_OPS)
+    }
+
+    /// Compile with `chunk_ops` ops per emitted function.
+    pub fn compile_with(tape: &Tape, chunk_ops: usize) -> Result<NativeTape, JitError> {
+        if !cfg!(any(
+            target_arch = "aarch64",
+            all(target_arch = "x86_64", unix)
+        )) {
+            return Err(JitError::Unsupported);
+        }
+        let mut rec = Recorder::default();
+        tape.lower(&mut rec);
+        let n_inputs = rec
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                ROp::Input(_, k) if *k != u32::MAX => Some(*k as usize + 1),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        let gather_len = rec.ops.iter().map(ROp::gather_len).max().unwrap_or(0);
+        let n_work = tape.n_work();
+        let scratch = n_work;
+        let gather = scratch + tape.bundle_scratch_len();
+        let layout = Layout {
+            scratch,
+            gather,
+            total: (gather + gather_len).max(1),
+        };
+        // Chunk the prolog and main phases separately so no chunk straddles
+        // the split; the recorded stream is 1:1 with the tape's ops.
+        let chunk_ops = chunk_ops.max(1);
+        let split = tape.prolog_len().min(rec.ops.len());
+        let (pro, main) = rec.ops.split_at(split);
+        let jobs: Vec<&[ROp]> = pro
+            .chunks(chunk_ops)
+            .chain(main.chunks(chunk_ops))
+            .collect();
+        let prolog_chunks = pro.chunks(chunk_ops).count();
+        let chunks: Result<Vec<Code>, JitError> =
+            jobs.par_iter().map(|ops| emit_chunk(ops, layout)).collect();
+        Ok(NativeTape {
+            chunks: chunks?,
+            prolog_chunks,
+            bundles: rec.bundles,
+            outputs: tape.outputs().to_vec(),
+            layout,
+            n_inputs,
+        })
+    }
+
+    /// Number of emitted functions (diagnostics).
+    pub fn n_chunks(&self) -> usize {
+        self.chunks.len()
+    }
+
+    fn padded<'a>(&self, inputs: &'a [f64], buf: &'a mut Vec<f64>) -> &'a [f64] {
+        if inputs.len() < self.n_inputs {
+            buf.clear();
+            buf.extend_from_slice(inputs);
+            buf.resize(self.n_inputs, f64::NAN);
+            buf
+        } else {
+            inputs
+        }
+    }
+
+    fn run(&self, range: std::ops::Range<usize>, inputs: &[f64], work: &mut [f64]) {
+        assert!(
+            work.len() >= self.layout.total,
+            "work buffer not prepared by this tape"
+        );
+        let (wp, ip, bp) = (
+            work.as_mut_ptr(),
+            inputs.as_ptr(),
+            &self.bundles as *const Bundles,
+        );
+        for c in &self.chunks[range] {
+            (c.func)(wp, ip, bp);
+        }
+    }
+
+    fn collect(&self, work: &[f64], out: &mut Vec<f64>) {
+        out.clear();
+        out.extend(self.outputs.iter().map(|&s| work[s as usize]));
+    }
+
+    /// Evaluate the parameter-pure prolog into `work` (sized and cleared
+    /// here); mirrors [`Tape::eval_prolog`]. Pair with [`eval_main`](Self::eval_main).
+    pub fn eval_prolog(&self, inputs: &[f64], work: &mut Vec<f64>) {
+        let mut buf = Vec::new();
+        let ins = self.padded(inputs, &mut buf);
+        work.clear();
+        work.resize(self.layout.total, 0.0);
+        self.run(0..self.prolog_chunks, ins, work);
+    }
+
+    /// Evaluate the main phase over a buffer prepared by
+    /// [`eval_prolog`](Self::eval_prolog); mirrors [`Tape::eval_main`].
+    pub fn eval_main(&self, inputs: &[f64], work: &mut [f64], out: &mut Vec<f64>) {
+        let mut buf = Vec::new();
+        let ins = self.padded(inputs, &mut buf);
+        self.run(self.prolog_chunks..self.chunks.len(), ins, work);
+        self.collect(work, out);
+    }
+
+    /// Evaluate the whole tape; mirrors [`Tape::eval`].
+    pub fn eval(&self, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
+        let mut buf = Vec::new();
+        let ins = self.padded(inputs, &mut buf);
+        work.clear();
+        work.resize(self.layout.total, 0.0);
+        self.run(0..self.chunks.len(), ins, work);
+        self.collect(work, out);
+    }
+
+    /// Evaluate many instances at once: `inputs` holds `n` input vectors of
+    /// `stride` values back to back, `out` receives the `n` output vectors
+    /// back to back. Instances share nothing, so they run on the rayon pool
+    /// with a work buffer per thread; this is what a batch of identical
+    /// devices, a parameter sweep or an ensemble amounts to.
+    pub fn eval_many(&self, inputs: &[f64], stride: usize, out: &mut Vec<f64>) {
+        let n = inputs.len().checked_div(stride).unwrap_or(0);
+        let n_out = self.outputs.len();
+        out.clear();
+        out.resize(n * n_out, 0.0);
+        out.par_chunks_mut(n_out.max(1))
+            .zip(inputs.par_chunks(stride.max(1)))
+            .for_each_init(
+                || (Vec::new(), Vec::new()),
+                |(work, o), (dst, ins)| {
+                    self.eval(ins, work, o);
+                    dst.copy_from_slice(o);
+                },
+            );
+    }
+}
+
+// --- the emitter --------------------------------------------------------------
+
+/// The value cache over an architecture's instruction layer: which slot
+/// each cache register holds, and which registers the current op still
+/// needs. Every operand `get` pins its register and every temporary is
+/// pinned by its maker, so an op can never evict what it is about to use;
+/// the pins clear when the op is done.
+struct Emitter<I: Isa> {
+    isa: I,
+    layout: Layout,
+    /// Slot held by each cache register (by cache index).
+    held: Vec<Option<u32>>,
+    /// Cache index holding each slot.
+    at: FxHashMap<u32, usize>,
+    /// Cache index of each register number.
+    index: [u8; 32],
+    next: usize,
+    pinned: Vec<bool>,
+}
+
+impl<I: Isa> Emitter<I> {
+    fn new(layout: Layout) -> Emitter<I> {
+        let mut index = [0u8; 32];
+        for (i, &r) in I::CACHE.iter().enumerate() {
+            index[r as usize] = i as u8;
+        }
+        Emitter {
+            isa: I::new(),
+            layout,
+            held: vec![None; I::CACHE.len()],
+            at: Default::default(),
+            index,
+            next: 0,
+            pinned: vec![false; I::CACHE.len()],
+        }
+    }
+
+    fn drop_index(&mut self, i: usize) {
+        if let Some(s) = self.held[i].take() {
+            self.at.remove(&s);
+        }
+    }
+    /// A register to write a new value into: the next unpinned one round
+    /// robin, evicting whatever it held; pinned for the rest of the op.
+    fn fresh(&mut self) -> u8 {
+        let n = I::CACHE.len();
+        for _ in 0..n {
+            let i = self.next;
+            self.next = (self.next + 1) % n;
+            if self.pinned[i] {
+                continue;
+            }
+            self.drop_index(i);
+            self.pinned[i] = true;
+            return I::CACHE[i];
+        }
+        unreachable!("an op pins fewer than {n} registers");
+    }
+    fn pin(&mut self, r: u8) {
+        self.pinned[self.index[r as usize] as usize] = true;
+    }
+    /// Unpin every register except `keep`.
+    fn release_except(&mut self, keep: &[u8]) {
+        self.pinned.iter_mut().for_each(|p| *p = false);
+        keep.iter().for_each(|&r| self.pin(r));
+    }
+    /// The register holding `slot`, loading it if the cache does not have it.
+    fn get(&mut self, slot: u32) -> u8 {
+        if let Some(&i) = self.at.get(&slot) {
+            self.pinned[i] = true;
+            return I::CACHE[i];
+        }
+        let r = self.fresh();
+        self.isa.load(r, Base::Work, slot as usize * 8);
+        self.bind(r, slot);
+        r
+    }
+    fn bind(&mut self, r: u8, slot: u32) {
+        if let Some(i) = self.at.remove(&slot) {
+            self.held[i] = None;
+        }
+        let i = self.index[r as usize] as usize;
+        self.drop_index(i);
+        self.held[i] = Some(slot);
+        self.at.insert(slot, i);
+    }
+    /// Store `r` as the value of `slot` and remember it.
+    fn put(&mut self, slot: u32, r: u8) {
+        self.isa.store(r, Base::Work, slot as usize * 8);
+        self.bind(r, slot);
+    }
+    fn fconst(&mut self, v: f64) -> u8 {
+        let r = self.fresh();
+        self.isa.fconst(r, v);
+        r
+    }
+    /// A host call; the caller-saved part of the cache is gone afterwards.
+    fn call(&mut self, addr: *const (), fargs: &[u8], iargs: &[IArg]) {
+        self.isa.call(addr, fargs, iargs);
+        for i in I::SAVED..I::CACHE.len() {
+            self.drop_index(i);
+        }
+    }
+    /// A host call whose result is the value of `dst`.
+    fn call_into(&mut self, dst: u32, addr: *const (), fargs: &[u8], iargs: &[IArg]) {
+        self.call(addr, fargs, iargs);
+        let r = self.fresh();
+        self.isa.mov(r, I::RESULT);
+        self.put(dst, r);
+    }
+    /// Copy `slots` into the gather area; its byte offset.
+    fn gather(&mut self, slots: &[u32]) -> usize {
+        let base = self.layout.gather * 8;
+        for (k, &s) in slots.iter().enumerate() {
+            let r = self.get(s);
+            self.isa.store(r, Base::Work, base + k * 8);
+            self.release_except(&[]);
+        }
+        base
+    }
+
+    fn op(&mut self, op: &ROp) {
+        self.op_inner(op);
+        self.release_except(&[]);
+    }
+
+    fn op_inner(&mut self, op: &ROp) {
+        match *op {
+            ROp::Const(dst, v) => {
+                let r = self.fconst(v);
+                self.put(dst, r);
+            }
+            ROp::Input(dst, k) => {
+                let r = if k == u32::MAX {
+                    self.fconst(f64::NAN)
+                } else {
+                    let r = self.fresh();
+                    self.isa.load(r, Base::Inputs, k as usize * 8);
+                    r
+                };
+                self.put(dst, r);
+            }
+            ROp::Add(dst, a, b) => self.bin2(Arith::Add, dst, a, b),
+            ROp::Sub(dst, a, b) => self.bin2(Arith::Sub, dst, a, b),
+            ROp::Mul(dst, a, b) => self.bin2(Arith::Mul, dst, a, b),
+            ROp::MulAdd(dst, a, b, c) => {
+                // Two roundings, like the interpreter.
+                let (x, y) = (self.get(a), self.get(b));
+                let m = self.fresh();
+                self.isa.arith(Arith::Mul, m, x, y);
+                let z = self.get(c);
+                let r = self.fresh();
+                self.isa.arith(Arith::Add, r, m, z);
+                self.put(dst, r);
+            }
+            ROp::Fma(dst, a, b, c) => {
+                let (x, y, z) = (self.get(a), self.get(b), self.get(c));
+                let r = self.fresh();
+                if self.isa.fma(r, x, y, z) {
+                    self.put(dst, r);
+                } else {
+                    self.call_into(dst, host::h_fma as *const (), &[x, y, z], &[]);
+                }
+            }
+            ROp::Neg(dst, a) => {
+                let x = self.get(a);
+                let r = self.fresh();
+                self.isa.neg(r, x);
+                self.put(dst, r);
+            }
+            ROp::Powi(dst, a, n) => match n {
+                -1 => {
+                    let x = self.get(a);
+                    let one = self.fconst(1.0);
+                    let r = self.fresh();
+                    self.isa.arith(Arith::Div, r, one, x);
+                    self.put(dst, r);
+                }
+                2 => self.bin2(Arith::Mul, dst, a, a),
+                _ => {
+                    let x = self.get(a);
+                    self.call_into(
+                        dst,
+                        host::h_powi as *const (),
+                        &[x],
+                        &[IArg::Imm(n as i64 as u64)],
+                    );
+                }
+            },
+            ROp::Unary(dst, uop, a) => self.unary(dst, uop, a),
+            ROp::Binary(dst, bop, a, b) => {
+                let (x, y) = (self.get(a), self.get(b));
+                let code = IArg::Imm(BinOp::code(bop) as u64);
+                self.call_into(dst, host::h_binary as *const (), &[x, y], &[code]);
+            }
+            ROp::Cmp(dst, cop, a, b) => {
+                let (x, y) = (self.get(a), self.get(b));
+                let one = self.fconst(1.0);
+                let zero = self.fconst(0.0);
+                let r = self.fresh();
+                self.isa.cmp_select(cop, x, y, one, zero, r);
+                self.put(dst, r);
+            }
+            ROp::Select(dst, c, t, e) => {
+                let (cv, tv, ev) = (self.get(c), self.get(t), self.get(e));
+                let r = self.fresh();
+                self.isa.select_nz(cv, tv, ev, r);
+                self.put(dst, r);
+            }
+            ROp::Reduce(dst, rop, ref args) => match rop {
+                ReduceOp::Sum => {
+                    let r = self.fold(Arith::Add, 0.0, args, None);
+                    self.put(dst, r);
+                }
+                ReduceOp::Product => {
+                    let r = self.fold(Arith::Mul, 1.0, args, None);
+                    self.put(dst, r);
+                }
+                ReduceOp::Min | ReduceOp::Max => {
+                    let at = self.gather(args);
+                    let iargs = [
+                        IArg::Imm(host::reduce_code(rop)),
+                        IArg::WorkAddr(at),
+                        IArg::Imm(args.len() as u64),
+                    ];
+                    self.call_into(dst, host::h_reduce as *const (), &[], &iargs);
+                }
+            },
+            ROp::Dot(dst, ref a, ref b) => {
+                let r = self.fold(Arith::Add, 0.0, a, Some(b));
+                self.put(dst, r);
+            }
+            ROp::Bundle(idx, ref args, base) => {
+                let at = self.gather(args);
+                let out = (self.layout.scratch + base as usize) * 8;
+                let iargs = [
+                    IArg::Bundles,
+                    IArg::Imm(idx as u64),
+                    IArg::WorkAddr(at),
+                    IArg::Imm(args.len() as u64),
+                    IArg::WorkAddr(out),
+                ];
+                self.call(host::h_bundle as *const (), &[], &iargs);
+            }
+            ROp::BundleBatch(idx, ref args, n_groups, n_args, base0) => {
+                let at = self.gather(args);
+                let out = (self.layout.scratch + base0 as usize) * 8;
+                let iargs = [
+                    IArg::Bundles,
+                    IArg::Imm(idx as u64),
+                    IArg::WorkAddr(at),
+                    IArg::Imm(n_groups as u64),
+                    IArg::Imm(n_args as u64),
+                    IArg::WorkAddr(out),
+                ];
+                self.call(host::h_bundle_batch as *const (), &[], &iargs);
+            }
+            ROp::Pick(dst, idx) => {
+                let r = self.fresh();
+                let off = (self.layout.scratch + idx as usize) * 8;
+                self.isa.load(r, Base::Work, off);
+                self.put(dst, r);
+            }
+        }
+    }
+
+    fn bin2(&mut self, op: Arith, dst: u32, a: u32, b: u32) {
+        let (x, y) = (self.get(a), self.get(b));
+        let r = self.fresh();
+        self.isa.arith(op, r, x, y);
+        self.put(dst, r);
+    }
+
+    fn unary(&mut self, dst: u32, uop: UnaryOp, a: u32) {
+        let x = self.get(a);
+        let r = self.fresh();
+        let inline = match uop {
+            UnaryOp::Sqrt => {
+                // x > 0 ? sqrt(x) : 0, the reference's guard.
+                let zero = self.fconst(0.0);
+                let s = self.fresh();
+                self.isa.sqrt(s, x);
+                self.isa.cmp_select(CmpOp::Gt, x, zero, s, zero, r);
+                true
+            }
+            UnaryOp::Floor => self.isa.round(Round::Floor, r, x),
+            UnaryOp::Ceil => self.isa.round(Round::Ceil, r, x),
+            UnaryOp::Trunc => self.isa.round(Round::Trunc, r, x),
+            UnaryOp::Abs => {
+                self.isa.abs(r, x);
+                true
+            }
+            UnaryOp::Sign => {
+                let zero = self.fconst(0.0);
+                let one = self.fconst(1.0);
+                let minus = self.fconst(-1.0);
+                let t = self.fresh();
+                self.isa.cmp_select(CmpOp::Lt, x, zero, minus, x, t);
+                self.isa.cmp_select(CmpOp::Gt, x, zero, one, t, r);
+                true
+            }
+            _ => false,
+        };
+        if inline {
+            self.put(dst, r);
+        } else {
+            let (addr, code) = host::unary_addr(uop);
+            let iargs: Vec<IArg> = code.into_iter().map(|c| IArg::Imm(c as u64)).collect();
+            self.call_into(dst, addr, &[x], &iargs);
+        }
+    }
+
+    /// A reduction (or, with `b`, a dot) in the reference order: a left fold
+    /// from the identity below `REDUCE_SIMD_MIN`, four accumulators above.
+    /// Accumulators stay pinned across the terms; a term's registers are
+    /// released once it is folded in, so a long list needs seven registers,
+    /// not one per operand.
+    fn fold(&mut self, op: Arith, ident: f64, a: &[u32], b: Option<&[u32]>) -> u8 {
+        let n = a.len();
+        if n >= REDUCE_SIMD_MIN {
+            let acc: [u8; 4] = std::array::from_fn(|_| self.fconst(ident));
+            let ch = n / 4;
+            for c in 0..ch {
+                for (k, &ak) in acc.iter().enumerate() {
+                    let t = self.term(a, b, 4 * c + k);
+                    self.isa.arith(op, ak, ak, t);
+                    self.release_except(&acc);
+                }
+            }
+            let l = self.fresh();
+            self.isa.arith(op, l, acc[0], acc[1]);
+            let r = self.fresh();
+            self.isa.arith(op, r, acc[2], acc[3]);
+            let mut s = self.fresh();
+            self.isa.arith(op, s, l, r);
+            for k in ch * 4..n {
+                let t = self.term(a, b, k);
+                let s2 = self.fresh();
+                self.isa.arith(op, s2, s, t);
+                s = s2;
+                self.release_except(&[s]);
+            }
+            s
+        } else {
+            let mut acc = self.fconst(ident);
+            for k in 0..n {
+                let t = self.term(a, b, k);
+                let s = self.fresh();
+                self.isa.arith(op, s, acc, t);
+                acc = s;
+                self.release_except(&[acc]);
+            }
+            acc
+        }
+    }
+
+    /// Term `k` of a fold: the operand, or the product for a dot.
+    fn term(&mut self, a: &[u32], b: Option<&[u32]>, k: usize) -> u8 {
+        match b {
+            None => self.get(a[k]),
+            Some(bb) => {
+                let (x, y) = (self.get(a[k]), self.get(bb[k]));
+                let p = self.fresh();
+                self.isa.arith(Arith::Mul, p, x, y);
+                p
+            }
+        }
+    }
+}
+
+fn emit_chunk(ops: &[ROp], layout: Layout) -> Result<Code, JitError> {
+    let mut e: Emitter<Arch> = Emitter::new(layout);
+    e.isa.prologue();
+    for op in ops {
+        e.op(op);
+    }
+    e.isa.epilogue();
+    let map = Mapping::new(&e.isa.finish())?;
+    let func: ChunkFn = unsafe { std::mem::transmute(map.ptr) };
+    Ok(Code { _map: map, func })
+}
+
+// --- executable memory -----------------------------------------------------------
+
+struct Mapping {
+    ptr: *mut u8,
+    len: usize,
+}
+
+impl Mapping {
+    fn new(bytes: &[u8]) -> Result<Mapping, JitError> {
+        let len = bytes.len().max(1);
+        unsafe {
+            #[cfg(target_os = "macos")]
+            let flags = libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_JIT;
+            #[cfg(not(target_os = "macos"))]
+            let flags = libc::MAP_PRIVATE | libc::MAP_ANON;
+            let ptr = libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+                flags,
+                -1,
+                0,
+            );
+            if ptr == libc::MAP_FAILED {
+                return Err(JitError::Codegen("mmap of executable memory failed".into()));
+            }
+            let ptr = ptr as *mut u8;
+            #[cfg(target_os = "macos")]
+            pthread_jit_write_protect_np(0);
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+            #[cfg(target_os = "macos")]
+            {
+                pthread_jit_write_protect_np(1);
+                sys_icache_invalidate(ptr as *mut libc::c_void, bytes.len());
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                libc::mprotect(
+                    ptr as *mut libc::c_void,
+                    len,
+                    libc::PROT_READ | libc::PROT_EXEC,
+                );
+                __clear_cache(
+                    ptr as *mut libc::c_char,
+                    ptr.add(bytes.len()) as *mut libc::c_char,
+                );
+            }
+            Ok(Mapping { ptr, len })
+        }
+    }
+}
+
+impl Drop for Mapping {
+    fn drop(&mut self) {
+        unsafe {
+            libc::munmap(self.ptr as *mut libc::c_void, self.len);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn pthread_jit_write_protect_np(enabled: libc::c_int);
+    fn sys_icache_invalidate(start: *mut libc::c_void, len: libc::size_t);
+}
+#[cfg(not(target_os = "macos"))]
+extern "C" {
+    fn __clear_cache(start: *mut libc::c_char, end: *mut libc::c_char);
+}

@@ -6,7 +6,7 @@
 //! method protocol (an object array of tracers under `np.sin` calls each
 //! element's `sin`), so plain numpy code traces without changes. A closed
 //! trace is a `Program`: a tape with an interpreter, an optional native
-//! (Cranelift) form, symbolic derivatives, and C source.
+//! native form, symbolic derivatives, and C source.
 
 // pyo3 0.22's method expansion trips clippy's `useless_conversion` on every
 // `PyResult` method; the conversions are the macro's, not ours.
@@ -499,11 +499,11 @@ impl Scope {
 }
 
 /// A compiled function: the tape, evaluated by the interpreter or, after
-/// `compile_native()`, by the Cranelift backend.
+/// `compile_native()`, by the native backend.
 #[pyclass(unsendable)]
 pub struct Program {
     tape: Tape,
-    native: Option<rsdag_jit::ChunkedTape>,
+    native: Option<rsdag_jit::NativeTape>,
     n_in: usize,
     n_out: usize,
     work: Vec<f64>,
@@ -540,9 +540,9 @@ impl Program {
         }
         Ok(self.out.clone())
     }
-    /// Compile the tape to native code (Cranelift); evaluation switches over.
+    /// Compile the tape to native code; evaluation switches over.
     fn compile_native(&mut self) -> PyResult<()> {
-        let c = rsdag_jit::ChunkedTape::compile(&self.tape)
+        let c = rsdag_jit::NativeTape::compile(&self.tape)
             .map_err(|e| PyValueError::new_err(format!("native compile failed: {e:?}")))?;
         self.native = Some(c);
         Ok(())

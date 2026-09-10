@@ -1,4 +1,4 @@
-//! Three-leg parity for the chunked JIT over synthetic programs.
+//! Three-leg parity for the native backend over synthetic programs.
 //!
 //! Arena sweep, tape interpreter and native code must agree on every program
 //! the generator draws. Chunk sizes down to 3 ops force values across chunk
@@ -7,7 +7,7 @@
 
 use rsdag::synth::{cases, Spec, Vocabulary};
 use rsdag::{Graph, Tape};
-use rsdag_jit::ChunkedTape;
+use rsdag_jit::NativeTape;
 
 /// The corpus both fuzz tests draw from: sizes and vocabularies varying with
 /// the seed, three symbols' worth of inputs.
@@ -26,7 +26,7 @@ fn corpus(seeds: std::ops::Range<u64>) -> impl Iterator<Item = rsdag::synth::Cas
 }
 
 #[test]
-fn chunked_jit_matches_the_arena_at_every_chunk_size() {
+fn native_matches_the_arena_at_every_chunk_size() {
     for (i, case) in corpus(0..250).enumerate() {
         // The tape leg first, then native code at an adversarial chunk size.
         let (mut w, mut o) = (Vec::new(), Vec::new());
@@ -35,9 +35,9 @@ fn chunked_jit_matches_the_arena_at_every_chunk_size() {
             o.clone()
         });
         let chunk_ops = [3, 7, rsdag_jit::CHUNK_OPS][i % 3];
-        let jit = ChunkedTape::compile_with(&case.tape, chunk_ops).expect("compile chunks");
+        let jit = NativeTape::compile_with(&case.tape, chunk_ops).expect("compile chunks");
         let (mut jw, mut jo) = (Vec::new(), Vec::new());
-        case.expect_bits(&format!("chunked jit (chunk {chunk_ops})"), |row| {
+        case.expect_bits(&format!("native (chunk {chunk_ops})"), |row| {
             jit.eval(row, &mut jw, &mut jo);
             jo.clone()
         });
@@ -45,7 +45,7 @@ fn chunked_jit_matches_the_arena_at_every_chunk_size() {
 }
 
 /// Specialize-then-compile: a choice-specialized (shortened) tape compiled
-/// with the chunked backend must reproduce the interpreted specialization,
+/// natively must reproduce the interpreted specialization,
 /// real outputs and guard outputs alike.
 #[test]
 fn compiled_specialized_tape_matches_the_interpreter() {
@@ -54,7 +54,7 @@ fn compiled_specialized_tape_matches_the_interpreter() {
         let (mut w, mut o, mut choices) = (Vec::new(), Vec::new(), Vec::new());
         case.tape.eval_traced(row, &mut w, &mut o, &mut choices);
         let spec = case.tape.specialize(&choices);
-        let jit = ChunkedTape::compile_with(spec.tape(), [3, rsdag_jit::CHUNK_OPS][i % 2])
+        let jit = NativeTape::compile_with(spec.tape(), [3, rsdag_jit::CHUNK_OPS][i % 2])
             .expect("compile specialized tape");
 
         // Every row, not just the one the choices were traced on: outside
@@ -105,7 +105,7 @@ fn function_call_and_short_input_parity() {
 
     let (xi, yi) = (symbol_of(&ctx, x), symbol_of(&ctx, y));
     let tape = Tape::compile(&ctx, &[e, s], &[xi, yi]);
-    let jit = ChunkedTape::compile_with(&tape, 2).expect("compile");
+    let jit = NativeTape::compile_with(&tape, 2).expect("compile");
 
     let (mut w1, mut o1) = (Vec::new(), Vec::new());
     let (mut w2, mut o2) = (Vec::new(), Vec::new());
