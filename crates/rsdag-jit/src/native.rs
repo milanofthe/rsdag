@@ -45,11 +45,6 @@ type Arch = crate::x86_64::X64;
 
 type ChunkFn = extern "C" fn(*mut f64, *const f64, *const Bundles);
 
-/// A value read more than this many ops ahead goes to a callee-saved
-/// register, where a host call in between does not cost it a store and a
-/// reload. Elementary-heavy programs call every three to five ops.
-const KEEP_HORIZON: u32 = 4;
-
 /// A tape compiled to native code. Evaluation mirrors [`Tape`]: a
 /// caller-owned work buffer, inputs padded with NaN, and the prolog/main
 /// split of a specialized tape.
@@ -345,6 +340,9 @@ struct Emitter<'a, I: Isa> {
     last_use: &'a [u32],
     /// Global index of the op being emitted.
     pos: u32,
+    /// Global index of the next op that calls a host routine (`u32::MAX`
+    /// when the chunk has none left).
+    next_call: u32,
     /// Slot held by each cache register (by cache index).
     held: Vec<Option<u32>>,
     /// Whether the register's value is newer than the slot in memory.
@@ -369,6 +367,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
             layout,
             last_use,
             pos: 0,
+            next_call: u32::MAX,
             held: vec![None; I::CACHE.len()],
             dirty: vec![false; I::CACHE.len()],
             at: Default::default(),
@@ -402,36 +401,49 @@ impl<'a, I: Isa> Emitter<'a, I> {
     fn fresh(&mut self) -> u8 {
         self.fresh_in(I::SAVED..I::CACHE.len())
     }
-    /// A register for the value of `slot`: the callee-saved pool when the
-    /// value is read far enough ahead that a host call is likely to come
-    /// first, the caller-saved pool otherwise. Either pool falls back to the
-    /// other when every register of its own is pinned.
+    /// A register for the value of `slot`: preferably callee-saved when a
+    /// host call comes before the value's last use, so the call does not
+    /// cost it a store and a reload; preferably caller-saved otherwise.
     fn fresh_for(&mut self, slot: u32) -> u8 {
-        let far = self.last_use[slot as usize].saturating_sub(self.pos) > KEEP_HORIZON;
-        if far && I::SAVED > 0 {
+        let keep = I::SAVED > 0 && self.next_call <= self.last_use[slot as usize];
+        if keep {
             self.fresh_in(0..I::SAVED)
         } else {
             self.fresh_in(I::SAVED..I::CACHE.len())
         }
     }
+    /// A register from the preferred pool: first one that is empty or holds
+    /// a dead value, in either pool; else the preferred pool's round-robin
+    /// victim; else any unpinned register.
     fn fresh_in(&mut self, pool: std::ops::Range<usize>) -> u8 {
         let n = I::CACHE.len();
         let (lo, len) = (pool.start, pool.len().max(1));
+        let other = if lo == 0 { I::SAVED..n } else { 0..I::SAVED };
+        let take = |e: &mut Self, i: usize| {
+            e.drop_index(i);
+            e.pinned[i] = true;
+            I::CACHE[i]
+        };
+        for i in pool.clone().chain(other) {
+            let dead = match self.held[i] {
+                None => true,
+                Some(s) => self.last_use[s as usize] < self.pos,
+            };
+            if !self.pinned[i] && dead {
+                return take(self, i);
+            }
+        }
         let cursor = &mut self.next[usize::from(lo != 0 || I::SAVED == 0)];
         for _ in 0..len {
             let i = lo + *cursor % len;
             *cursor = (*cursor + 1) % len;
             if !self.pinned[i] {
-                self.drop_index(i);
-                self.pinned[i] = true;
-                return I::CACHE[i];
+                return take(self, i);
             }
         }
         for i in 0..n {
             if !self.pinned[i] {
-                self.drop_index(i);
-                self.pinned[i] = true;
-                return I::CACHE[i];
+                return take(self, i);
             }
         }
         unreachable!("an op pins fewer than {n} registers");
@@ -788,10 +800,20 @@ fn emit_chunk(
     last_use: &[u32],
 ) -> Result<Code, JitError> {
     let hot = hot_routines(ops);
+    // For each op, the next op at or after it that calls out.
+    let mut next_call = vec![u32::MAX; ops.len() + 1];
+    for k in (0..ops.len()).rev() {
+        next_call[k] = if ops[k].host().is_some() {
+            (start + k) as u32
+        } else {
+            next_call[k + 1]
+        };
+    }
     let mut e: Emitter<Arch> = Emitter::new(layout, last_use, &hot);
     e.isa.prologue();
     for (k, op) in ops.iter().enumerate() {
         e.pos = (start + k) as u32;
+        e.next_call = next_call[k];
         e.op(op);
     }
     e.flush();
