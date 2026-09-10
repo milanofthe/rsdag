@@ -4,8 +4,8 @@
 
 use rsdag::synth::{build, Spec};
 use rsdag::{
-    substitute, ExprId, FuncId, Graph, Node, Output, OutputRole, ParamRole, Scope, SymbolId,
-    Tape, F64,
+    substitute, ExprId, FuncId, Graph, Node, Output, OutputRole, ParamRole, Scope, SymbolId, Tape,
+    F64,
 };
 
 fn expr_of(g: &Graph<F64>, f: FuncId, out: usize) -> ExprId {

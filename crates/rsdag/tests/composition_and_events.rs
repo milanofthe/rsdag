@@ -11,8 +11,7 @@ use rustc_hash::FxHashMap as HashMap;
 
 use rsdag::synth::{build, inputs, Spec};
 use rsdag::{
-    differentiate, substitute, ExprId, Graph, OutputRole, ParamRole, Scope, SymbolId,
-    Tape, F64,
+    differentiate, substitute, ExprId, Graph, OutputRole, ParamRole, Scope, SymbolId, Tape, F64,
 };
 
 /// A first-order lag: `y = x`, `dx/dt = (u - x) / tau`. Built in its own
