@@ -25,10 +25,6 @@ pub trait Scalar: Copy + Send + Sync + std::fmt::Debug + 'static {
     fn add(self, o: Self) -> Self;
     fn sub(self, o: Self) -> Self;
     fn mul(self, o: Self) -> Self;
-    /// `self * b + c` with one rounding where the type has a fused
-    /// multiply-add (`f64`, `f32`); a complex product has no single
-    /// rounding, so it is the multiply and the add.
-    fn mul_add(self, b: Self, c: Self) -> Self;
     fn neg(self) -> Self;
     fn powi(self, n: i32) -> Self;
     fn unary(op: UnaryOp, x: Self) -> Self;
@@ -62,9 +58,6 @@ impl Scalar for f64 {
     }
     fn mul(self, o: Self) -> Self {
         self * o
-    }
-    fn mul_add(self, b: Self, c: Self) -> Self {
-        f64::mul_add(self, b, c)
     }
     fn neg(self) -> Self {
         -self
@@ -117,9 +110,6 @@ impl Scalar for f32 {
     }
     fn mul(self, o: Self) -> Self {
         self * o
-    }
-    fn mul_add(self, b: Self, c: Self) -> Self {
-        f32::mul_add(self, b, c)
     }
     fn neg(self) -> Self {
         -self
@@ -174,9 +164,6 @@ impl Scalar for Complex64 {
     }
     fn mul(self, o: Self) -> Self {
         self * o
-    }
-    fn mul_add(self, b: Self, c: Self) -> Self {
-        self * b + c
     }
     fn neg(self) -> Self {
         -self
@@ -256,11 +243,10 @@ impl Scalar for Complex64 {
 }
 
 /// The reduction of a slice in `T`, with the same fixed order as the `f64`
-/// reference (`reduce_slice`): four accumulators above `REDUCE_SIMD_MIN`.
+/// reference (`reduce_slice`): four accumulators, then the tail.
 pub fn reduce_slice_t<T: Scalar>(op: ReduceOp, xs: &[T]) -> T {
-    use crate::node::REDUCE_SIMD_MIN;
     match op {
-        ReduceOp::Sum if xs.len() >= REDUCE_SIMD_MIN => {
+        ReduceOp::Sum => {
             let mut a = [T::zero(); 4];
             let ch = xs.len() / 4;
             for c in 0..ch {
@@ -274,7 +260,7 @@ pub fn reduce_slice_t<T: Scalar>(op: ReduceOp, xs: &[T]) -> T {
             }
             acc
         }
-        ReduceOp::Product if xs.len() >= REDUCE_SIMD_MIN => {
+        ReduceOp::Product => {
             let mut a = [T::one(); 4];
             let ch = xs.len() / 4;
             for c in 0..ch {
@@ -288,8 +274,6 @@ pub fn reduce_slice_t<T: Scalar>(op: ReduceOp, xs: &[T]) -> T {
             }
             acc
         }
-        ReduceOp::Sum => xs.iter().fold(T::zero(), |acc, &x| acc.add(x)),
-        ReduceOp::Product => xs.iter().fold(T::one(), |acc, &x| acc.mul(x)),
         ReduceOp::Min => {
             let mut it = xs.iter();
             match it.next() {
@@ -309,25 +293,16 @@ pub fn reduce_slice_t<T: Scalar>(op: ReduceOp, xs: &[T]) -> T {
 
 /// The inner product in `T`, same order as `dot_slice`.
 pub fn dot_slice_t<T: Scalar>(a: &[T], b: &[T]) -> T {
-    use crate::node::REDUCE_SIMD_MIN;
-    if a.len() >= REDUCE_SIMD_MIN {
-        let mut acc = [T::zero(); 4];
-        let ch = a.len() / 4;
-        for c in 0..ch {
-            for l in 0..4 {
-                acc[l] = acc[l].add(a[4 * c + l].mul(b[4 * c + l]));
-            }
+    let mut acc = [T::zero(); 4];
+    let ch = a.len() / 4;
+    for c in 0..ch {
+        for l in 0..4 {
+            acc[l] = acc[l].add(a[4 * c + l].mul(b[4 * c + l]));
         }
-        let mut s = (acc[0].add(acc[1])).add(acc[2].add(acc[3]));
-        for k in ch * 4..a.len() {
-            s = s.add(a[k].mul(b[k]));
-        }
-        s
-    } else {
-        let mut s = T::zero();
-        for (&x, &y) in a.iter().zip(b.iter()) {
-            s = s.add(x.mul(y));
-        }
-        s
     }
+    let mut s = (acc[0].add(acc[1])).add(acc[2].add(acc[3]));
+    for k in ch * 4..a.len() {
+        s = s.add(a[k].mul(b[k]));
+    }
+    s
 }

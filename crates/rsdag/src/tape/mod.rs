@@ -26,11 +26,6 @@ enum Op {
     /// results stay bit-identical to the arena sweep. Emitted by `compile`
     /// when an `Add` consumes a single-use `Mul`.
     MulAdd(u32, u32, u32),
-    /// `a*b + c` with one rounding: the contracted form, emitted only when
-    /// [`CompileOptions::contract`] asks for it. Every backend lowers it to
-    /// a real fused multiply-add, so the paths still agree with each other;
-    /// what changes is the last bit against the uncontracted program.
-    Fma(u32, u32, u32),
     /// `a - b`, from an `Add` consuming a single-use `Neg` (IEEE subtraction
     /// is exactly addition of the negation, so this is bit-preserving too).
     Sub(u32, u32),
@@ -76,7 +71,6 @@ pub struct BatchTable {
 mod compile;
 mod specialize;
 
-pub use compile::{CompileOptions, SchedulePolicy};
 pub use specialize::SpecializedTape;
 
 /// A compiled evaluator for a fixed set of root expressions over named inputs.
@@ -153,9 +147,9 @@ pub struct Tape {
 ///   here, not taken from a platform library, so a generator ports these
 ///   exact series.
 /// - **The fold orders.** [`crate::node::reduce_slice`] and
-///   [`crate::node::dot_slice`] fold from the identity below
-///   [`crate::node::REDUCE_SIMD_MIN`] operands and with four accumulators
-///   above it. A different association gives different bits.
+///   [`crate::node::dot_slice`] fold with four accumulators merged as
+///   `(a0 + a1) + (a2 + a3)`, then the tail in order. A different
+///   association gives different bits.
 /// - **No contraction.** [`TapeVisitor::mul_add`] is a fused *dispatch*, not
 ///   a fused rounding: it rounds the product and the sum separately. A C
 ///   generator therefore compiles with `-ffp-contract=off`, and no backend
@@ -168,13 +162,6 @@ pub trait TapeVisitor {
     fn mul(&mut self, dst: u32, a: u32, b: u32);
     /// `a*b + c` as one dispatch (unfused rounding; see `Op::MulAdd`).
     fn mul_add(&mut self, dst: u32, a: u32, b: u32, c: u32);
-    /// `a*b + c` with one rounding (see `Op::Fma`). A backend that has no
-    /// fused multiply-add may leave the default, which rounds twice; that
-    /// is one ulp of drift against the other backends, inside the tolerance
-    /// a contracted program has accepted by being contracted.
-    fn fma(&mut self, dst: u32, a: u32, b: u32, c: u32) {
-        self.mul_add(dst, a, b, c)
-    }
     /// `a - b` (from a fused `Add(Neg)`).
     fn sub(&mut self, dst: u32, a: u32, b: u32);
     fn neg(&mut self, dst: u32, a: u32);
@@ -322,7 +309,6 @@ impl Tape {
                 Op::Add(a, b) => g(a).add(g(b)),
                 Op::Mul(a, b) => g(a).mul(g(b)),
                 Op::MulAdd(a, b, c) => g(a).mul(g(b)).add(g(c)),
-                Op::Fma(a, b, c) => g(a).mul_add(g(b), g(c)),
                 Op::Sub(a, b) => g(a).sub(g(b)),
                 Op::Neg(a) => g(a).neg(),
                 Op::Powi(a, n) => g(a).powi(n),
@@ -429,7 +415,6 @@ impl Tape {
                     // separate mul + add on purpose (no `mul_add` contraction):
                     // the superinstruction fuses the dispatch, not the rounding
                     Op::MulAdd(a, b, c) => g(a) * g(b) + g(c),
-                    Op::Fma(a, b, c) => g(a).mul_add(g(b), g(c)),
                     Op::Sub(a, b) => g(a) - g(b),
                     Op::Neg(a) => -g(a),
                     Op::Powi(a, n) => g(a).powi(n),
@@ -612,12 +597,6 @@ impl Tape {
                             v[l] = wa[l] * wb[l] + wc[l];
                         }
                     }
-                    Op::Fma(a, b, c) => {
-                        let (wa, wb, wc) = (w(a), w(b), w(c));
-                        for l in 0..L {
-                            v[l] = wa[l].mul_add(wb[l], wc[l]);
-                        }
-                    }
                     Op::Sub(a, b) => {
                         let (wa, wb) = (w(a), w(b));
                         for l in 0..L {
@@ -757,7 +736,6 @@ impl Tape {
                 Op::Add(a, b) => v.add(dst, a, b),
                 Op::Mul(a, b) => v.mul(dst, a, b),
                 Op::MulAdd(a, b, c) => v.mul_add(dst, a, b, c),
-                Op::Fma(a, b, c) => v.fma(dst, a, b, c),
                 Op::Sub(a, b) => v.sub(dst, a, b),
                 Op::Neg(a) => v.neg(dst, a),
                 Op::Powi(a, n) => v.powi(dst, a, n),

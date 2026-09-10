@@ -70,7 +70,7 @@ impl Tape {
                 | Op::Binary(_, a, b) => {
                     dep_pool.extend([p(a), p(b)]);
                 }
-                Op::MulAdd(a, b, c) | Op::Fma(a, b, c) => {
+                Op::MulAdd(a, b, c) => {
                     dep_pool.extend([p(a), p(b), p(c)]);
                 }
                 Op::Neg(a) | Op::Powi(a, _) | Op::Unary(_, a) => dep_pool.push(p(a)),
@@ -242,7 +242,6 @@ impl Tape {
                 Op::Add(..) => Op::Add(ds(0), ds(1)),
                 Op::Mul(..) => Op::Mul(ds(0), ds(1)),
                 Op::MulAdd(..) => Op::MulAdd(ds(0), ds(1), ds(2)),
-                Op::Fma(..) => Op::Fma(ds(0), ds(1), ds(2)),
                 Op::Sub(..) => Op::Sub(ds(0), ds(1)),
                 Op::Neg(..) => Op::Neg(ds(0)),
                 Op::Powi(_, n) => Op::Powi(ds(0), n),

@@ -87,8 +87,6 @@ pub(crate) trait Isa {
     /// `false` when the instruction is not available; the caller then uses
     /// the host routine.
     fn round(&mut self, mode: Round, d: u8, a: u8) -> bool;
-    /// `d = a * b + c` with a single rounding; `false` when unavailable.
-    fn fma(&mut self, d: u8, a: u8, b: u8, c: u8) -> bool;
 
     /// `d = (a op b) ? t : e`, every comparison with a NaN false except `Ne`.
     fn cmp_select(&mut self, op: CmpOp, a: u8, b: u8, t: u8, e: u8, d: u8);

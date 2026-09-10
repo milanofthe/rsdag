@@ -207,15 +207,6 @@ impl Isa for A64 {
         self.w(opc | ((a as u32) << 5) | d as u32);
         true
     }
-    fn fma(&mut self, d: u8, a: u8, b: u8, c: u8) -> bool {
-        // fmadd Dd, Dn, Dm, Da = Da + Dn*Dm
-        self.w(0x1F40_0000
-            | ((b as u32) << 16)
-            | ((c as u32) << 10)
-            | ((a as u32) << 5)
-            | d as u32);
-        true
-    }
 
     fn cmp_select(&mut self, op: CmpOp, a: u8, b: u8, t: u8, e: u8, d: u8) {
         self.fcmp(a as u32, b as u32);

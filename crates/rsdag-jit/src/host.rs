@@ -37,9 +37,6 @@ pub(crate) extern "C" fn h_binary(op: u32, x: f64, y: f64) -> f64 {
 pub(crate) extern "C" fn h_powi(x: f64, n: i64) -> f64 {
     x.powi(n as i32)
 }
-pub(crate) extern "C" fn h_fma(x: f64, y: f64, z: f64) -> f64 {
-    x.mul_add(y, z)
-}
 
 pub(crate) fn reduce_code(op: ReduceOp) -> u64 {
     match op {

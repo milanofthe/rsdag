@@ -16,7 +16,6 @@ pub(crate) enum ROp {
     Add(u32, u32, u32),
     Mul(u32, u32, u32),
     MulAdd(u32, u32, u32, u32),
-    Fma(u32, u32, u32, u32),
     Sub(u32, u32, u32),
     Neg(u32, u32),
     Powi(u32, u32, i32),
@@ -48,7 +47,7 @@ impl ROp {
                 f(*a);
                 f(*b);
             }
-            ROp::MulAdd(_, a, b, c) | ROp::Fma(_, a, b, c) | ROp::Select(_, a, b, c) => {
+            ROp::MulAdd(_, a, b, c) | ROp::Select(_, a, b, c) => {
                 f(*a);
                 f(*b);
                 f(*c);
@@ -122,9 +121,6 @@ impl TapeVisitor for Recorder {
     }
     fn mul_add(&mut self, dst: u32, a: u32, b: u32, c: u32) {
         self.ops.push(ROp::MulAdd(dst, a, b, c));
-    }
-    fn fma(&mut self, dst: u32, a: u32, b: u32, c: u32) {
-        self.ops.push(ROp::Fma(dst, a, b, c));
     }
     fn sub(&mut self, dst: u32, a: u32, b: u32) {
         self.ops.push(ROp::Sub(dst, a, b));

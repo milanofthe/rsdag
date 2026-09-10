@@ -66,9 +66,8 @@ with `gt`, `lt`, ... for elementwise conditions on arrays.
 ## Bit-exactness
 
 Every backend computes the same IEEE operation sequence as the interpreter:
-no fast-math, fused multiply-add only when asked for (`CompileOptions`),
-one reference routine per transcendental, a fixed four-accumulator order
-for long reductions. `rsdag::synth` generates random programs over the
+no fast-math, no fused multiply-add, one reference routine per
+transcendental, one four-accumulator order for every reduction. `rsdag::synth` generates random programs over the
 whole op vocabulary, and the suites in `crates/rsdag/tests` and
 `crates/rsdag-jit/tests` pin the arena sweep, the tape, the native code and
 typed evaluation against each other on them. `TapeVisitor` documents what

@@ -6,7 +6,7 @@
 //! caller-saved, so nothing survives a host call; under Windows `xmm6` to
 //! `xmm15` are callee-saved, so the chunk preserves them and they come
 //! first in the cache. Baseline SSE2, with `roundsd` when SSE4.1 is present
-//! and `vfmadd231sd` when FMA is.
+//!.
 
 use crate::isa::*;
 use rsdag::node::CmpOp;
@@ -30,7 +30,6 @@ const WIN_XMM_SAVE: i32 = 48;
 pub(crate) struct X64 {
     code: Vec<u8>,
     sse41: bool,
-    fma: bool,
     /// Host routines held in `r12` and `r15`.
     hot: Vec<*const ()>,
 }
@@ -166,16 +165,12 @@ impl Isa for X64 {
 
     fn new(hot: &[*const ()]) -> X64 {
         #[cfg(target_arch = "x86_64")]
-        let (sse41, fma) = (
-            is_x86_feature_detected!("sse4.1"),
-            is_x86_feature_detected!("fma"),
-        );
+        let sse41 = is_x86_feature_detected!("sse4.1");
         #[cfg(not(target_arch = "x86_64"))]
-        let (sse41, fma) = (true, true);
+        let sse41 = true;
         X64 {
             code: Vec::with_capacity(8192),
             sse41,
-            fma,
             hot: hot.iter().copied().take(HOT_REGS.len()).collect(),
         }
     }
@@ -291,19 +286,6 @@ impl Isa for X64 {
         self.b(imm);
         true
     }
-    fn fma(&mut self, d: u8, a: u8, b: u8, c: u8) -> bool {
-        if !self.fma {
-            return false;
-        }
-        // vfmadd231sd d, a, b: d = a*b + d
-        self.mov(d, c);
-        let byte1 = ((!(d >> 3) & 1) << 7) | (1 << 6) | ((!(b >> 3) & 1) << 5) | 0b00010;
-        let byte2 = (1 << 7) | ((!a & 0xF) << 3) | 0b01;
-        self.bytes(&[0xC4, byte1, byte2, 0xB9]);
-        self.modrm_reg(d, b);
-        true
-    }
-
     fn cmp_select(&mut self, op: CmpOp, a: u8, b: u8, t: u8, e: u8, d: u8) {
         // cmpsd predicates: 0 eq, 1 lt, 2 le (ordered, so false on NaN),
         // 4 neq (true on NaN). Gt and Ge are Lt and Le with swapped operands.
