@@ -19,10 +19,12 @@ Design decisions and phases live in the GitHub issues.
 
 - `rsdag`: `Graph<K: Field>`, functions with calls and roles, `Scope` for
   building one incrementally, `Module` as the serializable form,
-  `differentiate`, `gradient` (reverse mode), `jacobian`, `hessian`,
-  `rebuild`, `Tape` (interpreter, `eval_typed`, choice specialization) and
-  `symbolic` (`determinant`, `collect`, `rational_form`, `simplify_egraph`,
-  `solve` with static LU and `newton_step`).
+  `differentiate`, `gradient` (reverse mode), `sparse_jacobian`, `hessian`,
+  `rebuild`, `Tape` (one interpreter over any `Scalar`, choice
+  specialization, instance batching), `semantics` (the reference arithmetic
+  every backend mirrors) and `symbolic` (`determinant`, `collect`,
+  `rational_form`, `simplify_egraph`, `solve` with block triangular form,
+  fill-reducing ordering, static LU and `newton_step`).
 - `rsdag-jit`: the native backend (`NativeTape`), machine code emitted
   straight from the tape for AArch64 and x86-64 (Linux, macOS, Windows),
   bit-identical to the interpreter. Function bodies are compiled once and
