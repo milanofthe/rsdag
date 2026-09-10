@@ -22,7 +22,7 @@ use rustc_hash::FxHashMap as HashMap;
 
 use super::{BatchTable, Op, Tape};
 use crate::extern_fn::ExternBundle;
-use crate::func::{CompiledBody, FuncId, Output};
+use crate::func::{Body, FuncId, Output};
 use crate::graph::Graph;
 use crate::node::{ExprId, Node, SymbolId};
 
@@ -514,35 +514,13 @@ impl Forest {
         // Per function: the evaluating bundle and its output-to-slot map --
         // the solver's registered body, the extern body, or an interpreted
         // body built here, so a tape is total without any registration.
-        let mut evaluators: HashMap<u32, (Arc<dyn ExternBundle>, Vec<Option<u32>>)> =
-            HashMap::default();
+        let mut bodies: HashMap<u32, Body> = HashMap::default();
         let mut evaluator = |ctx: &Graph<K>, f: FuncId, out: u32| {
-            let fi = f.0;
-            let known = evaluators
-                .get(&fi)
-                .is_some_and(|(_, slot_of)| slot_of.get(out as usize).copied().flatten().is_some());
-            if !known {
-                let func = ctx.func(f);
-                let cb = match func.evaluator() {
-                    Some((b, slot_of))
-                        if slot_of.get(out as usize).copied().flatten().is_some() =>
-                    {
-                        CompiledBody {
-                            bundle: b.clone(),
-                            slot_of,
-                        }
-                    }
-                    _ => func.interpreted_body(ctx).unwrap_or_else(|| {
-                        panic!(
-                            "extern function '{}' has no slot for output {out}",
-                            func.name
-                        )
-                    }),
-                };
-                evaluators.insert(fi, (cb.bundle, cb.slot_of));
-            }
-            let (b, slot_of) = &evaluators[&fi];
-            (b.clone(), slot_of.get(out as usize).copied().flatten())
+            let body = bodies.entry(f.0).or_insert_with(|| ctx.func(f).body(ctx));
+            (
+                body.bundle.clone(),
+                body.slot_of.get(out as usize).copied().flatten(),
+            )
         };
         let mut emitted = vec![false; m];
 

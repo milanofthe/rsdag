@@ -1,6 +1,4 @@
-//! Structural rewrites of the DAG: substituting one symbol for another, the
-//! primitive behind graph transformations like node merging (shorting two
-//! nodes replaces one node-voltage symbol with the other's everywhere).
+//! Structural rewrites of the DAG: substituting expressions for symbols.
 
 use crate::field::Field;
 use rustc_hash::FxHashMap as HashMap;
@@ -8,69 +6,22 @@ use rustc_hash::FxHashMap as HashMap;
 use crate::graph::{Graph, Memo};
 use crate::node::{ExprId, Node, SymbolId};
 
-/// Replace every occurrence of symbol `from` with symbol `to` in `expr`,
-/// rebuilding through the smart constructors (so the result is re-folded and
-/// hash-consed). Memoised over shared subexpressions.
+/// Replace every symbol in `map` with its expression, in every root, in
+/// one pass with one shared memo: a subexpression reachable from several
+/// roots is rebuilt once. Rebuilt through the smart constructors, so the
+/// result is re-folded and hash-consed. The substitution is simultaneous,
+/// so a target expression that itself mentions a mapped symbol is not
+/// re-substituted. This is the primitive behind merging two nodes (one
+/// voltage symbol for another), eliminating one (its solved expression for
+/// its symbol) and instantiating a template (its ports for the instance's).
 pub fn substitute<K: Field>(
     ctx: &mut Graph<K>,
-    expr: ExprId,
-    from: SymbolId,
-    to: SymbolId,
-) -> ExprId {
-    let te = ctx.symbol_expr(to);
-    substitute_expr(ctx, expr, from, te)
-}
-
-/// Replace every occurrence of symbol `from` with the expression `to` in `expr`
-/// (the symbol-to-expression generalisation of [`substitute`], the primitive
-/// behind node elimination: solving a node's KCL for its voltage and inlining
-/// that expression everywhere). Rebuilt through the smart constructors and
-/// memoised over shared subexpressions.
-pub fn substitute_expr<K: Field>(
-    ctx: &mut Graph<K>,
-    expr: ExprId,
-    from: SymbolId,
-    to: ExprId,
-) -> ExprId {
-    let mut memo = ctx.take_memo();
-    let r = subst_inner(ctx, expr, &|s| (s == from).then_some(to), &mut memo);
-    ctx.put_memo(memo);
-    r
-}
-
-/// Replace every symbol present in `map` with its mapped expression in a single
-/// pass (the multi-symbol generalisation of [`substitute_expr`]). Symbols absent
-/// from the map are left untouched. Rebuilt through the smart constructors and
-/// memoised over shared subexpressions. The substitution is simultaneous (a
-/// single traversal), so a target expression that itself mentions a mapped
-/// symbol is not re-substituted.
-pub fn substitute_many<K: Field>(
-    ctx: &mut Graph<K>,
-    expr: ExprId,
-    map: &HashMap<SymbolId, ExprId>,
-) -> ExprId {
-    let mut memo = ctx.take_memo();
-    let r = subst_inner(ctx, expr, &|s| map.get(&s).copied(), &mut memo);
-    ctx.put_memo(memo);
-    r
-}
-
-/// [`substitute_many`] over a whole forest of roots with ONE shared memo: a
-/// subexpression reachable from several roots is rebuilt once, not once per
-/// root. This is the instantiation primitive for anything with many outputs
-/// hanging off one shared core (a device template's terminal currents, noise
-/// densities and operating-point variables; a stamp's derivatives w.r.t. each
-/// of its ports) -- substituting those root by root re-walks and re-interns the
-/// shared core per root, which measured as the dominant cost of Verilog-A
-/// instance cloning. Returns the substituted roots in input order.
-pub fn substitute_many_all<K: Field>(
-    ctx: &mut Graph<K>,
-    exprs: &[ExprId],
+    roots: &[ExprId],
     map: &HashMap<SymbolId, ExprId>,
 ) -> Vec<ExprId> {
     let mut memo = ctx.take_memo();
     let resolve = |s: SymbolId| map.get(&s).copied();
-    let out: Vec<ExprId> = exprs
+    let out: Vec<ExprId> = roots
         .iter()
         .map(|&e| subst_inner(ctx, e, &resolve, &mut memo))
         .collect();

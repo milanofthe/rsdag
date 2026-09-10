@@ -30,7 +30,6 @@ impl<K: Field> Graph<K> {
             output_roles: vec![OutputRole::Plain; n_out],
             body: FunctionBody::Symbolic,
             deriv_index: HashMap::default(),
-            compiled: None,
         });
         id
     }
@@ -114,7 +113,6 @@ impl<K: Field> Graph<K> {
                 let call_table = self.outputs.clone();
                 self.rebuild_node(
                     &node,
-                    Rebuild::Fold,
                     |_| konst.clone(),
                     |s| s,
                     |x| map[&x],
@@ -219,7 +217,6 @@ impl<K: Field> Graph<K> {
             output_roles: vec![OutputRole::Plain; n_out],
             body: FunctionBody::Extern(body),
             deriv_index: HashMap::default(),
-            compiled: None,
         });
         id
     }
@@ -271,19 +268,12 @@ impl<K: Field> Graph<K> {
             output_roles: vec![OutputRole::Plain; n_out],
             body: FunctionBody::Extern(body),
             deriv_index: HashMap::default(),
-            compiled: None,
         });
         id
     }
 
     pub fn n_funcs(&self) -> usize {
         self.funcs.len()
-    }
-
-    /// Register the compiled body of a symbolic function (a solver's tape over
-    /// the function's parameters), replacing any earlier one.
-    pub fn set_func_body(&mut self, f: FuncId, body: CompiledBody) {
-        self.funcs[f.0 as usize].compiled = Some(body);
     }
 
     /// The `(function, output index)` an output id names.
@@ -371,7 +361,7 @@ impl<K: Field> Graph<K> {
                 let params = self.funcs[f.0 as usize].params.clone();
                 let map: HashMap<SymbolId, ExprId> =
                     params.iter().copied().zip(args.iter().copied()).collect();
-                Some(crate::transform::substitute_many(self, e, &map))
+                Some(crate::transform::substitute(self, &[e], &map)[0])
             }
             Output::Zero => Some(self.zero),
             Output::Slot(_) => None,
@@ -393,7 +383,7 @@ impl<K: Field> Graph<K> {
                 Output::Slot(_) => panic!("cannot inline an extern function output"),
             })
             .collect();
-        crate::transform::substitute_many_all(self, &exprs, &map)
+        crate::transform::substitute(self, &exprs, &map)
     }
 
     /// Every `(function, output)` called anywhere in `exprs` (one pass over

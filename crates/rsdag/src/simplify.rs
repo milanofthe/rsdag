@@ -112,7 +112,6 @@ fn copy<K: Field>(
         let node = *g.node(cur);
         let id = out.rebuild_node(
             &node,
-            crate::graph::Rebuild::Fold,
             |n| match *n {
                 Node::Const(c) => g.const_val(c).clone(),
                 _ => unreachable!("only a constant asks for its value"),

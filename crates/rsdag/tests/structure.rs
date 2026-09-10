@@ -4,7 +4,7 @@
 
 use rsdag::synth::{build, Spec};
 use rsdag::{
-    substitute_expr, ExprId, FuncId, Graph, Node, Output, OutputRole, ParamRole, Scope, SymbolId,
+    substitute, ExprId, FuncId, Graph, Node, Output, OutputRole, ParamRole, Scope, SymbolId,
     Tape, F64,
 };
 
@@ -118,7 +118,8 @@ fn an_incremental_change_costs_only_its_cone() {
     let two = g.konst_f64(2.0);
     let replacement = g.mul(two, extra);
     let after_building_the_replacement = g.len();
-    let changed = substitute_expr(&mut g, roots[0], syms[0], replacement);
+    let one = std::iter::once((syms[0], replacement)).collect();
+    let changed = substitute(&mut g, &[roots[0]], &one)[0];
     let grew = g.len() - after_building_the_replacement;
 
     let cone = g.free_symbols(changed).len();
@@ -128,7 +129,7 @@ fn an_incremental_change_costs_only_its_cone() {
         "a one-symbol substitution rebuilt {grew} nodes of {before}"
     );
     // The untouched roots are literally the same ids: nothing was copied.
-    let again = substitute_expr(&mut g, roots[0], syms[0], replacement);
+    let again = substitute(&mut g, &[roots[0]], &one)[0];
     assert_eq!(again, changed, "the same substitution is the same node");
 }
 
@@ -218,6 +219,6 @@ fn feedthrough_shows_where_an_algebraic_loop_is() {
     let uu = g.sym("u");
     let once = g.inline_outputs(direct, &[0], &[uu, k])[0];
     let u_sym = sym_of(&g, uu);
-    let twice = substitute_expr(&mut g, once, u_sym, once);
+    let twice = substitute(&mut g, &[once], &std::iter::once((u_sym, once)).collect())[0];
     assert!(g.free_symbols(twice).contains(&u_sym));
 }
