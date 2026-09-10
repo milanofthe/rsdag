@@ -45,7 +45,7 @@ pub fn time_derivative<K: Field>(
 /// Local derivative `d(op(a))/da` of a unary op, shared by the forward
 /// ([`differentiate`]) and reverse ([`gradient`]) sweeps so both modes apply the
 /// identical rule. The rules mirror the domain guards in
-/// [`crate::node::unary_f64`] exactly, so the Jacobian stays finite wherever the
+/// [`crate::semantics::unary_f64`] exactly, so the Jacobian stays finite wherever the
 /// residual does (an out-of-range internal-node guess must not produce an
 /// `inf`/`NaN` Jacobian entry that derails Newton).
 fn unary_factor<K: Field>(ctx: &mut Graph<K>, op: UnaryOp, a: ExprId) -> ExprId {
@@ -58,15 +58,15 @@ fn unary_factor<K: Field>(ctx: &mut Graph<K>, op: UnaryOp, a: ExprId) -> ExprId 
             // one transcendental per junction per evaluation instead of two.
             // Values are identical: for a <= EXP_LIMIT `unary_f64` evaluates
             // the bare `a.exp()`.
-            let hi = ctx.konst_f64(crate::node::EXP_LIMIT);
+            let hi = ctx.konst_f64(crate::semantics::EXP_LIMIT);
             let below = ctx.cmp(CmpOp::Le, a, hi);
             let ea = ctx.exp(a);
-            let slope = ctx.konst_f64(crate::node::EXP_LIMIT.exp());
+            let slope = ctx.konst_f64(crate::semantics::EXP_LIMIT.exp());
             ctx.select(below, ea, slope)
         }
         UnaryOp::Ln => {
             // 1/a above the floor, 0 below it (ln is clamped flat there).
-            let lo = ctx.konst_f64(crate::node::LN_FLOOR);
+            let lo = ctx.konst_f64(crate::semantics::LN_FLOOR);
             let above = ctx.cmp(CmpOp::Gt, a, lo);
             let inv_a = ctx.recip(a);
             let zero = ctx.zero();

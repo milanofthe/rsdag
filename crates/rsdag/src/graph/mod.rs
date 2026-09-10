@@ -9,10 +9,10 @@ use crate::field::Field;
 use crate::extern_fn::ExternBundle;
 use crate::func::{FuncId, Function, FunctionBody, Output, OutputId};
 use crate::node::{
-    binary_f64, unary_f64, ArgList, BinOp, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp,
-    SymbolId, UnaryOp,
+    ArgList, BinOp, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp, SymbolId, UnaryOp,
 };
 use crate::role::{OutputRole, ParamRole};
+use crate::semantics::{binary_f64, unary_f64};
 
 /// Owns the hash-consed symbolic DAG and the symbol table.
 ///

@@ -63,7 +63,7 @@ fn derivative_matches_finite_difference() {
 
 #[test]
 fn exp_derivative_shares_primal_and_matches_limexp_tail() {
-    use rsdag::node::EXP_LIMIT;
+    use rsdag::semantics::EXP_LIMIT;
     let mut ctx: Graph = Graph::new();
     let x = ctx.sym("x");
     let e = ctx.exp(x);
