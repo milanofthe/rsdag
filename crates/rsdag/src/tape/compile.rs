@@ -59,23 +59,24 @@ impl Tape {
         pure_inputs: Option<&[bool]>,
     ) -> Tape {
         // Five passes over the reachable forest, each reading only what the
-        // ones before it produced: analysis marks and counts, scheduling
-        // picks an order, liveness turns that order into lifetimes, the
-        // batch scan groups repeated calls, and emission allocates slots and
-        // writes the instruction stream.
+        // ones before it produced: analysis marks and counts, the batch scan
+        // groups repeated calls, scheduling picks an order that keeps each
+        // group's arguments ahead of the group, liveness turns that order
+        // into lifetimes, and emission allocates slots and writes the
+        // instruction stream.
         // Each pass reports its time through `hooks` at debug level, which
         // is what a consumer's pipeline profile reads.
         use crate::hooks::timed;
         let forest = timed("tape analyze", || {
             Forest::analyze(ctx, roots, input_syms, pure_inputs)
         });
-        let schedule = timed("tape schedule", || forest.schedule(ctx));
+        let batches = timed("tape batch scan", || forest.batches(ctx));
+        let schedule = timed("tape schedule", || forest.schedule(ctx, &batches));
         let liveness = timed("tape liveness", || {
             forest.liveness(ctx, roots, &schedule, pure_inputs.is_some())
         });
-        let batch_group_args = timed("tape batch scan", || batch_groups(ctx, &schedule.order));
         timed("tape emit", || {
-            forest.emit(ctx, roots, &schedule, &liveness, &batch_group_args)
+            forest.emit(ctx, roots, &schedule, &liveness, &batches)
         })
     }
 }
@@ -106,6 +107,19 @@ struct Schedule {
     pos: Vec<u32>,
     /// The consuming op's schedule position, for a fused operand.
     fused_into: Vec<Option<usize>>,
+}
+
+/// Instance batching: the calls of one function that evaluate as one
+/// batched call. Calls of the same function with distinct argument lists
+/// and the same call depth form a group; equal depth means none of them
+/// can depend on another's output, so the group's arguments all precede
+/// the group. Arguments may be any expressions, not only leaves.
+struct Batches {
+    /// Per group: the function and its distinct argument lists, in first
+    /// encounter order.
+    groups: Vec<(u32, Vec<Vec<ExprId>>)>,
+    /// Group of each batched call, by base position.
+    group_of: Vec<Option<u32>>,
 }
 
 /// Lifetimes over the schedule.
@@ -226,8 +240,90 @@ impl Forest {
         }
     }
 
-    /// Pass 2: the instruction order, and the position tables over it.
-    fn schedule<K: Field>(&self, ctx: &Graph<K>) -> Schedule {
+    /// Pass 2: instance batching. Every function called with at least two
+    /// distinct argument lists of one arity is batched, one group per call
+    /// depth (the depth of a call is one more than the deepest batched call
+    /// among its arguments' operands, so calls of equal depth are
+    /// independent of each other).
+    fn batches<K: Field>(&self, ctx: &Graph<K>) -> Batches {
+        let base = &self.base;
+        let m = base.len();
+        // Distinct argument lists per function, in first-encounter order.
+        let mut lists: HashMap<u32, Vec<Vec<ExprId>>> = HashMap::default();
+        let mut seen: BTreeSet<(u32, Vec<ExprId>)> = BTreeSet::new();
+        for &id in base {
+            if let Node::Call(o, l) = *ctx.node(id) {
+                let (f, _) = ctx.output(o);
+                let args = ctx.args(l);
+                if seen.insert((f.0, args.to_vec())) {
+                    lists.entry(f.0).or_default().push(args.to_vec());
+                }
+            }
+        }
+        lists.retain(|_, g| g.len() >= 2 && g.iter().all(|a| a.len() == g[0].len()));
+        // Call depth over the forest (ascending id is a dependency order).
+        let mut depth = vec![0u32; m];
+        for (i, &id) in base.iter().enumerate() {
+            let over_operands = ctx
+                .operands(id)
+                .iter()
+                .map(|&a| depth[self.pos(a)])
+                .max()
+                .unwrap_or(0);
+            let batched = match *ctx.node(id) {
+                Node::Call(o, _) => lists.contains_key(&ctx.output(o).0 .0),
+                _ => false,
+            };
+            depth[i] = over_operands + u32::from(batched);
+        }
+        // Groups by (function, depth), in first-encounter order; a call's
+        // group is the group of its (function, depth).
+        let mut index: HashMap<(u32, u32), u32> = HashMap::default();
+        let mut groups: Vec<(u32, Vec<Vec<ExprId>>)> = Vec::new();
+        let mut group_of = vec![None; m];
+        let mut listed: BTreeSet<(u32, Vec<ExprId>)> = BTreeSet::new();
+        for (i, &id) in base.iter().enumerate() {
+            if let Node::Call(o, l) = *ctx.node(id) {
+                let f = ctx.output(o).0 .0;
+                if !lists.contains_key(&f) {
+                    continue;
+                }
+                let g = *index.entry((f, depth[i])).or_insert_with(|| {
+                    groups.push((f, Vec::new()));
+                    (groups.len() - 1) as u32
+                });
+                let args = ctx.args(l).to_vec();
+                if listed.insert((f, args.clone())) {
+                    groups[g as usize].1.push(args);
+                }
+                group_of[i] = Some(g);
+            }
+        }
+        // A group of one call is a plain call.
+        let mut keep = vec![false; groups.len()];
+        for (g, (_, lists)) in groups.iter().enumerate() {
+            keep[g] = lists.len() >= 2;
+        }
+        let mut renumber = vec![u32::MAX; groups.len()];
+        let mut kept: Vec<(u32, Vec<Vec<ExprId>>)> = Vec::new();
+        for (g, entry) in groups.into_iter().enumerate() {
+            if keep[g] {
+                renumber[g] = kept.len() as u32;
+                kept.push(entry);
+            }
+        }
+        for slot in group_of.iter_mut() {
+            *slot = slot
+                .and_then(|g| (renumber[g as usize] != u32::MAX).then_some(renumber[g as usize]));
+        }
+        Batches {
+            groups: kept,
+            group_of,
+        }
+    }
+
+    /// Pass 3: the instruction order, and the position tables over it.
+    fn schedule<K: Field>(&self, ctx: &Graph<K>, batches: &Batches) -> Schedule {
         let base = &self.base;
         let pure = &self.pure;
         let fused_into_b = &self.fused_into_b;
@@ -278,21 +374,42 @@ impl Forest {
             .iter()
             .map(|id| matches!(ctx.node(*id), Node::Const(_) | Node::Symbol(_)))
             .collect();
-        // Reverse edges (CSR) among the scheduled (non-leaf, non-fused) ops.
+        // Dependencies of every scheduled (non-leaf, non-fused) op. The
+        // calls of a batch group share the union of their dependencies, so
+        // whichever of them is scheduled first, every argument of the whole
+        // group has been computed by then.
+        let mut dep_lists: Vec<Vec<usize>> = (0..m)
+            .map(|i| {
+                if fused_into_b[i].is_some() || is_leaf[i] {
+                    Vec::new()
+                } else {
+                    deps_of(i)
+                }
+            })
+            .collect();
+        let mut group_deps: Vec<Vec<usize>> = vec![Vec::new(); batches.groups.len()];
+        for i in 0..m {
+            if let Some(g) = batches.group_of[i] {
+                group_deps[g as usize].extend_from_slice(&dep_lists[i]);
+            }
+        }
+        for d in group_deps.iter_mut() {
+            d.sort_unstable();
+            d.dedup();
+        }
+        for i in 0..m {
+            if let Some(g) = batches.group_of[i] {
+                dep_lists[i] = group_deps[g as usize].clone();
+            }
+        }
+        // Reverse edges (CSR) among the scheduled ops.
         let mut user_count = vec![0u32; m];
         let mut pending = vec![0u32; m];
-        let mut dep_lists: Vec<Vec<usize>> = Vec::with_capacity(m);
-        for i in 0..m {
-            if fused_into_b[i].is_some() || is_leaf[i] {
-                dep_lists.push(Vec::new());
-                continue;
-            }
-            let d = deps_of(i);
+        for (i, d) in dep_lists.iter().enumerate() {
             pending[i] = d.iter().filter(|&&x| !is_leaf[x]).count() as u32;
-            for &x in &d {
+            for &x in d {
                 user_count[x] += 1;
             }
-            dep_lists.push(d);
         }
         let mut user_start = vec![0u32; m + 1];
         for i in 0..m {
@@ -431,7 +548,7 @@ impl Forest {
         }
     }
 
-    /// Pass 3: lifetimes and pins.
+    /// Pass 4: lifetimes and pins.
     fn liveness<K: Field>(
         &self,
         ctx: &Graph<K>,
@@ -499,8 +616,11 @@ impl Forest {
         roots: &[ExprId],
         schedule: &Schedule,
         liveness: &Liveness,
-        batch_group_args: &HashMap<u32, Vec<Vec<ExprId>>>,
+        batches_in: &Batches,
     ) -> Tape {
+        // The group of a call, by schedule position.
+        let group_at = |i: usize| batches_in.group_of[self.pos(schedule.order[i])];
+        let mut batch_emitted = vec![false; batches_in.groups.len()];
         let base = &self.base;
         let input_of = &self.input_of;
         let m = base.len();
@@ -552,28 +672,32 @@ impl Forest {
                 continue; // leaf materialised early by a BundleBatch below
             }
             let node = ctx.node(order[i]);
-            // Instance batching: the FIRST bundled opaque of a batchable bundle
-            // materialises every group's leaf arguments (inputs/constants have
-            // no dependencies, so early emission is always legal) and emits ONE
-            // `BundleBatch`; every group is pre-registered in `group_base`, so
-            // this and all later opaques of the bundle lower to cheap picks.
+            // Instance batching: the first call of a group materialises the
+            // group's leaf arguments (its computed ones precede it by the
+            // schedule's construction) and emits one `BundleBatch`; every
+            // argument list is pre-registered in `group_base`, so this and
+            // every later call of the group lower to cheap picks.
             if let Node::Call(o, _) = node {
                 let (cf, cout) = ctx.output(*o);
                 let cbidx = cf.0;
                 if !matches!(ctx.func(cf).outputs[cout as usize], Output::Zero) {
-                    if let Some(groups) = batch_group_args.get(&cbidx) {
-                        // not an entry(): ops are emitted between check and insert
-                        #[allow(clippy::map_entry)]
-                        if !bundle_tape_idx.contains_key(&cbidx) {
+                    if let Some(g) = group_at(i) {
+                        let groups = &batches_in.groups[g as usize].1;
+                        if !batch_emitted[g as usize] {
+                            batch_emitted[g as usize] = true;
                             for a in groups.iter().flatten() {
                                 let ap = p(*a);
+                                // A computed argument precedes the batch by
+                                // the schedule's construction; a leaf may be
+                                // scheduled later, at its first consumer, and
+                                // is materialised here instead.
                                 if ap > i && !emitted[ap] {
                                     let op = match ctx.node(*a) {
                                         Node::Const(c) => Op::Const(ctx.const_val(*c).to_f64()),
                                         Node::Symbol(sym) => Op::Input(
                                             input_of.get(sym).copied().unwrap_or(u32::MAX),
                                         ),
-                                        _ => unreachable!("batch pre-scan admits only leaves"),
+                                        _ => unreachable!("a computed argument precedes its batch"),
                                     };
                                     let d = free.pop().unwrap_or_else(|| {
                                         let d = next;
@@ -588,12 +712,11 @@ impl Forest {
                             }
                             let (cb, _) = evaluator(ctx, cf, cout);
                             let n_out = cb.n_outputs() as u32;
-                            let tape_bidx = {
+                            let tape_bidx = *bundle_tape_idx.entry(cbidx).or_insert_with(|| {
                                 let k = bundles.len() as u32;
                                 bundles.push(cb);
-                                bundle_tape_idx.insert(cbidx, k);
                                 k
-                            };
+                            });
                             let n_args = groups[0].len() as u32;
                             let n_groups = groups.len() as u32;
                             let base0 = bundle_scratch_len;
@@ -767,34 +890,4 @@ impl Forest {
             prolog_ops,
         }
     }
-}
-
-/// Pass 4: instance batching pre-scan. For every function referenced by at
-/// least two distinct argument groups whose arguments are all plain inputs
-/// or constants, the per-group calls can coalesce into one batched call at
-/// the first call site.
-fn batch_groups<K: Field>(ctx: &Graph<K>, order: &[ExprId]) -> HashMap<u32, Vec<Vec<ExprId>>> {
-    // Groups are keyed and ordered by first encounter, so the batched call
-    // lands at the first call site, where the leaf arguments can always be
-    // materialised.
-    let mut batch_group_args: HashMap<u32, Vec<Vec<ExprId>>> = HashMap::default();
-    let mut seen: BTreeSet<(u32, Vec<ExprId>)> = BTreeSet::new();
-    for id in order {
-        if let Node::Call(o, l) = *ctx.node(*id) {
-            let (f, _) = ctx.output(o);
-            let args = ctx.args(l);
-            if seen.insert((f.0, args.to_vec())) {
-                batch_group_args.entry(f.0).or_default().push(args.to_vec());
-            }
-        }
-    }
-    batch_group_args.retain(|_, groups| {
-        groups.len() >= 2
-            && groups.iter().all(|g| g.len() == groups[0].len())
-            && groups
-                .iter()
-                .flatten()
-                .all(|a| matches!(ctx.node(*a), Node::Const(_) | Node::Symbol(_)))
-    });
-    batch_group_args
 }
