@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap as HashMap;
 
-use super::{BatchTable, Op, Tape};
+use super::{BatchTable, GemvTable, Op, Src, Tape};
 use crate::extern_fn::ExternBundle;
 use crate::func::{Body, FuncId, Output};
 use crate::graph::Graph;
@@ -109,18 +109,37 @@ struct Schedule {
     fused_into: Vec<Option<usize>>,
 }
 
-/// Instance batching: the calls of one function that evaluate as one
-/// batched call. Calls of the same function with distinct argument lists
-/// and the same call depth form a group; equal depth means none of them
-/// can depend on another's output, so the group's arguments all precede
-/// the group. Arguments may be any expressions, not only leaves.
+/// The ops that evaluate as one kernel over several nodes: the calls of
+/// one function with distinct argument lists (one batched call), and the
+/// row dots of one matrix-vector product (one `Gemv`). Members of one group
+/// share a call depth, so none can depend on another's output, and the
+/// scheduler keeps every operand of the whole group ahead of it. Arguments
+/// may be any expressions, not only leaves.
 struct Batches {
-    /// Per group: the function and its distinct argument lists, in first
-    /// encounter order.
-    groups: Vec<(u32, Vec<Vec<ExprId>>)>,
-    /// Group of each batched call, by base position.
+    groups: Vec<Group>,
+    /// Group of each member node, by base position.
     group_of: Vec<Option<u32>>,
+    /// Leaves read only in place by kernels, by base position: never
+    /// materialised into a slot.
+    skip: Vec<bool>,
 }
+
+enum Group {
+    /// A function's distinct argument lists, in first-encounter order.
+    Call(Vec<Vec<ExprId>>),
+    /// The rows (`Dot` nodes, in order) of a product with the vector `x`,
+    /// and, for the matrix and the vector, the input index each starts at
+    /// when it is a run of consecutive inputs read in place.
+    Gemv {
+        rows: Vec<ExprId>,
+        x: Vec<ExprId>,
+        a_run: Option<u32>,
+        x_run: Option<u32>,
+    },
+}
+
+/// Row dots against one vector fuse into a `Gemv` from this many rows on.
+const GEMV_MIN_ROWS: usize = 8;
 
 /// Lifetimes over the schedule.
 struct Liveness {
@@ -261,6 +280,23 @@ impl Forest {
             }
         }
         lists.retain(|_, g| g.len() >= 2 && g.iter().all(|a| a.len() == g[0].len()));
+        // Row dots keyed by their vector: the rows of one product.
+        let mut rows_of: HashMap<Vec<ExprId>, Vec<usize>> = HashMap::default();
+        for (i, &id) in base.iter().enumerate() {
+            if let Node::Dot(l) = *ctx.node(id) {
+                let (_, x) = ctx.dot_args(l);
+                if !x.is_empty() {
+                    rows_of.entry(x.to_vec()).or_default().push(i);
+                }
+            }
+        }
+        rows_of.retain(|_, rows| rows.len() >= GEMV_MIN_ROWS);
+        let mut is_row = vec![false; m];
+        for rows in rows_of.values() {
+            for &r in rows {
+                is_row[r] = true;
+            }
+        }
         // Call depth over the forest (ascending id is a dependency order).
         let mut depth = vec![0u32; m];
         for (i, &id) in base.iter().enumerate() {
@@ -270,16 +306,17 @@ impl Forest {
                 .map(|&a| depth[self.pos(a)])
                 .max()
                 .unwrap_or(0);
-            let batched = match *ctx.node(id) {
-                Node::Call(o, _) => lists.contains_key(&ctx.output(o).0 .0),
-                _ => false,
-            };
+            let batched = is_row[i]
+                || match *ctx.node(id) {
+                    Node::Call(o, _) => lists.contains_key(&ctx.output(o).0 .0),
+                    _ => false,
+                };
             depth[i] = over_operands + u32::from(batched);
         }
         // Groups by (function, depth), in first-encounter order; a call's
         // group is the group of its (function, depth).
         let mut index: HashMap<(u32, u32), u32> = HashMap::default();
-        let mut groups: Vec<(u32, Vec<Vec<ExprId>>)> = Vec::new();
+        let mut groups: Vec<Group> = Vec::new();
         let mut group_of = vec![None; m];
         let mut listed: BTreeSet<(u32, Vec<ExprId>)> = BTreeSet::new();
         for (i, &id) in base.iter().enumerate() {
@@ -289,23 +326,99 @@ impl Forest {
                     continue;
                 }
                 let g = *index.entry((f, depth[i])).or_insert_with(|| {
-                    groups.push((f, Vec::new()));
+                    groups.push(Group::Call(Vec::new()));
                     (groups.len() - 1) as u32
                 });
                 let args = ctx.args(l).to_vec();
                 if listed.insert((f, args.clone())) {
-                    groups[g as usize].1.push(args);
+                    if let Group::Call(lists) = &mut groups[g as usize] {
+                        lists.push(args);
+                    }
                 }
                 group_of[i] = Some(g);
             }
         }
+        // Gemv groups: the rows of one vector at one depth, in row order. An
+        // operand that is a run of consecutive inputs is read in place, and
+        // a leaf read only that way is never materialised.
+        let input_run = |es: &[ExprId]| -> Option<u32> {
+            let first = match ctx.node(es[0]) {
+                Node::Symbol(sym) => *self.input_of.get(sym)?,
+                _ => return None,
+            };
+            es.iter()
+                .enumerate()
+                .all(|(k, e)| match ctx.node(*e) {
+                    Node::Symbol(sym) => self.input_of.get(sym) == Some(&(first + k as u32)),
+                    _ => false,
+                })
+                .then_some(first)
+        };
+        let mut uses = vec![0u32; m];
+        for &id in base {
+            for &a in ctx.operands(id).iter() {
+                uses[self.pos(a)] += 1;
+            }
+        }
+        let mut in_place = vec![0u32; m];
+        let mut keys: Vec<&Vec<ExprId>> = rows_of.keys().collect();
+        keys.sort_by_key(|x| rows_of[*x][0]);
+        for x in keys {
+            let mut by_depth: HashMap<u32, Vec<usize>> = HashMap::default();
+            for &r in &rows_of[x] {
+                by_depth.entry(depth[r]).or_default().push(r);
+            }
+            let mut depths: Vec<u32> = by_depth.keys().copied().collect();
+            depths.sort_unstable();
+            for d in depths {
+                let rows = &by_depth[&d];
+                if rows.len() < GEMV_MIN_ROWS {
+                    continue;
+                }
+                let entries: Vec<ExprId> = rows
+                    .iter()
+                    .flat_map(|&r| match *ctx.node(base[r]) {
+                        Node::Dot(l) => ctx.dot_args(l).0.to_vec(),
+                        _ => unreachable!("a row is a dot"),
+                    })
+                    .collect();
+                let a_run = input_run(&entries);
+                let x_run = input_run(x);
+                if a_run.is_some() {
+                    for e in &entries {
+                        in_place[self.pos(*e)] += 1;
+                    }
+                }
+                if x_run.is_some() {
+                    for e in x {
+                        in_place[self.pos(*e)] += rows.len() as u32;
+                    }
+                }
+                let g = groups.len() as u32;
+                groups.push(Group::Gemv {
+                    rows: rows.iter().map(|&r| base[r]).collect(),
+                    x: x.clone(),
+                    a_run,
+                    x_run,
+                });
+                for &r in rows {
+                    group_of[r] = Some(g);
+                }
+            }
+        }
+        let skip: Vec<bool> = (0..m)
+            .map(|i| in_place[i] > 0 && in_place[i] == uses[i])
+            .collect();
         // A group of one call is a plain call.
         let mut keep = vec![false; groups.len()];
-        for (g, (_, lists)) in groups.iter().enumerate() {
-            keep[g] = lists.len() >= 2;
+        for (g, group) in groups.iter().enumerate() {
+            keep[g] = match group {
+                Group::Call(lists) => lists.len() >= 2,
+                Group::Gemv { .. } => true,
+            };
         }
         let mut renumber = vec![u32::MAX; groups.len()];
-        let mut kept: Vec<(u32, Vec<Vec<ExprId>>)> = Vec::new();
+        let mut kept: Vec<Group> = Vec::new();
         for (g, entry) in groups.into_iter().enumerate() {
             if keep[g] {
                 renumber[g] = kept.len() as u32;
@@ -319,6 +432,7 @@ impl Forest {
         Batches {
             groups: kept,
             group_of,
+            skip,
         }
     }
 
@@ -374,10 +488,14 @@ impl Forest {
             .iter()
             .map(|id| matches!(ctx.node(*id), Node::Const(_) | Node::Symbol(_)))
             .collect();
-        // Dependencies of every scheduled (non-leaf, non-fused) op. The
-        // calls of a batch group share the union of their dependencies, so
-        // whichever of them is scheduled first, every argument of the whole
-        // group has been computed by then.
+        // Dependencies of every scheduled (non-leaf, non-fused) op. A batch
+        // group is one scheduling node of its own, after the base nodes:
+        // it depends on the union of its members' dependencies and each
+        // member depends on it alone, so whichever member is scheduled
+        // first, every argument of the whole group has been computed by
+        // then, and the union is held once, not per member.
+        let n_groups = batches.groups.len();
+        let mt = m + n_groups;
         let mut dep_lists: Vec<Vec<usize>> = (0..m)
             .map(|i| {
                 if fused_into_b[i].is_some() || is_leaf[i] {
@@ -387,35 +505,50 @@ impl Forest {
                 }
             })
             .collect();
-        let mut group_deps: Vec<Vec<usize>> = vec![Vec::new(); batches.groups.len()];
+        dep_lists.resize(mt, Vec::new());
         for i in 0..m {
             if let Some(g) = batches.group_of[i] {
-                group_deps[g as usize].extend_from_slice(&dep_lists[i]);
+                let own = std::mem::replace(&mut dep_lists[i], vec![m + g as usize]);
+                dep_lists[m + g as usize].extend(own);
             }
         }
-        for d in group_deps.iter_mut() {
+        for d in dep_lists[m..].iter_mut() {
             d.sort_unstable();
             d.dedup();
         }
+        let is_leaf: Vec<bool> = is_leaf
+            .into_iter()
+            .chain(std::iter::repeat_n(false, n_groups))
+            .collect();
+        // A group is pure when every member is; it then joins the prolog.
+        let mut pure: Vec<bool> = pure.clone();
+        pure.resize(mt, true);
         for i in 0..m {
             if let Some(g) = batches.group_of[i] {
-                dep_lists[i] = group_deps[g as usize].clone();
+                pure[m + g as usize] &= pure[i];
             }
         }
-        // Reverse edges (CSR) among the scheduled ops.
-        let mut user_count = vec![0u32; m];
-        let mut pending = vec![0u32; m];
+        let pure = &pure;
+        let fused_into_b: Vec<Option<usize>> = fused_into_b
+            .iter()
+            .copied()
+            .chain(std::iter::repeat_n(None, n_groups))
+            .collect();
+        let fused_into_b = &fused_into_b;
+        // Reverse edges (CSR) among the scheduled nodes.
+        let mut user_count = vec![0u32; mt];
+        let mut pending = vec![0u32; mt];
         for (i, d) in dep_lists.iter().enumerate() {
             pending[i] = d.iter().filter(|&&x| !is_leaf[x]).count() as u32;
             for &x in d {
                 user_count[x] += 1;
             }
         }
-        let mut user_start = vec![0u32; m + 1];
-        for i in 0..m {
+        let mut user_start = vec![0u32; mt + 1];
+        for i in 0..mt {
             user_start[i + 1] = user_start[i] + user_count[i];
         }
-        let mut users = vec![0u32; user_start[m] as usize];
+        let mut users = vec![0u32; user_start[mt] as usize];
         let mut fill = user_start.clone();
         for (i, d) in dep_lists.iter().enumerate() {
             for &x in d {
@@ -436,14 +569,14 @@ impl Forest {
         let mut heap: std::collections::BinaryHeap<(bool, u32, u64, u32)> =
             std::collections::BinaryHeap::new();
         let mut seq: u64 = 0;
-        for i in (0..m).rev() {
+        for i in (0..mt).rev() {
             if fused_into_b[i].is_none() && !is_leaf[i] && pending[i] == 0 {
                 heap.push((pure[i], kills_of(i, &remaining), seq, i as u32));
                 seq += 1;
             }
         }
         let mut order: Vec<ExprId> = Vec::with_capacity(m);
-        let mut emitted = vec![false; m];
+        let mut emitted = vec![false; mt];
         // First position of the main (impure) phase, once known.
         let mut boundary: Option<usize> = None;
         // The op emitted last (base index), for the interleave below.
@@ -480,22 +613,25 @@ impl Forest {
             last_op = Some(i);
             // Materialise this op's not-yet-emitted leaf operands (its own and
             // its fused operand's), then a fused operand as a placeholder,
-            // then the op itself.
+            // then the op itself. A group node emits nothing of its own; it
+            // materialises the group's leaves and enables its members.
             for &d in &dep_lists[i] {
                 if is_leaf[d] && !emitted[d] {
                     emitted[d] = true;
                     order.push(base[d]);
                 }
             }
-            for &a in ctx.operands(base[i]).iter() {
-                let pa = bp(a);
-                if fused_into_b[pa] == Some(i) {
-                    emitted[pa] = true;
-                    order.push(a);
+            if i < m {
+                for &a in ctx.operands(base[i]).iter() {
+                    let pa = bp(a);
+                    if fused_into_b[pa] == Some(i) {
+                        emitted[pa] = true;
+                        order.push(a);
+                    }
                 }
+                order.push(base[i]);
             }
             emitted[i] = true;
-            order.push(base[i]);
             for &d in &dep_lists[i] {
                 remaining[d] -= 1;
             }
@@ -621,6 +757,9 @@ impl Forest {
         // The group of a call, by schedule position.
         let group_at = |i: usize| batches_in.group_of[self.pos(schedule.order[i])];
         let mut batch_emitted = vec![false; batches_in.groups.len()];
+        let mut gemvs: Vec<GemvTable> = Vec::new();
+        // Pick index of each fused row, by schedule position.
+        let mut row_pick: HashMap<usize, u32> = HashMap::default();
         let base = &self.base;
         let input_of = &self.input_of;
         let m = base.len();
@@ -671,6 +810,9 @@ impl Forest {
             if emitted[i] {
                 continue; // leaf materialised early by a BundleBatch below
             }
+            if batches_in.skip[self.pos(order[i])] {
+                continue; // read in place by a kernel, never a slot
+            }
             let node = ctx.node(order[i]);
             // Instance batching: the first call of a group materialises the
             // group's leaf arguments (its computed ones precede it by the
@@ -682,7 +824,9 @@ impl Forest {
                 let cbidx = cf.0;
                 if !matches!(ctx.func(cf).outputs[cout as usize], Output::Zero) {
                     if let Some(g) = group_at(i) {
-                        let groups = &batches_in.groups[g as usize].1;
+                        let Group::Call(groups) = &batches_in.groups[g as usize] else {
+                            unreachable!("a call belongs to a call group")
+                        };
                         if !batch_emitted[g as usize] {
                             batch_emitted[g as usize] = true;
                             for a in groups.iter().flatten() {
@@ -749,6 +893,113 @@ impl Forest {
                     }
                 }
             }
+            // A fused product: the first row emits the kernel, every row
+            // then lowers to a pick of its result.
+            if let (Node::Dot(_), Some(g)) = (node, group_at(i)) {
+                if let Group::Gemv {
+                    rows,
+                    x,
+                    a_run,
+                    x_run,
+                } = &batches_in.groups[g as usize]
+                {
+                    if !batch_emitted[g as usize] {
+                        batch_emitted[g as usize] = true;
+                        let (m, n) = (rows.len(), x.len());
+                        let entries: Vec<ExprId> = rows
+                            .iter()
+                            .flat_map(|&r| match *ctx.node(r) {
+                                Node::Dot(l) => ctx.dot_args(l).0.to_vec(),
+                                _ => unreachable!("a row is a dot"),
+                            })
+                            .collect();
+                        // An operand that is a run of consecutive inputs is
+                        // read in place; anything else is gathered from slots,
+                        // late leaves materialised here.
+                        let source = |es: &[ExprId],
+                                      run: Option<u32>,
+                                      ops: &mut Vec<Op>,
+                                      dst: &mut Vec<u32>,
+                                      free: &mut Vec<u32>,
+                                      next: &mut u32,
+                                      slot_by_pos: &mut Vec<u32>,
+                                      emitted: &mut Vec<bool>,
+                                      arg_pool: &mut Vec<u32>|
+                         -> Src {
+                            if let Some(k) = run {
+                                return Src::Inputs(k);
+                            }
+                            for e in es {
+                                let ap = p(*e);
+                                if ap > i && !emitted[ap] {
+                                    let op = match ctx.node(*e) {
+                                        Node::Const(c) => Op::Const(ctx.const_val(*c).to_f64()),
+                                        Node::Symbol(sym) => Op::Input(
+                                            input_of.get(sym).copied().unwrap_or(u32::MAX),
+                                        ),
+                                        _ => unreachable!("a computed operand precedes its kernel"),
+                                    };
+                                    let d = free.pop().unwrap_or_else(|| {
+                                        let d = *next;
+                                        *next += 1;
+                                        d
+                                    });
+                                    slot_by_pos[ap] = d;
+                                    ops.push(op);
+                                    dst.push(d);
+                                    emitted[ap] = true;
+                                }
+                            }
+                            let start = arg_pool.len() as u32;
+                            arg_pool.extend(es.iter().map(|e| slot_by_pos[p(*e)]));
+                            Src::Slots(start)
+                        };
+                        let a = source(
+                            &entries,
+                            *a_run,
+                            &mut ops,
+                            &mut dst,
+                            &mut free,
+                            &mut next,
+                            &mut slot_by_pos,
+                            &mut emitted,
+                            &mut arg_pool,
+                        );
+                        let xs = source(
+                            x,
+                            *x_run,
+                            &mut ops,
+                            &mut dst,
+                            &mut free,
+                            &mut next,
+                            &mut slot_by_pos,
+                            &mut emitted,
+                            &mut arg_pool,
+                        );
+                        max_args = max_args.max(m * n + n);
+                        let base = bundle_scratch_len;
+                        bundle_scratch_len += m as u32;
+                        for (r, &row) in rows.iter().enumerate() {
+                            row_pick.insert(p(row), base + r as u32);
+                        }
+                        let t = gemvs.len() as u32;
+                        gemvs.push(GemvTable {
+                            a,
+                            x: xs,
+                            m: m as u32,
+                            n: n as u32,
+                            base,
+                        });
+                        let snk = *sink.get_or_insert_with(|| {
+                            let d = next;
+                            next += 1;
+                            d
+                        });
+                        ops.push(Op::Gemv(t));
+                        dst.push(snk);
+                    }
+                }
+            }
             let s = |a: &ExprId| slot_by_pos[p(*a)];
             let op = match node {
                 Node::Const(c) => Op::Const(ctx.const_val(*c).to_f64()),
@@ -787,6 +1038,7 @@ impl Forest {
                     max_args = max_args.max(args.len());
                     Op::Reduce(*op, start, args.len() as u32)
                 }
+                Node::Dot(_) if row_pick.contains_key(&i) => Op::BundlePick(row_pick[&i]),
                 Node::Dot(l) => {
                     let (a, b) = ctx.dot_args(*l);
                     let start = arg_pool.len() as u32;
@@ -853,7 +1105,13 @@ impl Forest {
                     dying.push(ap);
                 }
             }
-            dying.retain(|&ap| last[ap] == i && !pinned[ap] && fused_into[ap].is_none());
+            // A leaf read only in place by a kernel never had a slot.
+            dying.retain(|&ap| {
+                last[ap] == i
+                    && !pinned[ap]
+                    && fused_into[ap].is_none()
+                    && !batches_in.skip[self.pos(order[ap])]
+            });
             dying.sort_unstable();
             dying.dedup();
             for ap in dying {
@@ -887,6 +1145,7 @@ impl Forest {
             bundle_scratch_len: bundle_scratch_len as usize,
             batches,
             batch_args_len,
+            gemvs,
             prolog_ops,
         }
     }

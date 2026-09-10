@@ -257,3 +257,17 @@ pub fn cmp_bool<T: PartialOrd>(op: CmpOp, x: T, y: T) -> bool {
         CmpOp::Ne => x != y,
     }
 }
+
+/// A dense matrix-vector product: `out[i] = dot(a[i*n..(i+1)*n], x)` for
+/// `m` rows, each row the same fold as [`dot_slice_t`], so a fused product
+/// is bit-identical to its rows as separate dots.
+pub fn gemv_t<T: Scalar>(a: &[T], x: &[T], m: usize, n: usize, out: &mut [T]) {
+    for i in 0..m {
+        out[i] = dot_slice_t(&a[i * n..(i + 1) * n], x);
+    }
+}
+
+/// [`gemv_t`] in `f64`.
+pub fn gemv(a: &[f64], x: &[f64], m: usize, n: usize, out: &mut [f64]) {
+    gemv_t(a, x, m, n, out)
+}

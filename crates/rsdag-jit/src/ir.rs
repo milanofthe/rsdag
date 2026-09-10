@@ -6,6 +6,7 @@
 
 use rsdag::extern_fn::ExternBundle;
 use rsdag::node::{BinOp, CmpOp, ReduceOp, UnaryOp};
+use rsdag::tape::Operand;
 use rsdag::TapeVisitor;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
@@ -31,6 +32,29 @@ pub(crate) enum ROp {
     BundleBatch(u32, Vec<u32>, u32, u32, u32),
     /// `(dst, scratch index)`.
     Pick(u32, u32),
+    /// A dense matrix-vector product into the bundle scratch at `base`.
+    Gemv {
+        a: Dense,
+        x: Dense,
+        m: u32,
+        n: u32,
+        base: u32,
+    },
+}
+
+/// A dense operand: a run of inputs read in place, or slots gathered.
+pub(crate) enum Dense {
+    Inputs(u32),
+    Slots(Vec<u32>),
+}
+
+impl Dense {
+    fn slots(&self) -> &[u32] {
+        match self {
+            Dense::Inputs(_) => &[],
+            Dense::Slots(v) => v,
+        }
+    }
 }
 
 impl ROp {
@@ -56,6 +80,7 @@ impl ROp {
                 args.iter().copied().for_each(f)
             }
             ROp::Dot(_, a, b) => a.iter().chain(b).copied().for_each(f),
+            ROp::Gemv { a, x, .. } => a.slots().iter().chain(x.slots()).copied().for_each(f),
         }
     }
     /// The host routine the op calls, if any.
@@ -75,6 +100,7 @@ impl ROp {
             ROp::Reduce(_, ReduceOp::Min | ReduceOp::Max, _) => crate::host::h_reduce as *const (),
             ROp::Bundle(..) => crate::host::h_bundle as *const (),
             ROp::BundleBatch(..) => crate::host::h_bundle_batch as *const (),
+            ROp::Gemv { .. } => crate::host::h_gemv as *const (),
             _ => return None,
         })
     }
@@ -84,6 +110,7 @@ impl ROp {
         match self {
             ROp::Reduce(_, ReduceOp::Min | ReduceOp::Max, args) => args.len(),
             ROp::Bundle(_, args, _) | ROp::BundleBatch(_, args, ..) => args.len(),
+            ROp::Gemv { a, x, .. } => a.slots().len() + x.slots().len(),
             _ => 0,
         }
     }
@@ -172,5 +199,18 @@ impl TapeVisitor for Recorder {
     }
     fn bundle_pick(&mut self, dst: u32, idx: u32) {
         self.ops.push(ROp::Pick(dst, idx));
+    }
+    fn gemv(&mut self, a: Operand<'_>, x: Operand<'_>, m: u32, n: u32, base: u32) {
+        let dense = |o: Operand<'_>| match o {
+            Operand::Inputs(k) => Dense::Inputs(k),
+            Operand::Slots(s) => Dense::Slots(s.to_vec()),
+        };
+        self.ops.push(ROp::Gemv {
+            a: dense(a),
+            x: dense(x),
+            m,
+            n,
+            base,
+        });
     }
 }

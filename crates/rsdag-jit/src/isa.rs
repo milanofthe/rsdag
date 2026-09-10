@@ -27,6 +27,8 @@ pub(crate) enum IArg {
     Imm(u64),
     /// The address of a byte offset into the work array.
     WorkAddr(usize),
+    /// The address of a byte offset into the input vector.
+    InputAddr(usize),
     /// The bundle table pointer the chunk received.
     Bundles,
 }

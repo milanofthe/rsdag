@@ -1,7 +1,7 @@
 //! Choice specialization: shorten a tape against a recorded `Select` trace,
 //! keeping guard outputs that detect a region flip. See [`Tape::specialize`].
 
-use super::{BatchTable, Op, Tape};
+use super::{BatchTable, GemvTable, Op, Src, Tape};
 
 impl Tape {
     /// A shortened tape for the region a choice trace describes: `choices`
@@ -84,6 +84,17 @@ impl Tape {
                     }
                 }
                 Op::BundlePick(idx) => dep_pool.push(bprod[idx as usize]),
+                Op::Gemv(t) => {
+                    let tb = self.gemvs[t as usize];
+                    for (src, len) in [(tb.a, tb.m * tb.n), (tb.x, tb.n)] {
+                        if let Src::Slots(s) = src {
+                            dep_pool.extend((0..len).map(|k| p(self.arg_pool[(s + k) as usize])));
+                        }
+                    }
+                    for k in 0..tb.m as usize {
+                        bprod[tb.base as usize + k] = i as u32;
+                    }
+                }
             }
             vsrc.push(match sel_at[i] {
                 u32::MAX => i as u32,
@@ -195,6 +206,7 @@ impl Tape {
         let mut max_args = 0usize;
         let mut sink: Option<u32> = None;
         let mut batches: Vec<BatchTable> = Vec::new();
+        let mut gemvs: Vec<GemvTable> = Vec::new();
         // Surviving-op count from the source prolog region: order is preserved,
         // so this is the specialized tape's own prolog length.
         let mut spec_prolog_ops = 0usize;
@@ -246,6 +258,36 @@ impl Tape {
                     Op::BundleBatch(bidx, tidx)
                 }
                 Op::BundlePick(idx) => Op::BundlePick(idx),
+                Op::Gemv(t) => {
+                    // Slot operands are re-gathered in dependency order, a then x.
+                    let tb = self.gemvs[t as usize];
+                    let a = match tb.a {
+                        Src::Slots(_) => {
+                            Src::Slots(gather(&mut arg_pool, &mut max_args, (tb.m * tb.n) as usize))
+                        }
+                        src => src,
+                    };
+                    let x = match tb.x {
+                        Src::Slots(_) => {
+                            let skip = if matches!(tb.a, Src::Slots(_)) {
+                                (tb.m * tb.n) as usize
+                            } else {
+                                0
+                            };
+                            let start = arg_pool.len() as u32;
+                            arg_pool.extend(
+                                (0..tb.n as usize)
+                                    .map(|k| new_slot[vsrc[deps(i)[skip + k] as usize] as usize]),
+                            );
+                            max_args = max_args.max(skip + tb.n as usize);
+                            Src::Slots(start)
+                        }
+                        src => src,
+                    };
+                    let tidx = gemvs.len() as u32;
+                    gemvs.push(GemvTable { a, x, ..tb });
+                    Op::Gemv(tidx)
+                }
             };
             // Free distinct operand slots that die at this step, then pick dst
             // (so an op can reuse a dying operand's slot, as in `compile`).
@@ -258,7 +300,10 @@ impl Tape {
             dying.sort_unstable();
             dying.dedup();
             free.extend(dying);
-            let d = if matches!(self.ops[i], Op::BundleCall(..) | Op::BundleBatch(..)) {
+            let d = if matches!(
+                self.ops[i],
+                Op::BundleCall(..) | Op::BundleBatch(..) | Op::Gemv(..)
+            ) {
                 // All bundle calls share one never-read, never-freed sink slot.
                 *sink.get_or_insert_with(|| {
                     let s = next;
@@ -306,6 +351,7 @@ impl Tape {
                 bundle_scratch_len: self.bundle_scratch_len,
                 batches,
                 batch_args_len: self.batch_args_len,
+                gemvs,
                 // Inherited from the source tape: surviving ops keep their
                 // order, so the boundary is the surviving prefix.
                 prolog_ops: spec_prolog_ops,
