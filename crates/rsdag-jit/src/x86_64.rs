@@ -1,10 +1,12 @@
-//! x86-64 encodings (System V).
+//! x86-64 encodings, System V and Windows x64.
 //!
 //! `rbx` work, `r13` inputs, `r14` bundles; `rax` scratch; `xmm0` and
 //! `xmm1` carry call arguments, the result and the masks of a select. The
-//! cache is `xmm2` to `xmm15`; every vector register is caller-saved, so
-//! nothing survives a host call. Baseline SSE2, with `roundsd` when SSE4.1
-//! is present and `vfmadd231sd` when FMA is.
+//! cache is `xmm2` to `xmm15`. Under System V every vector register is
+//! caller-saved, so nothing survives a host call; under Windows `xmm6` to
+//! `xmm15` are callee-saved, so the chunk preserves them and they come
+//! first in the cache. Baseline SSE2, with `roundsd` when SSE4.1 is present
+//! and `vfmadd231sd` when FMA is.
 
 use crate::isa::*;
 use rsdag::node::CmpOp;
@@ -12,7 +14,18 @@ use rsdag::node::CmpOp;
 const WORK: u8 = 3; // rbx
 const INPUTS: u8 = 13; // r13
 const BUNDLES: u8 = 14; // r14
-const INT_ARGS: [u8; 6] = [7, 6, 2, 1, 8, 9]; // rdi rsi rdx rcx r8 r9
+const WIN: bool = cfg!(windows);
+/// Integer argument registers: rdi rsi rdx rcx r8 r9, or rcx rdx r8 r9.
+const INT_ARGS: [u8; 6] = if WIN {
+    [1, 2, 8, 9, 0, 0]
+} else {
+    [7, 6, 2, 1, 8, 9]
+};
+/// The Windows frame below the pushes: 32 bytes of shadow space, two
+/// stack argument slots, then `xmm6` to `xmm15`.
+const WIN_FRAME: i32 = 208;
+const WIN_STACK_ARGS: i32 = 32;
+const WIN_XMM_SAVE: i32 = 48;
 
 pub(crate) struct X64 {
     code: Vec<u8>,
@@ -73,6 +86,44 @@ impl X64 {
             self.bytes(&v.to_le_bytes());
         }
     }
+    /// `[rsp + disp]`, which needs a SIB byte.
+    fn modrm_rsp(&mut self, reg: u8, disp: i32) {
+        if let Ok(d8) = i8::try_from(disp) {
+            self.bytes(&[0x40 | ((reg & 7) << 3) | 4, 0x24, d8 as u8]);
+        } else {
+            self.bytes(&[0x80 | ((reg & 7) << 3) | 4, 0x24]);
+            self.bytes(&disp.to_le_bytes());
+        }
+    }
+    /// `movdqu [rsp + disp], xmm` (`store`) or the load.
+    fn xmm_rsp(&mut self, store: bool, xmm: u8, disp: i32) {
+        self.b(0xF3);
+        self.rex(false, xmm, 0);
+        self.bytes(&[0x0F, if store { 0x7F } else { 0x6F }]);
+        self.modrm_rsp(xmm, disp);
+    }
+    /// `mov [rsp + disp], r64`.
+    fn store_rsp(&mut self, r: u8, disp: i32) {
+        self.rex(true, r, 0);
+        self.b(0x89);
+        self.modrm_rsp(r, disp);
+    }
+    /// An integer argument into `r64`.
+    fn int_arg(&mut self, rk: u8, arg: IArg) {
+        match arg {
+            IArg::Imm(v) => self.mov_imm(rk, v),
+            IArg::WorkAddr(off) => {
+                self.rex(true, rk, WORK);
+                self.b(0x8D); // lea rk, [rbx + off]
+                self.modrm_mem(rk, WORK, off);
+            }
+            IArg::Bundles => {
+                self.rex(true, BUNDLES, rk);
+                self.b(0x89); // mov rk, r14
+                self.modrm_reg(BUNDLES, rk);
+            }
+        }
+    }
     /// `movq xmm, rax`.
     fn movq_from_rax(&mut self, xmm: u8) {
         self.b(0x66);
@@ -101,8 +152,12 @@ impl X64 {
 }
 
 impl Isa for X64 {
-    const CACHE: &'static [u8] = &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
-    const SAVED: usize = 0;
+    const CACHE: &'static [u8] = if WIN {
+        &[6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 2, 3, 4, 5]
+    } else {
+        &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    };
+    const SAVED: usize = if WIN { 10 } else { 0 };
     const RESULT: u8 = 0;
 
     fn new() -> X64 {
@@ -127,11 +182,29 @@ impl Isa for X64 {
         // Five pushes: the stack is 16-byte aligned at every call below.
         self.bytes(&[0x55, 0x48, 0x89, 0xE5]); // push rbp; mov rbp, rsp
         self.bytes(&[0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56]); // push rbx r12 r13 r14
-        self.bytes(&[0x48, 0x89, 0xFB]); // mov rbx, rdi
-        self.bytes(&[0x49, 0x89, 0xF5]); // mov r13, rsi
-        self.bytes(&[0x49, 0x89, 0xD6]); // mov r14, rdx
+        if WIN {
+            self.bytes(&[0x48, 0x81, 0xEC]); // sub rsp, WIN_FRAME
+            self.bytes(&WIN_FRAME.to_le_bytes());
+            for x in 6..16u8 {
+                self.xmm_rsp(true, x, WIN_XMM_SAVE + 16 * (x as i32 - 6));
+            }
+            self.bytes(&[0x48, 0x89, 0xCB]); // mov rbx, rcx
+            self.bytes(&[0x49, 0x89, 0xD5]); // mov r13, rdx
+            self.bytes(&[0x4D, 0x89, 0xC6]); // mov r14, r8
+        } else {
+            self.bytes(&[0x48, 0x89, 0xFB]); // mov rbx, rdi
+            self.bytes(&[0x49, 0x89, 0xF5]); // mov r13, rsi
+            self.bytes(&[0x49, 0x89, 0xD6]); // mov r14, rdx
+        }
     }
     fn epilogue(&mut self) {
+        if WIN {
+            for x in 6..16u8 {
+                self.xmm_rsp(false, x, WIN_XMM_SAVE + 16 * (x as i32 - 6));
+            }
+            self.bytes(&[0x48, 0x81, 0xC4]); // add rsp, WIN_FRAME
+            self.bytes(&WIN_FRAME.to_le_bytes());
+        }
         self.bytes(&[0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5B, 0x5D, 0xC3]);
     }
 
@@ -241,23 +314,27 @@ impl Isa for X64 {
         self.blend(t, e, d);
     }
 
-    fn call(&mut self, addr: *const (), fargs: &[u8], iargs: &[IArg]) {
-        for (k, &r) in fargs.iter().enumerate() {
-            self.mov(k as u8, r);
-        }
-        for (k, arg) in iargs.iter().enumerate() {
-            let rk = INT_ARGS[k];
+    fn call(&mut self, addr: *const (), args: &[Arg]) {
+        // System V counts floats and integers apart; Windows counts them
+        // together, with everything past the fourth position on the stack.
+        let (mut nf, mut ni) = (0usize, 0usize);
+        for (pos, arg) in args.iter().enumerate() {
             match *arg {
-                IArg::Imm(v) => self.mov_imm(rk, v),
-                IArg::WorkAddr(off) => {
-                    self.rex(true, rk, WORK);
-                    self.b(0x8D); // lea rk, [rbx + off]
-                    self.modrm_mem(rk, WORK, off);
+                Arg::F(r) => {
+                    let k = if WIN { pos } else { nf };
+                    nf += 1;
+                    assert!(k < 4, "float arguments fit the registers");
+                    self.mov(k as u8, r);
                 }
-                IArg::Bundles => {
-                    self.rex(true, BUNDLES, rk);
-                    self.b(0x89); // mov rk, r14
-                    self.modrm_reg(BUNDLES, rk);
+                Arg::I(iarg) => {
+                    let k = if WIN { pos } else { ni };
+                    ni += 1;
+                    if WIN && k >= 4 {
+                        self.int_arg(0, iarg);
+                        self.store_rsp(0, WIN_STACK_ARGS + 8 * (k as i32 - 4));
+                    } else {
+                        self.int_arg(INT_ARGS[k], iarg);
+                    }
                 }
             }
         }

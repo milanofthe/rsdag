@@ -23,6 +23,21 @@ jobs:
       - run: cargo doc --no-deps --workspace --exclude rsdag-py --features 'rsdag/synth rsdag/serde'
         env:
           RUSTDOCFLAGS: -D warnings
+  # The native backend on the two conventions this runner does not cover:
+  # Windows x64 here, AArch64 on macOS.
+  native:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy -p rsdag-jit --all-targets --features rsdag/synth -- -D warnings
+      - run: cargo test -p rsdag-jit --features rsdag/synth
   python:
     runs-on: ubuntu-latest
     steps:

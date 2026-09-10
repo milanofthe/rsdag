@@ -46,7 +46,7 @@ mod host;
 mod ir;
 mod isa;
 mod native;
-#[cfg(all(target_arch = "x86_64", unix))]
+#[cfg(target_arch = "x86_64")]
 mod x86_64;
 
 pub use native::NativeTape;
