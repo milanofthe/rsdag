@@ -29,8 +29,9 @@
 
 use rayon::prelude::*;
 use rsdag::node::{BinOp, CmpOp, ReduceOp, UnaryOp, REDUCE_SIMD_MIN};
-use rsdag::Tape;
+use rsdag::{ExternBundle, Tape};
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
 
 use crate::host::{self, Bundles};
 use crate::ir::{ROp, Recorder};
@@ -59,6 +60,81 @@ pub struct NativeTape {
     outputs: Vec<u32>,
     layout: Layout,
     n_inputs: usize,
+    n_ops: usize,
+}
+
+/// A function body compiled natively, behind the bundle interface the
+/// tape calls bodies through: emitted once, called per instance. A batch
+/// of instances runs on the rayon pool when it is worth a fork; either way
+/// the result is the serial loop's, bit for bit.
+struct NativeBody {
+    tape: NativeTape,
+    n_out: usize,
+}
+
+/// Ops per batched call below which the loop stays on the calling thread.
+const PAR_MIN_OPS: usize = 1 << 16;
+
+impl NativeBody {
+    /// The instances `groups` of a batch, one after the other on one work
+    /// buffer: nothing is cleared or resized between them, since a tape
+    /// writes every slot it reads.
+    fn run_groups(
+        &self,
+        work: &mut Vec<f64>,
+        args: &[f64],
+        n_args: usize,
+        out: &mut [f64],
+        groups: std::ops::Range<usize>,
+    ) {
+        work.resize(self.tape.layout.total, 0.0);
+        let n_out = self.n_out;
+        for g in groups {
+            let ins = &args[g * n_args..(g + 1) * n_args];
+            self.tape.run(0..self.tape.chunks.len(), ins, work);
+            for (k, &slot) in self.tape.outputs[..n_out].iter().enumerate() {
+                out[g * n_out + k] = work[slot as usize];
+            }
+        }
+    }
+}
+
+impl ExternBundle for NativeBody {
+    fn n_outputs(&self) -> usize {
+        self.n_out
+    }
+    fn call(&self, args: &[f64], out: &mut [f64]) {
+        // A pool rather than one buffer: a body that calls a body nests.
+        thread_local! {
+            static POOL: std::cell::RefCell<Vec<Vec<f64>>> = Default::default();
+        }
+        let mut work = POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default();
+        self.run_groups(&mut work, args, args.len(), out, 0..1);
+        POOL.with(|p| p.borrow_mut().push(work));
+    }
+    fn call_batch(&self, args: &[f64], n_groups: usize, n_args: usize, out: &mut [f64]) {
+        if n_groups * self.tape.n_ops < PAR_MIN_OPS || n_groups < 2 {
+            thread_local! {
+                static POOL: std::cell::RefCell<Vec<Vec<f64>>> = Default::default();
+            }
+            let mut work = POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default();
+            self.run_groups(&mut work, args, n_args, out, 0..n_groups);
+            POOL.with(|p| p.borrow_mut().push(work));
+            return;
+        }
+        // Blocks of instances per task, so a thread amortises its buffer
+        // and the scheduler's hand-offs over many bodies.
+        let block = (n_groups / (rayon::current_num_threads() * 4)).clamp(1, 4096);
+        let n_out = self.n_out.max(1);
+        out.par_chunks_mut(block * n_out)
+            .enumerate()
+            .for_each_init(Vec::new, |work, (b, dst)| {
+                let g0 = b * block;
+                let g1 = (g0 + block).min(n_groups);
+                let ins = &args[g0 * n_args..g1 * n_args];
+                self.run_groups(work, ins, n_args, dst, 0..g1 - g0);
+            });
+    }
 }
 
 /// The work array: the tape's slots, then the bundle scratch, then the
@@ -93,6 +169,19 @@ impl NativeTape {
         }
         let mut rec = Recorder::default();
         tape.lower(&mut rec);
+        // Function bodies that are tapes become native bodies of their own.
+        let bundles: Result<Bundles, JitError> = rec
+            .bundles
+            .iter()
+            .map(|b| match b.body() {
+                Some(body) => Ok(Arc::new(NativeBody {
+                    tape: NativeTape::compile_with(body, chunk_ops)?,
+                    n_out: b.n_outputs(),
+                }) as Arc<dyn ExternBundle>),
+                None => Ok(b.clone()),
+            })
+            .collect();
+        rec.bundles = bundles?;
         let n_inputs = rec
             .ops
             .iter()
@@ -149,6 +238,7 @@ impl NativeTape {
             outputs: tape.outputs().to_vec(),
             layout,
             n_inputs,
+            n_ops: tape.n_ops(),
         })
     }
 
@@ -168,10 +258,12 @@ impl NativeTape {
         }
     }
 
+    /// Run the chunks in `range`; `inputs` has at least `n_inputs` values
+    /// and `work` the layout's length.
     fn run(&self, range: std::ops::Range<usize>, inputs: &[f64], work: &mut [f64]) {
         assert!(
-            work.len() >= self.layout.total,
-            "work buffer not prepared by this tape"
+            work.len() >= self.layout.total && inputs.len() >= self.n_inputs,
+            "buffers not prepared by this tape"
         );
         let (wp, ip, bp) = (
             work.as_mut_ptr(),
@@ -683,6 +775,8 @@ fn hot_routines(ops: &[ROp]) -> Vec<*const ()> {
             }
         }
     }
+    // A routine called once is not worth a register load in the prologue.
+    count.retain(|&(_, n)| n >= 2);
     count.sort_by_key(|a| std::cmp::Reverse(a.1));
     count.into_iter().map(|(a, _)| a).collect()
 }

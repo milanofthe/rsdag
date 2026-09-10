@@ -24,8 +24,10 @@ Design decisions and phases live in the GitHub issues.
   `symbolic` (`determinant`, `collect`, `rational_form`, `simplify_egraph`,
   `solve` with static LU and `newton_step`).
 - `rsdag-jit`: the native backend (`NativeTape`), machine code emitted
-  straight from the tape for AArch64 and x86-64, bit-identical to the
-  interpreter, with `eval_many` for instances in parallel.
+  straight from the tape for AArch64 and x86-64 (Linux, macOS, Windows),
+  bit-identical to the interpreter. Function bodies are compiled once and
+  called per instance, a batch of instances in parallel; `eval_many` does
+  the same for whole programs.
 - `rsdag-py`: the Python package `rsdag` (`trace`, `jit`, `jacobian`,
   `grad`, `where`, comparison helpers), built with maturin.
 

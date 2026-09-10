@@ -42,4 +42,11 @@ pub trait ExternBundle: Send + Sync {
             );
         }
     }
+    /// The tape this bundle evaluates, when its body is one: a native
+    /// backend compiles it and substitutes its own bundle, so a function
+    /// body is emitted once and called per instance instead of being
+    /// unrolled into every call site. `None` for an opaque body.
+    fn body(&self) -> Option<&crate::tape::Tape> {
+        None
+    }
 }
