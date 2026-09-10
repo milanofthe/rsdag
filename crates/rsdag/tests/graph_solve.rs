@@ -1,7 +1,7 @@
 //! A linear solve as graph ops: correct against a pivoted dense solve, the
 //! ordering keeps fill down, and a Newton step composed of it converges.
 
-use rsdag::symbolic::solve::{lu_static, ordering, pattern_of, Pattern, SparseRows};
+use rsdag::symbolic::solve::{amd::amd, lu_static, pattern_of, Pattern, SparseRows};
 use rsdag::synth::Spec;
 use rsdag::{newton_step, Builder, ExprId, Graph, Node, Numeric, Scope, SymbolId, Tape, F64};
 
@@ -59,7 +59,16 @@ fn the_ordering_reduces_fill() {
     let jac = rsdag::sparse_jacobian(&mut g, &f, &syms);
     let pattern = pattern_of(&jac);
     let natural: Vec<usize> = (0..128).collect();
-    let md = ordering(&pattern);
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); 128];
+    for (i, row) in pattern.iter().enumerate() {
+        for &j in row {
+            if i != j {
+                adj[i].push(j);
+                adj[j].push(i);
+            }
+        }
+    }
+    let md = amd(&adj);
     let (a, b) = (fill_of(&pattern, &natural), fill_of(&pattern, &md));
     assert!(b <= a, "minimum degree fill {b} against natural {a}");
     // Every index exactly once.

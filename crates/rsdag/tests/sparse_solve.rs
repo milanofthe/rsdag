@@ -3,7 +3,7 @@
 //! over a hundred thousand unknowns is a program of tens of ops per unknown
 //! that converges.
 
-use rsdag::symbolic::solve::ordering;
+use rsdag::symbolic::solve::amd::amd;
 use rsdag::{newton_step, sparse_jacobian, ExprId, Graph, Node, SymbolId, Tape, F64};
 
 fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
@@ -61,7 +61,10 @@ fn a_global_net_is_eliminated_last_without_fill() {
     let pattern: Vec<Vec<usize>> = (0..n)
         .map(|i| if i == 0 { (0..n).collect() } else { vec![0, i] })
         .collect();
-    let order = ordering(&pattern);
+    let adj: Vec<Vec<usize>> = (0..n)
+        .map(|i| if i == 0 { (1..n).collect() } else { vec![0] })
+        .collect();
+    let order = amd(&adj);
     // The hub's degree only falls as the leaves go; it is eliminated once
     // it ties the last leaf at degree one, so it is one of the last two.
     let at = order.iter().position(|&k| k == 0).unwrap();
