@@ -11,7 +11,7 @@ fn main() {
     let mut g: Graph<F64> = Graph::new();
     let mut syms: Vec<SymbolId> = Vec::new();
     let mut rows: rsdag::symbolic::solve::SparseRows = vec![Vec::new(); n];
-    let mut sym = |g: &mut Graph<F64>, name: String, syms: &mut Vec<SymbolId>| {
+    let sym = |g: &mut Graph<F64>, name: String, syms: &mut Vec<SymbolId>| {
         let e = g.sym(&name);
         if let Node::Symbol(s) = g.node(e) {
             syms.push(*s);
