@@ -209,7 +209,7 @@ fn the_planned_solve_is_the_dense_solve() {
             p.btf.n_blocks(),
             sizes.len()
         );
-        let (x, _) = solve_planned(&mut g, &rows, &p, &b);
+        let x = solve_planned(&mut g, &rows, &p, &b).x;
         let tape = Tape::compile(&g, &x, &syms);
         let (mut w, mut o) = (Vec::new(), Vec::new());
         tape.eval(&vals, &mut w, &mut o);
@@ -243,7 +243,7 @@ fn a_newton_step_on_a_grid_converges() {
             g.sub(acc, one)
         })
         .collect();
-    let (step, _) = rsdag::newton_step(&mut g, &f, &syms);
+    let step = rsdag::newton_step(&mut g, &f, &syms).x;
     let step_tape = Tape::compile(&g, &step, &syms);
     let res_tape = Tape::compile(&g, &f, &syms);
     let mut x = vec![0.3; n];

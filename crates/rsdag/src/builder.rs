@@ -340,6 +340,6 @@ impl<K: Field> Builder for Graph<K> {
             return Graph::solve_dense(self, a.iter().flatten().copied().collect(), b.to_vec());
         }
         let plan = plan(&pattern_of(&rows)).expect("a structurally nonsingular system");
-        solve_planned(self, &rows, &plan, b).0
+        solve_planned(self, &rows, &plan, b).x
     }
 }
