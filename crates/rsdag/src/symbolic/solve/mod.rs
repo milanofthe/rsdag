@@ -372,13 +372,11 @@ impl Plan {
                     }
                 }
             }
-            // Threshold pivoting in the elimination order: at step k, among
-            // the rows not yet taken whose magnitude in column `order[k]`
-            // is within [`PIVOT_TOLERANCE`] of the largest (the rows the
-            // guard accepts), the sparsest, lowest index first. The choice
-            // depends on the values and the pattern alone, not on the
-            // order the entries were reached, and it keeps the fill down
-            // where the magnitudes tie (the unit entries of a source row).
+            // Partial pivoting in the elimination order: at step k the row
+            // of largest magnitude in column `order[k]` among the rows not
+            // yet taken; on a tie (the unit entries of a source row) the
+            // sparsest row, lowest index first, so the choice depends on the
+            // values and the pattern alone and keeps the fill down.
             let order = &self.orders[b];
             let mut taken = vec![false; size];
             let mut row_len = vec![0usize; size];
@@ -392,12 +390,16 @@ impl Plan {
                 open.sort_unstable();
                 open.dedup();
                 let mag = |r: usize| a.get(&(r, c)).copied().unwrap_or(0.0).abs();
-                let largest = open.iter().map(|&r| mag(r)).fold(0.0f64, f64::max);
                 let r = open
                     .iter()
                     .copied()
-                    .filter(|&r| mag(r) >= PIVOT_TOLERANCE * largest)
-                    .min_by_key(|&r| (row_len[r], r))
+                    .max_by(|&x, &y| {
+                        mag(x)
+                            .partial_cmp(&mag(y))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then(row_len[y].cmp(&row_len[x]))
+                            .then(y.cmp(&x))
+                    })
                     .expect("a structurally nonsingular block");
                 taken[r] = true;
                 rows.push(r);
