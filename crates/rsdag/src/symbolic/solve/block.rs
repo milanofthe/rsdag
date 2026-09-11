@@ -191,16 +191,28 @@ fn eliminate_blocks<K: Field>(
     }
     let mut fill = 0usize;
     let mut upper: Vec<Vec<(usize, Vec<ExprId>)>> = vec![Vec::new(); n];
-    let mut diag: Vec<Vec<ExprId>> = vec![Vec::new(); n];
+    let mut diag: Vec<Vec<Vec<ExprId>>> = vec![Vec::new(); n];
+    let (zero, one) = (g.zero(), g.one());
     for k in 0..n {
         assert!(
             orig.contains_key(&(k, k)) || pending.contains_key(&(k, k)),
             "a structurally nonzero pivot block at {k}"
         );
         let pivot = finalize(g, &mut orig, &mut pending, (k, k), b, b);
-        // The pivot block transposed, for `L = W A^-1` as `A^T L^T = W^T`.
-        let pivot_t: Vec<ExprId> = (0..b * b).map(|q| pivot[(q % b) * b + q / b]).collect();
-        diag[k] = pivot;
+        // The pivot block's inverse by columns: b solves of A_kk against the
+        // unit vectors, one factorization; `L = W A_kk^-1` and the back
+        // substitution are then products against it.
+        let inv_cols: Vec<Vec<ExprId>> = (0..b)
+            .map(|c| {
+                let e: Vec<ExprId> = (0..b).map(|q| if q == c { one } else { zero }).collect();
+                g.solve_dense(pivot.clone(), e)
+            })
+            .collect();
+        // Row q of the inverse, as a list.
+        let inv_rows: Vec<Vec<ExprId>> = (0..b)
+            .map(|q| (0..b).map(|c| inv_cols[c][q]).collect())
+            .collect();
+        diag[k] = inv_rows;
         let mut row_k: Vec<usize> = in_row[k].iter().copied().filter(|&c| c > k).collect();
         let mut col_k: Vec<usize> = in_col[k].iter().copied().filter(|&r| r > k).collect();
         row_k.sort_unstable();
@@ -220,12 +232,14 @@ fn eliminate_blocks<K: Field>(
             .iter()
             .map(|&i| {
                 let w = finalize(g, &mut orig, &mut pending, (i, k), b, b);
-                // L_ik = W A_kk^-1: row r of L is the solve of A_kk^T against
-                // row r of W; the b solves share the matrix and fuse.
+                // L_ik = W A_kk^-1: entry (r, c) the dot of row r of W with
+                // column c of the inverse; the dots over the block fuse into
+                // one product.
                 let mut l = Vec::with_capacity(b * b);
                 for r in 0..b {
-                    let row = w[r * b..(r + 1) * b].to_vec();
-                    l.extend(g.solve_dense(pivot_t.clone(), row));
+                    for c in 0..b {
+                        l.push(g.dot(w[r * b..(r + 1) * b].to_vec(), inv_cols[c].clone()));
+                    }
                 }
                 l
             })
@@ -261,7 +275,10 @@ fn eliminate_blocks<K: Field>(
                 g.sub(y[r], d)
             })
             .collect();
-        x[i] = g.solve_dense(diag[i].clone(), r);
+        // x_i = A_ii^-1 r: row q of the inverse against r.
+        x[i] = (0..b)
+            .map(|q| g.dot(diag[i][q].clone(), r.clone()))
+            .collect();
     }
     let mut out = vec![Vec::new(); n];
     for (k, &j) in order.iter().enumerate() {

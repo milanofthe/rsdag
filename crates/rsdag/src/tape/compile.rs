@@ -391,27 +391,48 @@ impl Forest {
             };
             ctx.dot_args(l).0.to_vec()
         };
-        let mut by_rows: HashMap<(Vec<Vec<ExprId>>, u32), Vec<usize>> = HashMap::default();
+        // Row sets are compared by fingerprint (one hash per row, sorted),
+        // and the candidate groups' rows verified before they merge, so a
+        // group of long rows costs one pass over its entries.
+        let row_hash = |mi: usize| -> u64 {
+            use std::hash::{Hash, Hasher};
+            let Node::Dot(l) = *ctx.node(base[mi]) else {
+                unreachable!()
+            };
+            let mut h = rustc_hash::FxHasher::default();
+            ctx.dot_args(l).0.hash(&mut h);
+            h.finish()
+        };
+        let mut by_rows: HashMap<(Vec<u64>, u32), Vec<usize>> = HashMap::default();
         for (g, (key, members)) in groups.iter().enumerate() {
             if let GroupKey::Gemv(_, d) = key {
                 if members.len() < GEMV_MIN_ROWS {
                     continue;
                 }
-                let mut rows: Vec<Vec<ExprId>> = members.iter().map(|&mi| row_of(mi)).collect();
-                rows.sort();
-                if rows.windows(2).any(|w| w[0] == w[1]) {
+                let mut hashes: Vec<u64> = members.iter().map(|&mi| row_hash(mi)).collect();
+                hashes.sort_unstable();
+                if hashes.windows(2).any(|w| w[0] == w[1]) {
                     continue;
                 }
-                by_rows.entry((rows, *d)).or_default().push(g);
+                by_rows.entry((hashes, *d)).or_default().push(g);
             }
         }
-        let mut merged: Vec<(Vec<usize>, Vec<Vec<ExprId>>)> = by_rows
-            .into_iter()
-            .filter(|(_, gs)| gs.len() >= 2)
-            .map(|((rows, _), gs)| (gs, rows))
-            .collect();
+        let mut merged: Vec<Vec<usize>> =
+            by_rows.into_values().filter(|gs| gs.len() >= 2).collect();
         merged.sort();
-        for (gs, rows) in merged {
+        for gs in merged {
+            // The rows of the first group, sorted, and the check that every
+            // other group has exactly them.
+            let mut rows: Vec<Vec<ExprId>> = groups[gs[0]].1.iter().map(|&mi| row_of(mi)).collect();
+            rows.sort();
+            let same_rows = gs[1..].iter().all(|&g| {
+                let mut r: Vec<Vec<ExprId>> = groups[g].1.iter().map(|&mi| row_of(mi)).collect();
+                r.sort();
+                r == rows
+            });
+            if !same_rows {
+                continue;
+            }
             let xs: Vec<Vec<ExprId>> = gs
                 .iter()
                 .map(|&g| match &groups[g].0 {
@@ -533,18 +554,27 @@ impl Forest {
                 }
             }
         };
-        let deps_of_unit = |u: usize| -> Vec<usize> {
-            let mut out = Vec::new();
+        // Distinct dependencies by a stamp per unit, not a sort: a kernel
+        // over thousands of rows names its operands hundreds of thousands
+        // of times.
+        let mut stamp: Vec<usize> = vec![usize::MAX; m];
+        let mut deps_of_unit = |u: usize| -> Vec<usize> {
+            let mut raw = Vec::new();
             match kernel_of[u] {
                 Some(g) => {
                     for &mi in &groups[g].1 {
-                        deps_of_node(mi, &mut out);
+                        deps_of_node(mi, &mut raw);
                     }
                 }
-                None => deps_of_node(u, &mut out),
+                None => deps_of_node(u, &mut raw),
             }
-            out.sort_unstable();
-            out.dedup();
+            let mut out = Vec::with_capacity(raw.len().min(64));
+            for d in raw {
+                if stamp[d] != u {
+                    stamp[d] = u;
+                    out.push(d);
+                }
+            }
             out
         };
         let mut done = vec![false; m];
@@ -935,21 +965,18 @@ impl Program {
         // Distinct value dependencies of each instruction, as instruction
         // indices; a constant is placed on demand and counts as no
         // dependency.
-        let deps: Vec<Vec<u32>> = self
-            .insts
-            .iter()
-            .enumerate()
-            .map(|(i, _)| {
-                let mut d: Vec<u32> = self
-                    .ins(i)
-                    .iter()
-                    .filter_map(|r| match *r {
-                        Ref::Value(j, _) => Some(j),
-                        Ref::Input(_) => None,
-                    })
-                    .collect();
-                d.sort_unstable();
-                d.dedup();
+        let mut stamp: Vec<u32> = vec![u32::MAX; m];
+        let deps: Vec<Vec<u32>> = (0..m)
+            .map(|i| {
+                let mut d: Vec<u32> = Vec::new();
+                for r in self.ins(i) {
+                    if let Ref::Value(j, _) = *r {
+                        if stamp[j as usize] != i as u32 {
+                            stamp[j as usize] = i as u32;
+                            d.push(j);
+                        }
+                    }
+                }
                 d
             })
             .collect();
@@ -1088,12 +1115,63 @@ impl Program {
                 }
             }
         }
+        // A kernel reads its dense operands from consecutive slots when
+        // they are consecutive, and gathers them into scratch otherwise: the
+        // single values a kernel consumes are placed in the order the kernel
+        // reads them, a reserved run per operand, so a block row computed
+        // entry by entry is read in place. First come first served in
+        // schedule order; a value already placed for one kernel keeps its
+        // slot. Reserved slots are never reused.
+        let mut reserved = vec![u32::MAX; m];
+        let mut next: u32 = 0;
+        for &i in order {
+            let inst = &self.insts[i as usize];
+            let runs: Vec<usize> = match inst.kind {
+                Kind::Gemv { m: rows, n } => vec![(rows * n) as usize, n as usize],
+                Kind::Gemm { m: rows, k, n } => vec![(rows * k) as usize, (n * k) as usize],
+                Kind::Solve { n } => vec![(n * n) as usize, n as usize],
+                Kind::SolveMany { n, k } => vec![(n * n) as usize, (n * k) as usize],
+                _ => continue,
+            };
+            let ins = self.ins(i as usize);
+            let mut at = 0usize;
+            for len in runs {
+                let operand = &ins[at..at + len];
+                at += len;
+                // Maximal stretches of single values not yet placed.
+                let mut s = 0usize;
+                while s < operand.len() {
+                    let placeable = |r: &Ref| match *r {
+                        Ref::Value(j, 0) => {
+                            self.insts[j as usize].n_out == 1 && reserved[j as usize] == u32::MAX
+                        }
+                        _ => false,
+                    };
+                    if !placeable(&operand[s]) {
+                        s += 1;
+                        continue;
+                    }
+                    let mut e = s;
+                    while e < operand.len() && placeable(&operand[e]) {
+                        e += 1;
+                    }
+                    if e - s >= 4 {
+                        for r in &operand[s..e] {
+                            if let Ref::Value(j, _) = *r {
+                                reserved[j as usize] = next;
+                                next += 1;
+                            }
+                        }
+                    }
+                    s = e;
+                }
+            }
+        }
         // Slots: a LIFO free list for single values, a fresh block for a
         // kernel; an instruction's dying operands are freed first, so it
         // can reuse one of their slots.
         let mut base = vec![u32::MAX; m];
         let mut free: Vec<u32> = Vec::new();
-        let mut next: u32 = 0;
         let mut ops: Vec<Op> = Vec::with_capacity(m);
         let mut dst: Vec<u32> = Vec::with_capacity(m);
         let mut arg_pool: Vec<u32> = Vec::new();
@@ -1113,7 +1191,13 @@ impl Program {
             let mut dying: Vec<u32> = ins
                 .iter()
                 .filter_map(|r| match *r {
-                    Ref::Value(j, _) if last[j as usize] == k && !pinned[j as usize] => Some(j),
+                    Ref::Value(j, _)
+                        if last[j as usize] == k
+                            && !pinned[j as usize]
+                            && reserved[j as usize] == u32::MAX =>
+                    {
+                        Some(j)
+                    }
                     _ => None,
                 })
                 .collect();
@@ -1123,7 +1207,9 @@ impl Program {
                 let b = base[j as usize];
                 free.extend(b..b + self.insts[j as usize].n_out);
             }
-            let d = if inst.n_out == 1 {
+            let d = if inst.n_out == 1 && reserved[i as usize] != u32::MAX {
+                reserved[i as usize]
+            } else if inst.n_out == 1 {
                 free.pop().unwrap_or_else(|| {
                     let s = next;
                     next += 1;
