@@ -316,13 +316,15 @@ impl NativeTape {
         }));
     }
 
-    /// Evaluate the parameter-pure prolog into `work` (sized and cleared
-    /// here); mirrors [`Tape::eval_prolog`]. Pair with [`eval_main`](Self::eval_main).
+    /// Evaluate the parameter-pure prolog into `work` (grown here to the
+    /// tape's layout; nothing is cleared, every slot is written before it is
+    /// read); mirrors [`Tape::eval_prolog`]. Pair with [`eval_main`](Self::eval_main).
     pub fn eval_prolog(&self, inputs: &[f64], work: &mut Vec<f64>) {
         let mut buf = Vec::new();
         let ins = self.padded(inputs, &mut buf);
-        work.clear();
-        work.resize(self.layout.total, 0.0);
+        if work.len() < self.layout.total {
+            work.resize(self.layout.total, 0.0);
+        }
         self.run(0..self.prolog_chunks, ins, work);
     }
 
@@ -339,8 +341,9 @@ impl NativeTape {
     pub fn eval(&self, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
         let mut buf = Vec::new();
         let ins = self.padded(inputs, &mut buf);
-        work.clear();
-        work.resize(self.layout.total, 0.0);
+        if work.len() < self.layout.total {
+            work.resize(self.layout.total, 0.0);
+        }
         self.run(0..self.chunks.len(), ins, work);
         self.collect(ins, work, out);
     }

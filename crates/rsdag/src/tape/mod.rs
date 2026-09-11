@@ -335,8 +335,9 @@ impl Tape {
         out: &mut Vec<T>,
         sink: &mut S,
     ) {
-        work.clear();
-        work.resize(self.buffer_len(), T::zero());
+        if work.len() < self.buffer_len() {
+            work.resize(self.buffer_len(), T::zero());
+        }
         self.run_range(inputs, work, 0, self.ops.len(), sink);
         self.collect(inputs, work, out);
     }
@@ -357,12 +358,14 @@ impl Tape {
         self.prolog_ops
     }
 
-    /// Evaluate the parameter-pure prolog into `work` (sized/cleared here).
+    /// Evaluate the parameter-pure prolog into `work` (grown here to the
+    /// buffer length; nothing is cleared, every slot is written before read).
     /// A Newton loop calls this once per parameter binding, then
     /// [`eval_main`](Self::eval_main) per iteration over the *same* buffer.
     pub fn eval_prolog<T: Scalar>(&self, inputs: &[T], work: &mut Vec<T>) {
-        work.clear();
-        work.resize(self.buffer_len(), T::zero());
+        if work.len() < self.buffer_len() {
+            work.resize(self.buffer_len(), T::zero());
+        }
         self.run_range(inputs, work, 0, self.prolog_ops, &mut NoTrace);
     }
 
