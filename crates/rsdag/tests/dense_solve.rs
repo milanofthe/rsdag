@@ -131,3 +131,51 @@ fn a_dense_matrix_through_the_builder_is_one_kernel() {
         assert_eq!(p.to_bits(), q.to_bits());
     }
 }
+
+#[test]
+fn solves_over_one_matrix_fuse_into_one_kernel_and_match_the_single_solves() {
+    use rsdag::semantics::{solve, solve_many};
+    let (n, k) = (5usize, 4usize);
+    let mut g: Graph<F64> = Graph::new();
+    let a: Vec<ExprId> = (0..n * n).map(|i| g.sym(&format!("a{i}"))).collect();
+    let bs: Vec<Vec<ExprId>> = (0..k)
+        .map(|c| (0..n).map(|i| g.sym(&format!("b{c}_{i}"))).collect())
+        .collect();
+    let syms: Vec<SymbolId> = (0..(n * n + n * k) as u32).map(SymbolId).collect();
+    let mut roots = Vec::new();
+    for b in &bs {
+        roots.extend(g.solve_dense(a.clone(), b.clone()));
+    }
+    let tape = Tape::compile(&g, &roots, &syms);
+    let d = tape.dump();
+    assert_eq!(d.matches("SolveMany(").count(), 1, "{d}");
+    assert_eq!(d.matches("Solve(").count(), 0, "{d}");
+    let inputs: Vec<f64> = (0..syms.len())
+        .map(|i| {
+            let (r, c) = ((i / n) % n, i % n);
+            if i < n * n && r == c {
+                3.0 + i as f64 * 0.01
+            } else {
+                0.1 * ((i % 7) as f64 - 3.0)
+            }
+        })
+        .collect();
+    let (mut w, mut o) = (Vec::new(), Vec::new());
+    tape.eval(&inputs, &mut w, &mut o);
+    // The reference: one solve per column, and the multi-solve routine.
+    let av = &inputs[..n * n];
+    let mut many = vec![0.0; n * k];
+    solve_many(av, &inputs[n * n..], n, k, &mut many);
+    for c in 0..k {
+        let mut x = vec![0.0; n];
+        solve(av, &inputs[n * n + c * n..n * n + (c + 1) * n], n, &mut x);
+        for i in 0..n {
+            assert_eq!(o[c * n + i].to_bits(), x[i].to_bits(), "column {c} row {i}");
+            assert_eq!(
+                many[c * n + i].to_bits(),
+                x[i].to_bits(),
+                "many column {c} row {i}"
+            );
+        }
+    }
+}

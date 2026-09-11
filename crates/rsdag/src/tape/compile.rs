@@ -158,6 +158,10 @@ pub enum Kind {
     Solve {
         n: u32,
     },
+    SolveMany {
+        n: u32,
+        k: u32,
+    },
 }
 
 /// The lowered program: instructions in a dependency order, the bundle
@@ -356,6 +360,9 @@ impl Forest {
             /// The rows (sorted) against every vector: a matrix product.
             Gemm(Vec<Vec<ExprId>>, Vec<Vec<ExprId>>),
             Solve(crate::node::ArgList),
+            /// One matrix against several right-hand sides (their lists, in
+            /// first-encounter order).
+            SolveMany(Vec<ExprId>, Vec<crate::node::ArgList>),
         }
         let mut group_index: HashMap<GroupKey, usize> = HashMap::default();
         let mut groups: Vec<(GroupKey, Vec<usize>)> = Vec::new();
@@ -421,6 +428,45 @@ impl Forest {
             }
             groups[gs[0]] = (GroupKey::Gemm(rows, xs), members);
         }
+        // Solve groups over one matrix at one depth are one solve of several
+        // right-hand sides: the factorization once. Equal depth means no
+        // right-hand side depends on another group's solution (a
+        // derivative's solve reads the primal solution over the same
+        // matrix). A merged-away group is left empty.
+        let mut by_matrix: HashMap<(Vec<ExprId>, u32), Vec<usize>> = HashMap::default();
+        for (g, (key, members)) in groups.iter().enumerate() {
+            if let GroupKey::Solve(l) = key {
+                let all = ctx.args(*l);
+                let n = Graph::<K>::solve_n(all.len());
+                by_matrix
+                    .entry((all[..n * n].to_vec(), depth[members[0]]))
+                    .or_default()
+                    .push(g);
+            }
+        }
+        let mut merged_solves: Vec<(Vec<usize>, Vec<ExprId>)> = by_matrix
+            .into_iter()
+            .filter(|(_, gs)| gs.len() >= 2)
+            .map(|((a, _), gs)| (gs, a))
+            .collect();
+        merged_solves.sort();
+        for (gs, a) in merged_solves {
+            let lists: Vec<crate::node::ArgList> = gs
+                .iter()
+                .map(|&g| match &groups[g].0 {
+                    GroupKey::Solve(l) => *l,
+                    _ => unreachable!(),
+                })
+                .collect();
+            let members: Vec<usize> = gs
+                .iter()
+                .flat_map(|&g| groups[g].1.iter().copied())
+                .collect();
+            for &g in &gs[1..] {
+                groups[g].1.clear();
+            }
+            groups[gs[0]] = (GroupKey::SolveMany(a, lists), members);
+        }
         // A gemv group of too few rows at its depth, or a call group of one
         // argument list, is no kernel: its members lower on their own.
         let mut kernel_of: Vec<Option<usize>> = vec![None; m];
@@ -438,6 +484,7 @@ impl Forest {
                     distinct.len() >= 2
                 }
                 GroupKey::Solve(_) => true,
+                GroupKey::SolveMany(..) => true,
             };
             if is_kernel {
                 for &i in members {
@@ -708,6 +755,34 @@ impl Forest {
                             let (a, x) = ctx.dot_args(l);
                             let (r, c) = (row_index[a], col_index[x]);
                             value[mi] = Some(Ref::Value(inst, (r * cn + c) as u32));
+                        }
+                    }
+                    GroupKey::SolveMany(a, lists) => {
+                        let n = (a.len() as f64).sqrt() as u32;
+                        let kk = lists.len() as u32;
+                        let mut ins: Vec<Ref> = a.iter().map(|&e| val(e, &value)).collect();
+                        for l in lists {
+                            let all = ctx.args(*l);
+                            ins.extend(all[(n * n) as usize..].iter().map(|&e| val(e, &value)));
+                        }
+                        let col_of: HashMap<crate::node::ArgList, u32> = lists
+                            .iter()
+                            .enumerate()
+                            .map(|(c, &l)| (l, c as u32))
+                            .collect();
+                        let pure = members.iter().all(|&mi| self.pure[mi]);
+                        let inst = insts.len() as u32;
+                        insts.push(Inst {
+                            kind: Kind::SolveMany { n, k: kk },
+                            ins: pooled(&mut pool, ins),
+                            n_out: n * kk,
+                            pure,
+                        });
+                        for &mi in members {
+                            let Node::Solve(l, c) = *ctx.node(base[mi]) else {
+                                unreachable!()
+                            };
+                            value[mi] = Some(Ref::Value(inst, col_of[&l] * n + c));
                         }
                     }
                     GroupKey::Solve(l) => {
@@ -1155,6 +1230,13 @@ impl Program {
                     let b = dense(&mut arg_pool, &mut max_args, b);
                     max_args = max_args.max((n * n + n) as usize);
                     Op::Solve { a, b, n }
+                }
+                Kind::SolveMany { n, k } => {
+                    let (a, b) = o.split_at((n * n) as usize);
+                    let a = dense(&mut arg_pool, &mut max_args, a);
+                    let b = dense(&mut arg_pool, &mut max_args, b);
+                    max_args = max_args.max((n * n + n * k) as usize);
+                    Op::SolveMany { a, b, n, k }
                 }
             };
             ops.push(op);

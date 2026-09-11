@@ -124,3 +124,34 @@ fn the_solve_kernel_matches_the_interpreter() {
         );
     }
 }
+
+#[test]
+fn the_multi_solve_kernel_matches_the_interpreter() {
+    let (n, k) = (6usize, 3usize);
+    let mut g: Graph<F64> = Graph::new();
+    let a: Vec<ExprId> = (0..n * n).map(|i| g.sym(&format!("a{i}"))).collect();
+    let bs: Vec<Vec<ExprId>> = (0..k)
+        .map(|c| (0..n).map(|i| g.sym(&format!("b{c}_{i}"))).collect())
+        .collect();
+    let syms: Vec<SymbolId> = (0..(n * n + n * k) as u32).map(SymbolId).collect();
+    let mut roots = Vec::new();
+    for b in &bs {
+        roots.extend(g.solve_dense(a.clone(), b.clone()));
+    }
+    let tape = Tape::compile(&g, &roots, &syms);
+    assert!(tape.dump().contains("SolveMany"), "{}", tape.dump());
+    let native = NativeTape::compile(&tape).expect("compile");
+    let inputs: Vec<f64> = (0..syms.len())
+        .map(|i| {
+            if i < n * n && (i / n) == (i % n) {
+                4.0 + i as f64 * 0.01
+            } else {
+                0.2 * ((i % 5) as f64 - 2.0)
+            }
+        })
+        .collect();
+    let (mut w1, mut o1, mut w2, mut o2) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    tape.eval(&inputs, &mut w1, &mut o1);
+    native.eval(&inputs, &mut w2, &mut o2);
+    assert!(same(&o1, &o2));
+}
