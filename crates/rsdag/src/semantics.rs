@@ -370,6 +370,11 @@ pub const LU_PANEL_SMALL: usize = 16;
 pub const LU_PANEL_LARGE: usize = 32;
 /// Systems of fewer unknowns than this use [`LU_PANEL_SMALL`].
 pub const LU_PANEL_SWITCH: usize = 512;
+/// Systems of at most this many unknowns are eliminated right-looking
+/// without panels: each pivot updates the whole trailing matrix and the
+/// right-hand sides row by row (one product and one difference per entry),
+/// which at these sizes beats the panel machinery.
+pub const LU_UNBLOCKED_MAX: usize = 64;
 
 pub fn solve_t<T: Scalar>(a: &[T], b: &[T], n: usize, out: &mut [T]) {
     solve_many_t(a, b, n, 1, out)
@@ -381,10 +386,66 @@ pub fn solve_t<T: Scalar>(a: &[T], b: &[T], n: usize, out: &mut [T]) {
 /// to its own [`solve_t`] (the pivots depend on `a` alone, and every
 /// right-hand side column runs through the same updates in the same order).
 pub fn solve_many_t<T: Scalar>(a: &[T], b: &[T], n: usize, k: usize, out: &mut [T]) {
-    if n < LU_PANEL_SWITCH {
+    T::solve_many(a, b, n, k, out)
+}
+
+/// [`solve_many_t`] as the generic reference, for any scalar (the `f64`
+/// twin in `simd` mirrors it step for step).
+pub fn solve_many_generic<T: Scalar>(a: &[T], b: &[T], n: usize, k: usize, out: &mut [T]) {
+    if n <= LU_UNBLOCKED_MAX {
+        solve_unblocked(a, b, n, k, out)
+    } else if n < LU_PANEL_SWITCH {
         solve_blocked::<T, LU_PANEL_SMALL>(a, b, n, k, out)
     } else {
         solve_blocked::<T, LU_PANEL_LARGE>(a, b, n, k, out)
+    }
+}
+
+/// [`solve_many_t`] right-looking without panels (see [`LU_UNBLOCKED_MAX`]).
+fn solve_unblocked<T: Scalar>(a: &[T], b: &[T], n: usize, k: usize, out: &mut [T]) {
+    let w = n + k;
+    let mut m: Vec<T> = Vec::with_capacity(n * w);
+    for i in 0..n {
+        m.extend_from_slice(&a[i * n..(i + 1) * n]);
+        for c in 0..k {
+            m.push(b[c * n + i]);
+        }
+    }
+    for kk in 0..n {
+        let mut p = kk;
+        let mut best = m[kk * w + kk].magnitude();
+        for i in kk + 1..n {
+            let v = m[i * w + kk].magnitude();
+            if v > best {
+                best = v;
+                p = i;
+            }
+        }
+        if p != kk {
+            for j in 0..w {
+                m.swap(kk * w + j, p * w + j);
+            }
+        }
+        let piv = m[kk * w + kk];
+        for i in kk + 1..n {
+            let l = m[i * w + kk].div(piv);
+            m[i * w + kk] = l;
+            for j in kk + 1..w {
+                let t = l.mul(m[kk * w + j]);
+                m[i * w + j] = m[i * w + j].sub(t);
+            }
+        }
+    }
+    for c in 0..k {
+        let x = &mut out[c * n..(c + 1) * n];
+        for i in (0..n).rev() {
+            let mut s = m[i * w + n + c];
+            for j in i + 1..n {
+                let t = m[i * w + j].mul(x[j]);
+                s = s.sub(t);
+            }
+            x[i] = s.div(m[i * w + i]);
+        }
     }
 }
 

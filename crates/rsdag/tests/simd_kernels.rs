@@ -2,7 +2,9 @@
 //! generic reference on every shape: chunked, with tails, with remainder
 //! rows and columns, on values whose rounding differs between folds.
 
-use rsdag::semantics::{dot_slice, dot_slice_t, gemm, gemm_t, gemv, gemv_t};
+use rsdag::semantics::{
+    dot_slice, dot_slice_t, gemm, gemm_t, gemv, gemv_t, solve_many, solve_many_generic,
+};
 use rsdag::synth::Spec;
 
 fn values(rng: &mut rsdag::synth::Rng, len: usize) -> Vec<f64> {
@@ -62,5 +64,24 @@ fn gemm_matches_the_reference_on_every_shape() {
         gemm(&a, &b, m, k, n, &mut c1);
         gemm_t(&a, &b, m, k, n, &mut c2);
         assert!(same(&c1, &c2), "m {m} k {k} n {n}");
+    }
+}
+
+#[test]
+fn solve_many_matches_the_generic_reference_on_every_shape() {
+    let mut rng = Spec::new(9).rng();
+    let shapes = (1..30usize)
+        .flat_map(|n| [1usize, 2, 5].into_iter().map(move |k| (n, k)))
+        .chain([(37, 4), (100, 7), (520, 2)]);
+    for (n, k) in shapes {
+        let mut a = values(&mut rng, n * n);
+        for i in 0..n {
+            a[i * n + i] += 4.0 * n as f64;
+        }
+        let b = values(&mut rng, n * k);
+        let (mut x1, mut x2) = (vec![0.0; n * k], vec![0.0; n * k]);
+        solve_many(&a, &b, n, k, &mut x1);
+        solve_many_generic(&a, &b, n, k, &mut x2);
+        assert!(same(&x1, &x2), "n {n} k {k}");
     }
 }

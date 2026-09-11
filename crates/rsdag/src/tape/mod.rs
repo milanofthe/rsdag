@@ -499,14 +499,8 @@ impl Tape {
                     let (m, n) = (m as usize, n as usize);
                     let (ra, rx) =
                         dense_operands(inputs, work, scratch, &self.arg_pool, a, m * n, x, n);
-                    let av: &[T] = match ra {
-                        Dense::Inputs(k) => &inputs[k..k + m * n],
-                        Dense::Scratch(s) => &scratch[s..s + m * n],
-                    };
-                    let xv: &[T] = match rx {
-                        Dense::Inputs(k) => &inputs[k..k + n],
-                        Dense::Scratch(s) => &scratch[s..s + n],
-                    };
+                    let av: &[T] = dense_slice(inputs, work.as_ptr(), scratch, ra, m * n);
+                    let xv: &[T] = dense_slice(inputs, work.as_ptr(), scratch, rx, n);
                     T::gemv(av, xv, m, n, &mut work[d..d + m]);
                     continue;
                 }
@@ -514,14 +508,8 @@ impl Tape {
                     let (m, k, n) = (m as usize, k as usize, n as usize);
                     let (ra, rb) =
                         dense_operands(inputs, work, scratch, &self.arg_pool, a, m * k, b, n * k);
-                    let av: &[T] = match ra {
-                        Dense::Inputs(i) => &inputs[i..i + m * k],
-                        Dense::Scratch(s) => &scratch[s..s + m * k],
-                    };
-                    let bv: &[T] = match rb {
-                        Dense::Inputs(i) => &inputs[i..i + n * k],
-                        Dense::Scratch(s) => &scratch[s..s + n * k],
-                    };
+                    let av: &[T] = dense_slice(inputs, work.as_ptr(), scratch, ra, m * k);
+                    let bv: &[T] = dense_slice(inputs, work.as_ptr(), scratch, rb, n * k);
                     T::gemm(av, bv, m, k, n, &mut work[d..d + m * n]);
                     continue;
                 }
@@ -529,14 +517,8 @@ impl Tape {
                     let (n, k) = (n as usize, k as usize);
                     let (ra, rb) =
                         dense_operands(inputs, work, scratch, &self.arg_pool, a, n * n, b, n * k);
-                    let av: &[T] = match ra {
-                        Dense::Inputs(i) => &inputs[i..i + n * n],
-                        Dense::Scratch(s) => &scratch[s..s + n * n],
-                    };
-                    let bv: &[T] = match rb {
-                        Dense::Inputs(i) => &inputs[i..i + n * k],
-                        Dense::Scratch(s) => &scratch[s..s + n * k],
-                    };
+                    let av: &[T] = dense_slice(inputs, work.as_ptr(), scratch, ra, n * n);
+                    let bv: &[T] = dense_slice(inputs, work.as_ptr(), scratch, rb, n * k);
                     solve_many_t(av, bv, n, k, &mut work[d..d + n * k]);
                     continue;
                 }
@@ -544,14 +526,8 @@ impl Tape {
                     let n = n as usize;
                     let (ra, rb) =
                         dense_operands(inputs, work, scratch, &self.arg_pool, a, n * n, b, n);
-                    let av: &[T] = match ra {
-                        Dense::Inputs(k) => &inputs[k..k + n * n],
-                        Dense::Scratch(s) => &scratch[s..s + n * n],
-                    };
-                    let bv: &[T] = match rb {
-                        Dense::Inputs(k) => &inputs[k..k + n],
-                        Dense::Scratch(s) => &scratch[s..s + n],
-                    };
+                    let av: &[T] = dense_slice(inputs, work.as_ptr(), scratch, ra, n * n);
+                    let bv: &[T] = dense_slice(inputs, work.as_ptr(), scratch, rb, n);
                     solve_t(av, bv, n, &mut work[d..d + n]);
                     continue;
                 }
@@ -647,11 +623,33 @@ fn read<T: Scalar>(inputs: &[T], work: &[T], k: u32) -> T {
 enum Dense {
     Inputs(usize),
     Scratch(usize),
+    /// A run of consecutive work slots, read in place.
+    Work(usize),
+}
+
+/// The slice a resolved dense operand names, `len` values long. `work` is
+/// the work array's base pointer: a run read in place is disjoint from the
+/// kernel's output block (the allocator gives a kernel a fresh block), so
+/// the read may overlap the `&mut` the kernel holds on its outputs.
+fn dense_slice<'a, T: Scalar>(
+    inputs: &'a [T],
+    work: *const T,
+    scratch: &'a [T],
+    d: Dense,
+    len: usize,
+) -> &'a [T] {
+    match d {
+        Dense::Inputs(k) => &inputs[k..k + len],
+        Dense::Scratch(s) => &scratch[s..s + len],
+        // SAFETY: `s .. s + len` lies within the work array (the tape's
+        // slots) and no kernel writes it while it is read.
+        Dense::Work(s) => unsafe { std::slice::from_raw_parts(work.add(s), len) },
+    }
 }
 
 /// Resolve a kernel's two dense operands: an input run that the inputs
-/// reach is read in place; anything else is gathered into the scratch,
-/// `a` first, then `b`.
+/// reach and a run of consecutive work slots are read in place; anything
+/// else is gathered into the scratch, `a` first, then `b`.
 #[allow(clippy::too_many_arguments)]
 fn dense_operands<T: Scalar>(
     inputs: &[T],
@@ -675,8 +673,15 @@ fn dense_operands<T: Scalar>(
                 Dense::Scratch(at - len)
             }
             Src::Pool(start) => {
+                let run = &pool[start as usize..start as usize + len];
+                let consecutive = len > 0
+                    && input_index(run[0]).is_none()
+                    && run.iter().enumerate().all(|(j, &s)| s == run[0] + j as u32);
+                if consecutive {
+                    return Dense::Work(run[0] as usize);
+                }
                 for j in 0..len {
-                    scratch[at + j] = read(inputs, work, pool[start as usize + j]);
+                    scratch[at + j] = read(inputs, work, run[j]);
                 }
                 at += len;
                 Dense::Scratch(at - len)

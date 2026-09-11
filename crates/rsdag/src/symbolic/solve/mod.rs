@@ -40,8 +40,11 @@
 //! pivoting across steps.
 
 pub mod amd;
+pub mod block;
 pub mod btf;
 pub mod predict;
+
+pub use block::{block_pattern, solve_block_planned, BlockRows};
 
 use rustc_hash::FxHashMap as HashMap;
 
