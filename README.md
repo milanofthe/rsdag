@@ -68,9 +68,14 @@ the main part the substitution.
 The eliminations are generic over the scalar (`Num`): a real expression,
 or a complex one as a pair of real expressions (`Cx`), which lowers a
 complex system to real ops at build time, the guard comparing moduli.
-`solve_block_planned` eliminates a pattern of dense or diagonal `b` by
-`b` blocks (`Block`): pivot blocks through the dense solve kernel, block
-updates as dot products that fuse into `Gemm` kernels.
+`solve_block_planned` eliminates a pattern of dense or diagonal blocks
+(`Block`, of one size or of `sizes` per block row): pivot blocks through
+the dense solve kernel, block updates as dot products that fuse into
+`Gemm` kernels, a guard per pivot block against the rows below it.
+`solve_supernodal_planned` runs the scalar plan's elimination over panels
+(`supernodes`: steps along the postordered elimination forest merged
+while their explicit zeros stay within an allowance), the fill of the
+scalar ordering with the flops in the kernels.
 
 ## Function bodies
 
