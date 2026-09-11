@@ -521,6 +521,12 @@ pub enum Node {
     /// [`crate::Graph::dot_args`]). The fused form of a sum of pairwise
     /// products (matrix-vector rows).
     Dot(ArgList),
+    /// Component `i` of `x` solving the dense system `A x = b`, the list
+    /// being `A` row-major (`n * n`) followed by `b` (`n`), with `n` from
+    /// the length. The `n` components share the list and evaluate as one
+    /// pivoting kernel (see [`crate::semantics::solve_t`]); the graph
+    /// differentiates through it by the identities of the inverse.
+    Solve(ArgList, u32),
     /// A call: output `OutputId` of a function (see [`crate::func`]) applied
     /// to the argument list. One compact model instantiated many times is one
     /// function and many calls; differentiation references the function's

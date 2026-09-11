@@ -1,0 +1,84 @@
+//! The native backend's kernels: the matrix-vector product and the dense
+//! solve, inputs read in place and gathered slots, bit-identical to the
+//! interpreter.
+
+use rsdag::{ExprId, Graph, SymbolId, Tape, F64};
+use rsdag_jit::NativeTape;
+
+fn same(a: &[f64], b: &[f64]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
+}
+
+#[test]
+fn the_gemv_kernel_matches_the_interpreter() {
+    for (n, m, computed) in [(8usize, 2usize, false), (40, 3, false), (12, 1, true)] {
+        let mut g: Graph<F64> = Graph::new();
+        let a: Vec<ExprId> = (0..n * n).map(|k| g.sym(&format!("a{k}"))).collect();
+        let x: Vec<ExprId> = (0..n).map(|i| g.sym(&format!("x{i}"))).collect();
+        let b: Vec<ExprId> = (0..n * m).map(|k| g.sym(&format!("b{k}"))).collect();
+        let u: Vec<ExprId> = (0..m).map(|i| g.sym(&format!("u{i}"))).collect();
+        let syms: Vec<SymbolId> = (0..(n * n + n + n * m + m) as u32).map(SymbolId).collect();
+        let (a, x) = if computed {
+            let a2 = a.iter().map(|&e| g.exp(e)).collect();
+            let x2 = x.iter().map(|&e| g.sin(e)).collect();
+            (a2, x2)
+        } else {
+            (a, x)
+        };
+        let roots: Vec<ExprId> = (0..n)
+            .map(|i| {
+                let ax = g.dot(a[i * n..(i + 1) * n].to_vec(), x.clone());
+                let bu = g.dot(b[i * m..(i + 1) * m].to_vec(), u.clone());
+                g.add(ax, bu)
+            })
+            .collect();
+        let tape = Tape::compile(&g, &roots, &syms);
+        assert!(tape.dump().contains("Gemv"));
+        let native = NativeTape::compile(&tape).expect("compile");
+        let inputs: Vec<f64> = (0..syms.len())
+            .map(|k| 0.03 * (k % 17) as f64 - 0.2)
+            .collect();
+        let (mut w1, mut o1, mut w2, mut o2) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        tape.eval(&inputs, &mut w1, &mut o1);
+        native.eval(&inputs, &mut w2, &mut o2);
+        assert!(same(&o1, &o2), "n {n} computed {computed}");
+    }
+}
+
+#[test]
+fn the_solve_kernel_matches_the_interpreter() {
+    for (n, computed) in [(3usize, false), (16, false), (7, true)] {
+        let mut g: Graph<F64> = Graph::new();
+        let a: Vec<ExprId> = (0..n * n).map(|k| g.sym(&format!("a{k}"))).collect();
+        let b: Vec<ExprId> = (0..n).map(|i| g.sym(&format!("b{i}"))).collect();
+        let syms: Vec<SymbolId> = (0..(n * n + n) as u32).map(SymbolId).collect();
+        let (a, b) = if computed {
+            (
+                a.iter().map(|&e| g.tanh(e)).collect(),
+                b.iter().map(|&e| g.exp(e)).collect(),
+            )
+        } else {
+            (a, b)
+        };
+        let x = g.solve_dense(a, b);
+        let tape = Tape::compile(&g, &x, &syms);
+        assert!(tape.dump().contains("Solve"));
+        let native = NativeTape::compile(&tape).expect("compile");
+        let inputs: Vec<f64> = (0..syms.len())
+            .map(|k| {
+                if k < n * n && k / n == k % n {
+                    5.0
+                } else {
+                    0.05 * (k % 11) as f64 - 0.2
+                }
+            })
+            .collect();
+        let (mut w1, mut o1, mut w2, mut o2) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        tape.eval(&inputs, &mut w1, &mut o1);
+        native.eval(&inputs, &mut w2, &mut o2);
+        assert!(
+            same(&o1, &o2),
+            "n {n} computed {computed}: {o1:?} vs {o2:?}"
+        );
+    }
+}

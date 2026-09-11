@@ -39,13 +39,7 @@ fn a_compile_reports_its_stages_through_the_installed_hooks() {
 
     let got = SINK.0.lock().unwrap().clone();
     let stages: Vec<&str> = got.iter().map(|(_, m)| m.as_str()).collect();
-    for want in [
-        "tape analyze",
-        "tape schedule",
-        "tape liveness",
-        "tape batch scan",
-        "tape emit",
-    ] {
+    for want in ["tape analyze", "tape lower", "tape schedule", "tape emit"] {
         assert!(
             stages.iter().any(|m| m.starts_with(want)),
             "no report for {want}: {stages:?}"

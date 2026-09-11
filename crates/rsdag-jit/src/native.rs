@@ -29,6 +29,7 @@
 
 use rayon::prelude::*;
 use rsdag::node::{BinOp, CmpOp, ReduceOp, UnaryOp};
+use rsdag::tape::input_index;
 use rsdag::{ExternBundle, Tape};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
@@ -88,7 +89,10 @@ impl NativeBody {
             let ins = &args[g * n_args..(g + 1) * n_args];
             self.tape.run(0..self.tape.chunks.len(), ins, work);
             for (k, &slot) in self.tape.outputs[..n_out].iter().enumerate() {
-                out[g * n_out + k] = work[slot as usize];
+                out[g * n_out + k] = match input_index(slot) {
+                    Some(i) => ins.get(i as usize).copied().unwrap_or(f64::NAN),
+                    None => work[slot as usize],
+                };
             }
         }
     }
@@ -136,7 +140,7 @@ impl ExternBundle for NativeBody {
 /// gather area for host calls.
 #[derive(Clone, Copy)]
 struct Layout {
-    scratch: usize,
+    /// First element of the gather area (after the slots).
     gather: usize,
     total: usize,
 }
@@ -177,22 +181,32 @@ impl NativeTape {
             })
             .collect();
         rec.bundles = bundles?;
-        let n_inputs = rec
-            .ops
-            .iter()
-            .flat_map(|op| match op {
-                ROp::Input(_, k) if *k != u32::MAX => vec![*k as usize + 1],
-                ROp::Gemv { a, x, m, n, .. } => [(a, m * n), (x, *n)]
-                    .into_iter()
-                    .filter_map(|(d, len)| match d {
-                        Dense::Inputs(k) => Some(*k as usize + len as usize),
-                        Dense::Slots(_) => None,
-                    })
-                    .collect(),
+        // Inputs the code reads: tagged operands, dense runs, outputs.
+        let mut n_inputs = 0usize;
+        for op in &rec.ops {
+            let mut top = 0usize;
+            op.for_each_operand(|k| {
+                if let Some(i) = input_index(k) {
+                    top = top.max(i as usize + 1);
+                }
+            });
+            n_inputs = n_inputs.max(top);
+            let runs: Vec<(&Dense, u32)> = match op {
+                ROp::Gemv { a, x, m, n, .. } => vec![(a, m * n), (x, *n)],
+                ROp::Solve { a, b, n, .. } => vec![(a, n * n), (b, *n)],
                 _ => Vec::new(),
-            })
-            .max()
-            .unwrap_or(0);
+            };
+            for (d, len) in runs {
+                if let Dense::Inputs(k) = d {
+                    n_inputs = n_inputs.max(*k as usize + len as usize);
+                }
+            }
+        }
+        for &o in tape.outputs() {
+            if let Some(i) = input_index(o) {
+                n_inputs = n_inputs.max(i as usize + 1);
+            }
+        }
         let gather_len = rec.ops.iter().map(ROp::gather_len).max().unwrap_or(0);
         let n_work = tape.n_work();
         // The last op reading each slot; outputs are read after the program.
@@ -201,14 +215,13 @@ impl NativeTape {
             op.for_each_read(|s| last_use[s as usize] = i as u32);
         }
         for &o in tape.outputs() {
-            last_use[o as usize] = u32::MAX;
+            if input_index(o).is_none() {
+                last_use[o as usize] = u32::MAX;
+            }
         }
-        let scratch = n_work;
-        let gather = scratch + tape.bundle_scratch_len();
         let layout = Layout {
-            scratch,
-            gather,
-            total: (gather + gather_len).max(1),
+            gather: n_work,
+            total: (n_work + gather_len).max(1),
         };
         // Chunk the prolog and main phases separately so no chunk straddles
         // the split; the recorded stream is 1:1 with the tape's ops.
@@ -277,9 +290,12 @@ impl NativeTape {
         }
     }
 
-    fn collect(&self, work: &[f64], out: &mut Vec<f64>) {
+    fn collect(&self, inputs: &[f64], work: &[f64], out: &mut Vec<f64>) {
         out.clear();
-        out.extend(self.outputs.iter().map(|&s| work[s as usize]));
+        out.extend(self.outputs.iter().map(|&s| match input_index(s) {
+            Some(i) => inputs.get(i as usize).copied().unwrap_or(f64::NAN),
+            None => work[s as usize],
+        }));
     }
 
     /// Evaluate the parameter-pure prolog into `work` (sized and cleared
@@ -298,7 +314,7 @@ impl NativeTape {
         let mut buf = Vec::new();
         let ins = self.padded(inputs, &mut buf);
         self.run(self.prolog_chunks..self.chunks.len(), ins, work);
-        self.collect(work, out);
+        self.collect(ins, work, out);
     }
 
     /// Evaluate the whole tape; mirrors [`Tape::eval`].
@@ -308,7 +324,7 @@ impl NativeTape {
         work.clear();
         work.resize(self.layout.total, 0.0);
         self.run(0..self.chunks.len(), ins, work);
-        self.collect(work, out);
+        self.collect(ins, work, out);
     }
 
     /// Evaluate many instances at once: `inputs` holds `n` input vectors of
@@ -434,7 +450,10 @@ impl<'a, I: Isa> Emitter<'a, I> {
         for i in pool.clone().chain(other) {
             let dead = match self.held[i] {
                 None => true,
-                Some(s) => self.last_use[s as usize] < self.pos,
+                Some(s) => match input_index(s) {
+                    Some(_) => true, // an input reloads from the inputs
+                    None => self.last_use[s as usize] < self.pos,
+                },
             };
             if !self.pinned[i] && dead {
                 return take(self, i);
@@ -469,10 +488,31 @@ impl<'a, I: Isa> Emitter<'a, I> {
             self.pinned[i] = true;
             return I::CACHE[i];
         }
-        let r = self.fresh_for(slot);
-        self.isa.load(r, Base::Work, slot as usize * 8);
-        self.bind(r, slot);
-        r
+        match input_index(slot) {
+            Some(k) => {
+                // An input: read in place, cached, never written back.
+                let r = self.fresh();
+                self.isa.load(r, Base::Inputs, k as usize * 8);
+                self.bind(r, slot);
+                r
+            }
+            None => {
+                let r = self.fresh_for(slot);
+                self.isa.load(r, Base::Work, slot as usize * 8);
+                self.bind(r, slot);
+                r
+            }
+        }
+    }
+    /// A kernel wrote the slots `dst .. dst+n`: whatever the cache held
+    /// for them is stale.
+    fn invalidate(&mut self, dst: u32, n: u32) {
+        for s in dst..dst + n {
+            if let Some(i) = self.at.remove(&s) {
+                self.held[i] = None;
+                self.dirty[i] = false;
+            }
+        }
     }
     fn bind(&mut self, r: u8, slot: u32) {
         // A slot rebound to a new value: the old one is dead by the tape's
@@ -536,16 +576,6 @@ impl<'a, I: Isa> Emitter<'a, I> {
         match *op {
             ROp::Const(dst, v) => {
                 let r = self.fconst(v);
-                self.put(dst, r);
-            }
-            ROp::Input(dst, k) => {
-                let r = if k == u32::MAX {
-                    self.fconst(f64::NAN)
-                } else {
-                    let r = self.fresh_for(dst);
-                    self.isa.load(r, Base::Inputs, k as usize * 8);
-                    r
-                };
                 self.put(dst, r);
             }
             ROp::Add(dst, a, b) => self.bin2(Arith::Add, dst, a, b),
@@ -632,37 +662,37 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 let r = self.fold(Arith::Add, 0.0, a, Some(b));
                 self.put(dst, r);
             }
-            ROp::Bundle(idx, ref args, base) => {
+            ROp::Call(dst, idx, ref args, n_out) => {
                 let at = self.gather(args);
-                let out = (self.layout.scratch + base as usize) * 8;
                 let args = [
                     Arg::I(IArg::Bundles),
                     Arg::I(IArg::Imm(idx as u64)),
                     Arg::I(IArg::WorkAddr(at)),
                     Arg::I(IArg::Imm(args.len() as u64)),
-                    Arg::I(IArg::WorkAddr(out)),
+                    Arg::I(IArg::WorkAddr(dst as usize * 8)),
                 ];
                 self.call(host::h_bundle as *const (), &args);
+                self.invalidate(dst, n_out);
             }
-            ROp::BundleBatch(idx, ref args, n_groups, n_args, base0) => {
+            ROp::CallBatch(dst, idx, ref args, n_groups, n_args, n_out) => {
                 let at = self.gather(args);
-                let out = (self.layout.scratch + base0 as usize) * 8;
                 let args = [
                     Arg::I(IArg::Bundles),
                     Arg::I(IArg::Imm(idx as u64)),
                     Arg::I(IArg::WorkAddr(at)),
                     Arg::I(IArg::Imm(n_groups as u64)),
                     Arg::I(IArg::Imm(n_args as u64)),
-                    Arg::I(IArg::WorkAddr(out)),
+                    Arg::I(IArg::WorkAddr(dst as usize * 8)),
                 ];
                 self.call(host::h_bundle_batch as *const (), &args);
+                self.invalidate(dst, n_groups * n_out);
             }
             ROp::Gemv {
+                dst,
                 ref a,
                 ref x,
                 m,
                 n,
-                base,
             } => {
                 let (ma, mn) = (m as usize, n as usize);
                 let a_arg = match a {
@@ -673,21 +703,39 @@ impl<'a, I: Isa> Emitter<'a, I> {
                     Dense::Inputs(k) => IArg::InputAddr(*k as usize * 8),
                     Dense::Slots(s) => IArg::WorkAddr(self.gather_at(s, ma * mn)),
                 };
-                let out = (self.layout.scratch + base as usize) * 8;
                 let args = [
                     Arg::I(a_arg),
                     Arg::I(x_arg),
                     Arg::I(IArg::Imm(m as u64)),
                     Arg::I(IArg::Imm(n as u64)),
-                    Arg::I(IArg::WorkAddr(out)),
+                    Arg::I(IArg::WorkAddr(dst as usize * 8)),
                 ];
                 self.call(host::h_gemv as *const (), &args);
+                self.invalidate(dst, m);
             }
-            ROp::Pick(dst, idx) => {
-                let r = self.fresh_for(dst);
-                let off = (self.layout.scratch + idx as usize) * 8;
-                self.isa.load(r, Base::Work, off);
-                self.put(dst, r);
+            ROp::Solve {
+                dst,
+                ref a,
+                ref b,
+                n,
+            } => {
+                let nn = n as usize;
+                let a_arg = match a {
+                    Dense::Inputs(k) => IArg::InputAddr(*k as usize * 8),
+                    Dense::Slots(s) => IArg::WorkAddr(self.gather_at(s, 0)),
+                };
+                let b_arg = match b {
+                    Dense::Inputs(k) => IArg::InputAddr(*k as usize * 8),
+                    Dense::Slots(s) => IArg::WorkAddr(self.gather_at(s, nn * nn)),
+                };
+                let args = [
+                    Arg::I(a_arg),
+                    Arg::I(b_arg),
+                    Arg::I(IArg::Imm(n as u64)),
+                    Arg::I(IArg::WorkAddr(dst as usize * 8)),
+                ];
+                self.call(host::h_solve as *const (), &args);
+                self.invalidate(dst, n);
             }
         }
     }

@@ -102,7 +102,7 @@ impl<K: Field> Graph<K> {
                     _ => K::zero(),
                 };
                 let args: Vec<ExprId> = match node {
-                    Node::Reduce(_, l) | Node::Dot(l) => {
+                    Node::Reduce(_, l) | Node::Dot(l) | Node::Solve(l, _) => {
                         self.args(l).to_vec().iter().map(|a| map[a]).collect()
                     }
                     _ => Vec::new(),

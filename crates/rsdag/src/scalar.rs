@@ -36,6 +36,10 @@ pub trait Scalar: Copy + Send + Sync + std::fmt::Debug + 'static {
     fn is_true(self) -> bool;
     fn min(self, o: Self) -> Self;
     fn max(self, o: Self) -> Self;
+    /// `self / o`, one rounding: what a dense kernel divides with.
+    fn div(self, o: Self) -> Self;
+    /// The size a pivot is chosen by: the absolute value, or the modulus.
+    fn magnitude(self) -> f64;
     /// The value as the real number a bundle takes; a bundle is a real
     /// function, so a scalar without a real value refuses.
     fn to_f64(self) -> f64;
@@ -67,6 +71,12 @@ pub trait Scalar: Copy + Send + Sync + std::fmt::Debug + 'static {
 }
 
 impl Scalar for f64 {
+    fn div(self, o: Self) -> Self {
+        self / o
+    }
+    fn magnitude(self) -> f64 {
+        self.abs()
+    }
     fn to_f64(self) -> f64 {
         self
     }
@@ -134,6 +144,12 @@ impl Scalar for f64 {
 }
 
 impl Scalar for f32 {
+    fn div(self, o: Self) -> Self {
+        self / o
+    }
+    fn magnitude(self) -> f64 {
+        self.abs() as f64
+    }
     fn to_f64(self) -> f64 {
         self as f64
     }
@@ -191,6 +207,12 @@ impl Scalar for f32 {
 }
 
 impl Scalar for Complex64 {
+    fn div(self, o: Self) -> Self {
+        self / o
+    }
+    fn magnitude(self) -> f64 {
+        self.norm()
+    }
     fn to_f64(self) -> f64 {
         assert!(self.im == 0.0, "a bundle call takes real arguments");
         self.re

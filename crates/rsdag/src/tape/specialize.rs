@@ -1,7 +1,14 @@
 //! Choice specialization: shorten a tape against a recorded `Select` trace,
 //! keeping guard outputs that detect a region flip. See [`Tape::specialize`].
 
-use super::{BatchTable, GemvTable, Op, Src, Tape};
+use super::{input_index, Op, Src, Tape, INPUT};
+
+/// A value of the source tape: an input, or output `off` of op `i`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Val {
+    Input(u32),
+    Op(u32, u32),
+}
 
 impl Tape {
     /// A shortened tape for the region a choice trace describes: `choices`
@@ -18,324 +25,419 @@ impl Tape {
         );
         assert_eq!(pin.len(), self.n_selects, "pin mask length mismatch");
         let m = self.ops.len();
-
-        // Forward pass: op-level def-use. `deps` records, per op, the producing
-        // op of every operand *at execution time* (slots are liveness-reused, so
-        // this is only recoverable in execution order). A `Select` records its
-        // condition/taken-arm producers instead and vacates the value chain:
-        // `vsrc[i]` is the op whose slot actually carries op `i`'s value (the
-        // pinned-select alias chain collapsed; `vsrc[i] == i` for real ops).
-        let mut dep_start: Vec<u32> = Vec::with_capacity(m + 1);
-        let mut dep_pool: Vec<u32> = Vec::new();
-        let mut prod = vec![u32::MAX; self.n_work];
-        let mut bprod = vec![u32::MAX; self.bundle_scratch_len];
-        let mut vsrc: Vec<u32> = Vec::with_capacity(m);
-        // Per select: (condition producer, taken-arm producer, traced choice).
-        let mut sel: Vec<(u32, u32, u8)> = Vec::with_capacity(self.n_selects);
-        let mut sel_at = vec![u32::MAX; m];
-        let mut n_sel_seen = 0usize;
-        for i in 0..m {
-            dep_start.push(dep_pool.len() as u32);
-            let p = |s: u32| prod[s as usize];
+        let width = |op: &Op| -> u32 {
+            match *op {
+                Op::Call { n_out, .. } => n_out,
+                Op::CallBatch {
+                    n_groups, n_out, ..
+                } => n_groups * n_out,
+                Op::Gemv { m, .. } => m,
+                Op::Solve { n, .. } => n,
+                _ => 1,
+            }
+        };
+        let pool = |start: u32, len: u32| &self.arg_pool[start as usize..(start + len) as usize];
+        // The slot operands of an op, in read order; a kernel's in-place
+        // input operands are not slots.
+        let operands = |i: usize| -> Vec<u32> {
+            let mut v: Vec<u32> = Vec::new();
+            let src = |s: Src, len: u32, v: &mut Vec<u32>| {
+                if let Src::Pool(start) = s {
+                    v.extend_from_slice(pool(start, len));
+                }
+            };
             match self.ops[i] {
-                Op::Const(_) | Op::Input(_) => {}
+                Op::Const(_) => {}
                 Op::Add(a, b)
                 | Op::Mul(a, b)
                 | Op::Sub(a, b)
                 | Op::Cmp(_, a, b)
-                | Op::Binary(_, a, b) => {
-                    dep_pool.extend([p(a), p(b)]);
+                | Op::Binary(_, a, b) => v.extend([a, b]),
+                Op::MulAdd(a, b, c) | Op::Select(a, b, c) => v.extend([a, b, c]),
+                Op::Neg(a) | Op::Powi(a, _) | Op::Unary(_, a) => v.push(a),
+                Op::Reduce(_, s, l) => v.extend_from_slice(pool(s, l)),
+                Op::Dot(s, l) => v.extend_from_slice(pool(s, 2 * l)),
+                Op::Call { start, n_args, .. } => v.extend_from_slice(pool(start, n_args)),
+                Op::CallBatch {
+                    start,
+                    n_groups,
+                    n_args,
+                    ..
+                } => v.extend_from_slice(pool(start, n_groups * n_args)),
+                Op::Gemv { a, x, m: rows, n } => {
+                    src(a, rows * n, &mut v);
+                    src(x, n, &mut v);
                 }
-                Op::MulAdd(a, b, c) => {
-                    dep_pool.extend([p(a), p(b), p(c)]);
+                Op::Solve { a, b, n } => {
+                    src(a, n * n, &mut v);
+                    src(b, n, &mut v);
                 }
-                Op::Neg(a) | Op::Powi(a, _) | Op::Unary(_, a) => dep_pool.push(p(a)),
-                Op::Select(c, t, e) => {
-                    let k = n_sel_seen;
-                    n_sel_seen += 1;
-                    if pin[k] {
-                        let arm = if choices[k] != 0 { p(t) } else { p(e) };
-                        sel_at[i] = sel.len() as u32;
-                        sel.push((p(c), arm, choices[k]));
-                    } else {
-                        // stays a real select: value chain keeps all three deps
-                        dep_pool.extend([p(c), p(t), p(e)]);
-                    }
-                }
-                Op::Reduce(_, s, l) => {
-                    dep_pool.extend((0..l).map(|k| p(self.arg_pool[(s + k) as usize])));
-                }
-                Op::Dot(s, l) => {
-                    dep_pool.extend((0..2 * l).map(|k| p(self.arg_pool[(s + k) as usize])));
-                }
-                Op::BundleCall(bidx, s, l, base) => {
-                    dep_pool.extend((0..l).map(|k| p(self.arg_pool[(s + k) as usize])));
-                    let n = self.bundles[bidx as usize].n_outputs();
-                    for k in 0..n {
-                        bprod[base as usize + k] = i as u32;
-                    }
-                }
-                Op::BundleBatch(_, t) => {
-                    let tbl = self.batches[t as usize];
-                    let flat = tbl.n_groups * tbl.n_args;
-                    dep_pool.extend((0..flat).map(|k| p(self.arg_pool[(tbl.start + k) as usize])));
-                    for k in 0..(tbl.n_groups * tbl.n_out) as usize {
-                        bprod[tbl.base0 as usize + k] = i as u32;
-                    }
-                }
-                Op::BundlePick(idx) => dep_pool.push(bprod[idx as usize]),
-                Op::Gemv(t) => {
-                    let tb = self.gemvs[t as usize];
-                    for (src, len) in [(tb.a, tb.m * tb.n), (tb.x, tb.n)] {
-                        if let Src::Slots(s) = src {
-                            dep_pool.extend((0..len).map(|k| p(self.arg_pool[(s + k) as usize])));
+            }
+            v
+        };
+
+        // Forward pass: what value each operand named when it was read.
+        // Slots are reused, so this is only recoverable in execution order:
+        // `prod[slot]` is the op that produced the slot's current value. A
+        // pinned `Select` vacates the value chain: its slot stands for the
+        // arm it took, resolved when the select is met, so `vsrc[i]` is the
+        // value op `i`'s slot carries.
+        let mut prod = vec![u32::MAX; self.n_work];
+        let mut vsrc: Vec<Val> = Vec::with_capacity(m);
+        // Per op, the values of its slot operands in read order, and the
+        // ops that had produced those slots (a pinned select among them:
+        // the value chain skips it, the liveness chain runs through it).
+        let mut reads: Vec<Vec<Val>> = Vec::with_capacity(m);
+        let mut raw: Vec<Vec<u32>> = Vec::with_capacity(m);
+        // Per pinned select: (condition value, condition producer, taken
+        // arm's producer, traced choice).
+        let mut sel: Vec<(Val, u32, u32, u8)> = Vec::with_capacity(self.n_selects);
+        let mut sel_at = vec![u32::MAX; m];
+        let mut n_sel_seen = 0usize;
+        for i in 0..m {
+            let val_of = |k: u32| -> Val {
+                match input_index(k) {
+                    Some(j) => Val::Input(j),
+                    None => {
+                        let j = prod[k as usize];
+                        match vsrc[j as usize] {
+                            Val::Op(o, 0) if o == j => Val::Op(j, k - self.dst[j as usize]),
+                            alias => alias,
                         }
                     }
-                    for k in 0..tb.m as usize {
-                        bprod[tb.base as usize + k] = i as u32;
+                }
+            };
+            let slots = operands(i);
+            let vals: Vec<Val> = slots.iter().map(|&k| val_of(k)).collect();
+            let prods: Vec<u32> = slots
+                .iter()
+                .filter_map(|&k| match input_index(k) {
+                    Some(_) => None,
+                    None => Some(prod[k as usize]),
+                })
+                .collect();
+            let mut alias: Option<Val> = None;
+            if let Op::Select(c, t, e) = self.ops[i] {
+                let k = n_sel_seen;
+                n_sel_seen += 1;
+                if pin[k] {
+                    let arm = if choices[k] != 0 { vals[1] } else { vals[2] };
+                    let raw_of = |k: u32| match input_index(k) {
+                        Some(_) => u32::MAX,
+                        None => prod[k as usize],
+                    };
+                    let arm_raw = raw_of(if choices[k] != 0 { t } else { e });
+                    sel_at[i] = sel.len() as u32;
+                    sel.push((vals[0], raw_of(c), arm_raw, choices[k]));
+                    alias = Some(arm);
+                }
+            }
+            vsrc.push(alias.unwrap_or(Val::Op(i as u32, 0)));
+            reads.push(vals);
+            raw.push(prods);
+            let w = width(&self.ops[i]);
+            for k in 0..w {
+                prod[(self.dst[i] + k) as usize] = i as u32;
+            }
+        }
+        let resolve = |k: u32| -> Val {
+            match input_index(k) {
+                Some(j) => Val::Input(j),
+                None => {
+                    let j = prod[k as usize];
+                    match vsrc[j as usize] {
+                        Val::Op(o, 0) if o == j => Val::Op(j, k - self.dst[j as usize]),
+                        alias => alias,
                     }
                 }
             }
-            vsrc.push(match sel_at[i] {
-                u32::MAX => i as u32,
-                k => vsrc[sel[k as usize].1 as usize], // arm < i: already resolved
-            });
-            prod[self.dst[i] as usize] = i as u32;
-        }
-        dep_start.push(dep_pool.len() as u32);
-        let deps = |i: usize| &dep_pool[dep_start[i] as usize..dep_start[i + 1] as usize];
+        };
+        let op_of = |v: Val| -> Option<usize> {
+            match v {
+                Val::Op(i, _) => Some(i as usize),
+                Val::Input(_) => None,
+            }
+        };
+        // Liveness runs over the ops that produced what an op read, pinned
+        // selects included: a pinned select keeps its condition (the guard)
+        // and its taken arm. Slot lifetimes run over the resolved values,
+        // which skip the pinned selects.
+        let raw_producers = |i: usize| -> Vec<usize> {
+            match sel_at[i] {
+                u32::MAX => raw[i].iter().map(|&j| j as usize).collect(),
+                s => {
+                    let (_, cond, arm, _) = sel[s as usize];
+                    [cond, arm]
+                        .into_iter()
+                        .filter(|&j| j != u32::MAX)
+                        .map(|j| j as usize)
+                        .collect()
+                }
+            }
+        };
+        let producers =
+            |i: usize| -> Vec<usize> { reads[i].iter().filter_map(|&v| op_of(v)).collect() };
 
-        // Backward liveness under pinning: a live select keeps its condition
-        // (the guard) and its taken arm; everything else keeps all operands.
+        // Backward liveness from the outputs.
+        let out_old: Vec<Val> = self.outputs.iter().map(|&k| resolve(k)).collect();
         let mut live = vec![false; m];
-        let mut stack: Vec<u32> = self.outputs.iter().map(|&s| prod[s as usize]).collect();
+        let mut stack: Vec<usize> = self
+            .outputs
+            .iter()
+            .filter_map(|&k| match input_index(k) {
+                Some(_) => None,
+                None => Some(prod[k as usize] as usize),
+            })
+            .collect();
         while let Some(i) = stack.pop() {
-            let i = i as usize;
             if live[i] {
                 continue;
             }
             live[i] = true;
-            match sel_at[i] {
-                u32::MAX => stack.extend_from_slice(deps(i)),
-                k => {
-                    let (cond, arm, _) = sel[k as usize];
-                    stack.push(cond);
-                    stack.push(arm);
-                }
-            }
+            stack.extend(raw_producers(i));
         }
 
-        // Guard outputs: each live select's condition, value-resolved and
-        // deduped (hash-consing makes shared region conditions common). Two
-        // selects sharing a condition source necessarily traced the same truth.
-        let mut guard_srcs: Vec<u32> = Vec::new();
+        // Guard outputs: each live pinned select's condition, deduped
+        // (hash-consing makes shared conditions common; two selects sharing
+        // one traced the same truth).
+        let mut guards: Vec<Val> = Vec::new();
         let mut expected: Vec<u8> = Vec::new();
-        let mut guard_seen = vec![false; m];
         for i in 0..m {
             if !live[i] || sel_at[i] == u32::MAX {
                 continue;
             }
-            let (cond, _, choice) = sel[sel_at[i] as usize];
-            let src = vsrc[cond as usize] as usize;
-            if !guard_seen[src] {
-                guard_seen[src] = true;
-                guard_srcs.push(src as u32);
+            let (cond, _, _, choice) = sel[sel_at[i] as usize];
+            if !guards.contains(&cond) {
+                guards.push(cond);
                 expected.push(choice);
             }
         }
-        let out_srcs: Vec<u32> = self
-            .outputs
-            .iter()
-            .map(|&s| vsrc[prod[s as usize] as usize])
-            .collect();
 
-        // Slot-read deps of an emitted op: all value deps, resolved through the
-        // pinned selects. A BundlePick reads the bundle-scratch region (not a
-        // slot), and a BundleCall writes only the shared never-read sink.
-        let sdeps = |i: usize| -> &[u32] {
-            match self.ops[i] {
-                Op::BundlePick(_) => &[],
-                _ => deps(i),
-            }
-        };
-
-        // Last use per (resolved) value producer, over the emitted subsequence;
-        // outputs and guards are pinned so their slots survive to the end.
+        // Emitted ops: live and not a pinned select. Last use of each
+        // producer's block over them; outputs, guards and, under the
+        // inherited prolog split, prolog values read by the main phase are
+        // pinned.
+        let emitted = |i: usize| live[i] && sel_at[i] == u32::MAX;
         let mut last = vec![0usize; m];
         let mut pinned = vec![false; m];
         for i in 0..m {
-            if !live[i] || sel_at[i] != u32::MAX {
-                continue;
-            }
-            for &d in sdeps(i) {
-                last[vsrc[d as usize] as usize] = i;
+            if emitted(i) {
+                for j in producers(i) {
+                    last[j] = i;
+                }
             }
         }
-        for &o in out_srcs.iter().chain(guard_srcs.iter()) {
-            pinned[o as usize] = true;
-            last[o as usize] = usize::MAX;
+        for &v in out_old.iter().chain(guards.iter()) {
+            if let Some(i) = op_of(v) {
+                pinned[i] = true;
+                last[i] = usize::MAX;
+            }
         }
-        // The specialization inherits the source tape's prolog split: surviving
-        // ops keep their order, so the boundary is where original indices cross
-        // `self.prolog_ops`. Prolog values read by the main phase are pinned,
-        // exactly like `compile_split` pins them -- repeated main passes must
-        // not clobber a prolog result they will read again.
         if self.prolog_ops > 0 {
             for i in self.prolog_ops..m {
-                if !live[i] || sel_at[i] != u32::MAX {
+                if !emitted(i) {
                     continue;
                 }
-                for &d in sdeps(i) {
-                    let v = vsrc[d as usize] as usize;
-                    if v < self.prolog_ops {
-                        pinned[v] = true;
-                        last[v] = usize::MAX;
+                for j in producers(i) {
+                    if j < self.prolog_ops {
+                        pinned[j] = true;
+                        last[j] = usize::MAX;
                     }
                 }
             }
         }
 
-        // Emit the surviving subsequence with fresh slots (same LIFO free-list
-        // scheme as `compile`); pinned selects emit nothing.
+        // Emit the surviving subsequence with fresh slots (the same free-list
+        // scheme as `compile`): a value maps to the new base of its producer
+        // plus its offset in the block.
         let mut ops: Vec<Op> = Vec::new();
         let mut dst: Vec<u32> = Vec::new();
         let mut arg_pool: Vec<u32> = Vec::new();
-        let mut new_slot = vec![u32::MAX; m];
+        let mut new_base = vec![u32::MAX; m];
         let mut free: Vec<u32> = Vec::new();
         let mut next: u32 = 0;
         let mut max_args = 0usize;
-        let mut sink: Option<u32> = None;
-        let mut batches: Vec<BatchTable> = Vec::new();
-        let mut gemvs: Vec<GemvTable> = Vec::new();
-        // Surviving-op count from the source prolog region: order is preserved,
-        // so this is the specialized tape's own prolog length.
         let mut spec_prolog_ops = 0usize;
+        let map_val = |v: Val, new_base: &[u32]| -> u32 {
+            match v {
+                Val::Input(j) => j | INPUT,
+                Val::Op(i, off) => new_base[i as usize] + off,
+            }
+        };
         for i in 0..m {
-            if !live[i] || sel_at[i] != u32::MAX {
+            if !emitted(i) {
                 continue;
             }
             if i < self.prolog_ops {
                 spec_prolog_ops += 1;
             }
-            let ds = |k: usize| new_slot[vsrc[deps(i)[k] as usize] as usize];
-            let gather = |arg_pool: &mut Vec<u32>, max_args: &mut usize, n: usize| -> u32 {
+            let vals: Vec<u32> = reads[i].iter().map(|&v| map_val(v, &new_base)).collect();
+            let mut at = 0usize;
+            let mut take = |n: usize| -> Vec<u32> {
+                let v = vals[at..at + n].to_vec();
+                at += n;
+                v
+            };
+            let gather = |ks: &[u32], arg_pool: &mut Vec<u32>, max_args: &mut usize| -> u32 {
                 let start = arg_pool.len() as u32;
-                arg_pool.extend((0..n).map(|k| new_slot[vsrc[deps(i)[k] as usize] as usize]));
-                *max_args = (*max_args).max(n);
+                arg_pool.extend_from_slice(ks);
+                *max_args = (*max_args).max(ks.len());
                 start
             };
             let op = match self.ops[i] {
                 Op::Const(v) => Op::Const(v),
-                Op::Input(k) => Op::Input(k),
-                Op::Add(..) => Op::Add(ds(0), ds(1)),
-                Op::Mul(..) => Op::Mul(ds(0), ds(1)),
-                Op::MulAdd(..) => Op::MulAdd(ds(0), ds(1), ds(2)),
-                Op::Sub(..) => Op::Sub(ds(0), ds(1)),
-                Op::Neg(..) => Op::Neg(ds(0)),
-                Op::Powi(_, n) => Op::Powi(ds(0), n),
-                Op::Unary(op, _) => Op::Unary(op, ds(0)),
-                Op::Cmp(op, ..) => Op::Cmp(op, ds(0), ds(1)),
-                Op::Binary(op, ..) => Op::Binary(op, ds(0), ds(1)),
-                // Only *pinned* selects vanish; an unpinned one survives as a
-                // real select over its (resolved) three operands.
-                Op::Select(..) => Op::Select(ds(0), ds(1), ds(2)),
+                Op::Add(..) => {
+                    let o = take(2);
+                    Op::Add(o[0], o[1])
+                }
+                Op::Mul(..) => {
+                    let o = take(2);
+                    Op::Mul(o[0], o[1])
+                }
+                Op::MulAdd(..) => {
+                    let o = take(3);
+                    Op::MulAdd(o[0], o[1], o[2])
+                }
+                Op::Sub(..) => {
+                    let o = take(2);
+                    Op::Sub(o[0], o[1])
+                }
+                Op::Neg(..) => Op::Neg(take(1)[0]),
+                Op::Powi(_, n) => Op::Powi(take(1)[0], n),
+                Op::Unary(op, _) => Op::Unary(op, take(1)[0]),
+                Op::Cmp(op, ..) => {
+                    let o = take(2);
+                    Op::Cmp(op, o[0], o[1])
+                }
+                Op::Binary(op, ..) => {
+                    let o = take(2);
+                    Op::Binary(op, o[0], o[1])
+                }
+                Op::Select(..) => {
+                    let o = take(3);
+                    Op::Select(o[0], o[1], o[2])
+                }
                 Op::Reduce(op, _, l) => {
-                    Op::Reduce(op, gather(&mut arg_pool, &mut max_args, l as usize), l)
+                    let o = take(l as usize);
+                    Op::Reduce(op, gather(&o, &mut arg_pool, &mut max_args), l)
                 }
-                Op::Dot(_, l) => Op::Dot(gather(&mut arg_pool, &mut max_args, 2 * l as usize), l),
-                Op::BundleCall(bidx, _, l, base) => Op::BundleCall(
-                    bidx,
-                    gather(&mut arg_pool, &mut max_args, l as usize),
-                    l,
-                    base,
-                ),
-                Op::BundleBatch(bidx, t) => {
-                    let tbl = self.batches[t as usize];
-                    let flat = (tbl.n_groups * tbl.n_args) as usize;
-                    let start = gather(&mut arg_pool, &mut max_args, flat);
-                    let tidx = batches.len() as u32;
-                    batches.push(BatchTable { start, ..tbl });
-                    Op::BundleBatch(bidx, tidx)
+                Op::Dot(_, l) => {
+                    let o = take(2 * l as usize);
+                    Op::Dot(gather(&o, &mut arg_pool, &mut max_args), l)
                 }
-                Op::BundlePick(idx) => Op::BundlePick(idx),
-                Op::Gemv(t) => {
-                    // Slot operands are re-gathered in dependency order, a then x.
-                    let tb = self.gemvs[t as usize];
-                    let a = match tb.a {
-                        Src::Slots(_) => {
-                            Src::Slots(gather(&mut arg_pool, &mut max_args, (tb.m * tb.n) as usize))
+                Op::Call {
+                    bundle,
+                    n_args,
+                    n_out,
+                    ..
+                } => {
+                    let o = take(n_args as usize);
+                    Op::Call {
+                        bundle,
+                        start: gather(&o, &mut arg_pool, &mut max_args),
+                        n_args,
+                        n_out,
+                    }
+                }
+                Op::CallBatch {
+                    bundle,
+                    n_groups,
+                    n_args,
+                    n_out,
+                    ..
+                } => {
+                    let o = take((n_groups * n_args) as usize);
+                    Op::CallBatch {
+                        bundle,
+                        start: gather(&o, &mut arg_pool, &mut max_args),
+                        n_groups,
+                        n_args,
+                        n_out,
+                    }
+                }
+                Op::Gemv { a, x, m: rows, n } => {
+                    let a = match a {
+                        Src::Inputs(k) => Src::Inputs(k),
+                        Src::Pool(_) => {
+                            let o = take((rows * n) as usize);
+                            Src::Pool(gather(&o, &mut arg_pool, &mut max_args))
                         }
-                        src => src,
                     };
-                    let x = match tb.x {
-                        Src::Slots(_) => {
-                            let skip = if matches!(tb.a, Src::Slots(_)) {
-                                (tb.m * tb.n) as usize
-                            } else {
-                                0
-                            };
-                            let start = arg_pool.len() as u32;
-                            arg_pool.extend(
-                                (0..tb.n as usize)
-                                    .map(|k| new_slot[vsrc[deps(i)[skip + k] as usize] as usize]),
-                            );
-                            max_args = max_args.max(skip + tb.n as usize);
-                            Src::Slots(start)
+                    let x = match x {
+                        Src::Inputs(k) => Src::Inputs(k),
+                        Src::Pool(_) => {
+                            let o = take(n as usize);
+                            Src::Pool(gather(&o, &mut arg_pool, &mut max_args))
                         }
-                        src => src,
                     };
-                    let tidx = gemvs.len() as u32;
-                    gemvs.push(GemvTable { a, x, ..tb });
-                    Op::Gemv(tidx)
+                    max_args = max_args.max((rows * n + n) as usize);
+                    Op::Gemv { a, x, m: rows, n }
+                }
+                Op::Solve { a, b, n } => {
+                    let a = match a {
+                        Src::Inputs(k) => Src::Inputs(k),
+                        Src::Pool(_) => {
+                            let o = take((n * n) as usize);
+                            Src::Pool(gather(&o, &mut arg_pool, &mut max_args))
+                        }
+                    };
+                    let b = match b {
+                        Src::Inputs(k) => Src::Inputs(k),
+                        Src::Pool(_) => {
+                            let o = take(n as usize);
+                            Src::Pool(gather(&o, &mut arg_pool, &mut max_args))
+                        }
+                    };
+                    max_args = max_args.max((n * n + n) as usize);
+                    Op::Solve { a, b, n }
                 }
             };
-            // Free distinct operand slots that die at this step, then pick dst
-            // (so an op can reuse a dying operand's slot, as in `compile`).
-            let mut dying: Vec<u32> = sdeps(i)
-                .iter()
-                .map(|&d| vsrc[d as usize] as usize)
-                .filter(|&v| last[v] == i && !pinned[v])
-                .map(|v| new_slot[v])
+            // Free the blocks that die at this step, then take a slot or a
+            // block.
+            let mut dying: Vec<usize> = producers(i)
+                .into_iter()
+                .filter(|&j| last[j] == i && !pinned[j])
                 .collect();
             dying.sort_unstable();
             dying.dedup();
-            free.extend(dying);
-            let d = if matches!(
-                self.ops[i],
-                Op::BundleCall(..) | Op::BundleBatch(..) | Op::Gemv(..)
-            ) {
-                // All bundle calls share one never-read, never-freed sink slot.
-                *sink.get_or_insert_with(|| {
-                    let s = next;
-                    next += 1;
-                    s
-                })
-            } else {
+            for j in dying {
+                let w = width(&self.ops[j]);
+                free.extend(new_base[j]..new_base[j] + w);
+            }
+            let w = width(&self.ops[i]);
+            let d = if w == 1 {
                 free.pop().unwrap_or_else(|| {
                     let s = next;
                     next += 1;
                     s
                 })
+            } else {
+                let s = next;
+                next += w;
+                s
             };
-            new_slot[i] = d;
+            new_base[i] = d;
             ops.push(op);
             dst.push(d);
         }
 
-        let n_real = out_srcs.len();
-        let outputs: Vec<u32> = out_srcs
+        let n_real = out_old.len();
+        let outputs: Vec<u32> = out_old
             .iter()
-            .chain(guard_srcs.iter())
-            .map(|&o| new_slot[o as usize])
+            .chain(guards.iter())
+            .map(|&v| map_val(v, &new_base))
             .collect();
-        // Guards whose (value-resolved) condition lives in the prolog: checked
-        // once after a prolog pass, by slot (their pinned slots stay valid
-        // across every later main pass).
-        let prolog_guards: Vec<(u32, u8)> = guard_srcs
+        // Guards whose condition lives in the prolog, or is an input: checked
+        // once after a prolog pass (pinned, so valid across every later main
+        // pass).
+        let prolog_guards: Vec<(u32, u8)> = guards
             .iter()
             .zip(&expected)
-            .filter(|(&src, _)| (src as usize) < self.prolog_ops)
-            .map(|(&src, &e)| (new_slot[src as usize], e))
+            .filter(|(&v, _)| match op_of(v) {
+                None => true,
+                Some(i) => i < self.prolog_ops,
+            })
+            .map(|(&v, &e)| (map_val(v, &new_base), e))
             .collect();
         let n_selects_out = ops.iter().filter(|o| matches!(o, Op::Select(..))).count();
         SpecializedTape {
@@ -348,12 +450,6 @@ impl Tape {
                 n_work: next as usize,
                 max_args,
                 bundles: self.bundles.clone(),
-                bundle_scratch_len: self.bundle_scratch_len,
-                batches,
-                batch_args_len: self.batch_args_len,
-                gemvs,
-                // Inherited from the source tape: surviving ops keep their
-                // order, so the boundary is the surviving prefix.
                 prolog_ops: spec_prolog_ops,
             },
             n_real,
@@ -363,18 +459,17 @@ impl Tape {
     }
 }
 
-/// A [`Tape`] shortened against a choice trace ([`Tape::specialize`]): all
-/// `Select`s pinned, untaken arms removed, plus guard outputs that re-validate
-/// the trace at every evaluation.
+/// A [`Tape`] shortened against a choice trace ([`Tape::specialize`]): the
+/// pinned `Select`s gone, their untaken arms removed, plus guard outputs
+/// that re-validate the trace at every evaluation.
 pub struct SpecializedTape {
     tape: Tape,
     /// The first `n_real` outputs are the original tape's; the rest are guards.
     n_real: usize,
     /// Expected truth (`1`/`0`) of each guard output.
     expected: Vec<u8>,
-    /// Guards whose condition lives in the inherited prolog, as `(work slot,
-    /// expected)` -- checked right after a prolog pass (their pinned slots stay
-    /// valid across every later main pass). Empty for unsplit tapes.
+    /// Guards whose condition lives in the inherited prolog (or is an
+    /// input), as `(operand, expected)`, checked right after a prolog pass.
     prolog_guards: Vec<(u32, u8)>,
 }
 
@@ -384,9 +479,8 @@ impl SpecializedTape {
         self.tape.ops.len()
     }
 
-    /// The shortened tape itself, for alternative backends (the chunked JIT
-    /// compiles it like any other tape; its outputs are the real outputs
-    /// followed by the guards).
+    /// The shortened tape itself, for other backends (its outputs are the
+    /// real outputs followed by the guards).
     pub fn tape(&self) -> &Tape {
         &self.tape
     }
@@ -405,59 +499,50 @@ impl SpecializedTape {
 
     /// Evaluate the shortened tape. Returns `true` if every pinned choice still
     /// holds, in which case `out` is bit-exact against the full tape. On
-    /// `false` a region flipped and `out` is NOT valid -- re-trace on the full
+    /// `false` a region flipped and `out` is NOT valid: re-trace on the full
     /// tape ([`Tape::eval_with`]) and respecialize.
     pub fn eval_checked(&self, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) -> bool {
         self.tape.eval(inputs, work, out);
-        let ok = out[self.n_real..]
-            .iter()
-            .zip(&self.expected)
-            .all(|(&v, &e)| (v != 0.0) == (e != 0));
-        out.truncate(self.n_real);
-        ok
+        self.check_outputs(out)
     }
 
     /// Evaluate the inherited prolog prefix into `work` and check the guards
     /// that live in it. `false` means a *parameter* change flipped a pinned
-    /// region -- respecialize before running any main pass.
+    /// region: respecialize before running any main pass.
     pub fn eval_prolog_checked(&self, inputs: &[f64], work: &mut Vec<f64>) -> bool {
         self.tape.eval_prolog(inputs, work);
-        self.check_prolog_guards(work)
+        self.check_prolog_guards(inputs, work)
     }
 
-    /// The prolog-resident guards as `(work slot, expected)`, for a backend
-    /// with a non-scalar work layout (e.g. lane-interleaved) that must
-    /// re-implement [`check_prolog_guards`](Self::check_prolog_guards).
+    /// The prolog-resident guards as `(operand, expected)`, for a backend
+    /// that re-implements [`check_prolog_guards`](Self::check_prolog_guards).
     pub fn prolog_guards(&self) -> &[(u32, u8)] {
         &self.prolog_guards
     }
 
     /// Check the prolog-resident guards against a `work` buffer some backend
-    /// (interpreted or native) filled with this tape's prolog pass.
-    pub fn check_prolog_guards(&self, work: &[f64]) -> bool {
-        self.prolog_guards
-            .iter()
-            .all(|&(s, e)| (work[s as usize] != 0.0) == (e != 0))
+    /// filled with this tape's prolog pass.
+    pub fn check_prolog_guards(&self, inputs: &[f64], work: &[f64]) -> bool {
+        self.prolog_guards.iter().all(|&(k, e)| {
+            let v = match input_index(k) {
+                Some(i) => inputs.get(i as usize).copied().unwrap_or(f64::NAN),
+                None => work[k as usize],
+            };
+            (v != 0.0) == (e != 0)
+        })
     }
 
     /// Evaluate the main phase over a buffer prepared by
     /// [`eval_prolog_checked`](Self::eval_prolog_checked), guard-checked like
-    /// [`eval_checked`](Self::eval_checked) (all guards: prolog guard slots are
-    /// pinned, so their outputs remain valid and cost nothing extra).
+    /// [`eval_checked`](Self::eval_checked).
     pub fn eval_main_checked(&self, inputs: &[f64], work: &mut [f64], out: &mut Vec<f64>) -> bool {
         self.tape.eval_main(inputs, work, out);
-        let ok = out[self.n_real..]
-            .iter()
-            .zip(&self.expected)
-            .all(|(&v, &e)| (v != 0.0) == (e != 0));
-        out.truncate(self.n_real);
-        ok
+        self.check_outputs(out)
     }
 
-    /// Verify guard outputs produced by an alternative backend's full or main
-    /// evaluation of [`tape`](Self::tape) (`out` = real outputs ++ guards);
-    /// truncates `out` to the real outputs. Same contract as
-    /// [`eval_checked`](Self::eval_checked).
+    /// Verify guard outputs produced by another backend's evaluation of
+    /// [`tape`](Self::tape) (`out` = real outputs ++ guards); truncates
+    /// `out` to the real outputs.
     pub fn check_outputs(&self, out: &mut Vec<f64>) -> bool {
         let ok = out[self.n_real..]
             .iter()

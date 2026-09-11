@@ -364,6 +364,25 @@ fn diff<K: Field>(ctx: &mut Graph<K>, expr: ExprId, wrt: SymbolId, memo: &mut Me
             }
             ctx.reduce(ReduceOp::Sum, terms)
         }
+        // x = A^-1 b: dx = A^-1 (db - dA x), another solve over the same
+        // matrix, with the solution's components as they are.
+        Node::Solve(l, i) => {
+            let (n, a, b) = ctx.solve_args(l);
+            let (a, b) = (a.to_vec(), b.to_vec());
+            let x = ctx.solve_dense(a.clone(), b.clone());
+            let mut rhs = Vec::with_capacity(n);
+            for r in 0..n {
+                let db = diff(ctx, b[r], wrt, memo);
+                let da: Vec<ExprId> = (0..n).map(|j| diff(ctx, a[r * n + j], wrt, memo)).collect();
+                let dax = ctx.dot(da, x.clone());
+                rhs.push(ctx.sub(db, dax));
+            }
+            if rhs.iter().all(|&e| ctx.is_zero(e)) {
+                ctx.zero()
+            } else {
+                ctx.solve_dense(a, rhs)[i as usize]
+            }
+        }
         // Chain rule through a call: d/dx f_out(a) = Σ_i (∂f_out/∂p_i)(a) · da_i,
         // each partial a call into the function's derivative output.
         Node::Call(o, l) => {
@@ -578,6 +597,37 @@ pub fn gradient<K: Field>(ctx: &mut Graph<K>, f: ExprId, wrt: &[SymbolId]) -> Ve
                     let ty = ctx.mul(a_bar, x);
                     push(&mut adj, x, tx);
                     push(&mut adj, y, ty);
+                }
+            }
+            // The whole system at once: the components of one solve have
+            // consecutive ids and every consumer a larger one, so at the
+            // first component visited every component's adjoint is final.
+            // Then b_bar = A^-T x_bar and A_bar = -b_bar x^T, one transposed
+            // solve for the system instead of one per component.
+            Node::Solve(l, _) => {
+                let (n, a, b) = ctx.solve_args(l);
+                let (a, b) = (a.to_vec(), b.to_vec());
+                let x = ctx.solve_dense(a.clone(), b.clone());
+                let mut x_bar = vec![ctx.zero(); n];
+                for (k, &xk) in x.iter().enumerate() {
+                    x_bar[k] = if xk == e {
+                        a_bar
+                    } else {
+                        match adj.remove(&xk) {
+                            Some(t) => ctx.reduce(ReduceOp::Sum, t),
+                            None => ctx.zero(),
+                        }
+                    };
+                }
+                let at: Vec<ExprId> = (0..n * n).map(|k| a[(k % n) * n + k / n]).collect();
+                let b_bar = ctx.solve_dense(at, x_bar);
+                for r in 0..n {
+                    push(&mut adj, b[r], b_bar[r]);
+                    for j in 0..n {
+                        let t = ctx.mul(b_bar[r], x[j]);
+                        let nt = ctx.neg(t);
+                        push(&mut adj, a[r * n + j], nt);
+                    }
                 }
             }
             // Chain rule through a call: the same derivative outputs as the

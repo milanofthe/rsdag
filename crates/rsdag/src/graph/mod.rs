@@ -205,7 +205,9 @@ impl<K: Field> Graph<K> {
                 buf: [c, t, e],
                 n: 3,
             },
-            Node::Reduce(_, l) | Node::Dot(l) | Node::Call(_, l) => Operands::Slice(self.args(l)),
+            Node::Reduce(_, l) | Node::Dot(l) | Node::Call(_, l) | Node::Solve(l, _) => {
+                Operands::Slice(self.args(l))
+            }
         }
     }
 
@@ -650,6 +652,52 @@ impl<K: Field> Graph<K> {
         }
     }
 
+    /// The solution `x` of the dense system `A x = b`, one expression per
+    /// component: `a` is `n * n` row-major, `b` of `n`. One unknown folds
+    /// to a division; otherwise the components are one kernel (see
+    /// [`Node::Solve`]).
+    pub fn solve_dense(&mut self, a: Vec<ExprId>, b: Vec<ExprId>) -> Vec<ExprId> {
+        let n = b.len();
+        assert_eq!(
+            a.len(),
+            n * n,
+            "solve: a square matrix over the right-hand side"
+        );
+        match n {
+            0 => Vec::new(),
+            1 => vec![self.div(b[0], a[0])],
+            _ => {
+                let mut all = a;
+                all.extend(b);
+                let l = self.intern_args(&all);
+                (0..n as u32)
+                    .map(|i| self.intern(Node::Solve(l, i)))
+                    .collect()
+            }
+        }
+    }
+
+    /// The matrix and the right-hand side of a [`Node::Solve`] list, and `n`.
+    pub fn solve_args(&self, l: ArgList) -> (usize, &[ExprId], &[ExprId]) {
+        let n = Self::solve_n(l.len());
+        let all = self.args(l);
+        (n, &all[..n * n], &all[n * n..])
+    }
+
+    /// `n` from the length `n * n + n` of a solve list.
+    pub fn solve_n(len: usize) -> usize {
+        let n = ((len as f64).sqrt()) as usize;
+        debug_assert_eq!(n * n + n, len, "a solve list is n*n + n long");
+        n
+    }
+
+    /// Component `i` of a solve over the list `all`, rebuilt.
+    pub(crate) fn solve_component(&mut self, all: Vec<ExprId>, i: u32) -> ExprId {
+        let n = Self::solve_n(all.len());
+        let (a, b) = all.split_at(n * n);
+        self.solve_dense(a.to_vec(), b.to_vec())[i as usize]
+    }
+
     // --- module interchange (see `crate::module`) ------------------------
 
     pub(crate) fn nodes_slice(&self) -> &[Node] {
@@ -708,6 +756,10 @@ impl<K: Field> Graph<K> {
                 let (a, b) = all.split_at(all.len() / 2);
                 self.dot(a.to_vec(), b.to_vec())
             }
+            Node::Solve(l, i) => {
+                let all = args_of(l);
+                self.solve_component(all, i)
+            }
         }
     }
 
@@ -747,6 +799,10 @@ impl<K: Field> Graph<K> {
             Node::Dot(l) => {
                 let args = args_of(l);
                 Node::Dot(self.intern_args(&args))
+            }
+            Node::Solve(l, i) => {
+                let args = args_of(l);
+                Node::Solve(self.intern_args(&args), i)
             }
         };
         self.intern(n)

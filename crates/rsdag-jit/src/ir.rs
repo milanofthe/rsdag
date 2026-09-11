@@ -2,18 +2,18 @@
 //! vector the emitter walks. Recording decouples the chunk partitioning and
 //! the parallel per-chunk codegen from the visitor callback structure.
 //! Bundle bodies are interned by `Arc` identity into a table the compiled
-//! code indexes through the pointer every chunk receives.
+//! code indexes through the pointer every chunk receives. Operands are the
+//! tape's: slots, or inputs when tagged (see [`rsdag::tape::INPUT`]).
 
 use rsdag::extern_fn::ExternBundle;
 use rsdag::node::{BinOp, CmpOp, ReduceOp, UnaryOp};
-use rsdag::tape::Operand;
+use rsdag::tape::{input_index, Operand};
 use rsdag::TapeVisitor;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 pub(crate) enum ROp {
     Const(u32, f64),
-    Input(u32, u32),
     Add(u32, u32, u32),
     Mul(u32, u32, u32),
     MulAdd(u32, u32, u32, u32),
@@ -26,19 +26,22 @@ pub(crate) enum ROp {
     Select(u32, u32, u32, u32),
     Reduce(u32, ReduceOp, Vec<u32>),
     Dot(u32, Vec<u32>, Vec<u32>),
-    /// `(bundle, args, scratch_base)`.
-    Bundle(u32, Vec<u32>, u32),
-    /// `(bundle, args, n_groups, n_args, base0)`.
-    BundleBatch(u32, Vec<u32>, u32, u32, u32),
-    /// `(dst, scratch index)`.
-    Pick(u32, u32),
-    /// A dense matrix-vector product into the bundle scratch at `base`.
+    /// `(dst, bundle, args, n_out)`.
+    Call(u32, u32, Vec<u32>, u32),
+    /// `(dst, bundle, args, n_groups, n_args, n_out)`.
+    CallBatch(u32, u32, Vec<u32>, u32, u32, u32),
     Gemv {
+        dst: u32,
         a: Dense,
         x: Dense,
         m: u32,
         n: u32,
-        base: u32,
+    },
+    Solve {
+        dst: u32,
+        a: Dense,
+        b: Dense,
+        n: u32,
     },
 }
 
@@ -49,19 +52,25 @@ pub(crate) enum Dense {
 }
 
 impl Dense {
-    fn slots(&self) -> &[u32] {
+    pub(crate) fn slots(&self) -> &[u32] {
         match self {
             Dense::Inputs(_) => &[],
             Dense::Slots(v) => v,
         }
     }
+    fn of(o: Operand<'_>) -> Dense {
+        match o {
+            Operand::Inputs(k) => Dense::Inputs(k),
+            Operand::Slots(s) => Dense::Slots(s.to_vec()),
+        }
+    }
 }
 
 impl ROp {
-    /// Every work slot the op reads.
-    pub(crate) fn for_each_read(&self, mut f: impl FnMut(u32)) {
+    /// Every operand the op reads, slots and tagged inputs alike.
+    pub(crate) fn for_each_operand(&self, mut f: impl FnMut(u32)) {
         match self {
-            ROp::Const(..) | ROp::Input(..) | ROp::Pick(..) => {}
+            ROp::Const(..) => {}
             ROp::Neg(_, a) | ROp::Powi(_, a, _) | ROp::Unary(_, _, a) => f(*a),
             ROp::Add(_, a, b)
             | ROp::Mul(_, a, b)
@@ -76,12 +85,21 @@ impl ROp {
                 f(*b);
                 f(*c);
             }
-            ROp::Reduce(_, _, args) | ROp::Bundle(_, args, _) | ROp::BundleBatch(_, args, ..) => {
+            ROp::Reduce(_, _, args) | ROp::Call(_, _, args, _) | ROp::CallBatch(_, _, args, ..) => {
                 args.iter().copied().for_each(f)
             }
             ROp::Dot(_, a, b) => a.iter().chain(b).copied().for_each(f),
             ROp::Gemv { a, x, .. } => a.slots().iter().chain(x.slots()).copied().for_each(f),
+            ROp::Solve { a, b, .. } => a.slots().iter().chain(b.slots()).copied().for_each(f),
         }
+    }
+    /// Every work slot the op reads.
+    pub(crate) fn for_each_read(&self, mut f: impl FnMut(u32)) {
+        self.for_each_operand(|k| {
+            if input_index(k).is_none() {
+                f(k)
+            }
+        });
     }
     /// The host routine the op calls, if any.
     pub(crate) fn host(&self) -> Option<*const ()> {
@@ -98,19 +116,21 @@ impl ROp {
             ROp::Binary(..) => crate::host::h_binary as *const (),
             ROp::Powi(_, _, n) if *n != -1 && *n != 2 => crate::host::h_powi as *const (),
             ROp::Reduce(_, ReduceOp::Min | ReduceOp::Max, _) => crate::host::h_reduce as *const (),
-            ROp::Bundle(..) => crate::host::h_bundle as *const (),
-            ROp::BundleBatch(..) => crate::host::h_bundle_batch as *const (),
+            ROp::Call(..) => crate::host::h_bundle as *const (),
+            ROp::CallBatch(..) => crate::host::h_bundle_batch as *const (),
             ROp::Gemv { .. } => crate::host::h_gemv as *const (),
+            ROp::Solve { .. } => crate::host::h_solve as *const (),
             _ => return None,
         })
     }
-    /// How many slots the op hands to a host routine through the gather
+    /// How many values the op hands to a host routine through the gather
     /// area of the work array.
     pub(crate) fn gather_len(&self) -> usize {
         match self {
             ROp::Reduce(_, ReduceOp::Min | ReduceOp::Max, args) => args.len(),
-            ROp::Bundle(_, args, _) | ROp::BundleBatch(_, args, ..) => args.len(),
+            ROp::Call(_, _, args, _) | ROp::CallBatch(_, _, args, ..) => args.len(),
             ROp::Gemv { a, x, .. } => a.slots().len() + x.slots().len(),
+            ROp::Solve { a, b, .. } => a.slots().len() + b.slots().len(),
             _ => 0,
         }
     }
@@ -136,9 +156,6 @@ impl Recorder {
 impl TapeVisitor for Recorder {
     fn constant(&mut self, dst: u32, v: f64) {
         self.ops.push(ROp::Const(dst, v));
-    }
-    fn input(&mut self, dst: u32, k: u32) {
-        self.ops.push(ROp::Input(dst, k));
     }
     fn add(&mut self, dst: u32, a: u32, b: u32) {
         self.ops.push(ROp::Add(dst, a, b));
@@ -176,41 +193,44 @@ impl TapeVisitor for Recorder {
     fn dot(&mut self, dst: u32, a: &[u32], b: &[u32]) {
         self.ops.push(ROp::Dot(dst, a.to_vec(), b.to_vec()));
     }
-    fn bundle_call(&mut self, b: &Arc<dyn ExternBundle>, args: &[u32], scratch_base: u32) {
+    fn call(&mut self, dst: u32, b: &Arc<dyn ExternBundle>, args: &[u32], n_out: u32) {
         let idx = self.intern(b);
-        self.ops.push(ROp::Bundle(idx, args.to_vec(), scratch_base));
+        self.ops.push(ROp::Call(dst, idx, args.to_vec(), n_out));
     }
-    fn bundle_batch(
+    fn call_batch(
         &mut self,
+        dst: u32,
         b: &Arc<dyn ExternBundle>,
         args: &[u32],
         n_groups: u32,
         n_args: u32,
-        base0: u32,
+        n_out: u32,
     ) {
         let idx = self.intern(b);
-        self.ops.push(ROp::BundleBatch(
+        self.ops.push(ROp::CallBatch(
+            dst,
             idx,
             args.to_vec(),
             n_groups,
             n_args,
-            base0,
+            n_out,
         ));
     }
-    fn bundle_pick(&mut self, dst: u32, idx: u32) {
-        self.ops.push(ROp::Pick(dst, idx));
-    }
-    fn gemv(&mut self, a: Operand<'_>, x: Operand<'_>, m: u32, n: u32, base: u32) {
-        let dense = |o: Operand<'_>| match o {
-            Operand::Inputs(k) => Dense::Inputs(k),
-            Operand::Slots(s) => Dense::Slots(s.to_vec()),
-        };
+    fn gemv(&mut self, dst: u32, a: Operand<'_>, x: Operand<'_>, m: u32, n: u32) {
         self.ops.push(ROp::Gemv {
-            a: dense(a),
-            x: dense(x),
+            dst,
+            a: Dense::of(a),
+            x: Dense::of(x),
             m,
             n,
-            base,
+        });
+    }
+    fn solve(&mut self, dst: u32, a: Operand<'_>, b: Operand<'_>, n: u32) {
+        self.ops.push(ROp::Solve {
+            dst,
+            a: Dense::of(a),
+            b: Dense::of(b),
+            n,
         });
     }
 }

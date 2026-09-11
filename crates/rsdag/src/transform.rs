@@ -93,6 +93,15 @@ fn subst_inner<K: Field, F: Fn(SymbolId) -> Option<ExprId>>(
                 .collect();
             ctx.reduce(op, na)
         }
+        Node::Solve(l, i) => {
+            let all: Vec<ExprId> = ctx
+                .args(l)
+                .to_vec()
+                .iter()
+                .map(|&e| subst_inner(ctx, e, resolve, memo))
+                .collect();
+            ctx.solve_component(all, i)
+        }
         Node::Dot(l) => {
             let (a, b) = ctx.dot_args(l);
             let (a, b) = (a.to_vec(), b.to_vec());

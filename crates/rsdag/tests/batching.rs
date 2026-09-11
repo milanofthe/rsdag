@@ -25,7 +25,7 @@ fn cell(g: &mut Graph<F64>) -> rsdag::FuncId {
 }
 
 fn batches_in(tape: &Tape) -> usize {
-    tape.dump().matches("BundleBatch").count()
+    tape.dump().matches("CallBatch").count()
 }
 
 #[test]

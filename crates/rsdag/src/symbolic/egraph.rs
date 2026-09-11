@@ -153,7 +153,7 @@ fn contains_unsupported(g: &Graph<BigRational>, root: ExprId) -> bool {
             continue;
         }
         match g.node(id) {
-            Node::Cmp(..) | Node::Select(..) | Node::Call(..) => return true,
+            Node::Cmp(..) | Node::Select(..) | Node::Call(..) | Node::Solve(..) => return true,
             Node::Reduce(ReduceOp::Min | ReduceOp::Max, _) => return true,
             _ => stack.extend_from_slice(&g.operands(id)),
         }
@@ -355,7 +355,7 @@ fn build(
             let first = it.next().expect("dot has terms");
             it.fold(first, |acc, x| rec.add(Lang::Add([acc, x])))
         }
-        Node::Cmp(..) | Node::Select(..) | Node::Call(..) => {
+        Node::Cmp(..) | Node::Select(..) | Node::Call(..) | Node::Solve(..) => {
             unreachable!("filtered by contains_unsupported")
         }
     };
