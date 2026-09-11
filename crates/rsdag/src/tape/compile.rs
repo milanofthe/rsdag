@@ -234,9 +234,10 @@ impl Program {
             |k: u32| pure_inputs.is_some_and(|p| p.get(k as usize).copied().unwrap_or(true));
         let mut alias: HashMap<u32, Ref> = HashMap::default();
         let mut dead = vec![false; m];
-        // Whether any kernel so far took an accumulator defined after it:
-        // from then on an earlier instruction can depend on a later one.
-        let mut any_forward = false;
+        // The first kernel that took an accumulator defined after it: an
+        // instruction before it reads only instructions before itself, so
+        // it reaches no later one, and the dependency walk stops there.
+        let mut first_forward = usize::MAX;
         // The placeholder accumulator of a plain, self or negating fold: a
         // NaN constant, never read.
         let mut placeholder_inst: Option<Ref> = None;
@@ -298,10 +299,9 @@ impl Program {
                         }
                         // An earlier instruction reaches this kernel only
                         // through a fused kernel's forward accumulator.
-                        if any_forward && self.depends_on(i as usize, k) {
-                            continue;
-                        }
-                        if !any_forward && i as usize > k && self.depends_on(i as usize, k) {
+                        if (i as usize > k || first_forward < i as usize)
+                            && self.depends_on(i as usize, k, first_forward)
+                        {
                             continue;
                         }
                         (code, acc)
@@ -325,7 +325,7 @@ impl Program {
                 .iter()
                 .any(|r| matches!(*r, Ref::Value(i, _) if i as usize > k))
             {
-                any_forward = true;
+                first_forward = first_forward.min(k);
             }
             let start = self.pool.len() as u32;
             let old: Vec<Ref> = self.ins(k).to_vec();
@@ -386,17 +386,18 @@ impl Program {
             .collect();
     }
 
-    /// Whether instruction `i` reads instruction `k` (transitively). Once
-    /// a fused kernel points forward, an instruction before `k` can reach
-    /// it through any path, so the walk prunes nothing but revisits.
-    fn depends_on(&self, i: usize, k: usize) -> bool {
+    /// Whether instruction `i` reads instruction `k` (transitively). The
+    /// list is in lowering order, so an instruction reaches a later one
+    /// only through a fused kernel's forward accumulator: the walk stops
+    /// at instructions before `k` that also precede the first such kernel.
+    fn depends_on(&self, i: usize, k: usize, first_forward: usize) -> bool {
         let mut stack = vec![i as u32];
         let mut seen: HashSet<u32> = HashSet::default();
         while let Some(i) = stack.pop() {
             if i as usize == k {
                 return true;
             }
-            if !seen.insert(i) {
+            if ((i as usize) < k && (i as usize) < first_forward) || !seen.insert(i) {
                 continue;
             }
             for r in self.ins(i as usize) {
