@@ -298,6 +298,20 @@ fn classify<K: Field>(
             }
             out
         }
+        // Rational in the matrix, linear in the right-hand side: a rational
+        // function of whatever the entries are.
+        Node::Solve(l, _) => {
+            let parts: Vec<Nonlinearity> = g.args(l).iter().map(|&a| sub(a, memo)).collect();
+            if parts.iter().all(Nonlinearity::is_constant) {
+                Nonlinearity::constant()
+            } else {
+                let mut out = Nonlinearity::unbounded(|o| o.rational = true);
+                for c in &parts {
+                    out.absorb(c);
+                }
+                out
+            }
+        }
         Node::Call(_, l) => {
             let parts: Vec<Nonlinearity> = g.args(l).iter().map(|&a| sub(a, memo)).collect();
             if parts.iter().all(Nonlinearity::is_constant) {

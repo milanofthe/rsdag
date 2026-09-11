@@ -1,11 +1,33 @@
 //! Compiled flat evaluator (tape) for fast, repeated numeric evaluation.
 //!
-//! A [`Tape`] is the reachable sub-DAG of a set of root expressions, lowered to
-//! a flat instruction list over compact slots (ascending `ExprId` is already a
-//! topological order, since a hash-consed node has a larger id than its
-//! children). Symbols become positional inputs (no per-call hashing), and the
-//! work buffer is caller-owned and reused -- so a Newton loop over a large
-//! circuit neither re-hashes symbols nor reallocates a huge scratch each step.
+//! A [`Tape`] is the reachable sub-DAG of a set of root expressions, lowered
+//! to a flat instruction list over compact slots. Symbols become positional
+//! inputs, read where they are used (an operand with the input tag names an
+//! input directly, no copy into a slot), and the work buffer is caller-owned
+//! and reused, so a Newton loop over a large circuit neither re-hashes
+//! symbols nor reallocates a scratch each step.
+//!
+//! An instruction writes one slot, or, for a kernel (a bundle call, a batch
+//! of calls, a matrix-vector product, a dense solve), a block of consecutive
+//! slots starting at its `dst`. Every value is a slot; there is no second
+//! storage.
+//!
+//! # What a backend must reproduce
+//!
+//! - **The domain guards.** [`crate::semantics::unary_f64`] is the reference
+//!   for every unary op, including the `exp` cap at
+//!   [`crate::semantics::EXP_LIMIT`] and the `ln` floor at
+//!   [`crate::semantics::LN_FLOOR`]; a backend that calls its own `exp`
+//!   diverges from the arena where the guards bite.
+//! - **The special functions.** [`crate::semantics::digamma`],
+//!   [`crate::semantics::trigamma`] and [`crate::semantics::rand_uniform`]
+//!   are defined there, not taken from a platform library.
+//! - **The fold orders.** [`crate::semantics::reduce_slice_t`] and
+//!   [`crate::semantics::dot_slice_t`] fold with four accumulators merged as
+//!   `(a0 + a1) + (a2 + a3)`, then the tail in order; a kernel is those
+//!   folds row by row.
+//! - **No contraction.** [`TapeVisitor::mul_add`] is a fused *dispatch*, not
+//!   a fused rounding: it rounds the product and the sum separately.
 
 use std::sync::Arc;
 
@@ -13,20 +35,28 @@ use crate::extern_fn::ExternBundle;
 use crate::node::{BinOp, CmpOp, ReduceOp, UnaryOp};
 use crate::scalar::Scalar;
 
+/// The tag bit of an operand that names an input rather than a slot.
+pub const INPUT: u32 = 1 << 31;
+
+/// The input index of a tagged operand.
+#[inline]
+pub fn input_index(k: u32) -> Option<u32> {
+    (k & INPUT != 0).then_some(k & !INPUT)
+}
+
+/// One instruction. Operands are slots, or inputs when tagged with
+/// [`INPUT`]; every instruction writes its `dst` slot, a kernel the block
+/// of slots from `dst` on.
 #[derive(Clone, Copy, Debug)]
-enum Op {
+pub enum Op {
     Const(f64),
-    Input(u32),
     Add(u32, u32),
     Mul(u32, u32),
-    /// `a*b + c` as one instruction -- a fused *dispatch*, not a fused
-    /// *rounding*: the two IEEE operations are evaluated exactly as the
-    /// separate `Mul` + `Add` would be (no `mul_add` contraction), so tape
-    /// results stay bit-identical to the arena sweep. Emitted by `compile`
+    /// `a*b + c` as one instruction, a fused *dispatch* with two roundings,
+    /// so results stay bit-identical to the arena. Emitted by `compile`
     /// when an `Add` consumes a single-use `Mul`.
     MulAdd(u32, u32, u32),
-    /// `a - b`, from an `Add` consuming a single-use `Neg` (IEEE subtraction
-    /// is exactly addition of the negation, so this is bit-preserving too).
+    /// `a - b`, from an `Add` consuming a single-use `Neg`.
     Sub(u32, u32),
     Neg(u32),
     Powi(u32, i32),
@@ -36,49 +66,50 @@ enum Op {
     Select(u32, u32, u32),
     /// Reduction over `arg_pool[start .. start+len]`.
     Reduce(ReduceOp, u32, u32),
-    /// Inner product of `arg_pool[start .. start+len]` (a) and the `len` slots
-    /// that follow it (b).
+    /// Inner product of `arg_pool[start .. start+len]` and the `len` that
+    /// follow.
     Dot(u32, u32),
-    /// Evaluate the bundle at `bundles[bidx]` once, gathering its arguments from
-    /// `arg_pool[start .. start+len]`, and write all its outputs into the
-    /// bundle-scratch region starting at `base`. Emitted once per distinct
-    /// (bundle, argument) group; its work slot is a never-read sink.
-    BundleCall(u32, u32, u32, u32),
-    /// Evaluate the bundle at `bundles[bidx]` for ALL of its argument groups at
-    /// once (instance batching): `batches[tidx]` describes the group-major
-    /// argument table in `arg_pool` and the consecutive scratch regions the
-    /// outputs land in. Emitted instead of the per-group `BundleCall`s when
-    /// every group's arguments are plain inputs/constants (hoistable to the
-    /// first call site); the backend may evaluate the groups as SIMD lanes.
-    BundleBatch(u32, u32),
-    /// Read one already-computed bundle output from `bundle_scratch[idx]`.
-    BundlePick(u32),
-    /// A dense matrix-vector product, table `gemvs[t]`: `m` rows of `n`
-    /// against a vector of `n`, the rows written to `bundle_scratch[base..]`
-    /// and read back by `BundlePick`s. Fused by `compile` from the rows'
-    /// `Dot`s, and bit-identical to them.
-    Gemv(u32),
+    /// `bundles[b]` on `arg_pool[start .. start+n_args]`, its outputs to
+    /// `dst .. dst+n_out`.
+    Call {
+        bundle: u32,
+        start: u32,
+        n_args: u32,
+        n_out: u32,
+    },
+    /// `bundles[b]` on `n_groups` argument groups laid group-major in the
+    /// pool, group `g`'s outputs to `dst + g*n_out ..`.
+    CallBatch {
+        bundle: u32,
+        start: u32,
+        n_groups: u32,
+        n_args: u32,
+        n_out: u32,
+    },
+    /// A matrix-vector product: `m` rows of `n` in `a` against `x`, the rows
+    /// to `dst .. dst+m`, each row the fold of `Dot`.
+    Gemv {
+        a: Src,
+        x: Src,
+        m: u32,
+        n: u32,
+    },
+    /// The dense solve `A x = b`, `a` `n` by `n` and `b` of `n`, `x` to
+    /// `dst .. dst+n` (see [`crate::semantics::solve_t`]).
+    Solve {
+        a: Src,
+        b: Src,
+        n: u32,
+    },
 }
 
-/// Where a dense operand's `len` values live.
+/// Where a kernel's dense operand lives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Src {
-    /// Consecutive inputs from index `k`: a parameter matrix or a state
-    /// vector, read in place.
+    /// Consecutive inputs from index `k`, read in place.
     Inputs(u32),
-    /// Slots listed in the arg pool from `start`, gathered.
-    Slots(u32),
-}
-
-/// One fused matrix-vector product.
-#[derive(Clone, Copy, Debug)]
-pub struct GemvTable {
-    pub a: Src,
-    pub x: Src,
-    pub m: u32,
-    pub n: u32,
-    /// First bundle-scratch index of the `m` results.
-    pub base: u32,
+    /// Operands listed in the arg pool from `start`, gathered.
+    Pool(u32),
 }
 
 /// A dense operand as a backend sees it.
@@ -88,115 +119,48 @@ pub enum Operand<'a> {
     Slots(&'a [u32]),
 }
 
-/// Layout of one batched bundle call: `n_groups` argument groups of `n_args`
-/// slots each at `arg_pool[start ..]` (group-major); group `g`'s outputs go to
-/// `bundle_scratch[base0 + g*n_out ..]`.
-#[derive(Clone, Copy, Debug)]
-pub struct BatchTable {
-    pub start: u32,
-    pub n_args: u32,
-    pub n_groups: u32,
-    pub base0: u32,
-    pub n_out: u32,
-}
-
 mod compile;
 mod specialize;
 
+pub use compile::Inst;
 pub use specialize::SpecializedTape;
 
-/// A compiled evaluator for a fixed set of root expressions over named inputs.
-///
-/// Each instruction writes to a `dst` work slot and reads from slots produced
-/// earlier. Slots are reused once their value is dead (liveness-driven, LIFO
-/// free list), so the work buffer is the live-set width, not the node count --
-/// a deep accumulator chain of `n` nodes needs a handful of slots, not `n`.
+/// A compiled evaluator for a set of expression roots.
 pub struct Tape {
     ops: Vec<Op>,
-    /// Destination work slot for each op (parallel to `ops`).
+    /// Destination slot of each op (the first of a kernel's block).
     dst: Vec<u32>,
-    /// Number of `Select` ops (the length of a choice trace).
     n_selects: usize,
-    /// Flat operand-slot pool for variadic ops (Reduce / Dot).
     arg_pool: Vec<u32>,
+    /// Output operands, one per root (a slot, or a tagged input).
     outputs: Vec<u32>,
     n_work: usize,
-    /// Widest gather any variadic op (Reduce / Dot / bundle call) needs, so `eval`
-    /// can carve the scratch region out of the tail of the caller's `work`
-    /// buffer instead of allocating one per call.
+    /// Widest gather any variadic op or kernel needs.
     max_args: usize,
-    /// Multi-output bodies for `BundleCall` ops, indexed by their `bidx`.
     bundles: Vec<Arc<dyn ExternBundle>>,
-    /// Total width of the persistent bundle-output scratch region (sum of every
-    /// distinct group's output count), carved from the tail of `work` in `eval`.
-    bundle_scratch_len: usize,
-    /// Argument tables for `BundleBatch` ops.
-    batches: Vec<BatchTable>,
-    /// Widest flat argument gather any `BundleBatch` needs
-    /// (`max n_groups*n_args`), carved from the tail of `work` like `max_args`.
-    batch_args_len: usize,
-    /// The fused matrix-vector products (see [`Op::Gemv`]).
-    gemvs: Vec<GemvTable>,
-    /// Instruction count of the parameter-pure prolog prefix (0 = no split; see
-    /// [`compile_split`](Self::compile_split)).
+    /// Instruction count of the parameter-pure prolog prefix (0 = no split;
+    /// see [`compile_split`](Self::compile_split)).
     prolog_ops: usize,
 }
 
 /// A backend that lowers a [`Tape`]'s instruction stream: the seam every
 /// code generator sits on.
 ///
-/// The tape is the evaluation IR. [`Tape::eval`] is the interpreting backend,
-/// [`Tape::lower`] drives any other one -- a printer, an alternative
+/// The tape is the evaluation IR. [`Tape::eval`] is the interpreting
+/// backend, [`Tape::lower`] drives any other one: a printer, another
 /// evaluator, or a generator emitting C, Verilog or a GPU kernel. Each method
-/// receives the destination work slot `dst` and the operand slots the op
-/// reads; a backend keeps its own slot-to-value map (the value of a slot is
-/// whatever its most recent writer produced -- the tape's liveness guarantees
-/// a slot is never reused while a value it holds is still needed, so reading
-/// the current occupant is always the intended SSA value).
-///
-/// Slots are `u32` indices into a work array of width [`Tape::n_work`];
-/// outputs are read from the slots in [`Tape::outputs`]. A program with a
-/// parameter-pure prefix (see [`Tape::compile_split`]) exposes it as the
-/// first [`Tape::prolog_len`] ops, which a generator emits as a separate
-/// function it can call once per parameter binding.
-///
-/// # What a generated backend must reproduce
-///
-/// rsdag's guarantee is that every backend computes the same IEEE operation
-/// sequence, so a generator that wants to stay inside it has to match five
-/// things. All five are available as data or as reference code in this
-/// crate, which is what makes a generator a walk over this trait rather than
-/// a re-derivation:
-///
-/// - **The domain guards.** [`crate::semantics::unary_f64`] is the reference for
-///   every unary op, including the `exp` cap at [`crate::semantics::EXP_LIMIT`],
-///   the `ln` floor at [`crate::semantics::LN_FLOOR`] and the `sqrt` clamp. An
-///   unguarded `exp` diverges on the first out-of-range Newton iterate.
-/// - **The op names.** [`crate::UnaryOp::c_fn`] and [`crate::BinOp::c_fn`]
-///   give the conventional C callee per op, and `name()` the spelling for
-///   any other target; a guarded op names an `rsdag_` helper the generator
-///   supplies from the reference above.
-/// - **The special functions.** [`crate::semantics::digamma`],
-///   [`crate::semantics::trigamma`] and [`crate::semantics::rand_uniform`] are defined
-///   here, not taken from a platform library, so a generator ports these
-///   exact series.
-/// - **The fold orders.** [`crate::semantics::reduce_slice`] and
-///   [`crate::semantics::dot_slice`] fold with four accumulators merged as
-///   `(a0 + a1) + (a2 + a3)`, then the tail in order. A different
-///   association gives different bits.
-/// - **No contraction.** [`TapeVisitor::mul_add`] is a fused *dispatch*, not
-///   a fused rounding: it rounds the product and the sum separately. A C
-///   generator therefore compiles with `-ffp-contract=off`, and no backend
-///   emits a hardware FMA for it.
+/// receives the destination slot `dst` and the operands the op reads, slots
+/// or tagged inputs (see [`INPUT`]); a backend keeps its own slot-to-value
+/// map. A slot is never reused while a value it holds is still needed, so
+/// reading the current occupant is always the intended value. A program
+/// with a parameter-pure prefix (see [`Tape::compile_split`]) exposes it as
+/// the first [`Tape::prolog_len`] ops.
 pub trait TapeVisitor {
     fn constant(&mut self, dst: u32, v: f64);
-    /// `inputs[k]` (or the not-an-input sentinel `u32::MAX`).
-    fn input(&mut self, dst: u32, k: u32);
     fn add(&mut self, dst: u32, a: u32, b: u32);
     fn mul(&mut self, dst: u32, a: u32, b: u32);
-    /// `a*b + c` as one dispatch (unfused rounding; see `Op::MulAdd`).
+    /// `a*b + c` as one dispatch, two roundings (see `Op::MulAdd`).
     fn mul_add(&mut self, dst: u32, a: u32, b: u32, c: u32);
-    /// `a - b` (from a fused `Add(Neg)`).
     fn sub(&mut self, dst: u32, a: u32, b: u32);
     fn neg(&mut self, dst: u32, a: u32);
     fn powi(&mut self, dst: u32, a: u32, n: i32);
@@ -206,26 +170,25 @@ pub trait TapeVisitor {
     fn select(&mut self, dst: u32, c: u32, t: u32, e: u32);
     fn reduce(&mut self, dst: u32, op: ReduceOp, args: &[u32]);
     fn dot(&mut self, dst: u32, a: &[u32], b: &[u32]);
-    /// Evaluate a bundle once, writing its outputs to the bundle-scratch region
-    /// at `scratch_base` (width [`Tape::bundle_scratch_len`]).
-    fn bundle_call(&mut self, b: &Arc<dyn ExternBundle>, args: &[u32], scratch_base: u32);
-    /// Evaluate a bundle for `n_groups` argument groups at once (group-major
-    /// `args`, `n_groups * n_args` slots); group `g`'s outputs go to
-    /// `bundle_scratch[base0 + g*n_outputs ..]`.
-    fn bundle_batch(
+    /// Call `b` on `args`, its `n_out` outputs to `dst ..`.
+    fn call(&mut self, dst: u32, b: &Arc<dyn ExternBundle>, args: &[u32], n_out: u32);
+    /// Call `b` on `n_groups` argument groups (group-major `args`), group
+    /// `g`'s outputs to `dst + g*n_out ..`.
+    fn call_batch(
         &mut self,
+        dst: u32,
         b: &Arc<dyn ExternBundle>,
         args: &[u32],
         n_groups: u32,
         n_args: u32,
-        base0: u32,
+        n_out: u32,
     );
-    /// Copy one already-computed bundle output from `bundle_scratch[idx]`.
-    fn bundle_pick(&mut self, dst: u32, idx: u32);
-    /// A dense matrix-vector product: `m` rows of `n` in `a` against `x`,
-    /// results to `bundle_scratch[base .. base + m]`, each row the fold of
-    /// [`dot`](Self::dot) (see [`crate::semantics::gemv_t`]).
-    fn gemv(&mut self, a: Operand<'_>, x: Operand<'_>, m: u32, n: u32, base: u32);
+    /// `m` rows of `n` in `a` against `x`, to `dst .. dst+m`, each row the
+    /// fold of [`dot`](Self::dot) (see [`crate::semantics::gemv_t`]).
+    fn gemv(&mut self, dst: u32, a: Operand<'_>, x: Operand<'_>, m: u32, n: u32);
+    /// The dense solve of `a` (`n` by `n`) against `b`, to `dst .. dst+n`
+    /// (see [`crate::semantics::solve_t`]).
+    fn solve(&mut self, dst: u32, a: Operand<'_>, b: Operand<'_>, n: u32);
 }
 
 /// Observer of `Select` decisions during evaluation: [`NoTrace`] costs
@@ -259,17 +222,71 @@ impl Tape {
         self.outputs.len()
     }
 
-    /// Human-readable instruction listing (diagnostics): one line per op with
-    /// its destination slot, the prolog boundary marked.
+    /// Human-readable instruction listing (diagnostics): one line per op
+    /// with its destination slot, the prolog boundary marked; an operand
+    /// `i7` is input 7.
     pub fn dump(&self) -> String {
+        let name = |k: u32| match input_index(k) {
+            Some(i) => format!("i{i}"),
+            None => format!("s{k}"),
+        };
+        let list = |start: u32, len: u32| -> String {
+            self.arg_pool[start as usize..(start + len) as usize]
+                .iter()
+                .map(|&k| name(k))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let src = |s: Src, len: u32| match s {
+            Src::Inputs(k) => format!("i{k}..i{}", k + len),
+            Src::Pool(start) => format!("[{}]", list(start, len)),
+        };
         let mut out = String::new();
         for (i, op) in self.ops.iter().enumerate() {
             if i == self.prolog_ops && self.prolog_ops > 0 {
                 out.push_str("---- main ----\n");
             }
-            out.push_str(&format!("{i:5}: s{} <- {:?}\n", self.dst[i], op));
+            let text = match *op {
+                Op::Const(v) => format!("Const({v})"),
+                Op::Add(a, b) => format!("Add({}, {})", name(a), name(b)),
+                Op::Mul(a, b) => format!("Mul({}, {})", name(a), name(b)),
+                Op::MulAdd(a, b, c) => format!("MulAdd({}, {}, {})", name(a), name(b), name(c)),
+                Op::Sub(a, b) => format!("Sub({}, {})", name(a), name(b)),
+                Op::Neg(a) => format!("Neg({})", name(a)),
+                Op::Powi(a, n) => format!("Powi({}, {n})", name(a)),
+                Op::Unary(op, a) => format!("Unary({op:?}, {})", name(a)),
+                Op::Binary(op, a, b) => format!("Binary({op:?}, {}, {})", name(a), name(b)),
+                Op::Cmp(op, a, b) => format!("Cmp({op:?}, {}, {})", name(a), name(b)),
+                Op::Select(c, t, e) => format!("Select({}, {}, {})", name(c), name(t), name(e)),
+                Op::Reduce(op, s, l) => format!("Reduce({op:?}, [{}])", list(s, l)),
+                Op::Dot(s, l) => format!("Dot([{}], [{}])", list(s, l), list(s + l, l)),
+                Op::Call {
+                    bundle,
+                    start,
+                    n_args,
+                    n_out,
+                } => format!("Call(b{bundle}, [{}]) -> {n_out}", list(start, n_args)),
+                Op::CallBatch {
+                    bundle,
+                    start,
+                    n_groups,
+                    n_args,
+                    n_out,
+                } => format!(
+                    "CallBatch(b{bundle}, {n_groups} x [{}]) -> {n_groups} x {n_out}",
+                    list(start, n_groups * n_args)
+                ),
+                Op::Gemv { a, x, m, n } => {
+                    format!("Gemv({m}x{n} {}, {}) -> {m}", src(a, m * n), src(x, n))
+                }
+                Op::Solve { a, b, n } => {
+                    format!("Solve({n}x{n} {}, {}) -> {n}", src(a, n * n), src(b, n))
+                }
+            };
+            out.push_str(&format!("{i:5}: s{} <- {text}\n", self.dst[i]));
         }
-        out.push_str(&format!("outputs {:?}\n", self.outputs));
+        let outs: Vec<String> = self.outputs.iter().map(|&k| name(k)).collect();
+        out.push_str(&format!("outputs [{}]\n", outs.join(", ")));
         out
     }
 
@@ -300,15 +317,17 @@ impl Tape {
         work.clear();
         work.resize(self.buffer_len(), T::zero());
         self.run_range(inputs, work, 0, self.ops.len(), sink);
-        out.clear();
-        let w = &work[..self.n_work];
-        out.extend(self.outputs.iter().map(|&o| w[o as usize]));
+        self.collect(inputs, work, out);
     }
 
-    /// The work buffer: the slots, then the gather scratch, the bundle
-    /// outputs and the batch arguments.
+    /// The work buffer: the slots, then the gather scratch.
     fn buffer_len(&self) -> usize {
-        self.n_work + self.max_args + self.bundle_scratch_len + self.batch_args_len
+        self.n_work + self.max_args
+    }
+
+    fn collect<T: Scalar>(&self, inputs: &[T], work: &[T], out: &mut Vec<T>) {
+        out.clear();
+        out.extend(self.outputs.iter().map(|&k| read(inputs, work, k)));
     }
 
     /// Instruction count of the parameter-pure prolog (0 when compiled without
@@ -336,9 +355,7 @@ impl Tape {
             "eval_main requires a work buffer prepared by eval_prolog"
         );
         self.run_range(inputs, work, self.prolog_ops, self.ops.len(), &mut NoTrace);
-        out.clear();
-        let w = &work[..self.n_work];
-        out.extend(self.outputs.iter().map(|&o| w[o as usize]));
+        self.collect(inputs, work, out);
     }
 
     /// Execute ops `lo..hi` over a fully-sized work buffer, feeding each
@@ -351,20 +368,16 @@ impl Tape {
         hi: usize,
         sink: &mut S,
     ) {
-        use crate::semantics::{dot_slice_t, reduce_slice_t};
-        // Two scratch regions at the tail of `work`, so nothing is allocated
-        // per call: the transient gather for variadic and bundle arguments,
-        // the persistent bundle-output region (written by a `BundleCall`,
-        // read by its `BundlePick`s later, possibly in a later main pass),
-        // and the batch argument block.
-        let (work, rest) = work.split_at_mut(self.n_work);
-        let (scratch, rest) = rest.split_at_mut(self.max_args);
-        let (bscratch, batch_scratch) = rest.split_at_mut(self.bundle_scratch_len);
+        use crate::semantics::{dot_slice_t, gemv_t, reduce_slice_t, solve_t};
+        // The gather scratch at the tail of `work`, so nothing is allocated
+        // per call.
+        let (work, scratch) = work.split_at_mut(self.n_work);
+        let pool = |start: u32, len: u32| &self.arg_pool[start as usize..(start + len) as usize];
         for i in lo..hi {
-            let g = |k: u32| work[k as usize];
+            let g = |k: u32| read(inputs, work, k);
+            let d = self.dst[i] as usize;
             let v = match self.ops[i] {
                 Op::Const(v) => T::from_f64(v),
-                Op::Input(k) => inputs.get(k as usize).copied().unwrap_or(T::nan()),
                 Op::Add(a, b) => g(a).add(g(b)),
                 Op::Mul(a, b) => g(a).mul(g(b)),
                 // The product and the sum round separately: a fused
@@ -386,130 +399,114 @@ impl Tape {
                     }
                 }
                 Op::Reduce(op, start, len) => {
-                    for k in 0..len {
-                        scratch[k as usize] = g(self.arg_pool[(start + k) as usize]);
+                    for (j, &k) in pool(start, len).iter().enumerate() {
+                        scratch[j] = g(k);
                     }
                     reduce_slice_t(op, &scratch[..len as usize])
                 }
                 Op::Dot(start, len) => {
-                    for k in 0..2 * len {
-                        scratch[k as usize] = g(self.arg_pool[(start + k) as usize]);
+                    for (j, &k) in pool(start, 2 * len).iter().enumerate() {
+                        scratch[j] = g(k);
                     }
                     dot_slice_t(
                         &scratch[..len as usize],
                         &scratch[len as usize..2 * len as usize],
                     )
                 }
-                Op::BundleCall(bidx, start, len, base) => {
-                    for k in 0..len {
-                        scratch[k as usize] = g(self.arg_pool[(start + k) as usize]);
+                Op::Call {
+                    bundle,
+                    start,
+                    n_args,
+                    n_out,
+                } => {
+                    for (j, &k) in pool(start, n_args).iter().enumerate() {
+                        scratch[j] = g(k);
                     }
-                    let b = &*self.bundles[bidx as usize];
-                    let n = b.n_outputs();
+                    let b = &*self.bundles[bundle as usize];
                     T::call_bundle(
                         b,
-                        &scratch[..len as usize],
-                        &mut bscratch[base as usize..base as usize + n],
+                        &scratch[..n_args as usize],
+                        &mut work[d..d + n_out as usize],
                     );
-                    T::zero() // written to the never-read sink slot
+                    continue;
                 }
-                Op::BundleBatch(bidx, tidx) => {
-                    let t = self.batches[tidx as usize];
-                    let flat = (t.n_groups * t.n_args) as usize;
-                    for k in 0..flat {
-                        batch_scratch[k] = g(self.arg_pool[(t.start as usize) + k]);
+                Op::CallBatch {
+                    bundle,
+                    start,
+                    n_groups,
+                    n_args,
+                    n_out,
+                } => {
+                    let flat = (n_groups * n_args) as usize;
+                    for (j, &k) in pool(start, n_groups * n_args).iter().enumerate() {
+                        scratch[j] = g(k);
                     }
-                    let b = &*self.bundles[bidx as usize];
-                    let w = (t.n_groups * t.n_out) as usize;
+                    let b = &*self.bundles[bundle as usize];
                     T::call_bundle_batch(
                         b,
-                        &batch_scratch[..flat],
-                        t.n_groups as usize,
-                        t.n_args as usize,
-                        &mut bscratch[t.base0 as usize..t.base0 as usize + w],
+                        &scratch[..flat],
+                        n_groups as usize,
+                        n_args as usize,
+                        &mut work[d..d + (n_groups * n_out) as usize],
                     );
-                    T::zero() // sink
+                    continue;
                 }
-                Op::BundlePick(idx) => bscratch[idx as usize],
-                Op::Gemv(t) => {
-                    let tb = self.gemvs[t as usize];
-                    let (m, n) = (tb.m as usize, tb.n as usize);
-                    // A dense operand in the inputs is read in place when the
-                    // inputs reach; otherwise, and for slots, it is gathered.
-                    let mut at = 0usize;
-                    let mut place =
-                        |src: Src, len: usize, scratch: &mut [T]| -> std::ops::Range<usize> {
-                            let r = at..at + len;
-                            match src {
-                                Src::Inputs(k) if inputs.len() >= k as usize + len => {
-                                    return usize::MAX..k as usize
-                                }
-                                Src::Inputs(k) => {
-                                    for j in 0..len {
-                                        scratch[at + j] =
-                                            inputs.get(k as usize + j).copied().unwrap_or(T::nan());
-                                    }
-                                }
-                                Src::Slots(start) => {
-                                    for j in 0..len {
-                                        scratch[at + j] =
-                                            work[self.arg_pool[start as usize + j] as usize];
-                                    }
-                                }
-                            }
-                            at += len;
-                            r
-                        };
-                    let ra = place(tb.a, m * n, scratch);
-                    let rx = place(tb.x, n, scratch);
-                    let a: &[T] = if ra.start == usize::MAX {
-                        &inputs[ra.end..ra.end + m * n]
-                    } else {
-                        &scratch[ra]
+                Op::Gemv { a, x, m, n } => {
+                    let (m, n) = (m as usize, n as usize);
+                    let (ra, rx) =
+                        dense_operands(inputs, work, scratch, &self.arg_pool, a, m * n, x, n);
+                    let av: &[T] = match ra {
+                        Dense::Inputs(k) => &inputs[k..k + m * n],
+                        Dense::Scratch(s) => &scratch[s..s + m * n],
                     };
-                    let x: &[T] = if rx.start == usize::MAX {
-                        &inputs[rx.end..rx.end + n]
-                    } else {
-                        &scratch[rx]
+                    let xv: &[T] = match rx {
+                        Dense::Inputs(k) => &inputs[k..k + n],
+                        Dense::Scratch(s) => &scratch[s..s + n],
                     };
-                    crate::semantics::gemv_t(
-                        a,
-                        x,
-                        m,
-                        n,
-                        &mut bscratch[tb.base as usize..tb.base as usize + m],
-                    );
-                    T::zero() // sink
+                    gemv_t(av, xv, m, n, &mut work[d..d + m]);
+                    continue;
+                }
+                Op::Solve { a, b, n } => {
+                    let n = n as usize;
+                    let (ra, rb) =
+                        dense_operands(inputs, work, scratch, &self.arg_pool, a, n * n, b, n);
+                    let av: &[T] = match ra {
+                        Dense::Inputs(k) => &inputs[k..k + n * n],
+                        Dense::Scratch(s) => &scratch[s..s + n * n],
+                    };
+                    let bv: &[T] = match rb {
+                        Dense::Inputs(k) => &inputs[k..k + n],
+                        Dense::Scratch(s) => &scratch[s..s + n],
+                    };
+                    solve_t(av, bv, n, &mut work[d..d + n]);
+                    continue;
                 }
             };
-            work[self.dst[i] as usize] = v;
+            work[d] = v;
         }
     }
 
+    /// Number of work slots (`n_slots` under another name, for backends).
     pub fn n_work(&self) -> usize {
         self.n_work
     }
 
-    /// The work slots holding the outputs, in root order.
+    /// Output operands, one per root: a slot, or an input when tagged.
     pub fn outputs(&self) -> &[u32] {
         &self.outputs
     }
 
-    /// Width of the persistent bundle-output scratch region a backend must hold.
-    pub fn bundle_scratch_len(&self) -> usize {
-        self.bundle_scratch_len
-    }
-
-    /// Drive `v` over the instruction stream in order (the lowering counterpart
-    /// of [`eval`](Self::eval)). The interpreter and any alternative backend thus
-    /// consume the exact same program, so their results agree.
+    /// Drive a backend over the instruction stream.
     pub fn lower(&self, v: &mut dyn TapeVisitor) {
+        let pool = |start: u32, len: u32| &self.arg_pool[start as usize..(start + len) as usize];
+        let operand = |src: Src, len: u32| match src {
+            Src::Inputs(k) => Operand::Inputs(k),
+            Src::Pool(start) => Operand::Slots(pool(start, len)),
+        };
         for i in 0..self.ops.len() {
             let dst = self.dst[i];
-            let ap = |s: u32, l: u32| &self.arg_pool[s as usize..(s + l) as usize];
             match self.ops[i] {
                 Op::Const(c) => v.constant(dst, c),
-                Op::Input(k) => v.input(dst, k),
                 Op::Add(a, b) => v.add(dst, a, b),
                 Op::Mul(a, b) => v.mul(dst, a, b),
                 Op::MulAdd(a, b, c) => v.mul_add(dst, a, b, c),
@@ -520,36 +517,35 @@ impl Tape {
                 Op::Binary(op, a, b) => v.binary(dst, op, a, b),
                 Op::Cmp(op, a, b) => v.cmp(dst, op, a, b),
                 Op::Select(c, t, e) => v.select(dst, c, t, e),
-                Op::Reduce(op, s, l) => v.reduce(dst, op, ap(s, l)),
-                Op::Dot(s, l) => v.dot(dst, ap(s, l), ap(s + l, l)),
-                Op::BundleCall(b, s, l, base) => {
-                    v.bundle_call(&self.bundles[b as usize], ap(s, l), base)
-                }
-                Op::BundleBatch(b, t) => {
-                    let tbl = self.batches[t as usize];
-                    v.bundle_batch(
-                        &self.bundles[b as usize],
-                        ap(tbl.start, tbl.n_groups * tbl.n_args),
-                        tbl.n_groups,
-                        tbl.n_args,
-                        tbl.base0,
-                    );
-                }
-                Op::BundlePick(idx) => v.bundle_pick(dst, idx),
-                Op::Gemv(t) => {
-                    let tb = self.gemvs[t as usize];
-                    let operand = |src: Src, len: u32| match src {
-                        Src::Inputs(k) => Operand::Inputs(k),
-                        Src::Slots(start) => Operand::Slots(ap(start, len)),
-                    };
-                    v.gemv(
-                        operand(tb.a, tb.m * tb.n),
-                        operand(tb.x, tb.n),
-                        tb.m,
-                        tb.n,
-                        tb.base,
-                    );
-                }
+                Op::Reduce(op, s, l) => v.reduce(dst, op, pool(s, l)),
+                Op::Dot(s, l) => v.dot(dst, pool(s, l), pool(s + l, l)),
+                Op::Call {
+                    bundle,
+                    start,
+                    n_args,
+                    n_out,
+                } => v.call(
+                    dst,
+                    &self.bundles[bundle as usize],
+                    pool(start, n_args),
+                    n_out,
+                ),
+                Op::CallBatch {
+                    bundle,
+                    start,
+                    n_groups,
+                    n_args,
+                    n_out,
+                } => v.call_batch(
+                    dst,
+                    &self.bundles[bundle as usize],
+                    pool(start, n_groups * n_args),
+                    n_groups,
+                    n_args,
+                    n_out,
+                ),
+                Op::Gemv { a, x, m, n } => v.gemv(dst, operand(a, m * n), operand(x, n), m, n),
+                Op::Solve { a, b, n } => v.solve(dst, operand(a, n * n), operand(b, n), n),
             }
         }
     }
@@ -559,4 +555,60 @@ impl Tape {
     pub fn n_ops(&self) -> usize {
         self.ops.len()
     }
+}
+
+/// The value of an operand: a slot, or an input when tagged (a missing
+/// input is `NaN`).
+#[inline]
+fn read<T: Scalar>(inputs: &[T], work: &[T], k: u32) -> T {
+    match input_index(k) {
+        Some(i) => inputs.get(i as usize).copied().unwrap_or(T::nan()),
+        None => work[k as usize],
+    }
+}
+
+/// A dense operand resolved for a kernel: in place in the inputs, or in
+/// the scratch from an element on.
+enum Dense {
+    Inputs(usize),
+    Scratch(usize),
+}
+
+/// Resolve a kernel's two dense operands: an input run that the inputs
+/// reach is read in place; anything else is gathered into the scratch,
+/// `a` first, then `b`.
+#[allow(clippy::too_many_arguments)]
+fn dense_operands<T: Scalar>(
+    inputs: &[T],
+    work: &[T],
+    scratch: &mut [T],
+    pool: &[u32],
+    a: Src,
+    len_a: usize,
+    b: Src,
+    len_b: usize,
+) -> (Dense, Dense) {
+    let mut at = 0usize;
+    let mut place = |src: Src, len: usize, scratch: &mut [T]| -> Dense {
+        match src {
+            Src::Inputs(k) if inputs.len() >= k as usize + len => Dense::Inputs(k as usize),
+            Src::Inputs(k) => {
+                for j in 0..len {
+                    scratch[at + j] = inputs.get(k as usize + j).copied().unwrap_or(T::nan());
+                }
+                at += len;
+                Dense::Scratch(at - len)
+            }
+            Src::Pool(start) => {
+                for j in 0..len {
+                    scratch[at + j] = read(inputs, work, pool[start as usize + j]);
+                }
+                at += len;
+                Dense::Scratch(at - len)
+            }
+        }
+    };
+    let ra = place(a, len_a, scratch);
+    let rb = place(b, len_b, scratch);
+    (ra, rb)
 }

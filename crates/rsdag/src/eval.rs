@@ -26,6 +26,7 @@ fn node_value<T: Scalar, K: Field>(
     mut get: impl FnMut(ExprId) -> T,
     sym: &mut impl FnMut(SymbolId) -> T,
     call: &mut impl FnMut(FuncId, u32, ArgList, &[T]) -> T,
+    solve: &mut impl FnMut(ArgList, &[T]) -> Vec<T>,
 ) -> T {
     match *node {
         Node::Const(c) => T::from_f64(ctx.const_val(c).to_f64()),
@@ -59,6 +60,10 @@ fn node_value<T: Scalar, K: Field>(
             let (f, out) = ctx.output(o);
             call(f, out, l, &vals)
         }
+        Node::Solve(l, i) => {
+            let vals: Vec<T> = ctx.args(l).iter().map(|&a| get(a)).collect();
+            solve(l, &vals)[i as usize]
+        }
     }
 }
 
@@ -85,6 +90,8 @@ pub fn eval<T: Scalar, K: Field>(
     }
     let mut w = vec![T::nan(); n];
     let mut fe = FuncEval::new();
+    // A dense system is solved once for all its components.
+    let mut solved: HashMap<ArgList, Vec<T>> = HashMap::new();
     for i in 0..n {
         if !reach[i] {
             continue;
@@ -93,7 +100,25 @@ pub fn eval<T: Scalar, K: Field>(
         let mut sym = |s: SymbolId| env.get(&s).copied().unwrap_or(T::nan());
         let mut call =
             |f: FuncId, out: u32, l: ArgList, args: &[T]| fe.output(ctx, f, out, l, args);
-        w[i] = node_value(ctx, &node, |e| w[e.0 as usize], &mut sym, &mut call);
+        let mut solve = |l: ArgList, vals: &[T]| -> Vec<T> {
+            solved
+                .entry(l)
+                .or_insert_with(|| {
+                    let n = Graph::<K>::solve_n(vals.len());
+                    let mut out = vec![T::zero(); n];
+                    crate::semantics::solve_t(&vals[..n * n], &vals[n * n..], n, &mut out);
+                    out
+                })
+                .clone()
+        };
+        w[i] = node_value(
+            ctx,
+            &node,
+            |e| w[e.0 as usize],
+            &mut sym,
+            &mut call,
+            &mut solve,
+        );
     }
     roots.iter().map(|&r| w[r.0 as usize]).collect()
 }

@@ -71,6 +71,13 @@ pub(crate) extern "C" fn h_bundle(
     b.call(xs, out);
 }
 
+pub(crate) extern "C" fn h_solve(a: *const f64, b: *const f64, n: usize, out: *mut f64) {
+    let a = unsafe { std::slice::from_raw_parts(a, n * n) };
+    let b = unsafe { std::slice::from_raw_parts(b, n) };
+    let out = unsafe { std::slice::from_raw_parts_mut(out, n) };
+    rsdag::semantics::solve(a, b, n, out);
+}
+
 pub(crate) extern "C" fn h_bundle_batch(
     bundles: *const Bundles,
     idx: usize,

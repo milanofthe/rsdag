@@ -281,35 +281,11 @@ impl Builder for Numeric {
         dot_slice(a, b)
     }
     fn solve(&mut self, a: &[Vec<f64>], b: &[f64]) -> Vec<f64> {
-        // Dense LU with partial pivoting: the numeric twin may pivot, the
-        // recorded one cannot, so the two agree to a rounding rather than
-        // to the bit, which is the tolerance an implicit step lives with.
         let n = b.len();
-        let mut m: Vec<Vec<f64>> = a.to_vec();
-        let mut r = b.to_vec();
-        for k in 0..n {
-            let p = (k..n)
-                .max_by(|&i, &j| m[i][k].abs().partial_cmp(&m[j][k].abs()).unwrap())
-                .unwrap();
-            m.swap(k, p);
-            r.swap(k, p);
-            for i in k + 1..n {
-                let l = m[i][k] / m[k][k];
-                for j in k..n {
-                    m[i][j] -= l * m[k][j];
-                }
-                r[i] -= l * r[k];
-            }
-        }
-        let mut x = vec![0.0; n];
-        for i in (0..n).rev() {
-            let mut s = r[i];
-            for j in i + 1..n {
-                s -= m[i][j] * x[j];
-            }
-            x[i] = s / m[i][i];
-        }
-        x
+        let flat: Vec<f64> = a.iter().flatten().copied().collect();
+        let mut out = vec![0.0; n];
+        crate::semantics::solve(&flat, b, n, &mut out);
+        out
     }
 }
 
@@ -354,8 +330,15 @@ impl<K: Field> Builder for Graph<K> {
         Graph::dot(self, a.to_vec(), b.to_vec())
     }
     fn solve(&mut self, a: &[Vec<ExprId>], b: &[ExprId]) -> Vec<ExprId> {
+        // A dense matrix is one pivoting kernel; a sparse one is the
+        // structural solve, its static LU as ops.
         use crate::symbolic::solve::{pattern_of, plan, solve_planned, sparse_rows};
         let rows = sparse_rows(self, a);
+        let n = b.len();
+        let nnz: usize = rows.iter().map(Vec::len).sum();
+        if nnz == n * n {
+            return Graph::solve_dense(self, a.iter().flatten().copied().collect(), b.to_vec());
+        }
         let plan = plan(&pattern_of(&rows)).expect("a structurally nonsingular system");
         solve_planned(self, &rows, &plan, b).0
     }

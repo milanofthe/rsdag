@@ -109,6 +109,10 @@ fn write_expr<K: Field>(ctx: &Graph<K>, id: ExprId, out: &mut String) {
             }
             out.push(')');
         }
+        Node::Solve(l, i) => {
+            let (n, _, _) = ctx.solve_args(*l);
+            out.push_str(&format!("solve{n}[{i}]"));
+        }
         Node::Dot(l) => {
             let (a, b) = ctx.dot_args(*l);
             out.push_str("dot(");

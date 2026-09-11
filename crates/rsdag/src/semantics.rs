@@ -301,3 +301,53 @@ pub fn gemv_t<T: Scalar>(a: &[T], x: &[T], m: usize, n: usize, out: &mut [T]) {
 pub fn gemv(a: &[f64], x: &[f64], m: usize, n: usize, out: &mut [f64]) {
     gemv_t(a, x, m, n, out)
 }
+
+/// A dense solve `A x = b` by LU with partial pivoting: `a` is `n` by `n`
+/// row-major, `b` of `n`, `out` receives `x`. The pivot is the largest
+/// magnitude in the column, chosen at run time inside the kernel, so this
+/// is the one solve that pivots. One routine for every scalar, so the
+/// numeric twin of a model and its recorded kernel agree to the bit.
+pub fn solve_t<T: Scalar>(a: &[T], b: &[T], n: usize, out: &mut [T]) {
+    let mut m: Vec<T> = a[..n * n].to_vec();
+    let mut r: Vec<T> = b[..n].to_vec();
+    for k in 0..n {
+        let mut p = k;
+        let mut best = m[k * n + k].magnitude();
+        for i in k + 1..n {
+            let v = m[i * n + k].magnitude();
+            if v > best {
+                best = v;
+                p = i;
+            }
+        }
+        if p != k {
+            for j in 0..n {
+                m.swap(k * n + j, p * n + j);
+            }
+            r.swap(k, p);
+        }
+        let piv = m[k * n + k];
+        for i in k + 1..n {
+            let l = m[i * n + k].div(piv);
+            for j in k..n {
+                let t = l.mul(m[k * n + j]);
+                m[i * n + j] = m[i * n + j].sub(t);
+            }
+            let t = l.mul(r[k]);
+            r[i] = r[i].sub(t);
+        }
+    }
+    for i in (0..n).rev() {
+        let mut s = r[i];
+        for j in i + 1..n {
+            let t = m[i * n + j].mul(out[j]);
+            s = s.sub(t);
+        }
+        out[i] = s.div(m[i * n + i]);
+    }
+}
+
+/// [`solve_t`] in `f64`.
+pub fn solve(a: &[f64], b: &[f64], n: usize, out: &mut [f64]) {
+    solve_t(a, b, n, out)
+}
