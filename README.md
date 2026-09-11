@@ -102,25 +102,20 @@ One core of an Apple M3, release profile. `docs/bench/plot.py` draws the
 figures from the CSVs in `docs/bench/data` (sources in
 `docs/bench/README.md`).
 
+Evaluation cost per op, interpreter and native, and native compile cost
+per op, over program size and op vocabulary:
+
 ![Evaluation and compile cost per op](docs/bench/ops.svg)
 
-Native: 0.5 ns per op on ring programs up to some ten thousand ops, 3 ns at
-800k ops (instruction fetch bound); 2 to 5 ns per op with elementary
-functions. Interpreter: 10 to 12 ns per op. Emission: about 100 ns per op
-on programs above ten thousand ops.
+Newton step of a circuit-like system, sparse solve as a program against a
+general sparse LU library (rslab, KLU path), and the program size per
+unknown, over the number of unknowns and the pattern family:
 
 ![Sparse solve against a sparse LU library](docs/bench/solve.svg)
 
-Newton step of a circuit-like system: 26 ops per unknown, 31 with pivot
-guards, linear to a million unknowns. Against a general sparse LU (rslab,
-KLU path): 15x to 150x faster on ring and band patterns; slower on 2D grids
-above about a thousand unknowns, where fill grows the program. The cost
-predictor gives the program size before it is built.
+The dense kernels' throughput over the matrix size:
 
 ![Dense kernels](docs/bench/dense.svg)
-
-Dense kernels: `Gemv` 1000 by 1000 in 0.09 ms, `Gemm` 1000 by 1000 at
-29 GF/s, dense `Solve` of 1000 unknowns in 40 ms.
 
 ## Rust
 
