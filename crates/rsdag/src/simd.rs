@@ -22,21 +22,7 @@ type Inner = [f64; 2];
 impl V2 {
     #[inline(always)]
     fn zero() -> V2 {
-        V2::splat(0.0)
-    }
-    #[inline(always)]
-    fn splat(v: f64) -> V2 {
-        unsafe { V2(std::arch::aarch64::vdupq_n_f64(v)) }
-    }
-    /// # Safety
-    /// `p` points at two writable `f64`.
-    #[inline(always)]
-    unsafe fn store(self, p: *mut f64) {
-        std::arch::aarch64::vst1q_f64(p, self.0)
-    }
-    #[inline(always)]
-    fn sub(self, o: V2) -> V2 {
-        unsafe { V2(std::arch::aarch64::vsubq_f64(self.0, o.0)) }
+        unsafe { V2(std::arch::aarch64::vdupq_n_f64(0.0)) }
     }
     /// # Safety
     /// `p` points at two readable `f64`.
@@ -69,20 +55,6 @@ impl V2 {
     fn zero() -> V2 {
         unsafe { V2(std::arch::x86_64::_mm_setzero_pd()) }
     }
-    #[inline(always)]
-    fn splat(v: f64) -> V2 {
-        unsafe { V2(std::arch::x86_64::_mm_set1_pd(v)) }
-    }
-    /// # Safety
-    /// `p` points at two writable `f64`.
-    #[inline(always)]
-    unsafe fn store(self, p: *mut f64) {
-        std::arch::x86_64::_mm_storeu_pd(p, self.0)
-    }
-    #[inline(always)]
-    fn sub(self, o: V2) -> V2 {
-        unsafe { V2(std::arch::x86_64::_mm_sub_pd(self.0, o.0)) }
-    }
     /// # Safety
     /// `p` points at two readable `f64`.
     #[inline(always)]
@@ -110,21 +82,6 @@ impl V2 {
     #[inline(always)]
     fn zero() -> V2 {
         V2([0.0; 2])
-    }
-    #[inline(always)]
-    fn splat(v: f64) -> V2 {
-        V2([v; 2])
-    }
-    /// # Safety
-    /// `p` points at two writable `f64`.
-    #[inline(always)]
-    unsafe fn store(self, p: *mut f64) {
-        *p = self.0[0];
-        *p.add(1) = self.0[1];
-    }
-    #[inline(always)]
-    fn sub(self, o: V2) -> V2 {
-        V2([self.0[0] - o.0[0], self.0[1] - o.0[1]])
     }
     /// # Safety
     /// `p` points at two readable `f64`.
@@ -276,66 +233,5 @@ pub(crate) fn gemm(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, out: &mut
         for j in 0..n {
             out[r * n + j] = dot(&a[r * k..][..k], &b[j * k..][..k]);
         }
-    }
-}
-
-/// [`crate::semantics::solve_t`] in `f64`: the same elimination, pivot
-/// search and substitution, with each row update `row_i -= l * row_k`
-/// two lanes at a time. Every element is one product and one difference,
-/// each rounded once, in either form, so the twins agree to the bit.
-pub(crate) fn solve(a: &[f64], b: &[f64], n: usize, out: &mut [f64]) {
-    assert!(a.len() >= n * n && b.len() >= n && out.len() >= n);
-    let mut m: Vec<f64> = a[..n * n].to_vec();
-    let mut r: Vec<f64> = b[..n].to_vec();
-    for k in 0..n {
-        let mut p = k;
-        let mut best = m[k * n + k].abs();
-        for i in k + 1..n {
-            let v = m[i * n + k].abs();
-            if v > best {
-                best = v;
-                p = i;
-            }
-        }
-        if p != k {
-            for j in 0..n {
-                m.swap(k * n + j, p * n + j);
-            }
-            r.swap(k, p);
-        }
-        let piv = m[k * n + k];
-        let (top, rest) = m.split_at_mut((k + 1) * n);
-        let row_k = &top[k * n + k..(k + 1) * n];
-        let width = row_k.len();
-        let ch = width / 2;
-        for (i, row_i) in rest.chunks_exact_mut(n).enumerate() {
-            let i = k + 1 + i;
-            let l = row_i[k] / piv;
-            let lv = V2::splat(l);
-            let row_i = &mut row_i[k..];
-            let (pk, pi) = (row_k.as_ptr(), row_i.as_mut_ptr());
-            for c in 0..ch {
-                let o = 2 * c;
-                // SAFETY: both rows have `width` elements from column `k`
-                // and `o + 1 < width`.
-                unsafe {
-                    let v = V2::load(pi.add(o)).sub(lv.mul(V2::load(pk.add(o))));
-                    v.store(pi.add(o));
-                }
-            }
-            for j in ch * 2..width {
-                row_i[j] -= l * row_k[j];
-            }
-            let t = l * r[k];
-            r[i] -= t;
-        }
-    }
-    for i in (0..n).rev() {
-        let mut s = r[i];
-        for j in i + 1..n {
-            let t = m[i * n + j] * out[j];
-            s -= t;
-        }
-        out[i] = s / m[i * n + i];
     }
 }

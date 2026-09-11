@@ -58,11 +58,6 @@ pub trait Scalar: Copy + Send + Sync + std::fmt::Debug + 'static {
     fn gemm(a: &[Self], b: &[Self], m: usize, k: usize, n: usize, out: &mut [Self]) {
         crate::semantics::gemm_t(a, b, m, k, n, out)
     }
-    /// The dense solve with partial pivoting
-    /// ([`crate::semantics::solve_t`]); `f64` runs its vector twin.
-    fn solve(a: &[Self], b: &[Self], n: usize, out: &mut [Self]) {
-        crate::semantics::solve_t(a, b, n, out)
-    }
     /// Call a bundle on arguments in `Self`, its outputs back in `Self`.
     /// The default converts through `f64` buffers; `f64` calls directly.
     fn call_bundle(b: &dyn crate::extern_fn::ExternBundle, args: &[Self], out: &mut [Self]) {
@@ -102,9 +97,6 @@ impl Scalar for f64 {
     }
     fn gemm(a: &[Self], b: &[Self], m: usize, k: usize, n: usize, out: &mut [Self]) {
         crate::simd::gemm(a, b, m, k, n, out)
-    }
-    fn solve(a: &[Self], b: &[Self], n: usize, out: &mut [Self]) {
-        crate::simd::solve(a, b, n, out)
     }
     fn magnitude(self) -> f64 {
         self.abs()

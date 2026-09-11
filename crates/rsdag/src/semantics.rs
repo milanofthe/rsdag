@@ -360,52 +360,123 @@ pub fn gemv(a: &[f64], x: &[f64], m: usize, n: usize, out: &mut [f64]) {
     <f64 as Scalar>::gemv(a, x, m, n, out)
 }
 
-/// A dense solve `A x = b` by LU with partial pivoting: `a` is `n` by `n`
-/// row-major, `b` of `n`, `out` receives `x`. The pivot is the largest
-/// magnitude in the column, chosen at run time inside the kernel, so this
-/// is the one solve that pivots. One routine for every scalar, so the
-/// numeric twin of a model and its recorded kernel agree to the bit.
+/// The column-panel widths of the blocked elimination in [`solve_t`]: the
+/// panel's own updates run one element at a time, the trailing update as
+/// a product, and the balance moves with the size (measured: 16 wins
+/// below about five hundred unknowns, 32 above). A width is a constant of
+/// its instantiation so the panel loops unroll.
+pub const LU_PANEL_SMALL: usize = 16;
+/// See [`LU_PANEL_SMALL`].
+pub const LU_PANEL_LARGE: usize = 32;
+/// Systems of fewer unknowns than this use [`LU_PANEL_SMALL`].
+pub const LU_PANEL_SWITCH: usize = 512;
+
 pub fn solve_t<T: Scalar>(a: &[T], b: &[T], n: usize, out: &mut [T]) {
-    let mut m: Vec<T> = a[..n * n].to_vec();
-    let mut r: Vec<T> = b[..n].to_vec();
-    for k in 0..n {
-        let mut p = k;
-        let mut best = m[k * n + k].magnitude();
-        for i in k + 1..n {
-            let v = m[i * n + k].magnitude();
-            if v > best {
-                best = v;
-                p = i;
+    if n < LU_PANEL_SWITCH {
+        solve_blocked::<T, LU_PANEL_SMALL>(a, b, n, out)
+    } else {
+        solve_blocked::<T, LU_PANEL_LARGE>(a, b, n, out)
+    }
+}
+
+/// [`solve_t`] with column panels of `NB`.
+fn solve_blocked<T: Scalar, const NB: usize>(a: &[T], b: &[T], n: usize, out: &mut [T]) {
+    let w = n + 1;
+    let mut m: Vec<T> = Vec::with_capacity(n * w);
+    for i in 0..n {
+        m.extend_from_slice(&a[i * n..(i + 1) * n]);
+        m.push(b[i]);
+    }
+    let mut k0 = 0;
+    while k0 < n {
+        let k1 = (k0 + NB).min(n);
+        // The panel's columns, right-looking within the panel.
+        for k in k0..k1 {
+            let mut p = k;
+            let mut best = m[k * w + k].magnitude();
+            for i in k + 1..n {
+                let v = m[i * w + k].magnitude();
+                if v > best {
+                    best = v;
+                    p = i;
+                }
+            }
+            if p != k {
+                for j in 0..w {
+                    m.swap(k * w + j, p * w + j);
+                }
+            }
+            let piv = m[k * w + k];
+            for i in k + 1..n {
+                let l = m[i * w + k].div(piv);
+                m[i * w + k] = l;
+                for j in k + 1..k1 {
+                    let t = l.mul(m[k * w + j]);
+                    m[i * w + j] = m[i * w + j].sub(t);
+                }
             }
         }
-        if p != k {
-            for j in 0..n {
-                m.swap(k * n + j, p * n + j);
+        // The panel's unit lower triangle applied to the columns right of
+        // the panel, for the panel's own rows.
+        for k in k0..k1 {
+            for i in k + 1..k1 {
+                let l = m[i * w + k];
+                for j in k1..w {
+                    let t = l.mul(m[k * w + j]);
+                    m[i * w + j] = m[i * w + j].sub(t);
+                }
             }
-            r.swap(k, p);
         }
-        let piv = m[k * n + k];
-        for i in k + 1..n {
-            let l = m[i * n + k].div(piv);
-            for j in k..n {
-                let t = l.mul(m[k * n + j]);
-                m[i * n + j] = m[i * n + j].sub(t);
+        // The trailing block: each entry minus the dot of its row's
+        // multipliers with its column's panel rows.
+        if k1 < n {
+            let nb = k1 - k0;
+            let cols = w - k1;
+            let mut ut: Vec<T> = vec![T::zero(); cols * nb];
+            for (jj, j) in (k1..w).enumerate() {
+                for (kk, k) in (k0..k1).enumerate() {
+                    ut[jj * nb + kk] = m[k * w + j];
+                }
             }
-            let t = l.mul(r[k]);
-            r[i] = r[i].sub(t);
+            let mut lrows: Vec<T> = vec![T::zero(); 4 * nb];
+            let mut prod: Vec<T> = vec![T::zero(); 4 * cols];
+            let mut i = k1;
+            while i < n {
+                let rows = (n - i).min(4);
+                for r in 0..rows {
+                    let at = (i + r) * w;
+                    lrows[r * nb..(r + 1) * nb].copy_from_slice(&m[at + k0..at + k1]);
+                }
+                T::gemm(
+                    &lrows[..rows * nb],
+                    &ut,
+                    rows,
+                    nb,
+                    cols,
+                    &mut prod[..rows * cols],
+                );
+                for r in 0..rows {
+                    let at = (i + r) * w + k1;
+                    for jj in 0..cols {
+                        m[at + jj] = m[at + jj].sub(prod[r * cols + jj]);
+                    }
+                }
+                i += rows;
+            }
         }
+        k0 = k1;
     }
     for i in (0..n).rev() {
-        let mut s = r[i];
+        let mut s = m[i * w + n];
         for j in i + 1..n {
-            let t = m[i * n + j].mul(out[j]);
+            let t = m[i * w + j].mul(out[j]);
             s = s.sub(t);
         }
-        out[i] = s.div(m[i * n + i]);
+        out[i] = s.div(m[i * w + i]);
     }
 }
 
 /// [`solve_t`] in `f64`.
 pub fn solve(a: &[f64], b: &[f64], n: usize, out: &mut [f64]) {
-    <f64 as Scalar>::solve(a, b, n, out)
+    solve_t(a, b, n, out)
 }

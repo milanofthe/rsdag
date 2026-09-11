@@ -2,7 +2,7 @@
 //! generic reference on every shape: chunked, with tails, with remainder
 //! rows and columns, on values whose rounding differs between folds.
 
-use rsdag::semantics::{dot_slice, dot_slice_t, gemm, gemm_t, gemv, gemv_t, solve, solve_t};
+use rsdag::semantics::{dot_slice, dot_slice_t, gemm, gemm_t, gemv, gemv_t};
 use rsdag::synth::Spec;
 
 fn values(rng: &mut rsdag::synth::Rng, len: usize) -> Vec<f64> {
@@ -62,18 +62,5 @@ fn gemm_matches_the_reference_on_every_shape() {
         gemm(&a, &b, m, k, n, &mut c1);
         gemm_t(&a, &b, m, k, n, &mut c2);
         assert!(same(&c1, &c2), "m {m} k {k} n {n}");
-    }
-}
-
-#[test]
-fn solve_matches_the_reference_on_every_size() {
-    let mut rng = Spec::new(6).rng();
-    for n in (0..25).chain([37, 64, 101]) {
-        let a = values(&mut rng, n * n);
-        let b = values(&mut rng, n);
-        let (mut x1, mut x2) = (vec![0.0; n], vec![0.0; n]);
-        solve(&a, &b, n, &mut x1);
-        solve_t(&a, &b, n, &mut x2);
-        assert!(same(&x1, &x2), "n {n}");
     }
 }
