@@ -354,12 +354,15 @@ impl Forest {
         }
         // Group keys, by first encounter: (kind, key, depth) -> members.
         #[derive(PartialEq, Eq, Hash, Clone)]
+        // Every key carries the members' purity: a kernel of pure and impure
+        // members would be impure as a whole and pull the pure work out of
+        // the prolog.
         enum GroupKey {
-            Call(u32, u32),
-            Gemv(Vec<ExprId>, u32),
+            Call(u32, u32, bool),
+            Gemv(Vec<ExprId>, u32, bool),
             /// The rows (sorted) against every vector: a matrix product.
             Gemm(Vec<Vec<ExprId>>, Vec<Vec<ExprId>>),
-            Solve(crate::node::ArgList),
+            Solve(crate::node::ArgList, bool),
             /// One matrix against several right-hand sides (their lists, in
             /// first-encounter order).
             SolveMany(Vec<ExprId>, Vec<crate::node::ArgList>),
@@ -371,9 +374,9 @@ impl Forest {
                 continue;
             }
             let key = match *ctx.node(id) {
-                Node::Call(o, _) => GroupKey::Call(ctx.output(o).0 .0, depth[i]),
-                Node::Dot(l) => GroupKey::Gemv(ctx.dot_args(l).1.to_vec(), depth[i]),
-                Node::Solve(l, _) => GroupKey::Solve(l),
+                Node::Call(o, _) => GroupKey::Call(ctx.output(o).0 .0, depth[i], self.pure[i]),
+                Node::Dot(l) => GroupKey::Gemv(ctx.dot_args(l).1.to_vec(), depth[i], self.pure[i]),
+                Node::Solve(l, _) => GroupKey::Solve(l, self.pure[i]),
                 _ => unreachable!("members are calls, rows or components"),
             };
             let g = *group_index.entry(key.clone()).or_insert_with(|| {
@@ -403,9 +406,9 @@ impl Forest {
             ctx.dot_args(l).0.hash(&mut h);
             h.finish()
         };
-        let mut by_rows: HashMap<(Vec<u64>, u32), Vec<usize>> = HashMap::default();
+        let mut by_rows: HashMap<(Vec<u64>, u32, bool), Vec<usize>> = HashMap::default();
         for (g, (key, members)) in groups.iter().enumerate() {
-            if let GroupKey::Gemv(_, d) = key {
+            if let GroupKey::Gemv(_, d, pure) = key {
                 if members.len() < GEMV_MIN_ROWS {
                     continue;
                 }
@@ -414,7 +417,7 @@ impl Forest {
                 if hashes.windows(2).any(|w| w[0] == w[1]) {
                     continue;
                 }
-                by_rows.entry((hashes, *d)).or_default().push(g);
+                by_rows.entry((hashes, *d, *pure)).or_default().push(g);
             }
         }
         let mut merged: Vec<Vec<usize>> =
@@ -436,7 +439,7 @@ impl Forest {
             let xs: Vec<Vec<ExprId>> = gs
                 .iter()
                 .map(|&g| match &groups[g].0 {
-                    GroupKey::Gemv(x, _) => x.clone(),
+                    GroupKey::Gemv(x, ..) => x.clone(),
                     _ => unreachable!(),
                 })
                 .collect();
@@ -454,13 +457,13 @@ impl Forest {
         // right-hand side depends on another group's solution (a
         // derivative's solve reads the primal solution over the same
         // matrix). A merged-away group is left empty.
-        let mut by_matrix: HashMap<(Vec<ExprId>, u32), Vec<usize>> = HashMap::default();
+        let mut by_matrix: HashMap<(Vec<ExprId>, u32, bool), Vec<usize>> = HashMap::default();
         for (g, (key, members)) in groups.iter().enumerate() {
-            if let GroupKey::Solve(l) = key {
+            if let GroupKey::Solve(l, pure) = key {
                 let all = ctx.args(*l);
                 let n = Graph::<K>::solve_n(all.len());
                 by_matrix
-                    .entry((all[..n * n].to_vec(), depth[members[0]]))
+                    .entry((all[..n * n].to_vec(), depth[members[0]], *pure))
                     .or_default()
                     .push(g);
             }
@@ -468,14 +471,14 @@ impl Forest {
         let mut merged_solves: Vec<(Vec<usize>, Vec<ExprId>)> = by_matrix
             .into_iter()
             .filter(|(_, gs)| gs.len() >= 2)
-            .map(|((a, _), gs)| (gs, a))
+            .map(|((a, _, _), gs)| (gs, a))
             .collect();
         merged_solves.sort();
         for (gs, a) in merged_solves {
             let lists: Vec<crate::node::ArgList> = gs
                 .iter()
                 .map(|&g| match &groups[g].0 {
-                    GroupKey::Solve(l) => *l,
+                    GroupKey::Solve(l, _) => *l,
                     _ => unreachable!(),
                 })
                 .collect();
@@ -504,7 +507,7 @@ impl Forest {
                     }
                     distinct.len() >= 2
                 }
-                GroupKey::Solve(_) => true,
+                GroupKey::Solve(..) => true,
                 GroupKey::SolveMany(..) => true,
             };
             if is_kernel {
@@ -658,7 +661,7 @@ impl Forest {
                 lowered_group[g] = true;
                 let (key, members) = &groups[g];
                 match key {
-                    GroupKey::Call(f, _) => {
+                    GroupKey::Call(f, ..) => {
                         let (bundle, n_out) = {
                             let body = bodies
                                 .entry(*f)
@@ -723,7 +726,7 @@ impl Forest {
                             });
                         }
                     }
-                    GroupKey::Gemv(x, _) => {
+                    GroupKey::Gemv(x, ..) => {
                         let mut ins: Vec<Ref> = Vec::new();
                         for &mi in members {
                             let Node::Dot(l) = *ctx.node(base[mi]) else {
@@ -815,7 +818,7 @@ impl Forest {
                             value[mi] = Some(Ref::Value(inst, col_of[&l] * n + c));
                         }
                     }
-                    GroupKey::Solve(l) => {
+                    GroupKey::Solve(l, _) => {
                         let all = ctx.args(*l);
                         let n = Graph::<K>::solve_n(all.len()) as u32;
                         let ins: Vec<Ref> = all.iter().map(|&a| val(a, &value)).collect();
