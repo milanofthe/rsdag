@@ -32,6 +32,13 @@ use crate::node::{ExprId, Node, SymbolId};
 /// Row dots against one vector fuse into a `Gemv` from this many rows on.
 const GEMV_MIN_ROWS: usize = 8;
 
+/// Append operands to the pool; their range.
+fn pooled(pool: &mut Vec<Ref>, ins: Vec<Ref>) -> (u32, u32) {
+    let start = pool.len() as u32;
+    pool.extend(ins);
+    (start, pool.len() as u32 - start)
+}
+
 impl Tape {
     /// Compile a tape computing `roots`, where `inputs[k]` (passed to
     /// [`eval`](Self::eval)) is the value of symbol `input_syms[k]`. Symbols not
@@ -96,7 +103,10 @@ struct Forest {
 /// the `k`th output of instruction `inst`.
 pub struct Inst {
     pub kind: Kind,
-    pub ins: Vec<Ref>,
+    /// The operands: `pool[start .. start + len]` of the program's pool,
+    /// one flat vector for every instruction, so a million instructions
+    /// are one allocation and not a million.
+    pub ins: (u32, u32),
     pub n_out: u32,
     /// Parameter-pure: schedulable into the prolog.
     pub pure: bool,
@@ -149,8 +159,17 @@ pub enum Kind {
 /// table, and which value each root is.
 struct Program {
     insts: Vec<Inst>,
+    /// The operand pool of every instruction (see [`Inst::ins`]).
+    pool: Vec<Ref>,
     bundles: Vec<Arc<dyn ExternBundle>>,
     roots: Vec<Ref>,
+}
+
+impl Program {
+    fn ins(&self, i: usize) -> &[Ref] {
+        let (s, l) = self.insts[i].ins;
+        &self.pool[s as usize..(s + l) as usize]
+    }
 }
 
 impl Forest {
@@ -253,6 +272,7 @@ impl Forest {
         let base = &self.base;
         let m = base.len();
         let mut insts: Vec<Inst> = Vec::with_capacity(m);
+        let mut pool: Vec<Ref> = Vec::with_capacity(2 * m);
         let mut bundles: Vec<Arc<dyn ExternBundle>> = Vec::new();
         let mut bundle_idx: HashMap<usize, u32> = HashMap::default();
         let mut bodies: HashMap<u32, Body> = HashMap::default();
@@ -459,7 +479,7 @@ impl Forest {
                     Ref::Input(u32::MAX) => {
                         insts.push(Inst {
                             kind: Kind::Const(f64::NAN),
-                            ins: Vec::new(),
+                            ins: (pool.len() as u32, 0),
                             n_out: 1,
                             pure: true,
                         });
@@ -472,7 +492,7 @@ impl Forest {
             if let Node::Const(c) = node {
                 insts.push(Inst {
                     kind: Kind::Const(ctx.const_val(c).to_f64()),
-                    ins: Vec::new(),
+                    ins: (pool.len() as u32, 0),
                     n_out: 1,
                     pure: true,
                 });
@@ -530,7 +550,7 @@ impl Forest {
                                 n_groups,
                                 n_args,
                             },
-                            ins,
+                            ins: pooled(&mut pool, ins),
                             n_out: n_groups * n_out,
                             pure,
                         });
@@ -548,7 +568,7 @@ impl Forest {
                                     // does not carry.
                                     insts.push(Inst {
                                         kind: Kind::Const(0.0),
-                                        ins: Vec::new(),
+                                        ins: (pool.len() as u32, 0),
                                         n_out: 1,
                                         pure: true,
                                     });
@@ -573,7 +593,7 @@ impl Forest {
                                 m: members.len() as u32,
                                 n: x.len() as u32,
                             },
-                            ins,
+                            ins: pooled(&mut pool, ins),
                             n_out: members.len() as u32,
                             pure,
                         });
@@ -589,7 +609,7 @@ impl Forest {
                         let inst = insts.len() as u32;
                         insts.push(Inst {
                             kind: Kind::Solve { n },
-                            ins,
+                            ins: pooled(&mut pool, ins),
                             n_out: n,
                             pure,
                         });
@@ -663,7 +683,7 @@ impl Forest {
                     let ins: Vec<Ref> = args.iter().map(|&a| val(a, &value)).collect();
                     insts.push(Inst {
                         kind: Kind::Call { bundle },
-                        ins,
+                        ins: pooled(&mut pool, ins),
                         n_out,
                         pure: self.pure[i],
                     });
@@ -679,7 +699,7 @@ impl Forest {
                             None => {
                                 insts.push(Inst {
                                     kind: Kind::Const(0.0),
-                                    ins: Vec::new(),
+                                    ins: (pool.len() as u32, 0),
                                     n_out: 1,
                                     pure: true,
                                 });
@@ -694,7 +714,7 @@ impl Forest {
             };
             insts.push(Inst {
                 kind,
-                ins,
+                ins: pooled(&mut pool, ins),
                 n_out: 1,
                 pure: self.pure[i],
             });
@@ -706,6 +726,7 @@ impl Forest {
             .collect();
         Program {
             insts,
+            pool,
             bundles,
             roots,
         }
@@ -731,9 +752,10 @@ impl Program {
         let deps: Vec<Vec<u32>> = self
             .insts
             .iter()
-            .map(|inst| {
-                let mut d: Vec<u32> = inst
-                    .ins
+            .enumerate()
+            .map(|(i, _)| {
+                let mut d: Vec<u32> = self
+                    .ins(i)
                     .iter()
                     .filter_map(|r| match *r {
                         Ref::Value(j, _) => Some(j),
@@ -860,7 +882,7 @@ impl Program {
         let mut last = vec![0usize; m];
         let mut pinned = vec![false; m];
         for (k, &i) in order.iter().enumerate() {
-            for r in &self.insts[i as usize].ins {
+            for r in self.ins(i as usize) {
                 if let Ref::Value(j, _) = *r {
                     last[j as usize] = last[j as usize].max(k);
                 }
@@ -900,9 +922,9 @@ impl Program {
         for (k, &i) in order.iter().enumerate() {
             let inst = &self.insts[i as usize];
             // The operands, before any slot of this step is freed.
-            let operands: Vec<u32> = inst.ins.iter().map(|&r| slot_of(r, &base)).collect();
-            let mut dying: Vec<u32> = inst
-                .ins
+            let ins = self.ins(i as usize);
+            let operands: Vec<u32> = ins.iter().map(|&r| slot_of(r, &base)).collect();
+            let mut dying: Vec<u32> = ins
                 .iter()
                 .filter_map(|r| match *r {
                     Ref::Value(j, _) if last[j as usize] == k && !pinned[j as usize] => Some(j),

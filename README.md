@@ -60,6 +60,9 @@ def lorenz(x, t):
 
 f = jit(lorenz, native=True)              # traces on first call, then native
 y = f(np.array([1.0, 2.0, 3.0]), 0.0)
+
+from rsdag import matmul, solve, dot, sum # arrays lower as kernels:
+g = jit(lambda A, x: solve(A, matmul(A, x)))   # one Gemv, one dense Solve
 J = jacobian(lorenz)(np.array([1.0, 2.0, 3.0]), 0.0)   # (3, 3), symbolic
 ```
 
@@ -88,7 +91,12 @@ prices a shape no consumer produces.
 On an M3 a ring op costs about 0.5 ns natively and 10 ns interpreted; an
 elementary function adds a call into the same routine the interpreter
 uses. Emitting costs 30 to 60 ns per op on a large program, so a program
-compiles in about the time of a handful of evaluations.
+compiles in about the time of a handful of evaluations. A 1000-state
+`A x + B u` evaluates in 0.18 ms as one kernel; a Newton step over a
+million unknowns of a circuit-like system is 33 ops per unknown and runs
+in 150 ms; against a general sparse LU the graph solve measures 13x to
+395x on ring and band patterns and loses on 2D grids past a thousand
+unknowns, where fill turns the program into millions of ops.
 
 ## Build
 

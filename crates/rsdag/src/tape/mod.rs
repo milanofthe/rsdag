@@ -486,11 +486,6 @@ impl Tape {
         }
     }
 
-    /// Number of work slots (`n_slots` under another name, for backends).
-    pub fn n_work(&self) -> usize {
-        self.n_work
-    }
-
     /// Output operands, one per root: a slot, or an input when tagged.
     pub fn outputs(&self) -> &[u32] {
         &self.outputs

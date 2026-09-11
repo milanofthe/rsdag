@@ -208,7 +208,7 @@ impl NativeTape {
             }
         }
         let gather_len = rec.ops.iter().map(ROp::gather_len).max().unwrap_or(0);
-        let n_work = tape.n_work();
+        let n_work = tape.n_slots();
         // The last op reading each slot; outputs are read after the program.
         let mut last_use = vec![0u32; n_work.max(1)];
         for (i, op) in rec.ops.iter().enumerate() {

@@ -588,12 +588,76 @@ fn select(cond: &Bound<'_, PyAny>, a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -
     Ok(anchor.wrap(id))
 }
 
+/// The tracer among a list of operands, and the operands as expressions.
+fn traced_list(items: &Bound<'_, PyAny>) -> PyResult<(Tracer, Vec<ExprId>)> {
+    let items: Vec<Bound<'_, PyAny>> = items.iter()?.collect::<PyResult<_>>()?;
+    let anchor = items
+        .iter()
+        .find_map(|x| x.downcast::<Tracer>().ok().map(|t| t.borrow().clone()))
+        .ok_or_else(|| PyTypeError::new_err("a traced operand is needed"))?;
+    let ids = items
+        .iter()
+        .map(|x| anchor.operand(x))
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok((anchor, ids))
+}
+
+/// The inner product of two equal-length lists, one `Dot` node: rows of
+/// one vector fuse into a matrix-vector kernel in the compiled program.
+#[pyfunction]
+fn dot(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<Tracer> {
+    let both = a
+        .py()
+        .eval_bound("lambda a, b: list(a) + list(b)", None, None)?
+        .call1((a, b))?;
+    let (anchor, ids) = traced_list(&both)?;
+    let n = ids.len() / 2;
+    let (x, y) = ids.split_at(n);
+    let id = anchor.g.borrow_mut().dot(x.to_vec(), y.to_vec());
+    Ok(anchor.wrap(id))
+}
+
+/// A reduction (`"sum"`, `"product"`, `"min"`, `"max"`) over a list, one
+/// `Reduce` node in the reference fold order.
+#[pyfunction]
+fn reduce(op: &str, items: &Bound<'_, PyAny>) -> PyResult<Tracer> {
+    let rop = match op {
+        "sum" => rsdag::ReduceOp::Sum,
+        "product" => rsdag::ReduceOp::Product,
+        "min" => rsdag::ReduceOp::Min,
+        "max" => rsdag::ReduceOp::Max,
+        _ => return Err(PyValueError::new_err(format!("unknown reduction '{op}'"))),
+    };
+    let (anchor, ids) = traced_list(items)?;
+    let id = anchor.g.borrow_mut().reduce(rop, ids);
+    Ok(anchor.wrap(id))
+}
+
+/// The solution of the dense system `A x = b`, `a` the `n*n` entries
+/// row-major and `b` the `n` right-hand sides: one pivoting kernel in the
+/// compiled program, differentiable.
+#[pyfunction]
+fn solve(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<Vec<Tracer>> {
+    let both = a
+        .py()
+        .eval_bound("lambda a, b: list(a) + list(b)", None, None)?
+        .call1((a, b))?;
+    let (anchor, ids) = traced_list(&both)?;
+    let n = rsdag::Graph::<rsdag::F64>::solve_n(ids.len());
+    let (m, rhs) = ids.split_at(n * n);
+    let xs = anchor.g.borrow_mut().solve_dense(m.to_vec(), rhs.to_vec());
+    Ok(xs.into_iter().map(|id| anchor.wrap(id)).collect())
+}
+
 #[pymodule]
 fn _rsdag(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Scope>()?;
     m.add_class::<Tracer>()?;
     m.add_class::<Program>()?;
     m.add_function(wrap_pyfunction!(select, m)?)?;
+    m.add_function(wrap_pyfunction!(dot, m)?)?;
+    m.add_function(wrap_pyfunction!(reduce, m)?)?;
+    m.add_function(wrap_pyfunction!(solve, m)?)?;
     let _ = PyTuple::empty_bound(m.py());
     Ok(())
 }
