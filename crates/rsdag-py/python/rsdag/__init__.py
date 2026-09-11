@@ -11,14 +11,68 @@ operation and numpy ufunc records a node. Data-dependent Python control flow
 is not traceable; use `rsdag.where(cond, a, b)`.
 """
 
+import builtins
 import numpy as np
 
-from ._rsdag import Program, Scope, Tracer, select as _select
+from ._rsdag import Program, Scope, Tracer, select as _select, dot as _dot, reduce as _reduce, solve as _solve
 
 __all__ = [
     "Scope", "Tracer", "Program", "trace", "jit", "jacobian", "grad", "where", "clip",
     "gt", "ge", "lt", "le", "eq", "ne",
+    "dot", "matmul", "sum", "solve",
 ]
+
+
+def dot(a, b):
+    """Inner product of two vectors; traced, one `Dot` node (rows of one
+    vector fuse into a matrix-vector kernel)."""
+    if _is_traced(a) or _is_traced(b):
+        return _dot(list(np.ravel(np.asarray(a, dtype=object))), list(np.ravel(np.asarray(b, dtype=object))))
+    return np.dot(a, b)
+
+
+def matmul(a, b):
+    """`a @ b` over tracers: a matrix against a vector is one `Dot` per row
+    (a kernel once compiled), against a matrix one per entry."""
+    if not (_is_traced(a) or _is_traced(b)):
+        return np.matmul(a, b)
+    a = np.asarray(a, dtype=object)
+    b = np.asarray(b, dtype=object)
+    if a.ndim == 1 and b.ndim == 1:
+        return dot(a, b)
+    if a.ndim == 2 and b.ndim == 1:
+        out = np.empty(a.shape[0], dtype=object)
+        for i in range(a.shape[0]):
+            out[i] = dot(a[i], b)
+        return out
+    if a.ndim == 2 and b.ndim == 2:
+        out = np.empty((a.shape[0], b.shape[1]), dtype=object)
+        for i in range(a.shape[0]):
+            for j in range(b.shape[1]):
+                out[i, j] = dot(a[i], b[:, j])
+        return out
+    raise ValueError("matmul over tracers takes vectors and matrices")
+
+
+def sum(x):
+    """The sum of a vector, one `Reduce` node in the reference fold order."""
+    if _is_traced(x):
+        return _reduce("sum", list(np.ravel(np.asarray(x, dtype=object))))
+    return np.sum(x)
+
+
+def solve(a, b):
+    """The solution of the dense system `a x = b`, one pivoting kernel once
+    compiled, differentiable through the inverse."""
+    if not (_is_traced(a) or _is_traced(b)):
+        return np.linalg.solve(a, b)
+    a = np.asarray(a, dtype=object)
+    b = np.asarray(b, dtype=object)
+    n = b.shape[0]
+    if a.shape != (n, n):
+        raise ValueError("solve takes an n by n matrix and n right-hand sides")
+    xs = _solve(list(a.ravel()), list(b))
+    return np.asarray(xs, dtype=object)
 
 
 def where(cond, a, b):
@@ -101,7 +155,7 @@ class _Spec:
         return tuple(self.shapes)
 
     def n_inputs(self):
-        return sum(1 if s is None else int(np.prod(s)) for s in self.shapes)
+        return builtins.sum(1 if s is None else int(np.prod(s)) for s in self.shapes)
 
     def input_range(self, arg):
         """Flat input indices of argument `arg`."""
@@ -111,7 +165,7 @@ class _Spec:
         return list(range(start, start + n))
 
     def n_inputs_before(self, arg):
-        return sum(1 if s is None else int(np.prod(s)) for s in self.shapes[:arg])
+        return builtins.sum(1 if s is None else int(np.prod(s)) for s in self.shapes[:arg])
 
 
 def _make_inputs(scope, spec):

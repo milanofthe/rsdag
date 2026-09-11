@@ -134,3 +134,24 @@ def test_tracer_defers_to_arrays_on_the_left():
     # a genuinely untraceable operand still raises, from Python's own message
     with pytest.raises(TypeError):
         k * "no"
+
+
+def test_matvec_and_solve_trace_to_kernels():
+    from rsdag import matmul, solve, dot
+    n = 10
+    A0 = np.eye(n) * 4.0 + 0.1 * np.arange(n * n).reshape(n, n) / n
+    x0 = np.linspace(0.1, 1.0, n)
+
+    def f(A, x):
+        y = matmul(A, x)
+        return solve(A, y)
+
+    p = trace(f, A0, x0).program(A0, x0)
+    d = p.dump()
+    assert "Gemv" in d and "Solve" in d
+    got = np.asarray(p.eval(np.concatenate([A0.ravel(), x0])))
+    assert np.allclose(got, x0, rtol=1e-12)
+    # The Jacobian of A x with respect to x is A itself.
+    J = jacobian(lambda A, x: matmul(A, x), wrt=1)(A0, x0)
+    assert np.allclose(J, A0)
+    assert np.isclose(trace(lambda a, b: dot(a, b), x0, x0)(x0, x0), np.dot(x0, x0))
