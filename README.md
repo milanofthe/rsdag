@@ -25,7 +25,8 @@ Design decisions and phases live in the GitHub issues.
   products and dense solves as kernels), `semantics` (the reference
   arithmetic every backend mirrors, with two-lane vector twins in `f64`) and `symbolic` (`determinant`, `collect`,
   `rational_form`, `simplify_egraph`, `solve` with block triangular form,
-  fill-reducing ordering, static LU and `newton_step`).
+  fill-reducing ordering, a static LU whose pivots are guarded and
+  repivoted on the values, and `newton_step`).
 - `rsdag-jit`: the native backend (`NativeTape`), machine code emitted
   straight from the tape for AArch64 and x86-64 (Linux, macOS, Windows),
   bit-identical to the interpreter. Function bodies are compiled once and
@@ -94,12 +95,12 @@ uses. Emitting costs 30 to 60 ns per op on a large program, so a program
 compiles in about the time of a handful of evaluations. A 1000-state
 `A x + B u` evaluates in 0.09 ms as one kernel, at memory bandwidth, and
 a 1000 by 1000 matrix product runs at 29 GF/s, the two-lane peak without
-fused multiply-add, and the dense solve of 1000 unknowns takes 40 ms; a
-Newton step over a
-million unknowns of a circuit-like system is 33 ops per unknown and runs
-in 150 ms; against a general sparse LU the graph solve measures 13x to
-395x on ring and band patterns and loses on 2D grids past a thousand
-unknowns, where fill turns the program into millions of ops.
+fused multiply-add, and the dense solve of 1000 unknowns takes 40 ms. A
+Newton step over a circuit-like system is 26 ops per unknown, 31 with the
+pivot guard, linear to a million unknowns; against a general sparse LU
+the graph solve measures 15x to 150x on ring and band patterns and loses
+on 2D grids past a thousand unknowns, where fill turns the program into
+millions of ops.
 
 ## Build
 

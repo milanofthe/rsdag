@@ -13,4 +13,15 @@ run $CARGO test --workspace --exclude rsdag-py --features "$FEATURES"
 run $CARGO clippy -p rsdag --all-targets -- -D warnings
 RUSTDOCFLAGS='-D warnings' run $CARGO doc --no-deps --workspace --exclude rsdag-py --features "$FEATURES"
 run $CARGO check -p rsdag-py
+# The Python job: the wheel, installed into the interpreter that runs the
+# tests. Skipped where maturin or pytest is missing.
+if command -v maturin >/dev/null && python3 -m pytest --version >/dev/null 2>&1; then
+    DIST="${TMPDIR:-/tmp}/rsdag-dist"
+    rm -rf "$DIST"
+    run maturin build --release -q -m crates/rsdag-py/Cargo.toml -o "$DIST"
+    run python3 -m pip install -q --force-reinstall --no-deps "$DIST"/*.whl
+    run python3 -m pytest -q crates/rsdag-py/tests
+else
+    echo "== python job skipped (maturin or pytest missing)"
+fi
 echo "== green"
