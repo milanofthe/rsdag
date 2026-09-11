@@ -18,5 +18,6 @@ pub use poly::{
     collect, expand_terms, poly_add, poly_mul, poly_to_expr, prune_poly, rational_form,
 };
 pub use solve::{
-    lu_static, newton_step, pattern_of, plan, solve_planned, sparse_rows, Pattern, Plan, StaticLu,
+    lu_static, newton_step, newton_step_planned, pattern_of, plan, solve_planned, sparse_rows,
+    NewtonStep, Pattern, Plan, Solved, StaticLu,
 };

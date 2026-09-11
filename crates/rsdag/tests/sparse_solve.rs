@@ -87,7 +87,8 @@ fn a_newton_step_over_a_hundred_thousand_unknowns_builds_and_converges() {
     let n = 100_000;
     let mut g: Graph<F64> = Graph::new();
     let (f, syms) = ring(&mut g, n);
-    let (step, fill) = newton_step(&mut g, &f, &syms);
+    let ns = newton_step(&mut g, &f, &syms);
+    let (step, fill) = (ns.x, ns.fill);
     // Eliminating a degree-two vertex of a cycle creates one fill entry.
     assert!(fill <= 2 * n, "fill {fill} on a ring of {n}");
     let step_tape = Tape::compile(&g, &step, &syms);

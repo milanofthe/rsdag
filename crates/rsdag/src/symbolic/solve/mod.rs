@@ -29,10 +29,15 @@
 //! Every flop of the factorization is a node, so a pattern with heavy fill
 //! (a 2D mesh past a few thousand unknowns) is a large program, which is
 //! what [`Plan::cost`] is for: below a few hundred flops per unknown the
-//! graph wins, above it a sparse solver does. The pivot order is fixed at
-//! build time -- static pivoting on the transversal's zero-free diagonal
-//! -- so a system whose pivots need reordering at run time is not a
-//! candidate.
+//! graph wins, above it a sparse solver does. The elimination order and
+//! the pivot rows are fixed at build time, as in a static solver, and
+//! guarded: each step whose column has more than one structural
+//! candidate checks at run time that its pivot row still dominates the
+//! column by [`PIVOT_TOLERANCE`] ([`Solved::pivots_ok`]). When the guard
+//! fails, [`Plan::repivot`] picks the rows a numeric elimination with
+//! partial pivoting takes on the current values, and the program is
+//! rebuilt: the static program's cost per step, a numeric solver's
+//! pivoting across steps.
 
 pub mod amd;
 pub mod btf;
@@ -86,7 +91,9 @@ pub fn sparse_rows<K: Field>(g: &Graph<K>, m: &[Vec<ExprId>]) -> SparseRows {
 }
 
 /// Static-pivot LU of a matrix of expressions in the given elimination
-/// order, as graph ops, in Crout form.
+/// order, as graph ops, in Crout form: the factors, for a consumer that
+/// solves several right-hand sides against one matrix. The solve of one
+/// right-hand side is [`solve_guarded`].
 ///
 /// At step `k` the pivot is `A[order[k]][order[k]]`. An entry is not
 /// updated once per pivot; its updates are collected as `(l, u)` pairs and
@@ -118,13 +125,15 @@ pub fn lu_static<K: Field>(g: &mut Graph<K>, m: &SparseRows, order: &[usize]) ->
         }
     }
     /// An entry's value once every update it receives is known.
+    // The value of an entry after the updates pending on it, kept so that a
+    // second read (the right-hand side in back-substitution) sees it.
     fn finalize<K: Field>(
         g: &mut Graph<K>,
-        orig: &HashMap<(usize, usize), ExprId>,
+        orig: &mut HashMap<(usize, usize), ExprId>,
         pending: &mut HashMap<(usize, usize), (Vec<ExprId>, Vec<ExprId>)>,
         at: (usize, usize),
     ) -> ExprId {
-        match (orig.get(&at).copied(), pending.remove(&at)) {
+        let v = match (orig.get(&at).copied(), pending.remove(&at)) {
             (Some(o), None) => o,
             (Some(o), Some((ls, us))) => {
                 let d = g.dot(ls, us);
@@ -135,7 +144,9 @@ pub fn lu_static<K: Field>(g: &mut Graph<K>, m: &SparseRows, order: &[usize]) ->
                 g.neg(d)
             }
             (None, None) => unreachable!("an occupied position has a value"),
-        }
+        };
+        orig.insert(at, v);
+        v
     }
     let mut factors: HashMap<(usize, usize), ExprId> = HashMap::default();
     let mut fill = 0usize;
@@ -144,7 +155,7 @@ pub fn lu_static<K: Field>(g: &mut Graph<K>, m: &SparseRows, order: &[usize]) ->
             orig.contains_key(&(k, k)) || pending.contains_key(&(k, k)),
             "a structurally nonzero diagonal in pivot position {k}"
         );
-        let pivot = finalize(g, &orig, &mut pending, (k, k));
+        let pivot = finalize(g, &mut orig, &mut pending, (k, k));
         factors.insert((k, k), pivot);
         let inv = g.recip(pivot);
         // Ascending, so the program is the same for the same pattern.
@@ -154,12 +165,12 @@ pub fn lu_static<K: Field>(g: &mut Graph<K>, m: &SparseRows, order: &[usize]) ->
         col_k.sort_unstable();
         let us: Vec<ExprId> = row_k
             .iter()
-            .map(|&j| finalize(g, &orig, &mut pending, (k, j)))
+            .map(|&j| finalize(g, &mut orig, &mut pending, (k, j)))
             .collect();
         let ls: Vec<ExprId> = col_k
             .iter()
             .map(|&i| {
-                let a = finalize(g, &orig, &mut pending, (i, k));
+                let a = finalize(g, &mut orig, &mut pending, (i, k));
                 g.mul(a, inv)
             })
             .collect();
@@ -243,8 +254,13 @@ impl StaticLu {
 #[derive(Clone, Debug)]
 pub struct Plan {
     pub btf: Btf,
-    /// Elimination order of each block, in the block's local indices.
+    /// Elimination order of each block, in the block's local indices:
+    /// `orders[b][k]` is the column eliminated at step `k`.
     pub orders: Vec<Vec<usize>>,
+    /// The row that pivots at each step of each block, in local indices.
+    /// The transversal's diagonal by default; [`Plan::repivot`] replaces it
+    /// with the rows a numeric elimination with partial pivoting takes.
+    pub pivots: Vec<Vec<usize>>,
     /// Predicted fill and flops of the factorization, summed over blocks.
     pub cost: Cost,
 }
@@ -309,7 +325,100 @@ pub fn plan(pattern: &Pattern) -> Option<Plan> {
         cost.flops += c.flops;
         orders.push(order);
     }
-    Some(Plan { btf, orders, cost })
+    let pivots = orders.clone();
+    Some(Plan {
+        btf,
+        orders,
+        pivots,
+        cost,
+    })
+}
+
+impl Plan {
+    /// The plan with the pivot rows a numeric elimination with partial
+    /// pivoting takes on the values `value(row, col)` (original indices):
+    /// what a consumer builds when the guard of [`solve_planned`] reports
+    /// that the current pivot rows no longer hold. The structure and the
+    /// elimination order stay; only which row pivots at each step changes.
+    pub fn repivot(&self, pattern: &Pattern, value: impl Fn(usize, usize) -> f64) -> Plan {
+        let btf = &self.btf;
+        let n = pattern.len();
+        let mut col_pos = vec![0usize; n];
+        for (k, &j) in btf.col_perm.iter().enumerate() {
+            col_pos[j] = k;
+        }
+        let mut pivots = Vec::with_capacity(btf.n_blocks());
+        for b in 0..btf.n_blocks() {
+            let range = btf.block(b);
+            let lo = range.start;
+            let size = range.len();
+            // The block numerically, in local row and column indices.
+            let mut a: HashMap<(usize, usize), f64> = HashMap::default();
+            let mut in_col: Vec<Vec<usize>> = vec![Vec::new(); size];
+            for k in range.clone() {
+                let i = btf.row_perm[k];
+                for &j in &pattern[i] {
+                    let c = col_pos[j];
+                    if range.contains(&c) {
+                        a.insert((k - lo, c - lo), value(i, j));
+                        in_col[c - lo].push(k - lo);
+                    }
+                }
+            }
+            // Partial pivoting in the elimination order: at step k the row
+            // with the largest magnitude in column `order[k]` among the
+            // rows not yet taken.
+            let order = &self.orders[b];
+            let mut taken = vec![false; size];
+            let mut rows = Vec::with_capacity(size);
+            for &c in order {
+                let mut best: Option<(usize, f64)> = None;
+                for &r in &in_col[c] {
+                    if taken[r] {
+                        continue;
+                    }
+                    let v = a.get(&(r, c)).copied().unwrap_or(0.0).abs();
+                    if best.is_none_or(|(_, bv)| v > bv) {
+                        best = Some((r, v));
+                    }
+                }
+                let (r, _) = best.expect("a structurally nonsingular block");
+                taken[r] = true;
+                rows.push(r);
+                // Eliminate column c from the rows still open, tracking fill.
+                let piv = a[&(r, c)];
+                let row_r: Vec<(usize, f64)> = a
+                    .iter()
+                    .filter(|(&(rr, cc), _)| rr == r && !taken_col(cc, order, c))
+                    .map(|(&(_, cc), &v)| (cc, v))
+                    .collect();
+                let col_c: Vec<usize> = in_col[c].iter().copied().filter(|&i| !taken[i]).collect();
+                for i in col_c {
+                    let l = a[&(i, c)] / piv;
+                    for &(cc, v) in &row_r {
+                        let e = a.entry((i, cc)).or_insert_with(|| {
+                            in_col[cc].push(i);
+                            0.0
+                        });
+                        *e -= l * v;
+                    }
+                }
+            }
+            pivots.push(rows);
+        }
+        Plan {
+            btf: self.btf.clone(),
+            orders: self.orders.clone(),
+            pivots,
+            cost: self.cost,
+        }
+    }
+}
+
+/// Whether column `cc` is eliminated at or before the step of `c`.
+fn taken_col(cc: usize, order: &[usize], c: usize) -> bool {
+    let pos = |x: usize| order.iter().position(|&o| o == x).unwrap_or(usize::MAX);
+    pos(cc) <= pos(c)
 }
 
 /// Solve `A x = b` along a [`Plan`]: one static LU per diagonal block,
@@ -322,7 +431,7 @@ pub fn solve_planned<K: Field>(
     m: &SparseRows,
     plan: &Plan,
     b: &[ExprId],
-) -> (Vec<ExprId>, usize) {
+) -> Solved {
     let n = m.len();
     assert_eq!(b.len(), n);
     let btf = &plan.btf;
@@ -342,6 +451,7 @@ pub fn solve_planned<K: Field>(
         .collect();
     let mut x = vec![g.zero(); n]; // permuted coordinates
     let mut fill = 0usize;
+    let mut guards: Vec<ExprId> = Vec::new();
     for blk in (0..btf.n_blocks()).rev() {
         let range = btf.block(blk);
         let (lo, hi) = (range.start, range.end);
@@ -367,9 +477,9 @@ pub fn solve_planned<K: Field>(
                 g.sub(bk, d)
             });
         }
-        let lu = lu_static(g, &local, &plan.orders[blk]);
-        fill += lu.fill;
-        let sol = lu.solve_static(g, &rhs);
+        let (sol, gs, f) = solve_guarded(g, &local, &plan.orders[blk], &plan.pivots[blk], &rhs);
+        fill += f;
+        guards.extend(gs);
         for (k, v) in (lo..hi).zip(sol) {
             x[k] = v;
         }
@@ -378,12 +488,176 @@ pub fn solve_planned<K: Field>(
     for (k, &j) in btf.col_perm.iter().enumerate() {
         out[j] = x[k];
     }
-    (out, fill)
+    let pivots_ok = match guards.len() {
+        0 => g.one(),
+        1 => guards[0],
+        _ => g.reduce(crate::node::ReduceOp::Min, guards),
+    };
+    Solved {
+        x: out,
+        pivots_ok,
+        fill,
+    }
+}
+
+/// The result of a planned solve.
+pub struct Solved {
+    /// The unknowns, one expression each, in original coordinates.
+    pub x: Vec<ExprId>,
+    /// `1` while every pivot row still dominates its column by the
+    /// threshold, `0` once a step would pivot elsewhere: the guard a
+    /// consumer checks per evaluation, rebuilding with
+    /// [`Plan::repivot`] when it fails.
+    pub pivots_ok: ExprId,
+    /// The factorizations' fill.
+    pub fill: usize,
+}
+
+/// Below this ratio of a pivot's magnitude to the largest in its column,
+/// the guard reports that the pivot rows should change (KLU's default).
+pub const PIVOT_TOLERANCE: f64 = 1e-3;
+
+/// The solve of one block: Gaussian elimination in the given column order
+/// with the given pivot rows, over the matrix augmented by the right-hand
+/// side, in Crout form (one dot per entry), plus a guard per step with
+/// more than one structural candidate: whether the pivot row's magnitude
+/// is at least [`PIVOT_TOLERANCE`] times the largest in its column. The
+/// program is the static elimination's; the guard costs the column's
+/// magnitudes, which the elimination computes anyway.
+pub fn solve_guarded<K: Field>(
+    g: &mut Graph<K>,
+    m: &SparseRows,
+    order: &[usize],
+    pivots: &[usize],
+    b: &[ExprId],
+) -> (Vec<ExprId>, Vec<ExprId>, usize) {
+    let n = m.len();
+    assert_eq!(order.len(), n, "one order entry per unknown");
+    assert_eq!(pivots.len(), n, "one pivot row per step");
+    assert_eq!(b.len(), n);
+    let mut cpos = vec![0usize; n];
+    let mut rpos = vec![0usize; n];
+    for k in 0..n {
+        cpos[order[k]] = k;
+        rpos[pivots[k]] = k;
+    }
+    let mut orig: HashMap<(usize, usize), ExprId> = HashMap::default();
+    let mut pending: HashMap<(usize, usize), (Vec<ExprId>, Vec<ExprId>)> = HashMap::default();
+    let mut in_row: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut in_col: Vec<Vec<usize>> = vec![Vec::new(); n + 1];
+    for (i, row) in m.iter().enumerate() {
+        for &(j, e) in row {
+            let (r, c) = (rpos[i], cpos[j]);
+            if orig.insert((r, c), e).is_none() {
+                in_row[r].push(c);
+                in_col[c].push(r);
+            }
+        }
+        orig.insert((rpos[i], n), b[i]);
+        in_row[rpos[i]].push(n);
+    }
+    // The value of an entry after the updates pending on it, kept so that a
+    // second read (the right-hand side in back-substitution) sees it.
+    fn finalize<K: Field>(
+        g: &mut Graph<K>,
+        orig: &mut HashMap<(usize, usize), ExprId>,
+        pending: &mut HashMap<(usize, usize), (Vec<ExprId>, Vec<ExprId>)>,
+        at: (usize, usize),
+    ) -> ExprId {
+        let v = match (orig.get(&at).copied(), pending.remove(&at)) {
+            (Some(o), None) => o,
+            (Some(o), Some((ls, us))) => {
+                let d = g.dot(ls, us);
+                g.sub(o, d)
+            }
+            (None, Some((ls, us))) => {
+                let d = g.dot(ls, us);
+                g.neg(d)
+            }
+            (None, None) => unreachable!("an occupied position has a value"),
+        };
+        orig.insert(at, v);
+        v
+    }
+    let mut fill = 0usize;
+    let mut upper: Vec<Vec<(usize, ExprId)>> = vec![Vec::new(); n];
+    let mut diag: Vec<ExprId> = vec![g.zero(); n];
+    let mut guards: Vec<ExprId> = Vec::new();
+    for k in 0..n {
+        assert!(
+            orig.contains_key(&(k, k)) || pending.contains_key(&(k, k)),
+            "a structurally nonzero entry in pivot position {k}"
+        );
+        let pivot = finalize(g, &mut orig, &mut pending, (k, k));
+        diag[k] = pivot;
+        let inv = g.recip(pivot);
+        let mut row_k: Vec<usize> = in_row[k].iter().copied().filter(|&c| c > k).collect();
+        let mut col_k: Vec<usize> = in_col[k].iter().copied().filter(|&r| r > k).collect();
+        row_k.sort_unstable();
+        row_k.dedup();
+        col_k.sort_unstable();
+        col_k.dedup();
+        let us: Vec<ExprId> = row_k
+            .iter()
+            .map(|&j| finalize(g, &mut orig, &mut pending, (k, j)))
+            .collect();
+        for (&j, &u) in row_k.iter().zip(&us) {
+            if j < n {
+                upper[k].push((j, u));
+            }
+        }
+        let below: Vec<ExprId> = col_k
+            .iter()
+            .map(|&i| finalize(g, &mut orig, &mut pending, (i, k)))
+            .collect();
+        if !below.is_empty() {
+            // The guard: the pivot dominates its column by the tolerance.
+            let mut mags: Vec<ExprId> = below
+                .iter()
+                .map(|&v| g.unary(crate::node::UnaryOp::Abs, v))
+                .collect();
+            let pa = g.unary(crate::node::UnaryOp::Abs, pivot);
+            let tol = g.konst_f64(PIVOT_TOLERANCE);
+            let largest = if mags.len() == 1 {
+                mags.pop().unwrap()
+            } else {
+                g.reduce(crate::node::ReduceOp::Max, mags)
+            };
+            let bound = g.mul(tol, largest);
+            guards.push(g.cmp(crate::node::CmpOp::Ge, pa, bound));
+        }
+        let ls: Vec<ExprId> = below.iter().map(|&a| g.mul(a, inv)).collect();
+        for (&i, &l) in col_k.iter().zip(&ls) {
+            for (&j, &u) in row_k.iter().zip(&us) {
+                let entry = pending.entry((i, j)).or_default();
+                if entry.0.is_empty() && !orig.contains_key(&(i, j)) {
+                    fill += 1;
+                    in_row[i].push(j);
+                    in_col[j].push(i);
+                }
+                entry.0.push(l);
+                entry.1.push(u);
+            }
+        }
+    }
+    let mut x = vec![g.zero(); n];
+    for i in (0..n).rev() {
+        let mut acc = finalize(g, &mut orig, &mut pending, (i, n));
+        for &(j, u) in &upper[i] {
+            let t = g.mul(u, x[j]);
+            acc = g.sub(acc, t);
+        }
+        x[i] = g.div(acc, diag[i]);
+    }
+    let mut out = vec![g.zero(); n];
+    for (k, &j) in order.iter().enumerate() {
+        out[j] = x[k];
+    }
+    (out, guards, fill)
 }
 
 /// One Newton step as expressions: `x - J^-1 F`, with `J` the Jacobian of
-/// `f` with respect to `x`, solved along its [`plan`]. Returns the updated
-/// unknowns, one expression each, and the factorizations' fill.
+/// `f` with respect to `x`, solved along its [`plan`].
 ///
 /// The result is an ordinary expression over the graph: it differentiates,
 /// specializes, compiles and batches like the model it came from, and a
@@ -393,18 +667,44 @@ pub fn newton_step<K: Field>(
     g: &mut Graph<K>,
     f: &[ExprId],
     x: &[crate::node::SymbolId],
-) -> (Vec<ExprId>, usize) {
+) -> NewtonStep {
     let jac = crate::autodiff::sparse_jacobian(g, f, x);
     let pattern = pattern_of(&jac);
     let plan = plan(&pattern).expect("a structurally nonsingular Jacobian");
-    let (dx, fill) = solve_planned(g, &jac, &plan, f);
+    newton_step_planned(g, f, x, &jac, &plan)
+}
+
+/// [`newton_step`] over a given Jacobian and plan: what a consumer calls
+/// again with a [`Plan::repivot`]ed plan when the step's guard failed.
+pub fn newton_step_planned<K: Field>(
+    g: &mut Graph<K>,
+    f: &[ExprId],
+    x: &[crate::node::SymbolId],
+    jac: &SparseRows,
+    plan: &Plan,
+) -> NewtonStep {
+    let solved = solve_planned(g, jac, plan, f);
     let out = x
         .iter()
-        .zip(&dx)
+        .zip(&solved.x)
         .map(|(&s, &d)| {
             let xe = g.symbol_expr(s);
             g.sub(xe, d)
         })
         .collect();
-    (out, fill)
+    NewtonStep {
+        x: out,
+        pivots_ok: solved.pivots_ok,
+        fill: solved.fill,
+    }
+}
+
+/// A Newton step as expressions.
+pub struct NewtonStep {
+    /// The updated unknowns, one expression each.
+    pub x: Vec<ExprId>,
+    /// The solve's pivot guard (see [`Solved::pivots_ok`]).
+    pub pivots_ok: ExprId,
+    /// The factorizations' fill.
+    pub fill: usize,
 }
