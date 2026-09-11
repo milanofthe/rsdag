@@ -193,6 +193,7 @@ impl NativeTape {
             n_inputs = n_inputs.max(top);
             let runs: Vec<(&Dense, u32)> = match op {
                 ROp::Gemv { a, x, m, n, .. } => vec![(a, m * n), (x, *n)],
+                ROp::Gemm { a, b, m, k, n, .. } => vec![(a, m * k), (b, n * k)],
                 ROp::Solve { a, b, n, .. } => vec![(a, n * n), (b, *n)],
                 _ => Vec::new(),
             };
@@ -567,6 +568,25 @@ impl<'a, I: Isa> Emitter<'a, I> {
         base
     }
 
+    /// A kernel's two dense operands as host arguments: an input run is
+    /// its address, gathered slots are packed into the gather area in
+    /// order, so the area holds exactly the slots the ops gather
+    /// ([`ROp::gather_len`]).
+    fn dense_args(&mut self, a: &Dense, b: &Dense) -> (IArg, IArg) {
+        let mut at = 0usize;
+        let mut arg = |this: &mut Self, d: &Dense| match d {
+            Dense::Inputs(k) => IArg::InputAddr(*k as usize * 8),
+            Dense::Slots(s) => {
+                let p = IArg::WorkAddr(this.gather_at(s, at));
+                at += s.len();
+                p
+            }
+        };
+        let a = arg(self, a);
+        let b = arg(self, b);
+        (a, b)
+    }
+
     fn op(&mut self, op: &ROp) {
         self.op_inner(op);
         self.release_except(&[]);
@@ -694,15 +714,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 m,
                 n,
             } => {
-                let (ma, mn) = (m as usize, n as usize);
-                let a_arg = match a {
-                    Dense::Inputs(k) => IArg::InputAddr(*k as usize * 8),
-                    Dense::Slots(s) => IArg::WorkAddr(self.gather_at(s, 0)),
-                };
-                let x_arg = match x {
-                    Dense::Inputs(k) => IArg::InputAddr(*k as usize * 8),
-                    Dense::Slots(s) => IArg::WorkAddr(self.gather_at(s, ma * mn)),
-                };
+                let (a_arg, x_arg) = self.dense_args(a, x);
                 let args = [
                     Arg::I(a_arg),
                     Arg::I(x_arg),
@@ -713,21 +725,33 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 self.call(host::h_gemv as *const (), &args);
                 self.invalidate(dst, m);
             }
+            ROp::Gemm {
+                dst,
+                ref a,
+                ref b,
+                m,
+                k,
+                n,
+            } => {
+                let (a_arg, b_arg) = self.dense_args(a, b);
+                let args = [
+                    Arg::I(a_arg),
+                    Arg::I(b_arg),
+                    Arg::I(IArg::Imm(m as u64)),
+                    Arg::I(IArg::Imm(k as u64)),
+                    Arg::I(IArg::Imm(n as u64)),
+                    Arg::I(IArg::WorkAddr(dst as usize * 8)),
+                ];
+                self.call(host::h_gemm as *const (), &args);
+                self.invalidate(dst, m * n);
+            }
             ROp::Solve {
                 dst,
                 ref a,
                 ref b,
                 n,
             } => {
-                let nn = n as usize;
-                let a_arg = match a {
-                    Dense::Inputs(k) => IArg::InputAddr(*k as usize * 8),
-                    Dense::Slots(s) => IArg::WorkAddr(self.gather_at(s, 0)),
-                };
-                let b_arg = match b {
-                    Dense::Inputs(k) => IArg::InputAddr(*k as usize * 8),
-                    Dense::Slots(s) => IArg::WorkAddr(self.gather_at(s, nn * nn)),
-                };
+                let (a_arg, b_arg) = self.dense_args(a, b);
                 let args = [
                     Arg::I(a_arg),
                     Arg::I(b_arg),

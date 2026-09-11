@@ -94,6 +94,16 @@ pub enum Op {
         m: u32,
         n: u32,
     },
+    /// A matrix-matrix product: `m` rows of `k` in `a` against `n` rows of
+    /// `k` in `b` (the right factor by columns), entry `(i, j)` to
+    /// `dst + i*n + j`, each entry the fold of `Dot`.
+    Gemm {
+        a: Src,
+        b: Src,
+        m: u32,
+        k: u32,
+        n: u32,
+    },
     /// The dense solve `A x = b`, `a` `n` by `n` and `b` of `n`, `x` to
     /// `dst .. dst+n` (see [`crate::semantics::solve_t`]).
     Solve {
@@ -186,6 +196,9 @@ pub trait TapeVisitor {
     /// `m` rows of `n` in `a` against `x`, to `dst .. dst+m`, each row the
     /// fold of [`dot`](Self::dot) (see [`crate::semantics::gemv_t`]).
     fn gemv(&mut self, dst: u32, a: Operand<'_>, x: Operand<'_>, m: u32, n: u32);
+    /// The product of `m` rows of `k` in `a` with `n` rows of `k` in `b`,
+    /// entry `(i, j)` to `dst + i*n + j` (see [`crate::semantics::gemm_t`]).
+    fn gemm(&mut self, dst: u32, a: Operand<'_>, b: Operand<'_>, m: u32, k: u32, n: u32);
     /// The dense solve of `a` (`n` by `n`) against `b`, to `dst .. dst+n`
     /// (see [`crate::semantics::solve_t`]).
     fn solve(&mut self, dst: u32, a: Operand<'_>, b: Operand<'_>, n: u32);
@@ -279,6 +292,14 @@ impl Tape {
                 Op::Gemv { a, x, m, n } => {
                     format!("Gemv({m}x{n} {}, {}) -> {m}", src(a, m * n), src(x, n))
                 }
+                Op::Gemm { a, b, m, k, n } => {
+                    format!(
+                        "Gemm({m}x{k} {}, {n}x{k} {}) -> {}",
+                        src(a, m * k),
+                        src(b, n * k),
+                        m * n
+                    )
+                }
                 Op::Solve { a, b, n } => {
                     format!("Solve({n}x{n} {}, {}) -> {n}", src(a, n * n), src(b, n))
                 }
@@ -368,7 +389,7 @@ impl Tape {
         hi: usize,
         sink: &mut S,
     ) {
-        use crate::semantics::{dot_slice_t, gemv_t, reduce_slice_t, solve_t};
+        use crate::semantics::reduce_slice_t;
         // The gather scratch at the tail of `work`, so nothing is allocated
         // per call.
         let (work, scratch) = work.split_at_mut(self.n_work);
@@ -408,7 +429,7 @@ impl Tape {
                     for (j, &k) in pool(start, 2 * len).iter().enumerate() {
                         scratch[j] = g(k);
                     }
-                    dot_slice_t(
+                    T::dot_slice(
                         &scratch[..len as usize],
                         &scratch[len as usize..2 * len as usize],
                     )
@@ -463,7 +484,22 @@ impl Tape {
                         Dense::Inputs(k) => &inputs[k..k + n],
                         Dense::Scratch(s) => &scratch[s..s + n],
                     };
-                    gemv_t(av, xv, m, n, &mut work[d..d + m]);
+                    T::gemv(av, xv, m, n, &mut work[d..d + m]);
+                    continue;
+                }
+                Op::Gemm { a, b, m, k, n } => {
+                    let (m, k, n) = (m as usize, k as usize, n as usize);
+                    let (ra, rb) =
+                        dense_operands(inputs, work, scratch, &self.arg_pool, a, m * k, b, n * k);
+                    let av: &[T] = match ra {
+                        Dense::Inputs(i) => &inputs[i..i + m * k],
+                        Dense::Scratch(s) => &scratch[s..s + m * k],
+                    };
+                    let bv: &[T] = match rb {
+                        Dense::Inputs(i) => &inputs[i..i + n * k],
+                        Dense::Scratch(s) => &scratch[s..s + n * k],
+                    };
+                    T::gemm(av, bv, m, k, n, &mut work[d..d + m * n]);
                     continue;
                 }
                 Op::Solve { a, b, n } => {
@@ -478,7 +514,7 @@ impl Tape {
                         Dense::Inputs(k) => &inputs[k..k + n],
                         Dense::Scratch(s) => &scratch[s..s + n],
                     };
-                    solve_t(av, bv, n, &mut work[d..d + n]);
+                    T::solve(av, bv, n, &mut work[d..d + n]);
                     continue;
                 }
             };
@@ -540,6 +576,9 @@ impl Tape {
                     n_out,
                 ),
                 Op::Gemv { a, x, m, n } => v.gemv(dst, operand(a, m * n), operand(x, n), m, n),
+                Op::Gemm { a, b, m, k, n } => {
+                    v.gemm(dst, operand(a, m * k), operand(b, n * k), m, k, n)
+                }
                 Op::Solve { a, b, n } => v.solve(dst, operand(a, n * n), operand(b, n), n),
             }
         }

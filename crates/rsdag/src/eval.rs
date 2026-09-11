@@ -3,7 +3,7 @@
 //! One forward sweep over the nodes reachable from the roots (ascending
 //! `ExprId` is topological, so every shared subexpression is computed once),
 //! with the same per-node semantics the tape uses: arithmetic from
-//! [`Scalar`], fold orders from [`reduce_slice_t`] and [`dot_slice_t`], so a
+//! [`Scalar`], fold orders from [`reduce_slice_t`] and [`crate::semantics::dot_slice_t`], so a
 //! value cannot depend on which evaluator computed it. An unbound symbol is
 //! `NaN`, as a missing input is for a tape. Calls evaluate their function
 //! once per distinct argument list through the function's body, a bundle
@@ -17,7 +17,7 @@ use crate::graph::Graph;
 use crate::node::ArgList;
 use crate::node::{ExprId, Node, SymbolId};
 use crate::scalar::Scalar;
-use crate::semantics::{dot_slice_t, reduce_slice_t};
+use crate::semantics::reduce_slice_t;
 
 /// The value of one node from its operands.
 fn node_value<T: Scalar, K: Field>(
@@ -53,7 +53,7 @@ fn node_value<T: Scalar, K: Field>(
             let (a, b) = ctx.dot_args(l);
             let va: Vec<T> = a.iter().map(|&x| get(x)).collect();
             let vb: Vec<T> = b.iter().map(|&y| get(y)).collect();
-            dot_slice_t(&va, &vb)
+            T::dot_slice(&va, &vb)
         }
         Node::Call(o, l) => {
             let vals: Vec<T> = ctx.args(l).iter().map(|&a| get(a)).collect();
@@ -106,7 +106,7 @@ pub fn eval<T: Scalar, K: Field>(
                 .or_insert_with(|| {
                     let n = Graph::<K>::solve_n(vals.len());
                     let mut out = vec![T::zero(); n];
-                    crate::semantics::solve_t(&vals[..n * n], &vals[n * n..], n, &mut out);
+                    T::solve(&vals[..n * n], &vals[n * n..], n, &mut out);
                     out
                 })
                 .clone()
