@@ -94,7 +94,8 @@ uses. Emitting costs 30 to 60 ns per op on a large program, so a program
 compiles in about the time of a handful of evaluations. A 1000-state
 `A x + B u` evaluates in 0.09 ms as one kernel, at memory bandwidth, and
 a 1000 by 1000 matrix product runs at 29 GF/s, the two-lane peak without
-fused multiply-add; a Newton step over a
+fused multiply-add, and the dense solve of 1000 unknowns takes 40 ms; a
+Newton step over a
 million unknowns of a circuit-like system is 33 ops per unknown and runs
 in 150 ms; against a general sparse LU the graph solve measures 13x to
 395x on ring and band patterns and loses on 2D grids past a thousand
