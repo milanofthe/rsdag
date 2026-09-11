@@ -43,7 +43,11 @@ derivative) as metadata.
 for register pressure, allocates slots by liveness and emits the
 instruction list. Row dots against one vector lower to `Gemv`, against
 several vectors to `Gemm`, a dense system to a pivoting `Solve`; calls of
-one function on distinct argument lists lower to one batched call.
+one function on distinct argument lists lower to one batched call. A
+kernel output whose one consumer subtracts it, adds it or negates it is
+folded by the kernel (`Fold`): the consumer vanishes and the kernel writes
+`c - d`, `c + d` or `-d`, the accumulator `c` an operand or another
+output of the same kernel.
 `Tape::compile_split` marks parameter-pure inputs; the tape then has a
 prolog evaluated once per parameter binding and a main part evaluated per
 iteration. `Tape::eval` runs over any `Scalar` (`f64`, `f32`, `Complex64`).

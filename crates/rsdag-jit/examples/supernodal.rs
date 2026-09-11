@@ -217,6 +217,9 @@ fn measure(
     let tape = Tape::compile_split(g, roots, syms, &pure);
     let t_tape = t.elapsed().as_secs_f64() * 1e3;
     let d = tape.dump();
+    if let Ok(dir) = std::env::var("RSDAG_DUMP") {
+        std::fs::write(format!("{dir}/{name}.txt"), &d).unwrap();
+    }
     let kernels = d.matches("Gemm(").count()
         + d.matches("Gemv(").count()
         + d.matches("SolveMany(").count()

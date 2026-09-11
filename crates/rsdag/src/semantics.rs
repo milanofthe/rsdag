@@ -11,6 +11,7 @@
 
 use crate::node::{BinOp, CmpOp, ReduceOp, UnaryOp};
 use crate::scalar::Scalar;
+use crate::tape::Fold;
 
 /// The reduction of a slice in `T`: four accumulators, merged as
 /// `(a0 + a1) + (a2 + a3)`, then the tail in order. The one fold order every
@@ -297,12 +298,39 @@ pub fn gemv_t<T: Scalar>(a: &[T], x: &[T], m: usize, n: usize, out: &mut [T]) {
     }
 }
 
+/// [`gemv_t`] with its rows folded per `codes` against `c` (see
+/// [`gemm_fold_t`]).
+pub fn gemv_fold_t<T: Scalar>(
+    a: &[T],
+    x: &[T],
+    m: usize,
+    n: usize,
+    c: Option<&[T]>,
+    codes: &[u32],
+    out: &mut [T],
+) {
+    gemv_t(a, x, m, n, out);
+    fold_in_place(codes, c, out);
+}
+
 /// A dense matrix-matrix product against rows: `out[i*n + j] =
 /// dot(a[i*k..], b[j*k..])` for `m` rows of `a` and `n` rows of `b`, each
 /// of `k` (the right factor by columns, each contiguous). Every entry is
 /// the fold of [`dot_slice_t`], so a fused product is bit-identical to
 /// its entries as separate dots.
 pub fn gemm_t<T: Scalar>(a: &[T], b: &[T], m: usize, k: usize, n: usize, out: &mut [T]) {
+    gemm_with(a, b, m, k, n, |i, v| out[i] = v);
+}
+
+/// [`gemm_t`] with every entry stored through `st(index, value)`.
+pub fn gemm_with<T: Scalar>(
+    a: &[T],
+    b: &[T],
+    m: usize,
+    k: usize,
+    n: usize,
+    mut st: impl FnMut(usize, T),
+) {
     // Four rows of `a` against two rows of `b` at a time: thirty-two
     // independent accumulators, six operand rows in the near cache.
     let ch = k / 4;
@@ -331,28 +359,100 @@ pub fn gemm_t<T: Scalar>(a: &[T], b: &[T], m: usize, k: usize, n: usize, out: &m
             }
             for (r, ar) in acc.iter().enumerate() {
                 for (q, &aq) in ar.iter().enumerate() {
-                    out[(i + r) * n + j + q] = tail(i + r, j + q, aq);
+                    st((i + r) * n + j + q, tail(i + r, j + q, aq));
                 }
             }
             j += 2;
         }
         for r in 0..4 {
             for jj in j..n {
-                out[(i + r) * n + jj] = dot_slice_t(&a[(i + r) * k..][..k], &b[jj * k..][..k]);
+                st(
+                    (i + r) * n + jj,
+                    dot_slice_t(&a[(i + r) * k..][..k], &b[jj * k..][..k]),
+                );
             }
         }
         i += 4;
     }
     for r in i..m {
         for j in 0..n {
-            out[r * n + j] = dot_slice_t(&a[r * k..][..k], &b[j * k..][..k]);
+            st(r * n + j, dot_slice_t(&a[r * k..][..k], &b[j * k..][..k]));
         }
+    }
+}
+
+/// [`gemm_t`] with its entries folded per `codes` (see
+/// [`crate::tape::Fold`]) against the accumulator `c`: an entry folded
+/// with an operand is folded as it is stored; a self fold (against another
+/// entry's product) is folded after every product is stored, the products
+/// it reads being those of entries that stay plain.
+pub fn gemm_fold_t<T: Scalar>(
+    a: &[T],
+    b: &[T],
+    m: usize,
+    k: usize,
+    n: usize,
+    c: Option<&[T]>,
+    codes: &[u32],
+    out: &mut [T],
+) {
+    if codes.iter().any(|&code| Fold(code).is_self()) {
+        gemm_t(a, b, m, k, n, out);
+        fold_in_place(codes, c, out);
+    } else {
+        gemm_with(a, b, m, k, n, |i, v| {
+            out[i] = Fold(codes[i]).fold(c.map_or(v, |c| c[i]), v)
+        });
+    }
+}
+
+/// The self folds of `out` (products stored plain), in place.
+pub fn fold_in_place<T: Scalar>(codes: &[u32], c: Option<&[T]>, out: &mut [T]) {
+    for i in 0..out.len() {
+        let f = Fold(codes[i]);
+        if f.is_plain() {
+            continue;
+        }
+        let acc = if f.is_self() {
+            out[f.self_index()]
+        } else {
+            c.map_or(out[i], |c| c[i])
+        };
+        out[i] = f.fold(acc, out[i]);
     }
 }
 
 /// [`gemm_t`] in `f64`: the two-lane vector twin, bit-identical.
 pub fn gemm(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, out: &mut [f64]) {
     <f64 as Scalar>::gemm(a, b, m, k, n, out)
+}
+
+/// [`gemm_fold_t`] in `f64`.
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_fold(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    c: Option<&[f64]>,
+    codes: &[u32],
+    out: &mut [f64],
+) {
+    <f64 as Scalar>::gemm_fold(a, b, m, k, n, c, codes, out)
+}
+
+/// [`gemv_fold_t`] in `f64`.
+pub fn gemv_fold(
+    a: &[f64],
+    x: &[f64],
+    m: usize,
+    n: usize,
+    c: Option<&[f64]>,
+    codes: &[u32],
+    out: &mut [f64],
+) {
+    <f64 as Scalar>::gemv_fold(a, x, m, n, c, codes, out)
 }
 
 /// [`gemv_t`] in `f64`: the two-lane vector twin, bit-identical.

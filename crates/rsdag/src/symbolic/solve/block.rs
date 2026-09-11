@@ -34,6 +34,11 @@ pub enum Block<N = ExprId> {
 /// A block-sparse matrix: one list per block row of `(block column, block)`.
 pub type BlockRows<N = ExprId> = Vec<Vec<(usize, Block<N>)>>;
 
+/// Blocks at least this size take their updates one product at a time,
+/// each a kernel folding into the previous result in place; smaller
+/// blocks take every update in one dot per entry.
+const CHAIN_MIN: usize = 8;
+
 /// The block pattern of `m` (the input of [`super::plan`]).
 pub fn block_pattern<N>(m: &BlockRows<N>) -> super::Pattern {
     m.iter()
@@ -41,12 +46,17 @@ pub fn block_pattern<N>(m: &BlockRows<N>) -> super::Pattern {
         .collect()
 }
 
-/// A block with its shape.
+/// A block with its shape and storage order. A dense block is row-major
+/// (`cm` false) or column-major: the blocks of `U` (right of a pivot) and
+/// the pivot inverses are kept column-major, so that a product's right
+/// factor, read by columns, is a consecutive run the kernel takes in
+/// place; `L` blocks and pivots are row-major for the same reason.
 #[derive(Clone, Debug)]
 struct Blk<N> {
     r: usize,
     c: usize,
     d: Block<N>,
+    cm: bool,
 }
 
 impl<N: Num> Blk<N> {
@@ -62,6 +72,7 @@ impl<N: Num> Blk<N> {
             r,
             c,
             d: block.clone(),
+            cm: false,
         }
     }
 
@@ -69,48 +80,67 @@ impl<N: Num> Blk<N> {
         matches!(self.d, Block::Diag(_))
     }
 
+    #[inline]
+    fn index(&self, r: usize, c: usize) -> usize {
+        if self.cm {
+            c * self.r + r
+        } else {
+            r * self.c + c
+        }
+    }
+
     /// Entry `(r, c)`, if structurally present.
     fn at(&self, r: usize, c: usize) -> Option<N> {
         match &self.d {
-            Block::Dense(v) => Some(v[r * self.c + c]),
+            Block::Dense(v) => Some(v[self.index(r, c)]),
             Block::Diag(v) => (r == c).then(|| v[r]),
         }
     }
 
-    /// The terms of entry `(r, c)` of `self * u`, appended to `ls, us`. A
-    /// diagonal block against a dense one is taken dense (its zeros in the
-    /// dot): the dots then fuse into one kernel, where the products of the
-    /// diagonal alone would be scalar ops, slower than the kernel.
-    fn product_terms(
+    /// Row `r` as a list (a diagonal block's row with its zeros).
+    fn row(&self, r: usize, zero: N) -> Vec<N> {
+        match &self.d {
+            Block::Dense(v) => (0..self.c).map(|c| v[self.index(r, c)]).collect(),
+            Block::Diag(d) => (0..self.c)
+                .map(|c| if c == r { d[r] } else { zero })
+                .collect(),
+        }
+    }
+
+    /// Column `c` as a list.
+    fn col(&self, c: usize, zero: N) -> Vec<N> {
+        match &self.d {
+            Block::Dense(v) => (0..self.r).map(|r| v[self.index(r, c)]).collect(),
+            Block::Diag(d) => (0..self.r)
+                .map(|r| if r == c { d[c] } else { zero })
+                .collect(),
+        }
+    }
+
+    /// Entry `(r, c)` of `self * u` as a dot. A diagonal block against a
+    /// dense one is taken dense (its zeros in the dot): the dots then fuse
+    /// into one kernel, where the products of the diagonal alone would be
+    /// scalar ops, slower than the kernel. With `cm`, the dot's lists are
+    /// swapped (the same fold, term by term), so the kernel the dots fuse
+    /// into writes the product column-major.
+    fn product_entry<K: Field>(
         &self,
+        g: &mut Graph<K>,
         u: &Blk<N>,
         r: usize,
         c: usize,
-        ls: &mut Vec<N>,
-        us: &mut Vec<N>,
+        cm: bool,
         zero: N,
-    ) {
-        let k = self.c;
-        debug_assert_eq!(k, u.r, "conformable blocks");
-        match (&self.d, &u.d) {
-            (Block::Dense(l), Block::Dense(ud)) => {
-                ls.extend_from_slice(&l[r * k..(r + 1) * k]);
-                us.extend((0..k).map(|q| ud[q * u.c + c]));
-            }
-            (Block::Dense(l), Block::Diag(ud)) => {
-                ls.extend_from_slice(&l[r * k..(r + 1) * k]);
-                us.extend((0..k).map(|q| if q == c { ud[c] } else { zero }));
-            }
-            (Block::Diag(l), Block::Dense(ud)) => {
-                ls.extend((0..k).map(|q| if q == r { l[r] } else { zero }));
-                us.extend((0..k).map(|q| ud[q * u.c + c]));
-            }
-            (Block::Diag(l), Block::Diag(ud)) => {
-                if r == c {
-                    ls.push(l[r]);
-                    us.push(ud[r]);
-                }
-            }
+    ) -> N {
+        debug_assert_eq!(self.c, u.r, "conformable blocks");
+        if let (Block::Diag(l), Block::Diag(ud)) = (&self.d, &u.d) {
+            return if r == c { N::mul(g, l[r], ud[r]) } else { zero };
+        }
+        let (ls, us) = (self.row(r, zero), u.col(c, zero));
+        if cm {
+            N::dot(g, us, ls)
+        } else {
+            N::dot(g, ls, us)
         }
     }
 
@@ -118,8 +148,9 @@ impl<N: Num> Blk<N> {
     fn apply_terms(&self, y: &[N], r: usize, ls: &mut Vec<N>, ys: &mut Vec<N>) {
         debug_assert_eq!(y.len(), self.c);
         match &self.d {
-            Block::Dense(l) => {
-                ls.extend_from_slice(&l[r * self.c..(r + 1) * self.c]);
+            Block::Dense(_) => {
+                let zero = y[0];
+                ls.extend(self.row(r, zero));
                 ys.extend_from_slice(y);
             }
             Block::Diag(l) => {
@@ -129,50 +160,60 @@ impl<N: Num> Blk<N> {
         }
     }
 
-    /// `self * u` as a block: diagonal when both are.
-    fn product<K: Field>(&self, g: &mut Graph<K>, u: &Blk<N>) -> Blk<N> {
+    /// `self * u` as a block: diagonal when both are, else dense in the
+    /// order `cm`.
+    fn product<K: Field>(&self, g: &mut Graph<K>, u: &Blk<N>, cm: bool) -> Blk<N> {
         if let (Block::Diag(l), Block::Diag(d)) = (&self.d, &u.d) {
             let v = (0..self.r).map(|r| N::mul(g, l[r], d[r])).collect();
             return Blk {
                 r: self.r,
                 c: u.c,
                 d: Block::Diag(v),
+                cm: false,
             };
         }
         let zero = N::zero(g);
-        let mut out = Vec::with_capacity(self.r * u.c);
-        for r in 0..self.r {
-            for c in 0..u.c {
-                let (mut ls, mut us) = (Vec::new(), Vec::new());
-                self.product_terms(u, r, c, &mut ls, &mut us, zero);
-                out.push(N::dot(g, ls, us));
+        let (rows, cols) = (self.r, u.c);
+        let mut out = Vec::with_capacity(rows * cols);
+        if cm {
+            for c in 0..cols {
+                for r in 0..rows {
+                    out.push(self.product_entry(g, u, r, c, true, zero));
+                }
+            }
+        } else {
+            for r in 0..rows {
+                for c in 0..cols {
+                    out.push(self.product_entry(g, u, r, c, false, zero));
+                }
             }
         }
         Blk {
-            r: self.r,
-            c: u.c,
+            r: rows,
+            c: cols,
             d: Block::Dense(out),
+            cm,
         }
     }
 
     /// The inverse of a square block: reciprocals of a diagonal one, the
-    /// dense kernel's solves against the unit vectors of a dense one.
+    /// dense kernel's solves against the unit vectors of a dense one,
+    /// column-major (the solves' layout).
     fn inverse<K: Field>(&self, g: &mut Graph<K>) -> Blk<N> {
         let s = self.r;
-        let d = match &self.d {
-            Block::Diag(d) => Block::Diag(d.iter().map(|&v| N::recip(g, v)).collect()),
-            Block::Dense(a) => {
-                let cols = N::inverse_columns(g, a, s);
-                let mut out = Vec::with_capacity(s * s);
-                for r in 0..s {
-                    for col in cols.iter().take(s) {
-                        out.push(col[r]);
-                    }
-                }
-                Block::Dense(out)
+        let zero = N::zero(g);
+        let (d, cm) = match &self.d {
+            Block::Diag(d) => (
+                Block::Diag(d.iter().map(|&v| N::recip(g, v)).collect()),
+                false,
+            ),
+            Block::Dense(_) => {
+                let a: Vec<N> = (0..s).flat_map(|r| self.row(r, zero)).collect();
+                let cols = N::inverse_columns(g, &a, s);
+                (Block::Dense(cols.into_iter().flatten().collect()), true)
             }
         };
-        Blk { r: s, c: s, d }
+        Blk { r: s, c: s, d, cm }
     }
 
     /// The largest size of column `c`'s entries.
@@ -180,7 +221,7 @@ impl<N: Num> Blk<N> {
         match &self.d {
             Block::Dense(v) => {
                 for r in 0..self.r {
-                    sizes.push(N::size(g, v[r * self.c + c]));
+                    sizes.push(N::size(g, v[self.index(r, c)]));
                 }
             }
             Block::Diag(d) => sizes.push(N::size(g, d[c])),
@@ -188,24 +229,27 @@ impl<N: Num> Blk<N> {
     }
 }
 
-/// `y - sum of the products in terms`, entry by entry.
-fn subtract_terms<K: Field, N: Num>(
+/// `y - L_1 v_1 - L_2 v_2 - ...`, one product per pair subtracted from the
+/// running vector: each product is one kernel whose accumulator is the
+/// previous kernel's output, read in place; a concatenated dot over every
+/// pair would gather its operands.
+fn subtract_products<K: Field, N: Num>(
     g: &mut Graph<K>,
     y: &[N],
-    mut terms: impl FnMut(usize, &mut Vec<N>, &mut Vec<N>),
+    pairs: &[(&Blk<N>, &[N])],
 ) -> Vec<N> {
-    (0..y.len())
-        .map(|r| {
-            let (mut ls, mut us) = (Vec::new(), Vec::new());
-            terms(r, &mut ls, &mut us);
-            if ls.is_empty() {
-                y[r]
-            } else {
-                let d = N::dot(g, ls, us);
-                N::sub(g, y[r], d)
-            }
-        })
-        .collect()
+    let mut acc: Vec<N> = y.to_vec();
+    for (l, v) in pairs {
+        acc = (0..acc.len())
+            .map(|r| {
+                let (mut ls, mut vs) = (Vec::new(), Vec::new());
+                l.apply_terms(v, r, &mut ls, &mut vs);
+                let d = N::dot(g, ls, vs);
+                N::sub(g, acc[r], d)
+            })
+            .collect();
+    }
+    acc
 }
 
 fn max_of<K: Field>(g: &mut Graph<K>, mut v: Vec<ExprId>) -> ExprId {
@@ -297,11 +341,11 @@ pub fn solve_block_planned_sizes<K: Field, N: Num>(
             let i = btf.row_perm[k];
             let bk = &rhs[starts[i]..starts[i + 1]];
             // rhs_k = b_k - sum over solved blocks of A_kc x_c.
-            let r = subtract_terms(g, bk, |r, ls, us| {
-                for (e, xc) in &couplings {
-                    e.apply_terms(xc, r, ls, us);
-                }
-            });
+            let pairs: Vec<(&Blk<N>, &[N])> = couplings
+                .iter()
+                .map(|(e, xc)| (*e, xc.as_slice()))
+                .collect();
+            let r = subtract_products(g, bk, &pairs);
             local_rhs.push(r);
         }
         let (sol, gs, f) = eliminate_blocks(g, &local, &local_sizes, &plan.orders[blk], &local_rhs);
@@ -379,52 +423,97 @@ fn eliminate_blocks<K: Field, N: Num>(
             return base.expect("an occupied block position has entries");
         };
         let (r, c) = shape;
+        // A block right of its pivot (of `U`) is kept column-major.
+        let cm = at.1 > at.0;
         let zero = N::zero(g);
         let diag = r == c
             && base.as_ref().is_none_or(|k| k.is_diag())
             && updates.iter().all(|(l, u)| l.is_diag() && u.is_diag());
-        let d = if diag {
-            Block::Diag(
+        let out = if diag {
+            let d = (0..r)
+                .map(|q| {
+                    let mut acc = base.as_ref().and_then(|k| k.at(q, q));
+                    for (l, u) in &updates {
+                        let d = l.product_entry(g, u, q, q, false, zero);
+                        acc = Some(match acc {
+                            Some(o) => N::sub(g, o, d),
+                            None => N::neg(g, d),
+                        });
+                    }
+                    acc.expect("an update")
+                })
+                .collect();
+            Blk {
+                r,
+                c,
+                d: Block::Diag(d),
+                cm: false,
+            }
+        } else {
+            // One product per update, subtracted from the running block:
+            // each is one kernel with the previous result as its
+            // accumulator, read in place. Entries in the block's order.
+            let order: Vec<(usize, usize)> = if cm {
+                (0..c)
+                    .flat_map(|cc| (0..r).map(move |rr| (rr, cc)))
+                    .collect()
+            } else {
                 (0..r)
-                    .map(|q| {
+                    .flat_map(|rr| (0..c).map(move |cc| (rr, cc)))
+                    .collect()
+            };
+            let mut acc: Option<Vec<N>> = base.as_ref().map(|k| {
+                order
+                    .iter()
+                    .map(|&(rr, cc)| k.at(rr, cc).unwrap_or(zero))
+                    .collect()
+            });
+            if r.min(c) >= CHAIN_MIN {
+                for (l, u) in &updates {
+                    let out: Vec<N> = order
+                        .iter()
+                        .enumerate()
+                        .map(|(q, &(rr, cc))| {
+                            let d = l.product_entry(g, u, rr, cc, cm, zero);
+                            match &acc {
+                                Some(a) => N::sub(g, a[q], d),
+                                None => N::neg(g, d),
+                            }
+                        })
+                        .collect();
+                    acc = Some(out);
+                }
+            } else {
+                // Small blocks: every update in one dot per entry.
+                let out: Vec<N> = order
+                    .iter()
+                    .enumerate()
+                    .map(|(q, &(rr, cc))| {
                         let (mut ls, mut us) = (Vec::new(), Vec::new());
                         for (l, u) in &updates {
-                            l.product_terms(u, q, q, &mut ls, &mut us, zero);
+                            ls.extend(l.row(rr, zero));
+                            us.extend(u.col(cc, zero));
                         }
-                        let d = N::dot(g, ls, us);
-                        match base.as_ref().and_then(|k| k.at(q, q)) {
-                            Some(o) => N::sub(g, o, d),
+                        let d = if cm {
+                            N::dot(g, us, ls)
+                        } else {
+                            N::dot(g, ls, us)
+                        };
+                        match &acc {
+                            Some(a) => N::sub(g, a[q], d),
                             None => N::neg(g, d),
                         }
                     })
-                    .collect(),
-            )
-        } else {
-            let mut out = Vec::with_capacity(r * c);
-            for rr in 0..r {
-                for cc in 0..c {
-                    let (mut ls, mut us) = (Vec::new(), Vec::new());
-                    for (l, u) in &updates {
-                        l.product_terms(u, rr, cc, &mut ls, &mut us, zero);
-                    }
-                    let o = base.as_ref().and_then(|k| k.at(rr, cc));
-                    out.push(match (o, ls.is_empty()) {
-                        (Some(o), true) => o,
-                        (None, true) => zero,
-                        (Some(o), false) => {
-                            let d = N::dot(g, ls, us);
-                            N::sub(g, o, d)
-                        }
-                        (None, false) => {
-                            let d = N::dot(g, ls, us);
-                            N::neg(g, d)
-                        }
-                    });
-                }
+                    .collect();
+                acc = Some(out);
             }
-            Block::Dense(out)
+            Blk {
+                r,
+                c,
+                d: Block::Dense(acc.expect("an update")),
+                cm,
+            }
         };
-        let out = Blk { r, c, d };
         orig.insert(at, out.clone());
         out
     }
@@ -444,11 +533,9 @@ fn eliminate_blocks<K: Field, N: Num>(
         let yk = {
             let updates = std::mem::take(&mut pending_y[k]);
             let base = std::mem::take(&mut y[k]);
-            subtract_terms(g, &base, |r, ls, us| {
-                for (l, v) in &updates {
-                    l.apply_terms(v, r, ls, us);
-                }
-            })
+            let pairs: Vec<(&Blk<N>, &[N])> =
+                updates.iter().map(|(l, v)| (l, v.as_slice())).collect();
+            subtract_products(g, &base, &pairs)
         };
         let mut row_k: Vec<usize> = in_row[k].iter().copied().filter(|&c| c > k).collect();
         let mut col_k: Vec<usize> = in_col[k].iter().copied().filter(|&r| r > k).collect();
@@ -484,8 +571,8 @@ fn eliminate_blocks<K: Field, N: Num>(
             }
         }
         let pinv = pivot.inverse(g);
-        // L_ik = W A_kk^-1.
-        let ls: Vec<Blk<N>> = ws.iter().map(|w| w.product(g, &pinv)).collect();
+        // L_ik = W A_kk^-1, row-major.
+        let ls: Vec<Blk<N>> = ws.iter().map(|w| w.product(g, &pinv, false)).collect();
         for (&i, l) in col_k.iter().zip(&ls) {
             for (&j, u) in row_k.iter().zip(&us) {
                 let entry = pending.entry((i, j)).or_default();
@@ -504,17 +591,18 @@ fn eliminate_blocks<K: Field, N: Num>(
     // Back substitution over blocks: x_i = A_ii^-1 (y_i - sum U_ij x_j).
     let mut x: Vec<Vec<N>> = vec![Vec::new(); n];
     for i in (0..n).rev() {
-        let r = subtract_terms(g, &y[i], |r, ls, us| {
-            for (j, u) in &upper[i] {
-                u.apply_terms(&x[*j], r, ls, us);
-            }
-        });
+        let pairs: Vec<(&Blk<N>, &[N])> = upper[i]
+            .iter()
+            .map(|(j, u)| (u, x[*j].as_slice()))
+            .collect();
+        let r = subtract_products(g, &y[i], &pairs);
         let pinv = inv[i].as_ref().unwrap();
         let s = psize[i];
+        let zero = N::zero(g);
         x[i] = match &pinv.d {
             Block::Diag(d) => (0..s).map(|q| N::mul(g, d[q], r[q])).collect(),
-            Block::Dense(a) => (0..s)
-                .map(|q| N::dot(g, a[q * s..(q + 1) * s].to_vec(), r.clone()))
+            Block::Dense(_) => (0..s)
+                .map(|q| N::dot(g, pinv.row(q, zero), r.clone()))
                 .collect(),
         };
     }

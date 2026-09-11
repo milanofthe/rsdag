@@ -36,6 +36,9 @@ pub(crate) enum ROp {
         x: Dense,
         m: u32,
         n: u32,
+        /// The accumulator operand, the fold codes and, once compiled,
+        /// the address of the codes' table.
+        acc: Option<(Option<Dense>, Vec<u32>, usize)>,
     },
     Gemm {
         dst: u32,
@@ -44,6 +47,9 @@ pub(crate) enum ROp {
         m: u32,
         k: u32,
         n: u32,
+        /// The accumulator operand, the fold codes and, once compiled,
+        /// the address of the codes' table.
+        acc: Option<(Option<Dense>, Vec<u32>, usize)>,
     },
     Solve {
         dst: u32,
@@ -104,8 +110,27 @@ impl ROp {
                 args.iter().copied().for_each(f)
             }
             ROp::Dot(_, a, b) => a.iter().chain(b).copied().for_each(f),
-            ROp::Gemv { a, x, .. } => a.slots().iter().chain(x.slots()).copied().for_each(f),
-            ROp::Gemm { a, b, .. } | ROp::Solve { a, b, .. } | ROp::SolveMany { a, b, .. } => {
+            ROp::Gemv { a, x, acc, .. } => a
+                .slots()
+                .iter()
+                .chain(x.slots())
+                .chain(
+                    acc.iter()
+                        .flat_map(|(c, _, _)| c.as_ref().map_or(&[][..], |c| c.slots())),
+                )
+                .copied()
+                .for_each(f),
+            ROp::Gemm { a, b, acc, .. } => a
+                .slots()
+                .iter()
+                .chain(b.slots())
+                .chain(
+                    acc.iter()
+                        .flat_map(|(c, _, _)| c.as_ref().map_or(&[][..], |c| c.slots())),
+                )
+                .copied()
+                .for_each(f),
+            ROp::Solve { a, b, .. } | ROp::SolveMany { a, b, .. } => {
                 a.slots().iter().chain(b.slots()).copied().for_each(f)
             }
         }
@@ -135,8 +160,10 @@ impl ROp {
             ROp::Reduce(_, ReduceOp::Min | ReduceOp::Max, _) => crate::host::h_reduce as *const (),
             ROp::Call(..) => crate::host::h_bundle as *const (),
             ROp::CallBatch(..) => crate::host::h_bundle_batch as *const (),
-            ROp::Gemv { .. } => crate::host::h_gemv as *const (),
-            ROp::Gemm { .. } => crate::host::h_gemm as *const (),
+            ROp::Gemv { acc: None, .. } => crate::host::h_gemv as *const (),
+            ROp::Gemv { .. } => crate::host::h_gemv_acc as *const (),
+            ROp::Gemm { acc: None, .. } => crate::host::h_gemm as *const (),
+            ROp::Gemm { .. } => crate::host::h_gemm_acc as *const (),
             ROp::Solve { .. } => crate::host::h_solve as *const (),
             ROp::SolveMany { .. } => crate::host::h_solve_many as *const (),
             _ => return None,
@@ -148,8 +175,21 @@ impl ROp {
         match self {
             ROp::Reduce(_, ReduceOp::Min | ReduceOp::Max, args) => args.len(),
             ROp::Call(_, _, args, _) | ROp::CallBatch(_, _, args, ..) => args.len(),
-            ROp::Gemv { a, x, .. } => a.slots().len() + x.slots().len(),
-            ROp::Gemm { a, b, .. } | ROp::Solve { a, b, .. } | ROp::SolveMany { a, b, .. } => {
+            ROp::Gemv { a, x, acc, .. } => {
+                a.slots().len()
+                    + x.slots().len()
+                    + acc
+                        .as_ref()
+                        .map_or(0, |(c, _, _)| c.as_ref().map_or(0, |c| c.slots().len()))
+            }
+            ROp::Gemm { a, b, acc, .. } => {
+                a.slots().len()
+                    + b.slots().len()
+                    + acc
+                        .as_ref()
+                        .map_or(0, |(c, _, _)| c.as_ref().map_or(0, |c| c.slots().len()))
+            }
+            ROp::Solve { a, b, .. } | ROp::SolveMany { a, b, .. } => {
                 a.slots().len() + b.slots().len()
             }
             _ => 0,
@@ -237,16 +277,34 @@ impl TapeVisitor for Recorder {
             n_out,
         ));
     }
-    fn gemv(&mut self, dst: u32, a: Operand<'_>, x: Operand<'_>, m: u32, n: u32) {
+    fn gemv(
+        &mut self,
+        dst: u32,
+        a: Operand<'_>,
+        x: Operand<'_>,
+        m: u32,
+        n: u32,
+        acc: Option<(Option<Operand<'_>>, &[u32])>,
+    ) {
         self.ops.push(ROp::Gemv {
             dst,
             a: Dense::of(a),
             x: Dense::of(x),
             m,
             n,
+            acc: acc.map(|(c, codes)| (c.map(Dense::of), codes.to_vec(), 0)),
         });
     }
-    fn gemm(&mut self, dst: u32, a: Operand<'_>, b: Operand<'_>, m: u32, k: u32, n: u32) {
+    fn gemm(
+        &mut self,
+        dst: u32,
+        a: Operand<'_>,
+        b: Operand<'_>,
+        m: u32,
+        k: u32,
+        n: u32,
+        acc: Option<(Option<Operand<'_>>, &[u32])>,
+    ) {
         self.ops.push(ROp::Gemm {
             dst,
             a: Dense::of(a),
@@ -254,6 +312,7 @@ impl TapeVisitor for Recorder {
             m,
             k,
             n,
+            acc: acc.map(|(c, codes)| (c.map(Dense::of), codes.to_vec(), 0)),
         });
     }
     fn solve_many(&mut self, dst: u32, a: Operand<'_>, b: Operand<'_>, n: u32, k: u32) {

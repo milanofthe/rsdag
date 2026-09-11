@@ -280,3 +280,23 @@ fn the_panel_guard_rejects_a_tiny_pivot_and_the_repivoted_plan_passes() {
         );
     }
 }
+
+#[test]
+fn the_value_order_is_a_permutation_grouped_by_block() {
+    let (_, rows, _, _, _, _) = random_system(40, 3, 2);
+    let pattern = pattern_of(&rows);
+    let plan = plan(&pattern).expect("plan");
+    let sn = supernodes(&pattern, &plan);
+    let entries: Vec<(usize, usize)> = rows
+        .iter()
+        .enumerate()
+        .flat_map(|(i, r)| r.iter().map(move |&(j, _)| (i, j)))
+        .collect();
+    let order = sn.value_order(&entries);
+    let mut seen = vec![false; entries.len()];
+    for &p in &order {
+        assert!(!seen[p], "a position twice");
+        seen[p] = true;
+    }
+    assert!(seen.iter().all(|&s| s), "every position taken");
+}

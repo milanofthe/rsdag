@@ -119,6 +119,46 @@ pub(crate) extern "C" fn h_gemm(
     rsdag::semantics::gemm(a, b, m, k, n, out);
 }
 
+/// `A x` folded per the codes at `codes` (see `rsdag::tape::Fold`)
+/// against `c` (null when no code reads it).
+#[allow(clippy::too_many_arguments)]
+pub(crate) extern "C" fn h_gemv_acc(
+    a: *const f64,
+    x: *const f64,
+    c: *const f64,
+    codes: *const u32,
+    m: usize,
+    n: usize,
+    out: *mut f64,
+) {
+    let a = unsafe { std::slice::from_raw_parts(a, m * n) };
+    let x = unsafe { std::slice::from_raw_parts(x, n) };
+    let c = (!c.is_null()).then(|| unsafe { std::slice::from_raw_parts(c, m) });
+    let codes = unsafe { std::slice::from_raw_parts(codes, m) };
+    let out = unsafe { std::slice::from_raw_parts_mut(out, m) };
+    rsdag::semantics::gemv_fold(a, x, m, n, c, codes, out);
+}
+
+/// `A B` folded per the codes, as [`h_gemv_acc`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) extern "C" fn h_gemm_acc(
+    a: *const f64,
+    b: *const f64,
+    c: *const f64,
+    codes: *const u32,
+    m: usize,
+    k: usize,
+    n: usize,
+    out: *mut f64,
+) {
+    let a = unsafe { std::slice::from_raw_parts(a, m * k) };
+    let b = unsafe { std::slice::from_raw_parts(b, n * k) };
+    let c = (!c.is_null()).then(|| unsafe { std::slice::from_raw_parts(c, m * n) });
+    let codes = unsafe { std::slice::from_raw_parts(codes, m * n) };
+    let out = unsafe { std::slice::from_raw_parts_mut(out, m * n) };
+    rsdag::semantics::gemm_fold(a, b, m, k, n, c, codes, out);
+}
+
 pub(crate) extern "C" fn h_gemv(a: *const f64, x: *const f64, m: usize, n: usize, out: *mut f64) {
     let a = unsafe { std::slice::from_raw_parts(a, m * n) };
     let x = unsafe { std::slice::from_raw_parts(x, n) };

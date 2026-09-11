@@ -233,6 +233,52 @@ pub(crate) fn gemv(a: &[f64], x: &[f64], m: usize, n: usize, out: &mut [f64]) {
 /// rows of `b` at a time, sixteen accumulator pairs.
 pub(crate) fn gemm(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, out: &mut [f64]) {
     assert!(a.len() >= m * k && b.len() >= n * k && out.len() >= m * n);
+    gemm_with(a, b, m, k, n, |i, v| out[i] = v);
+}
+
+/// [`crate::semantics::gemm_fold_t`] in `f64`: the folds against an
+/// operand at the store, the self folds after.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gemm_fold(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    c: Option<&[f64]>,
+    codes: &[u32],
+    out: &mut [f64],
+) {
+    use crate::tape::Fold;
+    assert!(a.len() >= m * k && b.len() >= n * k && out.len() >= m * n);
+    let codes = &codes[..m * n];
+    // One code for every entry, the common case, without a decode per
+    // store.
+    let uniform = codes.windows(2).all(|w| w[0] == w[1]);
+    let f = Fold(codes[0]);
+    match (uniform, f.0 & 3, f.is_self(), c) {
+        (true, 0, _, _) => gemm_with(a, b, m, k, n, |i, v| out[i] = v),
+        (true, 3, _, _) => gemm_with(a, b, m, k, n, |i, v| out[i] = -v),
+        (true, 1, false, Some(c)) => {
+            let c = &c[..m * n];
+            gemm_with(a, b, m, k, n, |i, v| out[i] = c[i] - v)
+        }
+        (true, 2, false, Some(c)) => {
+            let c = &c[..m * n];
+            gemm_with(a, b, m, k, n, |i, v| out[i] = c[i] + v)
+        }
+        _ if codes.iter().any(|&code| Fold(code).is_self()) => {
+            gemm_with(a, b, m, k, n, |i, v| out[i] = v);
+            crate::semantics::fold_in_place(codes, c, out);
+        }
+        _ => gemm_with(a, b, m, k, n, |i, v| {
+            out[i] = Fold(codes[i]).fold(c.map_or(v, |c| c[i]), v)
+        }),
+    }
+}
+
+/// [`gemm`] with every entry stored through `st(index, value)`.
+fn gemm_with(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, mut st: impl FnMut(usize, f64)) {
     let ch = k / 4;
     let mut i = 0;
     while i + 4 <= m {
@@ -267,12 +313,15 @@ pub(crate) fn gemm(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, out: &mut
             }
             for (r, ar) in acc.iter().enumerate() {
                 for (q, aq) in ar.iter().enumerate() {
-                    out[(i + r) * n + j + q] = finish(
-                        aq[0],
-                        aq[1],
-                        &a[(i + r) * k..][..k],
-                        &b[(j + q) * k..][..k],
-                        ch * 4,
+                    st(
+                        (i + r) * n + j + q,
+                        finish(
+                            aq[0],
+                            aq[1],
+                            &a[(i + r) * k..][..k],
+                            &b[(j + q) * k..][..k],
+                            ch * 4,
+                        ),
                     );
                 }
             }
@@ -280,14 +329,17 @@ pub(crate) fn gemm(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, out: &mut
         }
         for r in 0..4 {
             for jj in j..n {
-                out[(i + r) * n + jj] = dot(&a[(i + r) * k..][..k], &b[jj * k..][..k]);
+                st(
+                    (i + r) * n + jj,
+                    dot(&a[(i + r) * k..][..k], &b[jj * k..][..k]),
+                );
             }
         }
         i += 4;
     }
     for r in i..m {
         for j in 0..n {
-            out[r * n + j] = dot(&a[r * k..][..k], &b[j * k..][..k]);
+            st(r * n + j, dot(&a[r * k..][..k], &b[j * k..][..k]));
         }
     }
 }

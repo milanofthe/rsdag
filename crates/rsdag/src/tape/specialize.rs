@@ -1,7 +1,7 @@
 //! Choice specialization: shorten a tape against a recorded `Select` trace,
 //! keeping guard outputs that detect a region flip. See [`Tape::specialize`].
 
-use super::{input_index, Op, Src, Tape, INPUT};
+use super::{input_index, Accum, Op, Src, Tape, INPUT};
 
 /// A value of the source tape: an input, or output `off` of op `i`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -66,9 +66,18 @@ impl Tape {
                     n_args,
                     ..
                 } => v.extend_from_slice(pool(start, n_groups * n_args)),
-                Op::Gemv { a, x, m: rows, n } => {
+                Op::Gemv {
+                    a,
+                    x,
+                    m: rows,
+                    n,
+                    acc,
+                } => {
                     src(a, rows * n, &mut v);
                     src(x, n, &mut v);
+                    if let Some(Accum { c: Some(c), .. }) = acc {
+                        src(c, rows, &mut v);
+                    }
                 }
                 Op::Gemm {
                     a,
@@ -76,9 +85,13 @@ impl Tape {
                     m: rows,
                     k,
                     n,
+                    acc,
                 } => {
                     src(a, rows * k, &mut v);
                     src(b, n * k, &mut v);
+                    if let Some(Accum { c: Some(c), .. }) = acc {
+                        src(c, rows * n, &mut v);
+                    }
                 }
                 Op::Solve { a, b, n } => {
                     src(a, n * n, &mut v);
@@ -371,7 +384,13 @@ impl Tape {
                         n_out,
                     }
                 }
-                Op::Gemv { a, x, m: rows, n } => {
+                Op::Gemv {
+                    a,
+                    x,
+                    m: rows,
+                    n,
+                    acc,
+                } => {
                     let a = match a {
                         Src::Inputs(k) => Src::Inputs(k),
                         Src::Pool(_) => {
@@ -386,8 +405,26 @@ impl Tape {
                             Src::Pool(gather(&o, &mut arg_pool, &mut max_args))
                         }
                     };
-                    max_args = max_args.max((rows * n + n) as usize);
-                    Op::Gemv { a, x, m: rows, n }
+                    let acc = acc.map(|Accum { c, codes }| {
+                        let c = c.map(|c| match c {
+                            Src::Inputs(k) => Src::Inputs(k),
+                            Src::Pool(_) => {
+                                let o = take(rows as usize);
+                                Src::Pool(gather(&o, &mut arg_pool, &mut max_args))
+                            }
+                        });
+                        let start = arg_pool.len() as u32;
+                        arg_pool.extend_from_slice(pool(codes, rows));
+                        Accum { c, codes: start }
+                    });
+                    max_args = max_args.max((rows * n + n + rows) as usize);
+                    Op::Gemv {
+                        a,
+                        x,
+                        m: rows,
+                        n,
+                        acc,
+                    }
                 }
                 Op::Gemm {
                     a,
@@ -395,6 +432,7 @@ impl Tape {
                     m: rows,
                     k,
                     n,
+                    acc,
                 } => {
                     let a = match a {
                         Src::Inputs(i) => Src::Inputs(i),
@@ -410,13 +448,26 @@ impl Tape {
                             Src::Pool(gather(&o, &mut arg_pool, &mut max_args))
                         }
                     };
-                    max_args = max_args.max((rows * k + n * k) as usize);
+                    let acc = acc.map(|Accum { c, codes }| {
+                        let c = c.map(|c| match c {
+                            Src::Inputs(i) => Src::Inputs(i),
+                            Src::Pool(_) => {
+                                let o = take((rows * n) as usize);
+                                Src::Pool(gather(&o, &mut arg_pool, &mut max_args))
+                            }
+                        });
+                        let start = arg_pool.len() as u32;
+                        arg_pool.extend_from_slice(pool(codes, rows * n));
+                        Accum { c, codes: start }
+                    });
+                    max_args = max_args.max((rows * k + n * k + rows * n) as usize);
                     Op::Gemm {
                         a,
                         b,
                         m: rows,
                         k,
                         n,
+                        acc,
                     }
                 }
                 Op::Solve { a, b, n } => {

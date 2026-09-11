@@ -64,6 +64,51 @@ impl Supernodes {
         let n = self.row_of.len().max(1);
         self.widths().iter().filter(|&&w| w > 1).sum::<usize>() as f64 / n as f64
     }
+
+    /// The order in which the program reads the entries in place: for each
+    /// entry `k` of `entries` (original coordinates) its position in a
+    /// layout that goes block by block over the panels, a block right of
+    /// its pivot panel column-major and every other block row-major. A
+    /// consumer whose inputs follow this order feeds the kernels without
+    /// a gather.
+    pub fn value_order(&self, entries: &[(usize, usize)]) -> Vec<usize> {
+        let n = self.row_of.len();
+        let mut step_of_row = vec![0usize; n];
+        let mut step_of_col = vec![0usize; n];
+        for s in 0..n {
+            step_of_row[self.row_of[s]] = s;
+            step_of_col[self.col_of[s]] = s;
+        }
+        let np = self.n_panels();
+        let mut panel_of = vec![0usize; n];
+        for p in 0..np {
+            for s in self.bounds[p]..self.bounds[p + 1] {
+                panel_of[s] = p;
+            }
+        }
+        // Sort key per entry: (block row, block column, within-block index).
+        let mut keyed: Vec<((usize, usize, usize), usize)> = entries
+            .iter()
+            .enumerate()
+            .map(|(k, &(i, j))| {
+                let (rs, cs) = (step_of_row[i], step_of_col[j]);
+                let (pr, pc) = (panel_of[rs], panel_of[cs]);
+                let (r, c) = (rs - self.bounds[pr], cs - self.bounds[pc]);
+                let (sr, sc) = (
+                    self.bounds[pr + 1] - self.bounds[pr],
+                    self.bounds[pc + 1] - self.bounds[pc],
+                );
+                let within = if pc > pr { c * sr + r } else { r * sc + c };
+                ((pr, pc, within), k)
+            })
+            .collect();
+        keyed.sort_unstable();
+        let mut order = vec![0usize; entries.len()];
+        for (pos, (_, k)) in keyed.into_iter().enumerate() {
+            order[k] = pos;
+        }
+        order
+    }
 }
 
 /// The symbolic elimination of a pattern in step coordinates (`entries`

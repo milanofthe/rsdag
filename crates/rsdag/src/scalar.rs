@@ -58,6 +58,33 @@ pub trait Scalar: Copy + Send + Sync + std::fmt::Debug + 'static {
     fn gemm(a: &[Self], b: &[Self], m: usize, k: usize, n: usize, out: &mut [Self]) {
         crate::semantics::gemm_t(a, b, m, k, n, out)
     }
+    /// The product with its entries folded ([`crate::semantics::gemm_fold_t`]).
+    #[allow(clippy::too_many_arguments)]
+    fn gemm_fold(
+        a: &[Self],
+        b: &[Self],
+        m: usize,
+        k: usize,
+        n: usize,
+        c: Option<&[Self]>,
+        codes: &[u32],
+        out: &mut [Self],
+    ) {
+        crate::semantics::gemm_fold_t(a, b, m, k, n, c, codes, out)
+    }
+    /// The matrix-vector product with its rows folded
+    /// ([`crate::semantics::gemv_fold_t`]).
+    fn gemv_fold(
+        a: &[Self],
+        x: &[Self],
+        m: usize,
+        n: usize,
+        c: Option<&[Self]>,
+        codes: &[u32],
+        out: &mut [Self],
+    ) {
+        crate::semantics::gemv_fold_t(a, x, m, n, c, codes, out)
+    }
     /// The dense solve of `k` right-hand sides
     /// ([`crate::semantics::solve_many_t`]); `f64` runs its vector twin.
     fn solve_many(a: &[Self], b: &[Self], n: usize, k: usize, out: &mut [Self]) {
@@ -102,6 +129,30 @@ impl Scalar for f64 {
     }
     fn gemm(a: &[Self], b: &[Self], m: usize, k: usize, n: usize, out: &mut [Self]) {
         crate::simd::gemm(a, b, m, k, n, out)
+    }
+    fn gemm_fold(
+        a: &[Self],
+        b: &[Self],
+        m: usize,
+        k: usize,
+        n: usize,
+        c: Option<&[Self]>,
+        codes: &[u32],
+        out: &mut [Self],
+    ) {
+        crate::simd::gemm_fold(a, b, m, k, n, c, codes, out)
+    }
+    fn gemv_fold(
+        a: &[Self],
+        x: &[Self],
+        m: usize,
+        n: usize,
+        c: Option<&[Self]>,
+        codes: &[u32],
+        out: &mut [Self],
+    ) {
+        crate::simd::gemv(a, x, m, n, out);
+        crate::semantics::fold_in_place(codes, c, out);
     }
     fn solve_many(a: &[Self], b: &[Self], n: usize, k: usize, out: &mut [Self]) {
         crate::simd::solve_many(a, b, n, k, out)

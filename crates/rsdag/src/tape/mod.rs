@@ -87,22 +87,26 @@ pub enum Op {
         n_out: u32,
     },
     /// A matrix-vector product: `m` rows of `n` in `a` against `x`, the rows
-    /// to `dst .. dst+m`, each row the fold of `Dot`.
+    /// to `dst .. dst+m`, each row the fold of `Dot`; with `acc`, each row
+    /// folded per [`Fold`] with its accumulator entry.
     Gemv {
         a: Src,
         x: Src,
         m: u32,
         n: u32,
+        acc: Option<Accum>,
     },
     /// A matrix-matrix product: `m` rows of `k` in `a` against `n` rows of
     /// `k` in `b` (the right factor by columns), entry `(i, j)` to
-    /// `dst + i*n + j`, each entry the fold of `Dot`.
+    /// `dst + i*n + j`, each entry the fold of `Dot`; with `acc`, each
+    /// entry folded per [`Fold`] with its accumulator entry.
     Gemm {
         a: Src,
         b: Src,
         m: u32,
         k: u32,
         n: u32,
+        acc: Option<Accum>,
     },
     /// The dense solve `A x = b`, `a` `n` by `n` and `b` of `n`, `x` to
     /// `dst .. dst+n` (see [`crate::semantics::solve_t`]).
@@ -120,6 +124,66 @@ pub enum Op {
         n: u32,
         k: u32,
     },
+}
+
+/// How a product kernel folds one of its entries `d` after the fold of
+/// its dot: kept as is, `c - d`, `c + d` or `-d`, one rounding, as the
+/// `Sub`, `Add` or `Neg` it replaces; `c` is the entry's accumulator, an
+/// operand of the kernel or, for a self fold, another entry's product. A
+/// kernel with `acc` carries one code per entry in the arg pool
+/// (`acc.1 ..`) and the accumulator operand at `acc.0` (a plain or self
+/// fold's entry there is a placeholder).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Fold(pub u32);
+
+impl Fold {
+    pub const PLAIN: Fold = Fold(0);
+    pub const NEG: Fold = Fold(3);
+    /// `c - d` with `c` the accumulator operand.
+    pub const SUB: Fold = Fold(1);
+    /// `c + d` with `c` the accumulator operand.
+    pub const ADD: Fold = Fold(2);
+    /// `c - d` with `c` the product of entry `j` of the same kernel.
+    pub fn sub_self(j: u32) -> Fold {
+        Fold(1 | 4 | (j << 3))
+    }
+    /// `c + d` with `c` the product of entry `j` of the same kernel.
+    pub fn add_self(j: u32) -> Fold {
+        Fold(2 | 4 | (j << 3))
+    }
+    pub fn is_plain(self) -> bool {
+        self.0 & 3 == 0
+    }
+    pub fn is_self(self) -> bool {
+        self.0 & 4 != 0
+    }
+    /// The entry whose product is the accumulator of a self fold.
+    pub fn self_index(self) -> usize {
+        (self.0 >> 3) as usize
+    }
+    /// The product `d` folded against the accumulator `a` (unused by a
+    /// plain or negating fold).
+    #[inline]
+    pub fn fold<T: Scalar>(self, a: T, d: T) -> T {
+        match self.0 & 3 {
+            0 => d,
+            1 => a.sub(d),
+            2 => a.add(d),
+            _ => d.neg(),
+        }
+    }
+    /// Whether the fold reads the accumulator operand.
+    pub fn reads_operand(self) -> bool {
+        matches!(self.0 & 3, 1 | 2) && !self.is_self()
+    }
+}
+
+/// A product kernel's folds: the fold code per entry from `codes` in the
+/// arg pool, and the accumulator operand when any code reads one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Accum {
+    pub c: Option<Src>,
+    pub codes: u32,
 }
 
 /// Where a kernel's dense operand lives.
@@ -204,10 +268,28 @@ pub trait TapeVisitor {
     );
     /// `m` rows of `n` in `a` against `x`, to `dst .. dst+m`, each row the
     /// fold of [`dot`](Self::dot) (see [`crate::semantics::gemv_t`]).
-    fn gemv(&mut self, dst: u32, a: Operand<'_>, x: Operand<'_>, m: u32, n: u32);
+    fn gemv(
+        &mut self,
+        dst: u32,
+        a: Operand<'_>,
+        x: Operand<'_>,
+        m: u32,
+        n: u32,
+        acc: Option<(Option<Operand<'_>>, &[u32])>,
+    );
     /// The product of `m` rows of `k` in `a` with `n` rows of `k` in `b`,
     /// entry `(i, j)` to `dst + i*n + j` (see [`crate::semantics::gemm_t`]).
-    fn gemm(&mut self, dst: u32, a: Operand<'_>, b: Operand<'_>, m: u32, k: u32, n: u32);
+    #[allow(clippy::too_many_arguments)]
+    fn gemm(
+        &mut self,
+        dst: u32,
+        a: Operand<'_>,
+        b: Operand<'_>,
+        m: u32,
+        k: u32,
+        n: u32,
+        acc: Option<(Option<Operand<'_>>, &[u32])>,
+    );
     /// The dense solve of `a` (`n` by `n`) against `b`, to `dst .. dst+n`
     /// (see [`crate::semantics::solve_t`]).
     fn solve(&mut self, dst: u32, a: Operand<'_>, b: Operand<'_>, n: u32);
@@ -302,14 +384,20 @@ impl Tape {
                     "CallBatch(b{bundle}, {n_groups} x [{}]) -> {n_groups} x {n_out}",
                     list(start, n_groups * n_args)
                 ),
-                Op::Gemv { a, x, m, n } => {
-                    format!("Gemv({m}x{n} {}, {}) -> {m}", src(a, m * n), src(x, n))
-                }
-                Op::Gemm { a, b, m, k, n } => {
+                Op::Gemv { a, x, m, n, acc } => {
                     format!(
-                        "Gemm({m}x{k} {}, {n}x{k} {}) -> {}",
+                        "Gemv({m}x{n} {}, {}){} -> {m}",
+                        src(a, m * n),
+                        src(x, n),
+                        acc_text(&self.arg_pool, acc, m)
+                    )
+                }
+                Op::Gemm { a, b, m, k, n, acc } => {
+                    format!(
+                        "Gemm({m}x{k} {}, {n}x{k} {}){} -> {}",
                         src(a, m * k),
                         src(b, n * k),
+                        acc_text(&self.arg_pool, acc, m * n),
                         m * n
                     )
                 }
@@ -495,22 +583,55 @@ impl Tape {
                     );
                     continue;
                 }
-                Op::Gemv { a, x, m, n } => {
+                Op::Gemv { a, x, m, n, acc } => {
                     let (m, n) = (m as usize, n as usize);
-                    let (ra, rx) =
-                        dense_operands(inputs, work, scratch, &self.arg_pool, a, m * n, x, n);
+                    let mut at = 0usize;
+                    let pool = &self.arg_pool;
+                    let ra = place_operand(inputs, work, scratch, pool, a, m * n, &mut at);
+                    let rx = place_operand(inputs, work, scratch, pool, x, n, &mut at);
+                    let rc = acc.map(|f| {
+                        let c =
+                            f.c.map(|c| place_operand(inputs, work, scratch, pool, c, m, &mut at));
+                        (c, f.codes)
+                    });
                     let av: &[T] = dense_slice(inputs, work.as_ptr(), scratch, ra, m * n);
                     let xv: &[T] = dense_slice(inputs, work.as_ptr(), scratch, rx, n);
-                    T::gemv(av, xv, m, n, &mut work[d..d + m]);
+                    match rc {
+                        None => T::gemv(av, xv, m, n, &mut work[d..d + m]),
+                        Some((rc, codes)) => {
+                            // The kernel's outputs are fresh slots: the
+                            // accumulator never lives where they go.
+                            let cv: Option<&[T]> =
+                                rc.map(|rc| dense_slice(inputs, work.as_ptr(), scratch, rc, m));
+                            let codes = &self.arg_pool[codes as usize..codes as usize + m];
+                            T::gemv_fold(av, xv, m, n, cv, codes, &mut work[d..d + m]);
+                        }
+                    }
                     continue;
                 }
-                Op::Gemm { a, b, m, k, n } => {
+                Op::Gemm { a, b, m, k, n, acc } => {
                     let (m, k, n) = (m as usize, k as usize, n as usize);
-                    let (ra, rb) =
-                        dense_operands(inputs, work, scratch, &self.arg_pool, a, m * k, b, n * k);
+                    let mut at = 0usize;
+                    let pool = &self.arg_pool;
+                    let ra = place_operand(inputs, work, scratch, pool, a, m * k, &mut at);
+                    let rb = place_operand(inputs, work, scratch, pool, b, n * k, &mut at);
+                    let rc = acc.map(|f| {
+                        let c = f
+                            .c
+                            .map(|c| place_operand(inputs, work, scratch, pool, c, m * n, &mut at));
+                        (c, f.codes)
+                    });
                     let av: &[T] = dense_slice(inputs, work.as_ptr(), scratch, ra, m * k);
                     let bv: &[T] = dense_slice(inputs, work.as_ptr(), scratch, rb, n * k);
-                    T::gemm(av, bv, m, k, n, &mut work[d..d + m * n]);
+                    match rc {
+                        None => T::gemm(av, bv, m, k, n, &mut work[d..d + m * n]),
+                        Some((rc, codes)) => {
+                            let cv: Option<&[T]> =
+                                rc.map(|rc| dense_slice(inputs, work.as_ptr(), scratch, rc, m * n));
+                            let codes = &self.arg_pool[codes as usize..codes as usize + m * n];
+                            T::gemm_fold(av, bv, m, k, n, cv, codes, &mut work[d..d + m * n]);
+                        }
+                    }
                     continue;
                 }
                 Op::SolveMany { a, b, n, k } => {
@@ -589,10 +710,23 @@ impl Tape {
                     n_args,
                     n_out,
                 ),
-                Op::Gemv { a, x, m, n } => v.gemv(dst, operand(a, m * n), operand(x, n), m, n),
-                Op::Gemm { a, b, m, k, n } => {
-                    v.gemm(dst, operand(a, m * k), operand(b, n * k), m, k, n)
-                }
+                Op::Gemv { a, x, m, n, acc } => v.gemv(
+                    dst,
+                    operand(a, m * n),
+                    operand(x, n),
+                    m,
+                    n,
+                    acc.map(|f| (f.c.map(|c| operand(c, m)), pool(f.codes, m))),
+                ),
+                Op::Gemm { a, b, m, k, n, acc } => v.gemm(
+                    dst,
+                    operand(a, m * k),
+                    operand(b, n * k),
+                    m,
+                    k,
+                    n,
+                    acc.map(|f| (f.c.map(|c| operand(c, m * n)), pool(f.codes, m * n))),
+                ),
                 Op::Solve { a, b, n } => v.solve(dst, operand(a, n * n), operand(b, n), n),
                 Op::SolveMany { a, b, n, k } => {
                     v.solve_many(dst, operand(a, n * n), operand(b, n * k), n, k)
@@ -651,6 +785,45 @@ fn dense_slice<'a, T: Scalar>(
 /// reach and a run of consecutive work slots are read in place; anything
 /// else is gathered into the scratch, `a` first, then `b`.
 #[allow(clippy::too_many_arguments)]
+/// Where a dense operand is read from: in place (inputs, or a consecutive
+/// run of work slots), or gathered into `scratch` from `*at` on, which
+/// advances past it.
+fn place_operand<T: Scalar>(
+    inputs: &[T],
+    work: &[T],
+    scratch: &mut [T],
+    pool: &[u32],
+    src: Src,
+    len: usize,
+    at: &mut usize,
+) -> Dense {
+    match src {
+        Src::Inputs(k) if inputs.len() >= k as usize + len => Dense::Inputs(k as usize),
+        Src::Inputs(k) => {
+            for j in 0..len {
+                scratch[*at + j] = inputs.get(k as usize + j).copied().unwrap_or(T::nan());
+            }
+            *at += len;
+            Dense::Scratch(*at - len)
+        }
+        Src::Pool(start) => {
+            let run = &pool[start as usize..start as usize + len];
+            let consecutive = len > 0
+                && input_index(run[0]).is_none()
+                && run.iter().enumerate().all(|(j, &s)| s == run[0] + j as u32);
+            if consecutive {
+                return Dense::Work(run[0] as usize);
+            }
+            for j in 0..len {
+                scratch[*at + j] = read(inputs, work, run[j]);
+            }
+            *at += len;
+            Dense::Scratch(*at - len)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn dense_operands<T: Scalar>(
     inputs: &[T],
     work: &[T],
@@ -662,33 +835,44 @@ fn dense_operands<T: Scalar>(
     len_b: usize,
 ) -> (Dense, Dense) {
     let mut at = 0usize;
-    let mut place = |src: Src, len: usize, scratch: &mut [T]| -> Dense {
-        match src {
-            Src::Inputs(k) if inputs.len() >= k as usize + len => Dense::Inputs(k as usize),
-            Src::Inputs(k) => {
-                for j in 0..len {
-                    scratch[at + j] = inputs.get(k as usize + j).copied().unwrap_or(T::nan());
-                }
-                at += len;
-                Dense::Scratch(at - len)
-            }
-            Src::Pool(start) => {
-                let run = &pool[start as usize..start as usize + len];
-                let consecutive = len > 0
-                    && input_index(run[0]).is_none()
-                    && run.iter().enumerate().all(|(j, &s)| s == run[0] + j as u32);
-                if consecutive {
-                    return Dense::Work(run[0] as usize);
-                }
-                for j in 0..len {
-                    scratch[at + j] = read(inputs, work, run[j]);
-                }
-                at += len;
-                Dense::Scratch(at - len)
-            }
-        }
-    };
-    let ra = place(a, len_a, scratch);
-    let rb = place(b, len_b, scratch);
+    let ra = place_operand(inputs, work, scratch, pool, a, len_a, &mut at);
+    let rb = place_operand(inputs, work, scratch, pool, b, len_b, &mut at);
     (ra, rb)
+}
+
+/// The accumulator part of a kernel's dump line: the operand and the
+/// fold codes.
+fn acc_text(pool: &[u32], acc: Option<Accum>, len: u32) -> String {
+    match acc {
+        None => String::new(),
+        Some(Accum { c, codes }) => {
+            let codes = &pool[codes as usize..(codes + len) as usize];
+            let text: Vec<String> = codes
+                .iter()
+                .map(|&code| {
+                    let f = Fold(code);
+                    let op = match code & 3 {
+                        0 => "=",
+                        1 => "-",
+                        2 => "+",
+                        _ => "neg",
+                    };
+                    if f.is_self() {
+                        format!("{op}#{}", f.self_index())
+                    } else {
+                        op.to_string()
+                    }
+                })
+                .collect();
+            format!(
+                " acc {} [{}]",
+                match c {
+                    Some(Src::Inputs(k)) => format!("i{k}..i{}", k + len),
+                    Some(Src::Pool(start)) => format!("pool{start}[{len}]"),
+                    None => "-".to_string(),
+                },
+                text.join(",")
+            )
+        }
+    }
 }
