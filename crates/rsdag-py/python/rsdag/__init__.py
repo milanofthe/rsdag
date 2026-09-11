@@ -32,8 +32,9 @@ def dot(a, b):
 
 
 def matmul(a, b):
-    """`a @ b` over tracers: a matrix against a vector is one `Dot` per row
-    (a kernel once compiled), against a matrix one per entry."""
+    """`a @ b` over tracers: a matrix against a vector is one `Dot` per row,
+    against a matrix one per entry; either fuses into one kernel (`Gemv`,
+    `Gemm`) once compiled."""
     if not (_is_traced(a) or _is_traced(b)):
         return np.matmul(a, b)
     a = np.asarray(a, dtype=object)

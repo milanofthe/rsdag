@@ -155,3 +155,14 @@ def test_matvec_and_solve_trace_to_kernels():
     J = jacobian(lambda A, x: matmul(A, x), wrt=1)(A0, x0)
     assert np.allclose(J, A0)
     assert np.isclose(trace(lambda a, b: dot(a, b), x0, x0)(x0, x0), np.dot(x0, x0))
+
+
+def test_matmul_traces_to_one_gemm():
+    from rsdag import matmul
+    A0 = 0.1 * np.arange(8 * 6).reshape(8, 6)
+    B0 = np.linspace(-1.0, 1.0, 6 * 3).reshape(6, 3)
+    p = trace(lambda A, B: matmul(A, B), A0, B0).program(A0, B0)
+    d = p.dump()
+    assert d.count("Gemm(8x6") == 1 and "Gemv" not in d
+    got = np.asarray(p.eval(np.concatenate([A0.ravel(), B0.ravel()]))).reshape(8, 3)
+    assert np.allclose(got, A0 @ B0, rtol=1e-12)

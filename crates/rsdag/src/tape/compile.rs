@@ -150,6 +150,11 @@ pub enum Kind {
         m: u32,
         n: u32,
     },
+    Gemm {
+        m: u32,
+        k: u32,
+        n: u32,
+    },
     Solve {
         n: u32,
     },
@@ -336,6 +341,8 @@ impl Forest {
         enum GroupKey {
             Call(u32, u32),
             Gemv(Vec<ExprId>, u32),
+            /// The rows (sorted) against every vector: a matrix product.
+            Gemm(Vec<Vec<ExprId>>, Vec<Vec<ExprId>>),
             Solve(crate::node::ArgList),
         }
         let mut group_index: HashMap<GroupKey, usize> = HashMap::default();
@@ -356,12 +363,59 @@ impl Forest {
             });
             groups[g].1.push(i);
         }
+        // Gemv groups over the same rows at one depth are one Gemm: the
+        // rows against every vector at once. A merged-away group is left
+        // empty; no member points at it.
+        let row_of = |mi: usize| -> Vec<ExprId> {
+            let Node::Dot(l) = *ctx.node(base[mi]) else {
+                unreachable!()
+            };
+            ctx.dot_args(l).0.to_vec()
+        };
+        let mut by_rows: HashMap<(Vec<Vec<ExprId>>, u32), Vec<usize>> = HashMap::default();
+        for (g, (key, members)) in groups.iter().enumerate() {
+            if let GroupKey::Gemv(_, d) = key {
+                if members.len() < GEMV_MIN_ROWS {
+                    continue;
+                }
+                let mut rows: Vec<Vec<ExprId>> = members.iter().map(|&mi| row_of(mi)).collect();
+                rows.sort();
+                if rows.windows(2).any(|w| w[0] == w[1]) {
+                    continue;
+                }
+                by_rows.entry((rows, *d)).or_default().push(g);
+            }
+        }
+        let mut merged: Vec<(Vec<usize>, Vec<Vec<ExprId>>)> = by_rows
+            .into_iter()
+            .filter(|(_, gs)| gs.len() >= 2)
+            .map(|((rows, _), gs)| (gs, rows))
+            .collect();
+        merged.sort();
+        for (gs, rows) in merged {
+            let xs: Vec<Vec<ExprId>> = gs
+                .iter()
+                .map(|&g| match &groups[g].0 {
+                    GroupKey::Gemv(x, _) => x.clone(),
+                    _ => unreachable!(),
+                })
+                .collect();
+            let members: Vec<usize> = gs
+                .iter()
+                .flat_map(|&g| groups[g].1.iter().copied())
+                .collect();
+            for &g in &gs[1..] {
+                groups[g].1.clear();
+            }
+            groups[gs[0]] = (GroupKey::Gemm(rows, xs), members);
+        }
         // A gemv group of too few rows at its depth, or a call group of one
         // argument list, is no kernel: its members lower on their own.
         let mut kernel_of: Vec<Option<usize>> = vec![None; m];
         for (g, (key, members)) in groups.iter().enumerate() {
             let is_kernel = match key {
                 GroupKey::Gemv(..) => members.len() >= GEMV_MIN_ROWS,
+                GroupKey::Gemm(..) => true,
                 GroupKey::Call(..) => {
                     let mut distinct: BTreeSet<Vec<ExprId>> = BTreeSet::new();
                     for &i in members {
@@ -398,7 +452,10 @@ impl Forest {
         // fused operand is no unit, its consumer reads its operands. A
         // depth-first walk from the roots, post-order, with an explicit
         // stack.
-        let first_member: Vec<usize> = groups.iter().map(|(_, ms)| ms[0]).collect();
+        let first_member: Vec<usize> = groups
+            .iter()
+            .map(|(_, ms)| ms.first().copied().unwrap_or(0))
+            .collect();
         let unit_of = |i: usize| -> usize {
             match kernel_of[i] {
                 Some(g) => first_member[g],
@@ -599,6 +656,46 @@ impl Forest {
                         });
                         for (r, &mi) in members.iter().enumerate() {
                             value[mi] = Some(Ref::Value(inst, r as u32));
+                        }
+                    }
+                    GroupKey::Gemm(rows, xs) => {
+                        let (rm, k, cn) = (rows.len(), xs[0].len(), xs.len());
+                        let mut ins: Vec<Ref> = Vec::with_capacity((rm + cn) * k);
+                        for r in rows {
+                            ins.extend(r.iter().map(|&a| val(a, &value)));
+                        }
+                        for x in xs {
+                            ins.extend(x.iter().map(|&a| val(a, &value)));
+                        }
+                        let row_index: HashMap<&[ExprId], usize> = rows
+                            .iter()
+                            .enumerate()
+                            .map(|(i, r)| (r.as_slice(), i))
+                            .collect();
+                        let col_index: HashMap<&[ExprId], usize> = xs
+                            .iter()
+                            .enumerate()
+                            .map(|(j, x)| (x.as_slice(), j))
+                            .collect();
+                        let pure = members.iter().all(|&mi| self.pure[mi]);
+                        let inst = insts.len() as u32;
+                        insts.push(Inst {
+                            kind: Kind::Gemm {
+                                m: rm as u32,
+                                k: k as u32,
+                                n: cn as u32,
+                            },
+                            ins: pooled(&mut pool, ins),
+                            n_out: (rm * cn) as u32,
+                            pure,
+                        });
+                        for &mi in members {
+                            let Node::Dot(l) = *ctx.node(base[mi]) else {
+                                unreachable!()
+                            };
+                            let (a, x) = ctx.dot_args(l);
+                            let (r, c) = (row_index[a], col_index[x]);
+                            value[mi] = Some(Ref::Value(inst, (r * cn + c) as u32));
                         }
                     }
                     GroupKey::Solve(l) => {
@@ -1024,6 +1121,19 @@ impl Program {
                     // inputs do not reach is gathered as NaN.
                     max_args = max_args.max((rows * n + n) as usize);
                     Op::Gemv { a, x, m: rows, n }
+                }
+                Kind::Gemm { m: rows, k, n } => {
+                    let (a, b) = o.split_at((rows * k) as usize);
+                    let a = dense(&mut arg_pool, &mut max_args, a);
+                    let b = dense(&mut arg_pool, &mut max_args, b);
+                    max_args = max_args.max((rows * k + n * k) as usize);
+                    Op::Gemm {
+                        a,
+                        b,
+                        m: rows,
+                        k,
+                        n,
+                    }
                 }
                 Kind::Solve { n } => {
                     let (a, b) = o.split_at((n * n) as usize);

@@ -32,6 +32,7 @@ impl Tape {
                     n_groups, n_out, ..
                 } => n_groups * n_out,
                 Op::Gemv { m, .. } => m,
+                Op::Gemm { m, n, .. } => m * n,
                 Op::Solve { n, .. } => n,
                 _ => 1,
             }
@@ -67,6 +68,16 @@ impl Tape {
                 Op::Gemv { a, x, m: rows, n } => {
                     src(a, rows * n, &mut v);
                     src(x, n, &mut v);
+                }
+                Op::Gemm {
+                    a,
+                    b,
+                    m: rows,
+                    k,
+                    n,
+                } => {
+                    src(a, rows * k, &mut v);
+                    src(b, n * k, &mut v);
                 }
                 Op::Solve { a, b, n } => {
                     src(a, n * n, &mut v);
@@ -372,6 +383,36 @@ impl Tape {
                     };
                     max_args = max_args.max((rows * n + n) as usize);
                     Op::Gemv { a, x, m: rows, n }
+                }
+                Op::Gemm {
+                    a,
+                    b,
+                    m: rows,
+                    k,
+                    n,
+                } => {
+                    let a = match a {
+                        Src::Inputs(i) => Src::Inputs(i),
+                        Src::Pool(_) => {
+                            let o = take((rows * k) as usize);
+                            Src::Pool(gather(&o, &mut arg_pool, &mut max_args))
+                        }
+                    };
+                    let b = match b {
+                        Src::Inputs(i) => Src::Inputs(i),
+                        Src::Pool(_) => {
+                            let o = take((n * k) as usize);
+                            Src::Pool(gather(&o, &mut arg_pool, &mut max_args))
+                        }
+                    };
+                    max_args = max_args.max((rows * k + n * k) as usize);
+                    Op::Gemm {
+                        a,
+                        b,
+                        m: rows,
+                        k,
+                        n,
+                    }
                 }
                 Op::Solve { a, b, n } => {
                     let a = match a {

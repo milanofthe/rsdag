@@ -37,6 +37,14 @@ pub(crate) enum ROp {
         m: u32,
         n: u32,
     },
+    Gemm {
+        dst: u32,
+        a: Dense,
+        b: Dense,
+        m: u32,
+        k: u32,
+        n: u32,
+    },
     Solve {
         dst: u32,
         a: Dense,
@@ -90,7 +98,9 @@ impl ROp {
             }
             ROp::Dot(_, a, b) => a.iter().chain(b).copied().for_each(f),
             ROp::Gemv { a, x, .. } => a.slots().iter().chain(x.slots()).copied().for_each(f),
-            ROp::Solve { a, b, .. } => a.slots().iter().chain(b.slots()).copied().for_each(f),
+            ROp::Gemm { a, b, .. } | ROp::Solve { a, b, .. } => {
+                a.slots().iter().chain(b.slots()).copied().for_each(f)
+            }
         }
     }
     /// Every work slot the op reads.
@@ -119,6 +129,7 @@ impl ROp {
             ROp::Call(..) => crate::host::h_bundle as *const (),
             ROp::CallBatch(..) => crate::host::h_bundle_batch as *const (),
             ROp::Gemv { .. } => crate::host::h_gemv as *const (),
+            ROp::Gemm { .. } => crate::host::h_gemm as *const (),
             ROp::Solve { .. } => crate::host::h_solve as *const (),
             _ => return None,
         })
@@ -130,7 +141,7 @@ impl ROp {
             ROp::Reduce(_, ReduceOp::Min | ReduceOp::Max, args) => args.len(),
             ROp::Call(_, _, args, _) | ROp::CallBatch(_, _, args, ..) => args.len(),
             ROp::Gemv { a, x, .. } => a.slots().len() + x.slots().len(),
-            ROp::Solve { a, b, .. } => a.slots().len() + b.slots().len(),
+            ROp::Gemm { a, b, .. } | ROp::Solve { a, b, .. } => a.slots().len() + b.slots().len(),
             _ => 0,
         }
     }
@@ -222,6 +233,16 @@ impl TapeVisitor for Recorder {
             a: Dense::of(a),
             x: Dense::of(x),
             m,
+            n,
+        });
+    }
+    fn gemm(&mut self, dst: u32, a: Operand<'_>, b: Operand<'_>, m: u32, k: u32, n: u32) {
+        self.ops.push(ROp::Gemm {
+            dst,
+            a: Dense::of(a),
+            b: Dense::of(b),
+            m,
+            k,
             n,
         });
     }

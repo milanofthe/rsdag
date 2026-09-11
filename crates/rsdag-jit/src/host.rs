@@ -92,6 +92,20 @@ pub(crate) extern "C" fn h_bundle_batch(
     b.call_batch(xs, n_groups, n_args, out);
 }
 
+pub(crate) extern "C" fn h_gemm(
+    a: *const f64,
+    b: *const f64,
+    m: usize,
+    k: usize,
+    n: usize,
+    out: *mut f64,
+) {
+    let a = unsafe { std::slice::from_raw_parts(a, m * k) };
+    let b = unsafe { std::slice::from_raw_parts(b, n * k) };
+    let out = unsafe { std::slice::from_raw_parts_mut(out, m * n) };
+    rsdag::semantics::gemm(a, b, m, k, n, out);
+}
+
 pub(crate) extern "C" fn h_gemv(a: *const f64, x: *const f64, m: usize, n: usize, out: *mut f64) {
     let a = unsafe { std::slice::from_raw_parts(a, m * n) };
     let x = unsafe { std::slice::from_raw_parts(x, n) };

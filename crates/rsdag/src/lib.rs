@@ -20,6 +20,7 @@ pub mod role;
 pub mod scalar;
 pub mod scope;
 pub mod semantics;
+mod simd;
 pub mod simplify;
 pub mod symbolic;
 #[cfg(any(test, feature = "synth"))]

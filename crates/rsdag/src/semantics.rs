@@ -85,9 +85,9 @@ pub fn reduce_slice(op: ReduceOp, xs: &[f64]) -> f64 {
     reduce_slice_t(op, xs)
 }
 
-/// [`dot_slice_t`] in `f64`.
+/// [`dot_slice_t`] in `f64`: the two-lane vector twin, bit-identical.
 pub fn dot_slice(a: &[f64], b: &[f64]) -> f64 {
-    dot_slice_t(a, b)
+    <f64 as Scalar>::dot_slice(a, b)
 }
 
 /// Canonical evaluation of a [`BinOp`], the one reference for every backend.
@@ -297,9 +297,67 @@ pub fn gemv_t<T: Scalar>(a: &[T], x: &[T], m: usize, n: usize, out: &mut [T]) {
     }
 }
 
-/// [`gemv_t`] in `f64`.
+/// A dense matrix-matrix product against rows: `out[i*n + j] =
+/// dot(a[i*k..], b[j*k..])` for `m` rows of `a` and `n` rows of `b`, each
+/// of `k` (the right factor by columns, each contiguous). Every entry is
+/// the fold of [`dot_slice_t`], so a fused product is bit-identical to
+/// its entries as separate dots.
+pub fn gemm_t<T: Scalar>(a: &[T], b: &[T], m: usize, k: usize, n: usize, out: &mut [T]) {
+    // Four rows of `a` against two rows of `b` at a time: thirty-two
+    // independent accumulators, six operand rows in the near cache.
+    let ch = k / 4;
+    let tail = |i: usize, j: usize, acc: [T; 4]| -> T {
+        let mut s = (acc[0].add(acc[1])).add(acc[2].add(acc[3]));
+        for l in ch * 4..k {
+            s = s.add(a[i * k + l].mul(b[j * k + l]));
+        }
+        s
+    };
+    let mut i = 0;
+    while i + 4 <= m {
+        let mut j = 0;
+        while j + 2 <= n {
+            let mut acc = [[[T::zero(); 4]; 2]; 4];
+            for c in 0..ch {
+                for (r, ar) in acc.iter_mut().enumerate() {
+                    let ra = &a[(i + r) * k + 4 * c..][..4];
+                    for (q, aq) in ar.iter_mut().enumerate() {
+                        let rb = &b[(j + q) * k + 4 * c..][..4];
+                        for l in 0..4 {
+                            aq[l] = aq[l].add(ra[l].mul(rb[l]));
+                        }
+                    }
+                }
+            }
+            for (r, ar) in acc.iter().enumerate() {
+                for (q, &aq) in ar.iter().enumerate() {
+                    out[(i + r) * n + j + q] = tail(i + r, j + q, aq);
+                }
+            }
+            j += 2;
+        }
+        for r in 0..4 {
+            for jj in j..n {
+                out[(i + r) * n + jj] = dot_slice_t(&a[(i + r) * k..][..k], &b[jj * k..][..k]);
+            }
+        }
+        i += 4;
+    }
+    for r in i..m {
+        for j in 0..n {
+            out[r * n + j] = dot_slice_t(&a[r * k..][..k], &b[j * k..][..k]);
+        }
+    }
+}
+
+/// [`gemm_t`] in `f64`: the two-lane vector twin, bit-identical.
+pub fn gemm(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, out: &mut [f64]) {
+    <f64 as Scalar>::gemm(a, b, m, k, n, out)
+}
+
+/// [`gemv_t`] in `f64`: the two-lane vector twin, bit-identical.
 pub fn gemv(a: &[f64], x: &[f64], m: usize, n: usize, out: &mut [f64]) {
-    gemv_t(a, x, m, n, out)
+    <f64 as Scalar>::gemv(a, x, m, n, out)
 }
 
 /// A dense solve `A x = b` by LU with partial pivoting: `a` is `n` by `n`
@@ -349,5 +407,5 @@ pub fn solve_t<T: Scalar>(a: &[T], b: &[T], n: usize, out: &mut [T]) {
 
 /// [`solve_t`] in `f64`.
 pub fn solve(a: &[f64], b: &[f64], n: usize, out: &mut [f64]) {
-    solve_t(a, b, n, out)
+    <f64 as Scalar>::solve(a, b, n, out)
 }
