@@ -65,6 +65,18 @@ impl Supernodes {
         self.widths().iter().filter(|&&w| w > 1).sum::<usize>() as f64 / n as f64
     }
 
+    /// The order in which the program reads the right-hand side in place:
+    /// for each unknown (original row) the step whose panel it belongs to,
+    /// so a right-hand side laid out by step is read block by block.
+    pub fn rhs_order(&self) -> Vec<usize> {
+        let n = self.row_of.len();
+        let mut step_of_row = vec![0usize; n];
+        for s in 0..n {
+            step_of_row[self.row_of[s]] = s;
+        }
+        step_of_row
+    }
+
     /// The order in which the program reads the entries in place: for each
     /// entry `k` of `entries` (original coordinates) its position in a
     /// layout that goes block by block over the panels, a block right of
