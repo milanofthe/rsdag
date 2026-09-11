@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="720" height="320" viewBox="0 0 720 320" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12">
   <defs>
     <marker id="sp-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1f4e79"/>
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8b8b8b"/>
     </marker>
     <marker id="sp-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#c55a11"/>
@@ -9,32 +9,32 @@
   </defs>
 
   <!-- Tape with Select nodes -->
-  <rect x="24" y="30" width="190" height="176" rx="4" fill="#eef3f8" stroke="#1f4e79" stroke-width="1.2"/>
-  <text x="119" y="56" text-anchor="middle" font-size="14" font-weight="bold" fill="#1f4e79">tape</text>
-  <text x="119" y="80" text-anchor="middle" fill="#000000">
+  <rect x="24" y="30" width="190" height="176" rx="4" fill="none" stroke="#8b8b8b" stroke-width="1.2"/>
+  <text x="119" y="56" text-anchor="middle" font-size="14" font-weight="bold" fill="#8b8b8b">tape</text>
+  <text x="119" y="80" text-anchor="middle" fill="#8b8b8b">
     <tspan x="119" y="80">v1 = mul x, p</tspan>
-    <tspan x="119" y="97" font-weight="bold" fill="#1f4e79">v2 = Select c1, v1, x</tspan>
+    <tspan x="119" y="97" font-weight="bold" fill="#8b8b8b">v2 = Select c1, v1, x</tspan>
     <tspan x="119" y="114">v3 = exp v2</tspan>
-    <tspan x="119" y="131" font-weight="bold" fill="#1f4e79">v4 = Select c2, v3, p</tspan>
+    <tspan x="119" y="131" font-weight="bold" fill="#8b8b8b">v4 = Select c2, v3, p</tspan>
     <tspan x="119" y="148">v5 = add v4, v1</tspan>
-    <tspan x="119" y="165" font-weight="bold" fill="#1f4e79">v6 = Select c3, v5, v3</tspan>
+    <tspan x="119" y="165" font-weight="bold" fill="#8b8b8b">v6 = Select c3, v5, v3</tspan>
     <tspan x="119" y="182">out v6</tspan>
   </text>
 
   <!-- Trace -->
-  <rect x="270" y="70" width="160" height="100" rx="4" fill="#eef3f8" stroke="#1f4e79" stroke-width="1.2"/>
-  <text x="350" y="96" text-anchor="middle" font-size="14" font-weight="bold" fill="#1f4e79">trace</text>
-  <text x="350" y="118" text-anchor="middle" fill="#000000">
+  <rect x="270" y="70" width="160" height="100" rx="4" fill="none" stroke="#8b8b8b" stroke-width="1.2"/>
+  <text x="350" y="96" text-anchor="middle" font-size="14" font-weight="bold" fill="#8b8b8b">trace</text>
+  <text x="350" y="118" text-anchor="middle" fill="#8b8b8b">
     <tspan x="350" y="118">eval_with records</tspan>
     <tspan x="350" y="135">the arm taken</tspan>
     <tspan x="350" y="152">c1=1, c2=0, c3=1</tspan>
   </text>
 
   <!-- Specialized tape -->
-  <rect x="500" y="30" width="190" height="130" rx="4" fill="#eef3f8" stroke="#1f4e79" stroke-width="1.2"/>
-  <text x="595" y="56" text-anchor="middle" font-size="14" font-weight="bold" fill="#1f4e79">specialized tape</text>
-  <text x="595" y="74" text-anchor="middle" fill="#555555">pinned arms</text>
-  <text x="595" y="94" text-anchor="middle" fill="#000000">
+  <rect x="500" y="30" width="190" height="130" rx="4" fill="none" stroke="#8b8b8b" stroke-width="1.2"/>
+  <text x="595" y="56" text-anchor="middle" font-size="14" font-weight="bold" fill="#8b8b8b">specialized tape</text>
+  <text x="595" y="74" text-anchor="middle" fill="#8b8b8b">pinned arms</text>
+  <text x="595" y="94" text-anchor="middle" fill="#8b8b8b">
     <tspan x="595" y="94">v1 = mul x, p</tspan>
     <tspan x="595" y="111">v3 = exp v1</tspan>
     <tspan x="595" y="128">v5 = add p, v1</tspan>
@@ -43,20 +43,20 @@
 
   <!-- Guards -->
   <line x1="595" y1="160" x2="595" y2="186" stroke="#c55a11" stroke-width="1.2"/>
-  <rect x="500" y="186" width="190" height="76" rx="4" fill="#ffffff" stroke="#c55a11" stroke-width="1.2"/>
+  <rect x="500" y="186" width="190" height="76" rx="4" fill="none" stroke="#c55a11" stroke-width="1.2"/>
   <text x="595" y="210" text-anchor="middle" font-size="14" font-weight="bold" fill="#c55a11">guards</text>
-  <text x="595" y="232" text-anchor="middle" fill="#000000">
+  <text x="595" y="232" text-anchor="middle" fill="#8b8b8b">
     <tspan x="595" y="232">c1 == 1, c2 == 0, c3 == 1</tspan>
     <tspan x="595" y="249">checked on every eval</tspan>
   </text>
 
   <!-- Forward arrows -->
-  <g stroke="#1f4e79" stroke-width="1.2" fill="none" marker-end="url(#sp-arrow)">
+  <g stroke="#8b8b8b" stroke-width="1.2" fill="none" marker-end="url(#sp-arrow)">
     <line x1="214" y1="120" x2="270" y2="120"/>
     <line x1="430" y1="120" x2="500" y2="120"/>
   </g>
-  <text x="242" y="112" text-anchor="middle" fill="#555555">eval</text>
-  <text x="465" y="112" text-anchor="middle" fill="#555555">specialize</text>
+  <text x="242" y="112" text-anchor="middle" fill="#8b8b8b">eval</text>
+  <text x="465" y="112" text-anchor="middle" fill="#8b8b8b">specialize</text>
 
   <!-- Guard failure loop -->
   <path d="M 595 262 L 595 300 L 350 300 L 350 170" fill="none" stroke="#c55a11" stroke-width="1.2" marker-end="url(#sp-arrow-accent)"/>

@@ -15,17 +15,29 @@ import matplotlib.pyplot as plt
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "data")
-BLUE, ORANGE, GREY, GREEN = "#1f4e79", "#c55a11", "#7f7f7f", "#3a7d44"
+BLUE, ORANGE, GREY, GREEN = "#4f86c6", "#d9822b", "#8b8b8b", "#4f9d5f"
 
+# Transparent, grey axes and text: legible on a light and on a dark page.
 plt.rcParams.update({
     "font.family": ["Helvetica", "Arial", "DejaVu Sans"],
     "font.size": 10,
     "axes.spines.top": False,
     "axes.spines.right": False,
     "axes.grid": True,
-    "grid.color": "#e3e3e3",
+    "grid.color": GREY,
+    "grid.alpha": 0.25,
     "grid.linewidth": 0.6,
     "svg.fonttype": "none",
+    "figure.facecolor": "none",
+    "axes.facecolor": "none",
+    "savefig.transparent": True,
+    "text.color": GREY,
+    "axes.labelcolor": GREY,
+    "axes.titlecolor": GREY,
+    "axes.edgecolor": GREY,
+    "xtick.color": GREY,
+    "ytick.color": GREY,
+    "legend.labelcolor": GREY,
 })
 
 
