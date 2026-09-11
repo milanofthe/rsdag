@@ -372,39 +372,50 @@ impl Plan {
                     }
                 }
             }
-            // Partial pivoting in the elimination order: at step k the row
-            // with the largest magnitude in column `order[k]` among the
-            // rows not yet taken.
+            // Threshold pivoting in the elimination order: at step k, among
+            // the rows not yet taken whose magnitude in column `order[k]`
+            // is within [`PIVOT_TOLERANCE`] of the largest (the rows the
+            // guard accepts), the sparsest, lowest index first. The choice
+            // depends on the values and the pattern alone, not on the
+            // order the entries were reached, and it keeps the fill down
+            // where the magnitudes tie (the unit entries of a source row).
             let order = &self.orders[b];
             let mut taken = vec![false; size];
+            let mut row_len = vec![0usize; size];
+            for &(r, _) in a.keys() {
+                row_len[r] += 1;
+            }
             let mut rows = Vec::with_capacity(size);
             for &c in order {
-                let mut best: Option<(usize, f64)> = None;
-                for &r in &in_col[c] {
-                    if taken[r] {
-                        continue;
-                    }
-                    let v = a.get(&(r, c)).copied().unwrap_or(0.0).abs();
-                    if best.is_none_or(|(_, bv)| v > bv) {
-                        best = Some((r, v));
-                    }
-                }
-                let (r, _) = best.expect("a structurally nonsingular block");
+                let mut open: Vec<usize> =
+                    in_col[c].iter().copied().filter(|&r| !taken[r]).collect();
+                open.sort_unstable();
+                open.dedup();
+                let mag = |r: usize| a.get(&(r, c)).copied().unwrap_or(0.0).abs();
+                let largest = open.iter().map(|&r| mag(r)).fold(0.0f64, f64::max);
+                let r = open
+                    .iter()
+                    .copied()
+                    .filter(|&r| mag(r) >= PIVOT_TOLERANCE * largest)
+                    .min_by_key(|&r| (row_len[r], r))
+                    .expect("a structurally nonsingular block");
                 taken[r] = true;
                 rows.push(r);
                 // Eliminate column c from the rows still open, tracking fill.
                 let piv = a[&(r, c)];
-                let row_r: Vec<(usize, f64)> = a
+                let mut row_r: Vec<(usize, f64)> = a
                     .iter()
                     .filter(|(&(rr, cc), _)| rr == r && !taken_col(cc, order, c))
                     .map(|(&(_, cc), &v)| (cc, v))
                     .collect();
-                let col_c: Vec<usize> = in_col[c].iter().copied().filter(|&i| !taken[i]).collect();
+                row_r.sort_unstable_by_key(|&(cc, _)| cc);
+                let col_c: Vec<usize> = open.iter().copied().filter(|&i| i != r).collect();
                 for i in col_c {
                     let l = a[&(i, c)] / piv;
                     for &(cc, v) in &row_r {
                         let e = a.entry((i, cc)).or_insert_with(|| {
                             in_col[cc].push(i);
+                            row_len[i] += 1;
                             0.0
                         });
                         *e -= l * v;
