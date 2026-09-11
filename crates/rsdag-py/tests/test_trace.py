@@ -107,7 +107,8 @@ def test_numpy_linear_algebra_patterns_trace():
 def test_program_reports_ops_and_dump():
     f = trace(lambda x: np.exp(x) * x, 1.0)
     p = f.program(1.0)
-    assert p.n_inputs == 1 and p.n_outputs == 1 and p.n_ops >= 3
+    # An input is read where it is used, not copied: two ops here.
+    assert p.n_inputs == 1 and p.n_outputs == 1 and p.n_ops >= 2
     assert "Input" in p.dump()
 
 
