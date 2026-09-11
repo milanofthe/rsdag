@@ -230,14 +230,59 @@ impl Tape {
             Some(i) => format!("i{i}"),
             None => format!("s{k}"),
         };
+        let list = |start: u32, len: u32| -> String {
+            self.arg_pool[start as usize..(start + len) as usize]
+                .iter()
+                .map(|&k| name(k))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let src = |s: Src, len: u32| match s {
+            Src::Inputs(k) => format!("i{k}..i{}", k + len),
+            Src::Pool(start) => format!("[{}]", list(start, len)),
+        };
         let mut out = String::new();
         for (i, op) in self.ops.iter().enumerate() {
             if i == self.prolog_ops && self.prolog_ops > 0 {
                 out.push_str("---- main ----\n");
             }
-            let text = format!("{op:?}");
-            // Operand numbers inside the debug form are raw; the pool and
-            // the tag are readable enough for a listing.
+            let text = match *op {
+                Op::Const(v) => format!("Const({v})"),
+                Op::Add(a, b) => format!("Add({}, {})", name(a), name(b)),
+                Op::Mul(a, b) => format!("Mul({}, {})", name(a), name(b)),
+                Op::MulAdd(a, b, c) => format!("MulAdd({}, {}, {})", name(a), name(b), name(c)),
+                Op::Sub(a, b) => format!("Sub({}, {})", name(a), name(b)),
+                Op::Neg(a) => format!("Neg({})", name(a)),
+                Op::Powi(a, n) => format!("Powi({}, {n})", name(a)),
+                Op::Unary(op, a) => format!("Unary({op:?}, {})", name(a)),
+                Op::Binary(op, a, b) => format!("Binary({op:?}, {}, {})", name(a), name(b)),
+                Op::Cmp(op, a, b) => format!("Cmp({op:?}, {}, {})", name(a), name(b)),
+                Op::Select(c, t, e) => format!("Select({}, {}, {})", name(c), name(t), name(e)),
+                Op::Reduce(op, s, l) => format!("Reduce({op:?}, [{}])", list(s, l)),
+                Op::Dot(s, l) => format!("Dot([{}], [{}])", list(s, l), list(s + l, l)),
+                Op::Call {
+                    bundle,
+                    start,
+                    n_args,
+                    n_out,
+                } => format!("Call(b{bundle}, [{}]) -> {n_out}", list(start, n_args)),
+                Op::CallBatch {
+                    bundle,
+                    start,
+                    n_groups,
+                    n_args,
+                    n_out,
+                } => format!(
+                    "CallBatch(b{bundle}, {n_groups} x [{}]) -> {n_groups} x {n_out}",
+                    list(start, n_groups * n_args)
+                ),
+                Op::Gemv { a, x, m, n } => {
+                    format!("Gemv({m}x{n} {}, {}) -> {m}", src(a, m * n), src(x, n))
+                }
+                Op::Solve { a, b, n } => {
+                    format!("Solve({n}x{n} {}, {}) -> {n}", src(a, n * n), src(b, n))
+                }
+            };
             out.push_str(&format!("{i:5}: s{} <- {text}\n", self.dst[i]));
         }
         let outs: Vec<String> = self.outputs.iter().map(|&k| name(k)).collect();

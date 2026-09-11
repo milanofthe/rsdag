@@ -109,7 +109,7 @@ def test_program_reports_ops_and_dump():
     p = f.program(1.0)
     # An input is read where it is used, not copied: two ops here.
     assert p.n_inputs == 1 and p.n_outputs == 1 and p.n_ops >= 2
-    assert "Input" in p.dump()
+    assert "i0" in p.dump()
 
 
 def test_tracer_defers_to_arrays_on_the_left():
