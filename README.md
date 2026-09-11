@@ -1,125 +1,126 @@
 # rsdag
 
-A differentiable graph compiler for the equation systems of simulators:
-DAEs and ODEs, circuits, state-space blocks. One hash-consed expression
-graph, forward and reverse derivatives, a flat instruction tape, an
-interpreter over any scalar type, and a native code backend that emits
-AArch64 and x86-64 machine code from the tape, bit-identical to the
-interpreter. The linear solve of a Newton step is a program too: the static
-LU of the Jacobian's pattern as graph ops, so a Newton step runs as
-straight-line code without a library call.
+Expression graph compiler for the equation systems of simulators (DAEs,
+ODEs, circuits, state-space blocks): a hash-consed expression graph with
+forward and reverse differentiation, a flat instruction tape, an
+interpreter over any scalar type, a native code backend for AArch64 and
+x86-64, and a sparse linear solve compiled into the same tape.
 
-![The stages from a consumer's model to execution](docs/diagrams/pipeline.svg)
+![Pipeline](docs/diagrams/pipeline.svg)
 
 Private for now. Licensed under PolyForm Noncommercial 1.0.0 (see LICENSE).
 
 ## Crates
 
 - `rsdag`: `Graph<K: Field>` (exact rationals or `f64`), functions with
-  calls and roles, `Scope`, `Module` (the serializable form), `differentiate`,
+  calls and roles, `Scope`, `Module` (serialization), `differentiate`,
   `gradient` (reverse mode), `sparse_jacobian`, `hessian`, `substitute`,
-  `Tape` (one interpreter over any `Scalar`, choice specialization, instance
-  batching, the `Gemv`, `Gemm` and dense `Solve` kernels, prolog/main
-  split), `semantics` (the reference arithmetic every backend mirrors) and
-  `symbolic` (`determinant`, `collect`, `rational_form`, `simplify_egraph`,
-  the graph solve, `newton_step`).
-- `rsdag-jit`: the native backend (`NativeTape`) for AArch64 and x86-64 on
-  Linux, macOS and Windows. Function bodies are compiled once and called per
-  instance, a batch of instances in parallel; `eval_many` runs a program
-  over many input sets.
-- `rsdag-py`: the Python package `rsdag` (`trace`, `jit`, `jacobian`,
-  `grad`, `where`, `matmul`, `solve`), built with maturin.
+  `Tape` (interpreter over any `Scalar`, choice specialization, instance
+  batching, `Gemv`, `Gemm` and dense `Solve` kernels, prolog/main split),
+  `semantics` (the reference arithmetic), `symbolic` (`determinant`,
+  `collect`, `rational_form`, `simplify_egraph`, the sparse solve,
+  `newton_step`).
+- `rsdag-jit`: `NativeTape`, machine code for AArch64 and x86-64 on Linux,
+  macOS and Windows; function bodies compiled once and batched over
+  instances; `eval_many` over many input sets.
+- `rsdag-py`: Python package `rsdag` (`trace`, `jit`, `jacobian`, `grad`,
+  `where`, `matmul`, `solve`), built with maturin.
 
-The graph crate compiles for `wasm32-unknown-unknown`, where a consumer runs
-the interpreter; the emitter needs a host.
+`rsdag` compiles for `wasm32-unknown-unknown` (interpreter only).
 
-## How it works
+## Graph
 
-**Graph.** Nodes are hash-consed, ascending ids are a topological order,
-and the smart constructors fold constants in `K` and apply the algebraic
-identities. A function is a graph over positional parameters with named
-outputs; a `Call` node applies it, and a derivative output is derived from
-the body on first demand. Roles on parameters and outputs (state, input,
-parameter, time; residual, derivative) are metadata for the system layer.
+Nodes are hash-consed; ascending ids are a topological order. Constructors
+fold constants in `K` and apply the algebraic identities. A function is a
+graph over positional parameters with named outputs; `Call` applies it;
+derivative outputs are derived from the body on first demand. Parameters
+and outputs carry roles (state, input, parameter, time; residual,
+derivative) as metadata.
 
-**Tape.** The flat instruction list of a set of roots: reachability,
-lowering into an instruction IR, a register-pressure list schedule, slot
-allocation with liveness, emission. Row dots against one vector become a
-`Gemv`, rows against several vectors a `Gemm`, a dense system a pivoting
-`Solve`; calls of one function on distinct argument lists become one
-batched call. A tape compiled with a parameter-pure prolog splits into the
-part a solve evaluates once per parameter binding and the part it
-evaluates per iteration. The interpreter runs the tape over any `Scalar`
-(`f64`, `f32`, `Complex64`); the native backend emits the same instruction
-sequence as machine code in chunked functions, with a write-back register
-cache.
+## Tape
 
-![The linear solve as a program](docs/diagrams/solve.svg)
+`Tape::compile` lowers a set of roots into an instruction IR, schedules it
+for register pressure, allocates slots by liveness and emits the
+instruction list. Row dots against one vector lower to `Gemv`, against
+several vectors to `Gemm`, a dense system to a pivoting `Solve`; calls of
+one function on distinct argument lists lower to one batched call.
+`Tape::compile_split` marks parameter-pure inputs; the tape then has a
+prolog evaluated once per parameter binding and a main part evaluated per
+iteration. `Tape::eval` runs over any `Scalar` (`f64`, `f32`, `Complex64`).
+`NativeTape::compile` emits the same instruction sequence as machine code
+in chunked functions with a write-back register cache.
 
-**Solve.** `symbolic::solve` turns the solve of a system with a known
-pattern into graph ops: block triangular form, a minimum-degree order per
-block, a cost predictor over the elimination tree, and a static LU in Crout
-form with the right-hand side as the last column. The pivot rows are fixed
-at build time and guarded: a step with more than one structural candidate
-checks at run time that its pivot dominates its column, and on a failed
-guard `Plan::repivot` chooses the rows a numeric elimination takes on the
-current values and the program is rebuilt. Compiled with the matrix
-entries as parameter-pure inputs and the right-hand side as main inputs,
-the factorization is the prolog pass and the substitution the main pass.
+## Sparse solve
 
-![Functions and instance batching](docs/diagrams/bodies.svg)
+![Sparse solve](docs/diagrams/solve.svg)
 
-**Bodies.** A multiply-instantiated model is one function and one call per
-instance. The body is compiled once, and the calls of a program that share
-a shape become one kernel op that runs the body over all instances, on the
-rayon pool when the batch is large. A consumer may register a body it
-compiled itself, for instance one that caches the prolog over its
-parameter-pure arguments per instance.
+`symbolic::solve` lowers the solve of a system with a known sparsity
+pattern into graph ops: block triangular form, minimum-degree ordering per
+block, a fill and flop predictor over the elimination tree, and a static LU
+in Crout form with the right-hand side as the last column. Pivot rows are
+fixed at build time. A step with more than one structural candidate emits a
+guard, `|pivot| >= 1e-3 max|column|`; on a failed guard `Plan::repivot`
+takes the rows of a numeric elimination on the current values and the
+program is rebuilt. With the matrix entries as parameter-pure inputs and
+the right-hand side as main inputs, the prolog is the factorization and
+the main part the substitution.
+
+## Function bodies
+
+![Function bodies](docs/diagrams/bodies.svg)
+
+A multiply-instantiated model is one function and one call per instance.
+The body is compiled once; calls with the same shape lower to one kernel op
+that runs the body over all instances, on the rayon pool above a size
+threshold. `Graph::set_func_body` registers a body compiled by the caller
+(for instance with a per-instance prolog cache); programs whose calls it
+covers use it.
+
+## Choice specialization
 
 ![Choice specialization](docs/diagrams/specialize.svg)
 
-**Specialization.** Evaluating a tape with a trace sink records the arm
-each `Select` takes; specializing on the trace pins the arms and shortens
-the tape to that region, keeping the conditions as guards. A guard that
-flips retraces the full tape and rebuilds the specialization. Guards that
-depend only on parameters live in the prolog and are checked once per
-parameter binding.
+`Tape::eval_with` records the arm taken by each `Select`. `Tape::specialize`
+pins the recorded arms and shortens the tape to that region; the pinned
+conditions remain as guards. A failed guard means the region changed: the
+full tape is retraced and the specialization rebuilt. Guards that depend
+only on parameters are in the prolog and checked once per parameter
+binding.
 
-**Bit-exactness.** Every backend computes the same IEEE operation sequence:
-no fast-math, no fused multiply-add, one reference routine per elementary
-function, one four-accumulator order for every reduction and dot product,
-the same domain guards. `rsdag::synth` generates random programs over the
-whole op vocabulary, and the test suites pin the arena sweep, the tape, the
-native code and the typed evaluation against each other on them.
+## Bit-exactness
+
+All backends compute the same IEEE operation sequence: no fast-math, no
+fused multiply-add, one reference routine per elementary function, one
+four-accumulator order for reductions and dot products, the same domain
+guards. `rsdag::synth` generates random programs over the whole op
+vocabulary; the test suites compare the arena sweep, the tape, the native
+code and the typed evaluation on them bit for bit.
 
 ## Numbers
 
 One core of an Apple M3, release profile. `docs/bench/plot.py` draws the
-figures from the CSVs in `docs/bench/data`; `docs/bench/README.md` names
-the sources.
+figures from the CSVs in `docs/bench/data` (sources in
+`docs/bench/README.md`).
 
 ![Evaluation and compile cost per op](docs/bench/ops.svg)
 
-A ring op costs half a nanosecond natively up to programs of a few tens of
-thousands of ops and three at a million, where instruction fetch sets the
-pace; interpreted it costs ten. An elementary function adds a call into the
-same routine the interpreter uses. Emitting costs about a hundred
-nanoseconds per op on a large program.
+Native: 0.5 ns per op on ring programs up to some ten thousand ops, 3 ns at
+800k ops (instruction fetch bound); 2 to 5 ns per op with elementary
+functions. Interpreter: 10 to 12 ns per op. Emission: about 100 ns per op
+on programs above ten thousand ops.
 
-![The Newton step against a sparse LU library](docs/bench/solve.svg)
+![Sparse solve against a sparse LU library](docs/bench/solve.svg)
 
-A Newton step over a circuit-like system is 26 ops per unknown, 31 with the
-pivot guard, linear to a million unknowns. Against a general sparse LU
-(rslab, KLU path) the graph solve measures 15x to 150x on ring and band
-patterns and loses on 2D grids past a thousand unknowns, where fill makes
-the program large; the cost predictor tells a consumer which side of that
-line a pattern is on.
+Newton step of a circuit-like system: 26 ops per unknown, 31 with pivot
+guards, linear to a million unknowns. Against a general sparse LU (rslab,
+KLU path): 15x to 150x faster on ring and band patterns; slower on 2D grids
+above about a thousand unknowns, where fill grows the program. The cost
+predictor gives the program size before it is built.
 
-![The dense kernels](docs/bench/dense.svg)
+![Dense kernels](docs/bench/dense.svg)
 
-The dense kernels run at the two-lane peak without fused multiply-add: a
-1000-state `A x + B u` evaluates in 0.09 ms, a 1000 by 1000 product at
-29 GF/s, the dense solve of 1000 unknowns in 40 ms.
+Dense kernels: `Gemv` 1000 by 1000 in 0.09 ms, `Gemm` 1000 by 1000 at
+29 GF/s, dense `Solve` of 1000 unknowns in 40 ms.
 
 ## Rust
 
