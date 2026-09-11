@@ -106,7 +106,7 @@ pub fn eval<T: Scalar, K: Field>(
                 .or_insert_with(|| {
                     let n = Graph::<K>::solve_n(vals.len());
                     let mut out = vec![T::zero(); n];
-                    T::solve(&vals[..n * n], &vals[n * n..], n, &mut out);
+                    crate::semantics::solve_t(&vals[..n * n], &vals[n * n..], n, &mut out);
                     out
                 })
                 .clone()

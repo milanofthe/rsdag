@@ -389,7 +389,7 @@ impl Tape {
         hi: usize,
         sink: &mut S,
     ) {
-        use crate::semantics::reduce_slice_t;
+        use crate::semantics::{reduce_slice_t, solve_t};
         // The gather scratch at the tail of `work`, so nothing is allocated
         // per call.
         let (work, scratch) = work.split_at_mut(self.n_work);
@@ -514,7 +514,7 @@ impl Tape {
                         Dense::Inputs(k) => &inputs[k..k + n],
                         Dense::Scratch(s) => &scratch[s..s + n],
                     };
-                    T::solve(av, bv, n, &mut work[d..d + n]);
+                    solve_t(av, bv, n, &mut work[d..d + n]);
                     continue;
                 }
             };
