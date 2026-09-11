@@ -36,7 +36,7 @@ def rows(name):
 
 def save(fig, name):
     fig.tight_layout()
-    fig.savefig(os.path.join(HERE, name), format="svg")
+    fig.savefig(os.path.join(HERE, name), format="svg", bbox_inches="tight")
     plt.close(fig)
 
 
@@ -52,11 +52,11 @@ def ops():
     a.set_xscale("log"); a.set_yscale("log")
     a.set_xlabel("ops in the program"); a.set_ylabel("ns per op")
     a.set_title("Evaluation")
-    a.legend(fontsize=8, frameon=False)
+    a.legend(fontsize=8, frameon=False, loc="center right")
     b.set_xscale("log")
     b.set_xlabel("ops in the program"); b.set_ylabel("ns per op")
     b.set_title("Native compile")
-    b.legend(fontsize=8, frameon=False)
+    b.legend(fontsize=8, frameon=False, loc="upper right")
     save(fig, "ops.svg")
 
 
