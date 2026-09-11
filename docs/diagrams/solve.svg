@@ -1,12 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="770" height="330" viewBox="0 0 770 330" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12">
   <defs>
     <marker id="sv-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1f4e79"/>
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8b8b8b"/>
     </marker>
   </defs>
 
   <!-- Sparse pattern, 6 by 6 -->
-  <g stroke="#cccccc" stroke-width="0.8">
+  <g stroke="#8b8b8b" stroke-width="0.8">
     <line x1="24" y1="76" x2="96" y2="76"/>
     <line x1="24" y1="88" x2="96" y2="88"/>
     <line x1="24" y1="100" x2="96" y2="100"/>
@@ -22,7 +22,7 @@
     <line x1="84" y1="76" x2="84" y2="148"/>
     <line x1="96" y1="76" x2="96" y2="148"/>
   </g>
-  <g fill="#1f4e79">
+  <g fill="#8b8b8b">
     <circle cx="30" cy="82" r="2.6"/>
     <circle cx="66" cy="82" r="2.6"/>
     <circle cx="42" cy="94" r="2.6"/>
@@ -37,65 +37,65 @@
     <circle cx="66" cy="142" r="2.6"/>
     <circle cx="90" cy="142" r="2.6"/>
   </g>
-  <text x="60" y="168" text-anchor="middle" fill="#555555">pattern fixed</text>
-  <text x="60" y="184" text-anchor="middle" fill="#555555">at build time</text>
+  <text x="60" y="168" text-anchor="middle" fill="#8b8b8b">pattern fixed</text>
+  <text x="60" y="184" text-anchor="middle" fill="#8b8b8b">at build time</text>
 
   <!-- BTF -->
-  <rect x="120" y="60" width="82" height="104" rx="4" fill="#eef3f8" stroke="#1f4e79" stroke-width="1.2"/>
-  <text x="161" y="86" text-anchor="middle" font-size="14" font-weight="bold" fill="#1f4e79">BTF</text>
-  <text x="161" y="108" text-anchor="middle" fill="#000000">
+  <rect x="120" y="60" width="82" height="104" rx="4" fill="none" stroke="#8b8b8b" stroke-width="1.2"/>
+  <text x="161" y="86" text-anchor="middle" font-size="14" font-weight="bold" fill="#8b8b8b">BTF</text>
+  <text x="161" y="108" text-anchor="middle" fill="#8b8b8b">
     <tspan x="161" y="108">block</tspan>
     <tspan x="161" y="125">triangular</tspan>
     <tspan x="161" y="142">form</tspan>
   </text>
 
   <!-- AMD -->
-  <rect x="226" y="60" width="80" height="104" rx="4" fill="#eef3f8" stroke="#1f4e79" stroke-width="1.2"/>
-  <text x="266" y="86" text-anchor="middle" font-size="14" font-weight="bold" fill="#1f4e79">AMD</text>
-  <text x="266" y="108" text-anchor="middle" fill="#000000">
+  <rect x="226" y="60" width="80" height="104" rx="4" fill="none" stroke="#8b8b8b" stroke-width="1.2"/>
+  <text x="266" y="86" text-anchor="middle" font-size="14" font-weight="bold" fill="#8b8b8b">AMD</text>
+  <text x="266" y="108" text-anchor="middle" fill="#8b8b8b">
     <tspan x="266" y="108">minimum</tspan>
     <tspan x="266" y="125">degree</tspan>
     <tspan x="266" y="142">ordering</tspan>
   </text>
 
   <!-- Cost predictor -->
-  <rect x="330" y="60" width="120" height="104" rx="4" fill="#eef3f8" stroke="#1f4e79" stroke-width="1.2"/>
-  <text x="390" y="86" text-anchor="middle" font-size="14" font-weight="bold" fill="#1f4e79">cost predictor</text>
-  <text x="390" y="108" text-anchor="middle" fill="#000000">
+  <rect x="330" y="60" width="120" height="104" rx="4" fill="none" stroke="#8b8b8b" stroke-width="1.2"/>
+  <text x="390" y="86" text-anchor="middle" font-size="14" font-weight="bold" fill="#8b8b8b">cost predictor</text>
+  <text x="390" y="108" text-anchor="middle" fill="#8b8b8b">
     <tspan x="390" y="108">fill and flops</tspan>
     <tspan x="390" y="125">from the</tspan>
     <tspan x="390" y="142">elimination tree</tspan>
   </text>
 
   <!-- Static LU -->
-  <rect x="474" y="60" width="110" height="104" rx="4" fill="#eef3f8" stroke="#1f4e79" stroke-width="1.2"/>
-  <text x="529" y="86" text-anchor="middle" font-size="14" font-weight="bold" fill="#1f4e79">static LU</text>
-  <text x="529" y="108" text-anchor="middle" fill="#000000">
+  <rect x="474" y="60" width="110" height="104" rx="4" fill="none" stroke="#8b8b8b" stroke-width="1.2"/>
+  <text x="529" y="86" text-anchor="middle" font-size="14" font-weight="bold" fill="#8b8b8b">static LU</text>
+  <text x="529" y="108" text-anchor="middle" fill="#8b8b8b">
     <tspan x="529" y="108">Crout form,</tspan>
     <tspan x="529" y="125">guarded pivots</tspan>
     <tspan x="529" y="142">as graph ops</tspan>
   </text>
 
   <!-- Tape with prolog and main -->
-  <rect x="608" y="24" width="134" height="200" rx="4" fill="#ffffff" stroke="#1f4e79" stroke-width="1.2"/>
-  <text x="675" y="42" text-anchor="middle" font-size="14" font-weight="bold" fill="#1f4e79">tape</text>
-  <rect x="618" y="50" width="114" height="96" rx="4" fill="#eef3f8" stroke="#1f4e79" stroke-width="1.2"/>
-  <text x="675" y="68" text-anchor="middle" font-weight="bold" fill="#1f4e79">prolog</text>
-  <text x="675" y="85" text-anchor="middle" fill="#000000">
+  <rect x="608" y="24" width="134" height="200" rx="4" fill="none" stroke="#8b8b8b" stroke-width="1.2"/>
+  <text x="675" y="42" text-anchor="middle" font-size="14" font-weight="bold" fill="#8b8b8b">tape</text>
+  <rect x="618" y="50" width="114" height="96" rx="4" fill="none" stroke="#8b8b8b" stroke-width="1.2"/>
+  <text x="675" y="68" text-anchor="middle" font-weight="bold" fill="#8b8b8b">prolog</text>
+  <text x="675" y="85" text-anchor="middle" fill="#8b8b8b">
     <tspan x="675" y="85">factorization</tspan>
     <tspan x="675" y="102">parameter-pure</tspan>
     <tspan x="675" y="119">inputs = matrix</tspan>
     <tspan x="675" y="136">entries</tspan>
   </text>
-  <rect x="618" y="156" width="114" height="60" rx="4" fill="#eef3f8" stroke="#1f4e79" stroke-width="1.2"/>
-  <text x="675" y="174" text-anchor="middle" font-weight="bold" fill="#1f4e79">main</text>
-  <text x="675" y="191" text-anchor="middle" fill="#000000">
+  <rect x="618" y="156" width="114" height="60" rx="4" fill="none" stroke="#8b8b8b" stroke-width="1.2"/>
+  <text x="675" y="174" text-anchor="middle" font-weight="bold" fill="#8b8b8b">main</text>
+  <text x="675" y="191" text-anchor="middle" fill="#8b8b8b">
     <tspan x="675" y="191">substitution</tspan>
     <tspan x="675" y="208">right-hand side</tspan>
   </text>
 
   <!-- Flow arrows -->
-  <g stroke="#1f4e79" stroke-width="1.2" fill="none" marker-end="url(#sv-arrow)">
+  <g stroke="#8b8b8b" stroke-width="1.2" fill="none" marker-end="url(#sv-arrow)">
     <line x1="96" y1="112" x2="120" y2="112"/>
     <line x1="202" y1="112" x2="226" y2="112"/>
     <line x1="306" y1="112" x2="330" y2="112"/>
@@ -105,8 +105,8 @@
 
   <!-- Pivot guard note -->
   <line x1="529" y1="164" x2="529" y2="250" stroke="#c55a11" stroke-width="1.2" stroke-dasharray="4 3"/>
-  <rect x="330" y="250" width="412" height="64" rx="4" fill="#ffffff" stroke="#c55a11" stroke-width="1.2"/>
-  <text x="536" y="274" text-anchor="middle" fill="#000000">
+  <rect x="330" y="250" width="412" height="64" rx="4" fill="none" stroke="#c55a11" stroke-width="1.2"/>
+  <text x="536" y="274" text-anchor="middle" fill="#8b8b8b">
     <tspan x="536" y="274">pivot guard: |pivot| &gt;= 1e-3 max|column|</tspan>
     <tspan x="536" y="294">fails -&gt; Plan::repivot on the values, rebuild</tspan>
   </text>

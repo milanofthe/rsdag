@@ -1,14 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="770" height="320" viewBox="0 0 770 320" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12">
   <defs>
     <marker id="pl-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1f4e79"/>
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8b8b8b"/>
     </marker>
   </defs>
 
   <!-- Graph -->
-  <rect x="16" y="24" width="136" height="230" rx="4" fill="#eef3f8" stroke="#1f4e79" stroke-width="1.2"/>
-  <text x="84" y="50" text-anchor="middle" font-size="14" font-weight="bold" fill="#1f4e79">Graph</text>
-  <text x="84" y="74" text-anchor="middle" fill="#000000">
+  <rect x="16" y="24" width="136" height="230" rx="4" fill="none" stroke="#8b8b8b" stroke-width="1.2"/>
+  <text x="84" y="50" text-anchor="middle" font-size="14" font-weight="bold" fill="#8b8b8b">Graph</text>
+  <text x="84" y="74" text-anchor="middle" fill="#8b8b8b">
     <tspan x="84" y="74">hash-consed</tspan>
     <tspan x="84" y="91">expression DAG</tspan>
     <tspan x="84" y="108">over a field K:</tspan>
@@ -21,9 +21,9 @@
   </text>
 
   <!-- Transforms -->
-  <rect x="178" y="24" width="118" height="230" rx="4" fill="#eef3f8" stroke="#1f4e79" stroke-width="1.2"/>
-  <text x="237" y="50" text-anchor="middle" font-size="14" font-weight="bold" fill="#1f4e79">Transforms</text>
-  <text x="237" y="74" text-anchor="middle" fill="#000000">
+  <rect x="178" y="24" width="118" height="230" rx="4" fill="none" stroke="#8b8b8b" stroke-width="1.2"/>
+  <text x="237" y="50" text-anchor="middle" font-size="14" font-weight="bold" fill="#8b8b8b">Transforms</text>
+  <text x="237" y="74" text-anchor="middle" fill="#8b8b8b">
     <tspan x="237" y="74">differentiate:</tspan>
     <tspan x="237" y="91">forward and</tspan>
     <tspan x="237" y="108">reverse</tspan>
@@ -34,9 +34,9 @@
   </text>
 
   <!-- Tape -->
-  <rect x="322" y="24" width="140" height="230" rx="4" fill="#eef3f8" stroke="#1f4e79" stroke-width="1.2"/>
-  <text x="392" y="50" text-anchor="middle" font-size="14" font-weight="bold" fill="#1f4e79">Tape</text>
-  <text x="392" y="74" text-anchor="middle" fill="#000000">
+  <rect x="322" y="24" width="140" height="230" rx="4" fill="none" stroke="#8b8b8b" stroke-width="1.2"/>
+  <text x="392" y="50" text-anchor="middle" font-size="14" font-weight="bold" fill="#8b8b8b">Tape</text>
+  <text x="392" y="74" text-anchor="middle" fill="#8b8b8b">
     <tspan x="392" y="74">flat instruction IR</tspan>
     <tspan x="392" y="91">analyze, lower,</tspan>
     <tspan x="392" y="108">schedule (register</tspan>
@@ -49,9 +49,9 @@
   </text>
 
   <!-- Interpreter -->
-  <rect x="488" y="24" width="132" height="110" rx="4" fill="#eef3f8" stroke="#1f4e79" stroke-width="1.2"/>
-  <text x="554" y="46" text-anchor="middle" font-size="14" font-weight="bold" fill="#1f4e79">Interpreter</text>
-  <text x="554" y="68" text-anchor="middle" fill="#000000">
+  <rect x="488" y="24" width="132" height="110" rx="4" fill="none" stroke="#8b8b8b" stroke-width="1.2"/>
+  <text x="554" y="46" text-anchor="middle" font-size="14" font-weight="bold" fill="#8b8b8b">Interpreter</text>
+  <text x="554" y="68" text-anchor="middle" fill="#8b8b8b">
     <tspan x="554" y="68">one generic loop</tspan>
     <tspan x="554" y="84">over any Scalar:</tspan>
     <tspan x="554" y="100">f64, f32,</tspan>
@@ -59,9 +59,9 @@
   </text>
 
   <!-- Native code -->
-  <rect x="488" y="144" width="132" height="110" rx="4" fill="#eef3f8" stroke="#1f4e79" stroke-width="1.2"/>
-  <text x="554" y="166" text-anchor="middle" font-size="14" font-weight="bold" fill="#1f4e79">Native code</text>
-  <text x="554" y="188" text-anchor="middle" fill="#000000">
+  <rect x="488" y="144" width="132" height="110" rx="4" fill="none" stroke="#8b8b8b" stroke-width="1.2"/>
+  <text x="554" y="166" text-anchor="middle" font-size="14" font-weight="bold" fill="#8b8b8b">Native code</text>
+  <text x="554" y="188" text-anchor="middle" fill="#8b8b8b">
     <tspan x="554" y="188">emitter for</tspan>
     <tspan x="554" y="203">AArch64, x86-64</tspan>
     <tspan x="554" y="218">chunked functions</tspan>
@@ -70,16 +70,17 @@
   </text>
 
   <!-- Consumer -->
-  <rect x="646" y="24" width="96" height="230" rx="4" fill="#eef3f8" stroke="#1f4e79" stroke-width="1.2"/>
-  <text x="694" y="50" text-anchor="middle" font-size="14" font-weight="bold" fill="#1f4e79">Consumer</text>
-  <text x="694" y="74" text-anchor="middle" fill="#000000">
-    <tspan x="694" y="74">SANE</tspan>
-    <tspan x="694" y="91">fastsim</tspan>
-    <tspan x="694" y="108">Python</tspan>
+  <rect x="646" y="24" width="96" height="230" rx="4" fill="none" stroke="#8b8b8b" stroke-width="1.2"/>
+  <text x="694" y="50" text-anchor="middle" font-size="14" font-weight="bold" fill="#8b8b8b">Caller</text>
+  <text x="694" y="74" text-anchor="middle" fill="#8b8b8b">
+    <tspan x="694" y="74">evaluates the</tspan>
+    <tspan x="694" y="91">program per</tspan>
+    <tspan x="694" y="108">iteration</tspan>
+    <tspan x="694" y="125">or sweep</tspan>
   </text>
 
   <!-- Arrows -->
-  <g stroke="#1f4e79" stroke-width="1.2" fill="none" marker-end="url(#pl-arrow)">
+  <g stroke="#8b8b8b" stroke-width="1.2" fill="none" marker-end="url(#pl-arrow)">
     <line x1="152" y1="139" x2="178" y2="139"/>
     <line x1="296" y1="139" x2="322" y2="139"/>
     <line x1="462" y1="139" x2="488" y2="79"/>
@@ -89,6 +90,6 @@
   </g>
 
   <!-- Reference arithmetic -->
-  <line x1="16" y1="276" x2="742" y2="276" stroke="#999999" stroke-width="1.2"/>
-  <text x="381" y="298" text-anchor="middle" font-size="13" fill="#555555">semantics: one reference arithmetic every backend mirrors</text>
+  <line x1="16" y1="276" x2="742" y2="276" stroke="#8b8b8b" stroke-width="1.2"/>
+  <text x="381" y="298" text-anchor="middle" font-size="13" fill="#8b8b8b">semantics: one reference arithmetic every backend mirrors</text>
 </svg>
