@@ -5,12 +5,12 @@ set -eu
 cd "$(dirname "$0")/.."
 export CARGO_TERM_COLOR=always
 FEATURES='rsdag/synth rsdag/serde'
-# The toolchain's own binaries: `rustup run` leaves a Homebrew cargo on the
-# PATH ahead of the toolchain's, and that one lacks the wasm target.
+# The toolchain's own binaries first on the PATH: `rustup run` leaves a
+# Homebrew cargo ahead of the toolchain's, and that one lacks the wasm target
+# and mixes its rustc, rustdoc and clippy into one target directory.
 TC=$(dirname "$(rustup which cargo --toolchain stable)")
-CARGO="$TC/cargo"
-export RUSTC="$TC/rustc"
-export RUSTDOC="$TC/rustdoc"
+export PATH="$TC:$PATH"
+CARGO=cargo
 run() { echo "== $*"; "$@"; }
 run $CARGO fmt --all -- --check
 run $CARGO clippy --workspace --exclude rsdag-py --all-targets --features "$FEATURES" -- -D warnings
