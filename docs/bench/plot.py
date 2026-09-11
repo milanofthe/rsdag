@@ -42,7 +42,7 @@ def save(fig, name):
 
 def ops():
     r = rows("ops.csv")
-    fig, (a, b) = plt.subplots(1, 2, figsize=(9, 3.4))
+    fig, (a, b) = plt.subplots(1, 2, figsize=(7.6, 3.0))
     for vocab, color in (("ring", BLUE), ("elementary", ORANGE), ("full", GREEN)):
         sel = [x for x in r if x["vocab"] == vocab]
         n = [int(x["ops"]) for x in sel]
@@ -62,7 +62,7 @@ def ops():
 
 def solve():
     r = rows("solve.csv")
-    fig, (a, b) = plt.subplots(1, 2, figsize=(9, 3.4))
+    fig, (a, b) = plt.subplots(1, 2, figsize=(7.6, 3.0))
     for fam, color in (("ring", BLUE), ("band", ORANGE), ("grid", GREEN)):
         sel = [x for x in r if x["family"] == fam]
         n = [int(x["n"]) for x in sel]
@@ -82,7 +82,7 @@ def solve():
 
 def dense():
     r = rows("dense.csv")
-    fig, a = plt.subplots(1, 1, figsize=(4.6, 3.4))
+    fig, a = plt.subplots(1, 1, figsize=(4.6, 3.2))
     for kernel, color in (("gemv", BLUE), ("gemm", ORANGE), ("solve", GREEN)):
         sel = [x for x in r if x["kernel"] == kernel]
         a.plot([int(x["n"]) for x in sel], [float(x["gflops"]) for x in sel], "o-", color=color, ms=4, label=kernel)
