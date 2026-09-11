@@ -53,6 +53,9 @@ pub struct NativeTape {
     chunks: Vec<Code>,
     prolog_chunks: usize,
     bundles: Bundles,
+    /// The fold code tables of the accumulating kernels; the code holds
+    /// their addresses.
+    _tables: Vec<Box<[u32]>>,
     outputs: Vec<u32>,
     layout: Layout,
     n_inputs: usize,
@@ -198,6 +201,24 @@ impl NativeTape {
             })
             .collect();
         rec.bundles = bundles?;
+        // The fold code tables, boxed so their addresses hold for the
+        // tape's life; the ops carry the addresses.
+        let mut tables: Vec<Box<[u32]>> = Vec::new();
+        for op in rec.ops.iter_mut() {
+            if let ROp::Gemv {
+                acc: Some((_, codes, table)),
+                ..
+            }
+            | ROp::Gemm {
+                acc: Some((_, codes, table)),
+                ..
+            } = op
+            {
+                let b: Box<[u32]> = codes.clone().into_boxed_slice();
+                *table = b.as_ptr() as usize;
+                tables.push(b);
+            }
+        }
         // Inputs the code reads: tagged operands, dense runs, outputs.
         let mut n_inputs = 0usize;
         for op in &rec.ops {
@@ -209,8 +230,24 @@ impl NativeTape {
             });
             n_inputs = n_inputs.max(top);
             let runs: Vec<(&Dense, u32)> = match op {
-                ROp::Gemv { a, x, m, n, .. } => vec![(a, m * n), (x, *n)],
-                ROp::Gemm { a, b, m, k, n, .. } => vec![(a, m * k), (b, n * k)],
+                ROp::Gemv {
+                    a, x, m, n, acc, ..
+                } => {
+                    let mut v = vec![(a, m * n), (x, *n)];
+                    if let Some((Some(c), _, _)) = acc {
+                        v.push((c, *m));
+                    }
+                    v
+                }
+                ROp::Gemm {
+                    a, b, m, k, n, acc, ..
+                } => {
+                    let mut v = vec![(a, m * k), (b, n * k)];
+                    if let Some((Some(c), _, _)) = acc {
+                        v.push((c, m * n));
+                    }
+                    v
+                }
                 ROp::Solve { a, b, n, .. } => vec![(a, n * n), (b, *n)],
                 ROp::SolveMany { a, b, n, k, .. } => vec![(a, n * n), (b, n * k)],
                 _ => Vec::new(),
@@ -269,6 +306,7 @@ impl NativeTape {
             chunks: chunks?,
             prolog_chunks,
             bundles: rec.bundles,
+            _tables: tables,
             outputs: tape.outputs().to_vec(),
             layout,
             n_inputs,
@@ -595,6 +633,14 @@ impl<'a, I: Isa> Emitter<'a, I> {
     /// ([`ROp::gather_len`]).
     fn dense_args(&mut self, a: &Dense, b: &Dense) -> (IArg, IArg) {
         let mut at = 0usize;
+        let a = self.dense_arg(a, &mut at);
+        let b = self.dense_arg(b, &mut at);
+        (a, b)
+    }
+
+    /// A dense operand's address: in place (inputs, a consecutive run of
+    /// work slots), or gathered into the gather area from `*at`.
+    fn dense_arg(&mut self, d: &Dense, at: &mut usize) -> IArg {
         let mut arg = |this: &mut Self, d: &Dense| match d {
             Dense::Inputs(k) => IArg::InputAddr(*k as usize * 8),
             Dense::Slots(s) => {
@@ -610,14 +656,12 @@ impl<'a, I: Isa> Emitter<'a, I> {
                     }
                     return IArg::WorkAddr(s[0] as usize * 8);
                 }
-                let p = IArg::WorkAddr(this.gather_at(s, at));
-                at += s.len();
+                let p = IArg::WorkAddr(this.gather_at(s, *at));
+                *at += s.len();
                 p
             }
         };
-        let a = arg(self, a);
-        let b = arg(self, b);
-        (a, b)
+        arg(self, d)
     }
 
     fn op(&mut self, op: &ROp) {
@@ -762,16 +806,39 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 ref x,
                 m,
                 n,
+                ref acc,
             } => {
-                let (a_arg, x_arg) = self.dense_args(a, x);
-                let args = [
-                    Arg::I(a_arg),
-                    Arg::I(x_arg),
-                    Arg::I(IArg::Imm(m as u64)),
-                    Arg::I(IArg::Imm(n as u64)),
-                    Arg::I(IArg::WorkAddr(dst as usize * 8)),
-                ];
-                self.call(host::h_gemv as *const (), &args);
+                let mut at = 0usize;
+                let a_arg = self.dense_arg(a, &mut at);
+                let x_arg = self.dense_arg(x, &mut at);
+                match acc {
+                    None => {
+                        let args = [
+                            Arg::I(a_arg),
+                            Arg::I(x_arg),
+                            Arg::I(IArg::Imm(m as u64)),
+                            Arg::I(IArg::Imm(n as u64)),
+                            Arg::I(IArg::WorkAddr(dst as usize * 8)),
+                        ];
+                        self.call(host::h_gemv as *const (), &args);
+                    }
+                    Some((c, _, table)) => {
+                        let c_arg = match c {
+                            Some(c) => self.dense_arg(c, &mut at),
+                            None => IArg::Imm(0),
+                        };
+                        let args = [
+                            Arg::I(a_arg),
+                            Arg::I(x_arg),
+                            Arg::I(c_arg),
+                            Arg::I(IArg::Imm(*table as u64)),
+                            Arg::I(IArg::Imm(m as u64)),
+                            Arg::I(IArg::Imm(n as u64)),
+                            Arg::I(IArg::WorkAddr(dst as usize * 8)),
+                        ];
+                        self.call(host::h_gemv_acc as *const (), &args);
+                    }
+                }
                 self.invalidate(dst, m);
             }
             ROp::Gemm {
@@ -781,17 +848,41 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 m,
                 k,
                 n,
+                ref acc,
             } => {
-                let (a_arg, b_arg) = self.dense_args(a, b);
-                let args = [
-                    Arg::I(a_arg),
-                    Arg::I(b_arg),
-                    Arg::I(IArg::Imm(m as u64)),
-                    Arg::I(IArg::Imm(k as u64)),
-                    Arg::I(IArg::Imm(n as u64)),
-                    Arg::I(IArg::WorkAddr(dst as usize * 8)),
-                ];
-                self.call(host::h_gemm as *const (), &args);
+                let mut at = 0usize;
+                let a_arg = self.dense_arg(a, &mut at);
+                let b_arg = self.dense_arg(b, &mut at);
+                match acc {
+                    None => {
+                        let args = [
+                            Arg::I(a_arg),
+                            Arg::I(b_arg),
+                            Arg::I(IArg::Imm(m as u64)),
+                            Arg::I(IArg::Imm(k as u64)),
+                            Arg::I(IArg::Imm(n as u64)),
+                            Arg::I(IArg::WorkAddr(dst as usize * 8)),
+                        ];
+                        self.call(host::h_gemm as *const (), &args);
+                    }
+                    Some((c, _, table)) => {
+                        let c_arg = match c {
+                            Some(c) => self.dense_arg(c, &mut at),
+                            None => IArg::Imm(0),
+                        };
+                        let args = [
+                            Arg::I(a_arg),
+                            Arg::I(b_arg),
+                            Arg::I(c_arg),
+                            Arg::I(IArg::Imm(*table as u64)),
+                            Arg::I(IArg::Imm(m as u64)),
+                            Arg::I(IArg::Imm(k as u64)),
+                            Arg::I(IArg::Imm(n as u64)),
+                            Arg::I(IArg::WorkAddr(dst as usize * 8)),
+                        ];
+                        self.call(host::h_gemm_acc as *const (), &args);
+                    }
+                }
                 self.invalidate(dst, m * n);
             }
             ROp::SolveMany {

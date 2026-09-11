@@ -20,9 +20,9 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap as HashMap;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use super::{Op, Src, Tape, INPUT};
+use super::{Fold, Op, Src, Tape, INPUT};
 use crate::extern_fn::ExternBundle;
 use crate::field::Field;
 use crate::func::{Body, FuncId};
@@ -75,7 +75,8 @@ impl Tape {
         let forest = timed("tape analyze", || {
             Forest::analyze(ctx, roots, input_syms, pure_inputs)
         });
-        let program = timed("tape lower", || forest.lower(ctx, roots));
+        let mut program = timed("tape lower", || forest.lower(ctx, roots));
+        timed("tape fuse", || program.fuse_accumulators(pure_inputs));
         let order = timed("tape schedule", || program.schedule());
         timed("tape emit", || program.emit(&order, pure_inputs.is_some()))
     }
@@ -146,14 +147,18 @@ pub enum Kind {
         n_groups: u32,
         n_args: u32,
     },
+    /// With `acc`, the fold code per output and an accumulator operand per
+    /// output after the factors.
     Gemv {
         m: u32,
         n: u32,
+        acc: Option<Vec<u32>>,
     },
     Gemm {
         m: u32,
         k: u32,
         n: u32,
+        acc: Option<Vec<u32>>,
     },
     Solve {
         n: u32,
@@ -178,6 +183,229 @@ impl Program {
     fn ins(&self, i: usize) -> &[Ref] {
         let (s, l) = self.insts[i].ins;
         &self.pool[s as usize..(s + l) as usize]
+    }
+
+    /// Pass 3: the accumulator fusion of the product kernels. An output of
+    /// a `Gemv` or `Gemm` whose one consumer folds it, `Sub` with the output
+    /// as the subtrahend, `Add` with the output as one operand, or `Neg`,
+    /// is computed folded by the kernel and the consumer vanishes; the
+    /// accumulator is the consumer's other operand, an earlier value, or
+    /// another output of the same kernel (whose product is then read
+    /// before its own fold). Outputs with other consumers stay plain. An
+    /// accumulator may be defined after the kernel in this list (the
+    /// scheduler orders by dependencies) as long as it does not depend on
+    /// it, and a pure kernel takes only pure accumulators (the prolog
+    /// keeps it).
+    fn fuse_accumulators(&mut self, pure_inputs: Option<&[bool]>) {
+        let m = self.insts.len();
+        let kernels: Vec<usize> = (0..m)
+            .filter(|&i| {
+                matches!(
+                    self.insts[i].kind,
+                    Kind::Gemv { acc: None, .. } | Kind::Gemm { acc: None, .. }
+                )
+            })
+            .collect();
+        if kernels.is_empty() {
+            return;
+        }
+        // Uses and the one consumer of every kernel output.
+        let mut uses: HashMap<(u32, u32), (u32, u32)> = HashMap::default();
+        for j in 0..m {
+            for r in self.ins(j) {
+                if let Ref::Value(i, c) = *r {
+                    if matches!(
+                        self.insts[i as usize].kind,
+                        Kind::Gemv { .. } | Kind::Gemm { .. }
+                    ) {
+                        let e = uses.entry((i, c)).or_insert((0, j as u32));
+                        e.0 += 1;
+                        e.1 = j as u32;
+                    }
+                }
+            }
+        }
+        for r in &self.roots {
+            if let Ref::Value(i, c) = *r {
+                uses.entry((i, c)).or_insert((0, u32::MAX)).0 += 2;
+            }
+        }
+        let input_pure =
+            |k: u32| pure_inputs.is_some_and(|p| p.get(k as usize).copied().unwrap_or(true));
+        let mut alias: HashMap<u32, Ref> = HashMap::default();
+        let mut dead = vec![false; m];
+        // Whether any kernel so far took an accumulator defined after it:
+        // from then on an earlier instruction can depend on a later one.
+        let mut any_forward = false;
+        // The placeholder accumulator of a plain, self or negating fold: a
+        // NaN constant, never read.
+        let mut placeholder_inst: Option<Ref> = None;
+        for &k in &kernels {
+            let n_out = self.insts[k].n_out;
+            let kernel_pure = self.insts[k].pure;
+            let mut codes: Vec<u32> = vec![Fold::PLAIN.0; n_out as usize];
+            let placeholder = *placeholder_inst.get_or_insert_with(|| {
+                self.insts.push(Inst {
+                    kind: Kind::Const(f64::NAN),
+                    ins: (self.pool.len() as u32, 0),
+                    n_out: 1,
+                    pure: true,
+                });
+                dead.push(false);
+                Ref::Value(self.insts.len() as u32 - 1, 0)
+            });
+            let mut accs: Vec<Ref> = vec![placeholder; n_out as usize];
+            let mut fused: Vec<(u32, u32)> = Vec::new(); // (output, consumer)
+                                                         // Outputs read as another output's accumulator stay plain.
+            let mut held = vec![false; n_out as usize];
+            for c in 0..n_out {
+                let Some(&(count, j)) = uses.get(&(k as u32, c)) else {
+                    continue;
+                };
+                if count != 1 || dead[j as usize] || held[c as usize] {
+                    continue;
+                }
+                let this = Ref::Value(k as u32, c);
+                let ins = self.ins(j as usize);
+                let (code, acc) = match self.insts[j as usize].kind {
+                    Kind::Sub if ins[1] == this => (Fold::SUB.0, ins[0]),
+                    Kind::Neg => (Fold::NEG.0, placeholder),
+                    Kind::Add => (Fold::ADD.0, if ins[0] == this { ins[1] } else { ins[0] }),
+                    _ => continue,
+                };
+                // An accumulator that is a consumer folded away earlier is
+                // that kernel's output.
+                let mut acc = acc;
+                while let Ref::Value(i, _) = acc {
+                    match alias.get(&i) {
+                        Some(&to) => acc = to,
+                        None => break,
+                    }
+                }
+                let (code, acc) = match acc {
+                    Ref::Value(i, c2) if i as usize == k && code != Fold::NEG.0 => {
+                        // Another output of this kernel: its product, if
+                        // that is not folded itself.
+                        if c2 == c || codes[c2 as usize] != Fold::PLAIN.0 {
+                            continue;
+                        }
+                        held[c2 as usize] = true;
+                        (code | 4 | (c2 << 3), placeholder)
+                    }
+                    Ref::Value(i, _) if code != Fold::NEG.0 => {
+                        if kernel_pure && !self.insts[i as usize].pure {
+                            continue;
+                        }
+                        // An earlier instruction reaches this kernel only
+                        // through a fused kernel's forward accumulator.
+                        if any_forward && self.depends_on(i as usize, k) {
+                            continue;
+                        }
+                        if !any_forward && i as usize > k && self.depends_on(i as usize, k) {
+                            continue;
+                        }
+                        (code, acc)
+                    }
+                    Ref::Input(i) if code != Fold::NEG.0 => {
+                        if kernel_pure && !input_pure(i) {
+                            continue;
+                        }
+                        (code, acc)
+                    }
+                    _ => (code, placeholder),
+                };
+                codes[c as usize] = code;
+                accs[c as usize] = acc;
+                fused.push((c, j));
+            }
+            if fused.is_empty() {
+                continue;
+            }
+            if accs
+                .iter()
+                .any(|r| matches!(*r, Ref::Value(i, _) if i as usize > k))
+            {
+                any_forward = true;
+            }
+            let start = self.pool.len() as u32;
+            let old: Vec<Ref> = self.ins(k).to_vec();
+            let len = old.len() as u32 + n_out;
+            self.pool.extend(old);
+            self.pool.extend(accs);
+            let inst = &mut self.insts[k];
+            inst.ins = (start, len);
+            match &mut inst.kind {
+                Kind::Gemv { acc, .. } | Kind::Gemm { acc, .. } => *acc = Some(codes),
+                _ => unreachable!(),
+            }
+            for (c, j) in fused {
+                dead[j as usize] = true;
+                alias.insert(j, Ref::Value(k as u32, c));
+            }
+        }
+        if alias.is_empty() {
+            return;
+        }
+        // Redirect the consumers' values, then drop them.
+        let resolve = |r: Ref| -> Ref {
+            let mut r = r;
+            while let Ref::Value(i, _) = r {
+                match alias.get(&i) {
+                    Some(&to) => r = to,
+                    None => break,
+                }
+            }
+            r
+        };
+        let mut renumber = vec![u32::MAX; self.insts.len()];
+        let mut next = 0u32;
+        for (i, &d) in dead.iter().enumerate() {
+            if !d {
+                renumber[i] = next;
+                next += 1;
+            }
+        }
+        let map = |r: Ref| -> Ref {
+            match resolve(r) {
+                Ref::Value(i, c) => Ref::Value(renumber[i as usize], c),
+                r => r,
+            }
+        };
+        for r in self.pool.iter_mut() {
+            *r = map(*r);
+        }
+        for r in self.roots.iter_mut() {
+            *r = map(*r);
+        }
+        let old = std::mem::take(&mut self.insts);
+        self.insts = old
+            .into_iter()
+            .zip(&dead)
+            .filter(|(_, &d)| !d)
+            .map(|(inst, _)| inst)
+            .collect();
+    }
+
+    /// Whether instruction `i` reads instruction `k` (transitively). Once
+    /// a fused kernel points forward, an instruction before `k` can reach
+    /// it through any path, so the walk prunes nothing but revisits.
+    fn depends_on(&self, i: usize, k: usize) -> bool {
+        let mut stack = vec![i as u32];
+        let mut seen: HashSet<u32> = HashSet::default();
+        while let Some(i) = stack.pop() {
+            if i as usize == k {
+                return true;
+            }
+            if !seen.insert(i) {
+                continue;
+            }
+            for r in self.ins(i as usize) {
+                if let Ref::Value(j, _) = *r {
+                    stack.push(j);
+                }
+            }
+        }
+        false
     }
 }
 
@@ -741,6 +969,7 @@ impl Forest {
                             kind: Kind::Gemv {
                                 m: members.len() as u32,
                                 n: x.len() as u32,
+                                acc: None,
                             },
                             ins: pooled(&mut pool, ins),
                             n_out: members.len() as u32,
@@ -776,6 +1005,7 @@ impl Forest {
                                 m: rm as u32,
                                 k: k as u32,
                                 n: cn as u32,
+                                acc: None,
                             },
                             ins: pooled(&mut pool, ins),
                             n_out: (rm * cn) as u32,
@@ -1092,6 +1322,7 @@ impl Program {
         } else {
             0
         };
+
         // Last use of each instruction's block (the highest position that
         // reads any of its values); roots and, under a split, prolog values
         // read by the main phase are pinned.
@@ -1130,8 +1361,29 @@ impl Program {
         for &i in order {
             let inst = &self.insts[i as usize];
             let runs: Vec<usize> = match inst.kind {
-                Kind::Gemv { m: rows, n } => vec![(rows * n) as usize, n as usize],
-                Kind::Gemm { m: rows, k, n } => vec![(rows * k) as usize, (n * k) as usize],
+                Kind::Gemv {
+                    m: rows,
+                    n,
+                    ref acc,
+                } => {
+                    let mut r = vec![(rows * n) as usize, n as usize];
+                    if acc.is_some() {
+                        r.push(rows as usize);
+                    }
+                    r
+                }
+                Kind::Gemm {
+                    m: rows,
+                    k,
+                    n,
+                    ref acc,
+                } => {
+                    let mut r = vec![(rows * k) as usize, (n * k) as usize];
+                    if acc.is_some() {
+                        r.push((rows * n) as usize);
+                    }
+                    r
+                }
                 Kind::Solve { n } => vec![(n * n) as usize, n as usize],
                 Kind::SolveMany { n, k } => vec![(n * n) as usize, (n * k) as usize],
                 _ => continue,
@@ -1291,26 +1543,58 @@ impl Program {
                         n_out: inst.n_out / n_groups,
                     }
                 }
-                Kind::Gemv { m: rows, n } => {
-                    let (a, x) = o.split_at((rows * n) as usize);
+                Kind::Gemv {
+                    m: rows,
+                    n,
+                    ref acc,
+                } => {
+                    let (a, rest) = o.split_at((rows * n) as usize);
+                    let (x, c) = rest.split_at(n as usize);
                     let a = dense(&mut arg_pool, &mut max_args, a);
                     let x = dense(&mut arg_pool, &mut max_args, x);
-                    // The scratch holds both operands: an input run that the
+                    let acc = acc.as_ref().map(|codes| {
+                        let reads = codes.iter().any(|&code| Fold(code).reads_operand());
+                        let c = reads.then(|| dense(&mut arg_pool, &mut max_args, c));
+                        let start = arg_pool.len() as u32;
+                        arg_pool.extend_from_slice(codes);
+                        super::Accum { c, codes: start }
+                    });
+                    // The scratch holds every operand: an input run that the
                     // inputs do not reach is gathered as NaN.
-                    max_args = max_args.max((rows * n + n) as usize);
-                    Op::Gemv { a, x, m: rows, n }
+                    max_args = max_args.max((rows * n + n + rows) as usize);
+                    Op::Gemv {
+                        a,
+                        x,
+                        m: rows,
+                        n,
+                        acc,
+                    }
                 }
-                Kind::Gemm { m: rows, k, n } => {
-                    let (a, b) = o.split_at((rows * k) as usize);
+                Kind::Gemm {
+                    m: rows,
+                    k,
+                    n,
+                    ref acc,
+                } => {
+                    let (a, rest) = o.split_at((rows * k) as usize);
+                    let (b, c) = rest.split_at((n * k) as usize);
                     let a = dense(&mut arg_pool, &mut max_args, a);
                     let b = dense(&mut arg_pool, &mut max_args, b);
-                    max_args = max_args.max((rows * k + n * k) as usize);
+                    let acc = acc.as_ref().map(|codes| {
+                        let reads = codes.iter().any(|&code| Fold(code).reads_operand());
+                        let c = reads.then(|| dense(&mut arg_pool, &mut max_args, c));
+                        let start = arg_pool.len() as u32;
+                        arg_pool.extend_from_slice(codes);
+                        super::Accum { c, codes: start }
+                    });
+                    max_args = max_args.max((rows * k + n * k + rows * n) as usize);
                     Op::Gemm {
                         a,
                         b,
                         m: rows,
                         k,
                         n,
+                        acc,
                     }
                 }
                 Kind::Solve { n } => {

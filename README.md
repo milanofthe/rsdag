@@ -43,7 +43,11 @@ derivative) as metadata.
 for register pressure, allocates slots by liveness and emits the
 instruction list. Row dots against one vector lower to `Gemv`, against
 several vectors to `Gemm`, a dense system to a pivoting `Solve`; calls of
-one function on distinct argument lists lower to one batched call.
+one function on distinct argument lists lower to one batched call. A
+kernel output whose one consumer subtracts it, adds it or negates it is
+folded by the kernel (`Fold`): the consumer vanishes and the kernel writes
+`c - d`, `c + d` or `-d`, the accumulator `c` an operand or another
+output of the same kernel.
 `Tape::compile_split` marks parameter-pure inputs; the tape then has a
 prolog evaluated once per parameter binding and a main part evaluated per
 iteration. `Tape::eval` runs over any `Scalar` (`f64`, `f32`, `Complex64`).
@@ -68,9 +72,14 @@ the main part the substitution.
 The eliminations are generic over the scalar (`Num`): a real expression,
 or a complex one as a pair of real expressions (`Cx`), which lowers a
 complex system to real ops at build time, the guard comparing moduli.
-`solve_block_planned` eliminates a pattern of dense or diagonal `b` by
-`b` blocks (`Block`): pivot blocks through the dense solve kernel, block
-updates as dot products that fuse into `Gemm` kernels.
+`solve_block_planned` eliminates a pattern of dense or diagonal blocks
+(`Block`, of one size or of `sizes` per block row): pivot blocks through
+the dense solve kernel, block updates as dot products that fuse into
+`Gemm` kernels, a guard per pivot block against the rows below it.
+`solve_supernodal_planned` runs the scalar plan's elimination over panels
+(`supernodes`: steps along the postordered elimination forest merged
+while their explicit zeros stay within an allowance), the fill of the
+scalar ordering with the flops in the kernels.
 
 ## Function bodies
 
