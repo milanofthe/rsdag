@@ -168,9 +168,7 @@ fn main() {
         // The "AxB" tokens of a kernel's text, and the count before "rhs".
         let dims = |s: &str| -> Vec<f64> {
             let mut v = Vec::new();
-            let toks: Vec<&str> = s
-                .split(|c: char| c == ' ' || c == '(' || c == ',')
-                .collect();
+            let toks: Vec<&str> = s.split([' ', '(', ',']).collect();
             for (t, tok) in toks.iter().enumerate() {
                 if let Some((a, b)) = tok.split_once('x') {
                     if let (Ok(a), Ok(b)) = (a.parse::<f64>(), b.parse::<f64>()) {

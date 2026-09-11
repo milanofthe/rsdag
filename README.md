@@ -65,6 +65,13 @@ program is rebuilt. With the matrix entries as parameter-pure inputs and
 the right-hand side as main inputs, the prolog is the factorization and
 the main part the substitution.
 
+The eliminations are generic over the scalar (`Num`): a real expression,
+or a complex one as a pair of real expressions (`Cx`), which lowers a
+complex system to real ops at build time, the guard comparing moduli.
+`solve_block_planned` eliminates a pattern of dense or diagonal `b` by
+`b` blocks (`Block`): pivot blocks through the dense solve kernel, block
+updates as dot products that fuse into `Gemm` kernels.
+
 ## Function bodies
 
 ![Function bodies](docs/diagrams/bodies.svg)
