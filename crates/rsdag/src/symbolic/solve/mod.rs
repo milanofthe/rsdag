@@ -42,9 +42,11 @@
 pub mod amd;
 pub mod block;
 pub mod btf;
+pub mod num;
 pub mod predict;
 
-pub use block::{block_pattern, solve_block_planned, BlockRows};
+pub use block::{block_pattern, solve_block_planned, Block, BlockRows};
+pub use num::{Cx, Num};
 
 use rustc_hash::FxHashMap as HashMap;
 
@@ -429,12 +431,12 @@ fn taken_col(cc: usize, order: &[usize], c: usize) -> bool {
 /// diagonal blocks moved to the right-hand side as they are known. `b`
 /// and the result are in original coordinates. Returns the unknowns and
 /// the factorizations' actual fill.
-pub fn solve_planned<K: Field>(
+pub fn solve_planned<K: Field, N: Num>(
     g: &mut Graph<K>,
-    m: &SparseRows,
+    m: &[Vec<(usize, N)>],
     plan: &Plan,
-    b: &[ExprId],
-) -> Solved {
+    b: &[N],
+) -> Solved<N> {
     let n = m.len();
     assert_eq!(b.len(), n);
     let btf = &plan.btf;
@@ -443,23 +445,23 @@ pub fn solve_planned<K: Field>(
         col_pos[j] = k;
     }
     // Permuted rows: entries as (permuted column, expr).
-    let rows: Vec<Vec<(usize, ExprId)>> = btf
+    let rows: Vec<Vec<(usize, N)>> = btf
         .row_perm
         .iter()
         .map(|&i| {
-            let mut r: Vec<(usize, ExprId)> = m[i].iter().map(|&(j, e)| (col_pos[j], e)).collect();
+            let mut r: Vec<(usize, N)> = m[i].iter().map(|&(j, e)| (col_pos[j], e)).collect();
             r.sort_by_key(|&(c, _)| c);
             r
         })
         .collect();
-    let mut x = vec![g.zero(); n]; // permuted coordinates
+    let mut x = vec![N::zero(g); n]; // permuted coordinates
     let mut fill = 0usize;
     let mut guards: Vec<ExprId> = Vec::new();
     for blk in (0..btf.n_blocks()).rev() {
         let range = btf.block(blk);
         let (lo, hi) = (range.start, range.end);
-        let mut local: SparseRows = Vec::with_capacity(hi - lo);
-        let mut rhs: Vec<ExprId> = Vec::with_capacity(hi - lo);
+        let mut local: Vec<Vec<(usize, N)>> = Vec::with_capacity(hi - lo);
+        let mut rhs: Vec<N> = Vec::with_capacity(hi - lo);
         for k in lo..hi {
             let mut row = Vec::new();
             let (mut ls, mut xs) = (Vec::new(), Vec::new());
@@ -476,8 +478,8 @@ pub fn solve_planned<K: Field>(
             rhs.push(if ls.is_empty() {
                 bk
             } else {
-                let d = g.dot(ls, xs);
-                g.sub(bk, d)
+                let d = N::dot(g, ls, xs);
+                N::sub(g, bk, d)
             });
         }
         let (sol, gs, f) = solve_guarded(g, &local, &plan.orders[blk], &plan.pivots[blk], &rhs);
@@ -487,7 +489,7 @@ pub fn solve_planned<K: Field>(
             x[k] = v;
         }
     }
-    let mut out = vec![g.zero(); n];
+    let mut out = vec![N::zero(g); n];
     for (k, &j) in btf.col_perm.iter().enumerate() {
         out[j] = x[k];
     }
@@ -504,9 +506,9 @@ pub fn solve_planned<K: Field>(
 }
 
 /// The result of a planned solve.
-pub struct Solved {
+pub struct Solved<N = ExprId> {
     /// The unknowns, one expression each, in original coordinates.
-    pub x: Vec<ExprId>,
+    pub x: Vec<N>,
     /// `1` while every pivot row still dominates its column by the
     /// threshold, `0` once a step would pivot elsewhere: the guard a
     /// consumer checks per evaluation, rebuilding with
@@ -527,13 +529,13 @@ pub const PIVOT_TOLERANCE: f64 = 1e-3;
 /// is at least [`PIVOT_TOLERANCE`] times the largest in its column. The
 /// program is the static elimination's; the guard costs the column's
 /// magnitudes, which the elimination computes anyway.
-pub fn solve_guarded<K: Field>(
+pub fn solve_guarded<K: Field, N: Num>(
     g: &mut Graph<K>,
-    m: &SparseRows,
+    m: &[Vec<(usize, N)>],
     order: &[usize],
     pivots: &[usize],
-    b: &[ExprId],
-) -> (Vec<ExprId>, Vec<ExprId>, usize) {
+    b: &[N],
+) -> (Vec<N>, Vec<ExprId>, usize) {
     let n = m.len();
     assert_eq!(order.len(), n, "one order entry per unknown");
     assert_eq!(pivots.len(), n, "one pivot row per step");
@@ -544,8 +546,8 @@ pub fn solve_guarded<K: Field>(
         cpos[order[k]] = k;
         rpos[pivots[k]] = k;
     }
-    let mut orig: HashMap<(usize, usize), ExprId> = HashMap::default();
-    let mut pending: HashMap<(usize, usize), (Vec<ExprId>, Vec<ExprId>)> = HashMap::default();
+    let mut orig: HashMap<(usize, usize), N> = HashMap::default();
+    let mut pending: HashMap<(usize, usize), (Vec<N>, Vec<N>)> = HashMap::default();
     let mut in_row: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut in_col: Vec<Vec<usize>> = vec![Vec::new(); n + 1];
     for (i, row) in m.iter().enumerate() {
@@ -561,21 +563,21 @@ pub fn solve_guarded<K: Field>(
     }
     // The value of an entry after the updates pending on it, kept so that a
     // second read (the right-hand side in back-substitution) sees it.
-    fn finalize<K: Field>(
+    fn finalize<K: Field, N: Num>(
         g: &mut Graph<K>,
-        orig: &mut HashMap<(usize, usize), ExprId>,
-        pending: &mut HashMap<(usize, usize), (Vec<ExprId>, Vec<ExprId>)>,
+        orig: &mut HashMap<(usize, usize), N>,
+        pending: &mut HashMap<(usize, usize), (Vec<N>, Vec<N>)>,
         at: (usize, usize),
-    ) -> ExprId {
+    ) -> N {
         let v = match (orig.get(&at).copied(), pending.remove(&at)) {
             (Some(o), None) => o,
             (Some(o), Some((ls, us))) => {
-                let d = g.dot(ls, us);
-                g.sub(o, d)
+                let d = N::dot(g, ls, us);
+                N::sub(g, o, d)
             }
             (None, Some((ls, us))) => {
-                let d = g.dot(ls, us);
-                g.neg(d)
+                let d = N::dot(g, ls, us);
+                N::neg(g, d)
             }
             (None, None) => unreachable!("an occupied position has a value"),
         };
@@ -583,8 +585,8 @@ pub fn solve_guarded<K: Field>(
         v
     }
     let mut fill = 0usize;
-    let mut upper: Vec<Vec<(usize, ExprId)>> = vec![Vec::new(); n];
-    let mut diag: Vec<ExprId> = vec![g.zero(); n];
+    let mut upper: Vec<Vec<(usize, N)>> = vec![Vec::new(); n];
+    let mut diag: Vec<N> = vec![N::zero(g); n];
     let mut guards: Vec<ExprId> = Vec::new();
     for k in 0..n {
         assert!(
@@ -593,14 +595,14 @@ pub fn solve_guarded<K: Field>(
         );
         let pivot = finalize(g, &mut orig, &mut pending, (k, k));
         diag[k] = pivot;
-        let inv = g.recip(pivot);
+        let inv = N::recip(g, pivot);
         let mut row_k: Vec<usize> = in_row[k].iter().copied().filter(|&c| c > k).collect();
         let mut col_k: Vec<usize> = in_col[k].iter().copied().filter(|&r| r > k).collect();
         row_k.sort_unstable();
         row_k.dedup();
         col_k.sort_unstable();
         col_k.dedup();
-        let us: Vec<ExprId> = row_k
+        let us: Vec<N> = row_k
             .iter()
             .map(|&j| finalize(g, &mut orig, &mut pending, (k, j)))
             .collect();
@@ -609,27 +611,21 @@ pub fn solve_guarded<K: Field>(
                 upper[k].push((j, u));
             }
         }
-        let below: Vec<ExprId> = col_k
+        let below: Vec<N> = col_k
             .iter()
             .map(|&i| finalize(g, &mut orig, &mut pending, (i, k)))
             .collect();
         if !below.is_empty() {
             // The guard: the pivot dominates its column by the tolerance.
-            let mut mags: Vec<ExprId> = below
-                .iter()
-                .map(|&v| g.unary(crate::node::UnaryOp::Abs, v))
-                .collect();
-            let pa = g.unary(crate::node::UnaryOp::Abs, pivot);
-            let tol = g.konst_f64(PIVOT_TOLERANCE);
+            let mut mags: Vec<ExprId> = below.iter().map(|&v| N::size(g, v)).collect();
             let largest = if mags.len() == 1 {
                 mags.pop().unwrap()
             } else {
                 g.reduce(crate::node::ReduceOp::Max, mags)
             };
-            let bound = g.mul(tol, largest);
-            guards.push(g.cmp(crate::node::CmpOp::Ge, pa, bound));
+            guards.push(N::guard(g, pivot, largest));
         }
-        let ls: Vec<ExprId> = below.iter().map(|&a| g.mul(a, inv)).collect();
+        let ls: Vec<N> = below.iter().map(|&a| N::mul(g, a, inv)).collect();
         for (&i, &l) in col_k.iter().zip(&ls) {
             for (&j, &u) in row_k.iter().zip(&us) {
                 let entry = pending.entry((i, j)).or_default();
@@ -643,16 +639,16 @@ pub fn solve_guarded<K: Field>(
             }
         }
     }
-    let mut x = vec![g.zero(); n];
+    let mut x = vec![N::zero(g); n];
     for i in (0..n).rev() {
         let mut acc = finalize(g, &mut orig, &mut pending, (i, n));
         for &(j, u) in &upper[i] {
-            let t = g.mul(u, x[j]);
-            acc = g.sub(acc, t);
+            let t = N::mul(g, u, x[j]);
+            acc = N::sub(g, acc, t);
         }
-        x[i] = g.div(acc, diag[i]);
+        x[i] = N::div(g, acc, diag[i]);
     }
-    let mut out = vec![g.zero(); n];
+    let mut out = vec![N::zero(g); n];
     for (k, &j) in order.iter().enumerate() {
         out[j] = x[k];
     }

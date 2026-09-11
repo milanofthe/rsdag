@@ -3,7 +3,7 @@
 //! solve kernel (one factorization per block for its right-hand sides) and
 //! the block updates through Gemm kernels.
 
-use rsdag::symbolic::solve::{block_pattern, plan, solve_block_planned, BlockRows};
+use rsdag::symbolic::solve::{block_pattern, plan, solve_block_planned, Block, BlockRows};
 use rsdag::synth::Spec;
 use rsdag::{Builder, ExprId, Graph, Node, Numeric, SymbolId, Tape, F64};
 
@@ -51,7 +51,7 @@ fn system(
                 block.push(e);
             }
         }
-        rows[i].push((j, block));
+        rows[i].push((j, Block::Dense(block)));
     }
     let rhs: Vec<ExprId> = (0..n)
         .map(|k| {
