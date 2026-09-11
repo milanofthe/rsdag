@@ -373,9 +373,8 @@ impl Tape {
     /// [`eval_prolog`](Self::eval_prolog) (prolog results are pinned slots, so
     /// repeated main passes may not clear or resize the buffer).
     pub fn eval_main<T: Scalar>(&self, inputs: &[T], work: &mut [T], out: &mut Vec<T>) {
-        assert_eq!(
-            work.len(),
-            self.buffer_len(),
+        assert!(
+            work.len() >= self.buffer_len(),
             "eval_main requires a work buffer prepared by eval_prolog"
         );
         self.run_range(inputs, work, self.prolog_ops, self.ops.len(), &mut NoTrace);
