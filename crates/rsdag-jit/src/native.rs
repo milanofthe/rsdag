@@ -167,6 +167,19 @@ impl NativeTape {
 
     /// Compile with `chunk_ops` ops per emitted function.
     pub fn compile_with(tape: &Tape, chunk_ops: usize) -> Result<NativeTape, JitError> {
+        Self::compile_live(tape, chunk_ops, &[])
+    }
+
+    /// Compile with `chunk_ops` ops per emitted function, keeping the slots
+    /// `live` written to the work array at the end of the program, as the
+    /// outputs are: what a consumer that reads a specialized tape's
+    /// prolog guards from `work` after [`eval_prolog`](Self::eval_prolog)
+    /// passes ([`rsdag::SpecializedTape::prolog_guards`]).
+    pub fn compile_live(
+        tape: &Tape,
+        chunk_ops: usize,
+        live: &[u32],
+    ) -> Result<NativeTape, JitError> {
         if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
             return Err(JitError::Unsupported);
         }
@@ -219,7 +232,7 @@ impl NativeTape {
         for (i, op) in rec.ops.iter().enumerate() {
             op.for_each_read(|s| last_use[s as usize] = i as u32);
         }
-        for &o in tape.outputs() {
+        for &o in tape.outputs().iter().chain(live) {
             if input_index(o).is_none() {
                 last_use[o as usize] = u32::MAX;
             }

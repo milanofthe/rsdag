@@ -68,6 +68,7 @@ pub enum FunctionBody {
 /// carries each output, so a tape or a sweep picks outputs without the
 /// symbolic expressions. An extern function is its bundle; a symbolic one
 /// is its interpreted body.
+#[derive(Clone)]
 pub struct Body {
     pub bundle: Arc<dyn ExternBundle>,
     /// `slot_of[out]` is the bundle slot holding output `out`, `None` when
@@ -86,6 +87,16 @@ pub struct Function {
     /// tagged `Derivative`).
     pub output_roles: Vec<OutputRole>,
     pub body: FunctionBody,
+    /// A body a consumer compiled itself and registered with
+    /// [`Graph::set_func_body`](crate::Graph::set_func_body), used in place
+    /// of the interpreted body of a symbolic function (a consumer's body may
+    /// cache work over its solve-constant arguments, say) while it carries
+    /// every expression output; once an output it lacks exists (a derivative
+    /// demanded later), calls fall back to the interpreted body until the
+    /// consumer registers one that covers it. The symbolic outputs stay:
+    /// differentiation and printing read them, only the evaluation goes
+    /// through the registered bundle.
+    pub compiled: Option<Body>,
     /// Derivative output `d outputs[out] / d params[param]`, by index.
     pub(crate) deriv_index: HashMap<(u32, u32), u32>,
 }
@@ -124,6 +135,14 @@ impl Function {
     /// a tape and interpreted (see [`InterpretedBody`]), every expression
     /// output a slot.
     pub fn body<K: crate::field::Field>(&self, ctx: &crate::graph::Graph<K>) -> Body {
+        if let Some(c) = &self.compiled {
+            let covers = self.outputs.iter().enumerate().all(|(k, o)| {
+                !matches!(o, Output::Expr(_)) || c.slot_of.get(k).is_some_and(|s| s.is_some())
+            });
+            if covers {
+                return c.clone();
+            }
+        }
         if let FunctionBody::Extern(b) = &self.body {
             return Body {
                 bundle: b.clone(),
