@@ -34,6 +34,7 @@ impl Tape {
                 Op::Gemv { m, .. } => m,
                 Op::Gemm { m, n, .. } => m * n,
                 Op::Solve { n, .. } => n,
+                Op::SolveMany { n, k, .. } => n * k,
                 _ => 1,
             }
         };
@@ -82,6 +83,10 @@ impl Tape {
                 Op::Solve { a, b, n } => {
                     src(a, n * n, &mut v);
                     src(b, n, &mut v);
+                }
+                Op::SolveMany { a, b, n, k } => {
+                    src(a, n * n, &mut v);
+                    src(b, n * k, &mut v);
                 }
             }
             v
@@ -431,6 +436,24 @@ impl Tape {
                     };
                     max_args = max_args.max((n * n + n) as usize);
                     Op::Solve { a, b, n }
+                }
+                Op::SolveMany { a, b, n, k } => {
+                    let a = match a {
+                        Src::Inputs(k) => Src::Inputs(k),
+                        Src::Pool(_) => {
+                            let o = take((n * n) as usize);
+                            Src::Pool(gather(&o, &mut arg_pool, &mut max_args))
+                        }
+                    };
+                    let b = match b {
+                        Src::Inputs(k) => Src::Inputs(k),
+                        Src::Pool(_) => {
+                            let o = take((n * k) as usize);
+                            Src::Pool(gather(&o, &mut arg_pool, &mut max_args))
+                        }
+                    };
+                    max_args = max_args.max((n * n + n * k) as usize);
+                    Op::SolveMany { a, b, n, k }
                 }
             };
             // Free the blocks that die at this step, then take a slot or a

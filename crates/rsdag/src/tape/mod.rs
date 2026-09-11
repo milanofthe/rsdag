@@ -111,6 +111,15 @@ pub enum Op {
         b: Src,
         n: u32,
     },
+    /// The dense solve of `k` right-hand sides against one `n` by `n` `a`:
+    /// `b` holds `k` vectors of `n` back to back, the `k` solutions go to
+    /// `dst .. dst + n*k` the same way (see [`crate::semantics::solve_many_t`]).
+    SolveMany {
+        a: Src,
+        b: Src,
+        n: u32,
+        k: u32,
+    },
 }
 
 /// Where a kernel's dense operand lives.
@@ -202,6 +211,10 @@ pub trait TapeVisitor {
     /// The dense solve of `a` (`n` by `n`) against `b`, to `dst .. dst+n`
     /// (see [`crate::semantics::solve_t`]).
     fn solve(&mut self, dst: u32, a: Operand<'_>, b: Operand<'_>, n: u32);
+    /// The dense solve of `k` right-hand sides (`b`: `k` vectors of `n`
+    /// back to back) against `a`, the solutions to `dst .. dst + n*k`
+    /// (see [`crate::semantics::solve_many_t`]).
+    fn solve_many(&mut self, dst: u32, a: Operand<'_>, b: Operand<'_>, n: u32, k: u32);
 }
 
 /// Observer of `Select` decisions during evaluation: [`NoTrace`] costs
@@ -303,6 +316,14 @@ impl Tape {
                 Op::Solve { a, b, n } => {
                     format!("Solve({n}x{n} {}, {}) -> {n}", src(a, n * n), src(b, n))
                 }
+                Op::SolveMany { a, b, n, k } => {
+                    format!(
+                        "SolveMany({n}x{n} {}, {k} rhs {}) -> {}",
+                        src(a, n * n),
+                        src(b, n * k),
+                        n * k
+                    )
+                }
             };
             out.push_str(&format!("{i:5}: s{} <- {text}\n", self.dst[i]));
         }
@@ -391,7 +412,7 @@ impl Tape {
         hi: usize,
         sink: &mut S,
     ) {
-        use crate::semantics::{reduce_slice_t, solve_t};
+        use crate::semantics::{reduce_slice_t, solve_many_t, solve_t};
         // The gather scratch at the tail of `work`, so nothing is allocated
         // per call.
         let (work, scratch) = work.split_at_mut(self.n_work);
@@ -504,6 +525,21 @@ impl Tape {
                     T::gemm(av, bv, m, k, n, &mut work[d..d + m * n]);
                     continue;
                 }
+                Op::SolveMany { a, b, n, k } => {
+                    let (n, k) = (n as usize, k as usize);
+                    let (ra, rb) =
+                        dense_operands(inputs, work, scratch, &self.arg_pool, a, n * n, b, n * k);
+                    let av: &[T] = match ra {
+                        Dense::Inputs(i) => &inputs[i..i + n * n],
+                        Dense::Scratch(s) => &scratch[s..s + n * n],
+                    };
+                    let bv: &[T] = match rb {
+                        Dense::Inputs(i) => &inputs[i..i + n * k],
+                        Dense::Scratch(s) => &scratch[s..s + n * k],
+                    };
+                    solve_many_t(av, bv, n, k, &mut work[d..d + n * k]);
+                    continue;
+                }
                 Op::Solve { a, b, n } => {
                     let n = n as usize;
                     let (ra, rb) =
@@ -582,6 +618,9 @@ impl Tape {
                     v.gemm(dst, operand(a, m * k), operand(b, n * k), m, k, n)
                 }
                 Op::Solve { a, b, n } => v.solve(dst, operand(a, n * n), operand(b, n), n),
+                Op::SolveMany { a, b, n, k } => {
+                    v.solve_many(dst, operand(a, n * n), operand(b, n * k), n, k)
+                }
             }
         }
     }

@@ -372,20 +372,31 @@ pub const LU_PANEL_LARGE: usize = 32;
 pub const LU_PANEL_SWITCH: usize = 512;
 
 pub fn solve_t<T: Scalar>(a: &[T], b: &[T], n: usize, out: &mut [T]) {
+    solve_many_t(a, b, n, 1, out)
+}
+
+/// [`solve_t`] for `k` right-hand sides at once: `b` holds `k` vectors of
+/// `n` back to back, `out` receives the `k` solutions the same way. One
+/// factorization serves every right-hand side; each solution is bit-identical
+/// to its own [`solve_t`] (the pivots depend on `a` alone, and every
+/// right-hand side column runs through the same updates in the same order).
+pub fn solve_many_t<T: Scalar>(a: &[T], b: &[T], n: usize, k: usize, out: &mut [T]) {
     if n < LU_PANEL_SWITCH {
-        solve_blocked::<T, LU_PANEL_SMALL>(a, b, n, out)
+        solve_blocked::<T, LU_PANEL_SMALL>(a, b, n, k, out)
     } else {
-        solve_blocked::<T, LU_PANEL_LARGE>(a, b, n, out)
+        solve_blocked::<T, LU_PANEL_LARGE>(a, b, n, k, out)
     }
 }
 
-/// [`solve_t`] with column panels of `NB`.
-fn solve_blocked<T: Scalar, const NB: usize>(a: &[T], b: &[T], n: usize, out: &mut [T]) {
-    let w = n + 1;
+/// [`solve_many_t`] with column panels of `NB`.
+fn solve_blocked<T: Scalar, const NB: usize>(a: &[T], b: &[T], n: usize, k: usize, out: &mut [T]) {
+    let w = n + k;
     let mut m: Vec<T> = Vec::with_capacity(n * w);
     for i in 0..n {
         m.extend_from_slice(&a[i * n..(i + 1) * n]);
-        m.push(b[i]);
+        for c in 0..k {
+            m.push(b[c * n + i]);
+        }
     }
     let mut k0 = 0;
     while k0 < n {
@@ -466,17 +477,25 @@ fn solve_blocked<T: Scalar, const NB: usize>(a: &[T], b: &[T], n: usize, out: &m
         }
         k0 = k1;
     }
-    for i in (0..n).rev() {
-        let mut s = m[i * w + n];
-        for j in i + 1..n {
-            let t = m[i * w + j].mul(out[j]);
-            s = s.sub(t);
+    for c in 0..k {
+        let x = &mut out[c * n..(c + 1) * n];
+        for i in (0..n).rev() {
+            let mut s = m[i * w + n + c];
+            for j in i + 1..n {
+                let t = m[i * w + j].mul(x[j]);
+                s = s.sub(t);
+            }
+            x[i] = s.div(m[i * w + i]);
         }
-        out[i] = s.div(m[i * w + i]);
     }
 }
 
 /// [`solve_t`] in `f64`.
 pub fn solve(a: &[f64], b: &[f64], n: usize, out: &mut [f64]) {
     solve_t(a, b, n, out)
+}
+
+/// [`solve_many_t`] in `f64`.
+pub fn solve_many(a: &[f64], b: &[f64], n: usize, k: usize, out: &mut [f64]) {
+    solve_many_t(a, b, n, k, out)
 }

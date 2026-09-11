@@ -212,6 +212,7 @@ impl NativeTape {
                 ROp::Gemv { a, x, m, n, .. } => vec![(a, m * n), (x, *n)],
                 ROp::Gemm { a, b, m, k, n, .. } => vec![(a, m * k), (b, n * k)],
                 ROp::Solve { a, b, n, .. } => vec![(a, n * n), (b, *n)],
+                ROp::SolveMany { a, b, n, k, .. } => vec![(a, n * n), (b, n * k)],
                 _ => Vec::new(),
             };
             for (d, len) in runs {
@@ -780,6 +781,24 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 ];
                 self.call(host::h_gemm as *const (), &args);
                 self.invalidate(dst, m * n);
+            }
+            ROp::SolveMany {
+                dst,
+                ref a,
+                ref b,
+                n,
+                k,
+            } => {
+                let (a_arg, b_arg) = self.dense_args(a, b);
+                let args = [
+                    Arg::I(a_arg),
+                    Arg::I(b_arg),
+                    Arg::I(IArg::Imm(n as u64)),
+                    Arg::I(IArg::Imm(k as u64)),
+                    Arg::I(IArg::WorkAddr(dst as usize * 8)),
+                ];
+                self.call(host::h_solve_many as *const (), &args);
+                self.invalidate(dst, n * k);
             }
             ROp::Solve {
                 dst,

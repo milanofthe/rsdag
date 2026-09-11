@@ -92,6 +92,19 @@ pub(crate) extern "C" fn h_bundle_batch(
     b.call_batch(xs, n_groups, n_args, out);
 }
 
+pub(crate) extern "C" fn h_solve_many(
+    a: *const f64,
+    b: *const f64,
+    n: usize,
+    k: usize,
+    out: *mut f64,
+) {
+    let a = unsafe { std::slice::from_raw_parts(a, n * n) };
+    let b = unsafe { std::slice::from_raw_parts(b, n * k) };
+    let out = unsafe { std::slice::from_raw_parts_mut(out, n * k) };
+    rsdag::semantics::solve_many(a, b, n, k, out);
+}
+
 pub(crate) extern "C" fn h_gemm(
     a: *const f64,
     b: *const f64,

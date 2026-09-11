@@ -51,6 +51,13 @@ pub(crate) enum ROp {
         b: Dense,
         n: u32,
     },
+    SolveMany {
+        dst: u32,
+        a: Dense,
+        b: Dense,
+        n: u32,
+        k: u32,
+    },
 }
 
 /// A dense operand: a run of inputs read in place, or slots gathered.
@@ -98,7 +105,7 @@ impl ROp {
             }
             ROp::Dot(_, a, b) => a.iter().chain(b).copied().for_each(f),
             ROp::Gemv { a, x, .. } => a.slots().iter().chain(x.slots()).copied().for_each(f),
-            ROp::Gemm { a, b, .. } | ROp::Solve { a, b, .. } => {
+            ROp::Gemm { a, b, .. } | ROp::Solve { a, b, .. } | ROp::SolveMany { a, b, .. } => {
                 a.slots().iter().chain(b.slots()).copied().for_each(f)
             }
         }
@@ -131,6 +138,7 @@ impl ROp {
             ROp::Gemv { .. } => crate::host::h_gemv as *const (),
             ROp::Gemm { .. } => crate::host::h_gemm as *const (),
             ROp::Solve { .. } => crate::host::h_solve as *const (),
+            ROp::SolveMany { .. } => crate::host::h_solve_many as *const (),
             _ => return None,
         })
     }
@@ -141,7 +149,9 @@ impl ROp {
             ROp::Reduce(_, ReduceOp::Min | ReduceOp::Max, args) => args.len(),
             ROp::Call(_, _, args, _) | ROp::CallBatch(_, _, args, ..) => args.len(),
             ROp::Gemv { a, x, .. } => a.slots().len() + x.slots().len(),
-            ROp::Gemm { a, b, .. } | ROp::Solve { a, b, .. } => a.slots().len() + b.slots().len(),
+            ROp::Gemm { a, b, .. } | ROp::Solve { a, b, .. } | ROp::SolveMany { a, b, .. } => {
+                a.slots().len() + b.slots().len()
+            }
             _ => 0,
         }
     }
@@ -244,6 +254,15 @@ impl TapeVisitor for Recorder {
             m,
             k,
             n,
+        });
+    }
+    fn solve_many(&mut self, dst: u32, a: Operand<'_>, b: Operand<'_>, n: u32, k: u32) {
+        self.ops.push(ROp::SolveMany {
+            dst,
+            a: Dense::of(a),
+            b: Dense::of(b),
+            n,
+            k,
         });
     }
     fn solve(&mut self, dst: u32, a: Operand<'_>, b: Operand<'_>, n: u32) {
