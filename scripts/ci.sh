@@ -10,6 +10,7 @@ FEATURES='rsdag/synth rsdag/serde'
 TC=$(dirname "$(rustup which cargo --toolchain stable)")
 CARGO="$TC/cargo"
 export RUSTC="$TC/rustc"
+export RUSTDOC="$TC/rustdoc"
 run() { echo "== $*"; "$@"; }
 run $CARGO fmt --all -- --check
 run $CARGO clippy --workspace --exclude rsdag-py --all-targets --features "$FEATURES" -- -D warnings
