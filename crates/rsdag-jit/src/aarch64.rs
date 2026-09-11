@@ -11,7 +11,7 @@
 //! an access is one instruction almost always instead of four.
 
 use crate::isa::*;
-use rsdag::node::CmpOp;
+use rsdag::node::{CmpOp, ReduceOp};
 
 const WORK: u32 = 19;
 const INPUTS: u32 = 20;
@@ -191,6 +191,16 @@ impl Isa for A64 {
     }
     fn neg(&mut self, d: u8, a: u8) {
         self.w(0x1E61_4000 | ((a as u32) << 5) | d as u32);
+    }
+    const MINMAX: bool = true;
+    fn minmax(&mut self, op: ReduceOp, d: u8, a: u8, b: u8) {
+        // fminnm / fmaxnm: IEEE minNum / maxNum, what `f64::min` and
+        // `f64::max` compile to on this target.
+        let opc = match op {
+            ReduceOp::Min => 0x1E60_7800,
+            _ => 0x1E60_6800,
+        };
+        self.fbin(opc, d as u32, a as u32, b as u32);
     }
     fn abs(&mut self, d: u8, a: u8) {
         self.w(0x1E60_C000 | ((a as u32) << 5) | d as u32);

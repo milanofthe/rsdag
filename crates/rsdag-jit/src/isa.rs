@@ -10,7 +10,7 @@
 //! [`arith`](Isa::arith), whose result may alias the first operand (the
 //! folds accumulate in place).
 
-use rsdag::node::CmpOp;
+use rsdag::node::{CmpOp, ReduceOp};
 
 /// Which base pointer a memory operand is relative to.
 #[derive(Clone, Copy)]
@@ -89,6 +89,12 @@ pub(crate) trait Isa {
     /// `false` when the instruction is not available; the caller then uses
     /// the host routine.
     fn round(&mut self, mode: Round, d: u8, a: u8) -> bool;
+    /// Whether [`minmax`](Self::minmax) is available; without it the
+    /// caller uses the host routine.
+    const MINMAX: bool;
+    /// `d = min(a, b)` or `max(a, b)` with the reference's NaN rule (a NaN
+    /// operand yields the other), as one instruction.
+    fn minmax(&mut self, op: ReduceOp, d: u8, a: u8, b: u8);
 
     /// `d = (a op b) ? t : e`, every comparison with a NaN false except `Ne`.
     fn cmp_select(&mut self, op: CmpOp, a: u8, b: u8, t: u8, e: u8, d: u8);

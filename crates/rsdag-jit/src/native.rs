@@ -70,6 +70,10 @@ struct NativeBody {
 
 /// Ops per batched call below which the loop stays on the calling thread.
 const PAR_MIN_OPS: usize = 1 << 16;
+/// A min or max over at most this many terms is a chain of instructions
+/// where the ISA has one; longer ones go through the host routine, whose
+/// call costs about as much as this many terms.
+const INLINE_MINMAX_MAX: usize = 16;
 
 impl NativeBody {
     /// The instances `groups` of a batch, one after the other on one work
@@ -667,6 +671,22 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 ReduceOp::Product => {
                     let r = self.fold(Arith::Mul, 1.0, args, None);
                     self.put(dst, r);
+                }
+                ReduceOp::Min | ReduceOp::Max
+                    if I::MINMAX && !args.is_empty() && args.len() <= INLINE_MINMAX_MAX =>
+                {
+                    // The reference's left fold, one instruction per term.
+                    let first = self.get(args[0]);
+                    let mut acc = self.fresh();
+                    self.isa.mov(acc, first);
+                    for &k in &args[1..] {
+                        let t = self.get(k);
+                        let r = self.fresh();
+                        self.isa.minmax(rop, r, acc, t);
+                        acc = r;
+                        self.release_except(&[acc]);
+                    }
+                    self.put(dst, acc);
                 }
                 ReduceOp::Min | ReduceOp::Max => {
                     let at = self.gather(args);

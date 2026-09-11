@@ -9,7 +9,7 @@
 //!.
 
 use crate::isa::*;
-use rsdag::node::CmpOp;
+use rsdag::node::{CmpOp, ReduceOp};
 
 const WORK: u8 = 3; // rbx
 const INPUTS: u8 = 13; // r13
@@ -261,6 +261,12 @@ impl Isa for X64 {
             self.mov(d, a);
             self.sse(0xF2, opc, d, b);
         }
+    }
+    const MINMAX: bool = false;
+    fn minmax(&mut self, _op: ReduceOp, _d: u8, _a: u8, _b: u8) {
+        // minsd / maxsd return the second operand on a NaN or a tie of
+        // signed zeros, not the reference's rule; the host routine it is.
+        unreachable!("no min/max instruction with the reference's NaN rule")
     }
     fn neg(&mut self, d: u8, a: u8) {
         self.mask1(0x8000_0000_0000_0000);
