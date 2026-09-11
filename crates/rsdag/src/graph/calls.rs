@@ -29,6 +29,7 @@ impl<K: Field> Graph<K> {
             outputs: outputs.into_iter().map(Output::Expr).collect(),
             output_roles: vec![OutputRole::Plain; n_out],
             body: FunctionBody::Symbolic,
+            compiled: None,
             deriv_index: HashMap::default(),
         });
         id
@@ -216,6 +217,7 @@ impl<K: Field> Graph<K> {
             outputs,
             output_roles: vec![OutputRole::Plain; n_out],
             body: FunctionBody::Extern(body),
+            compiled: None,
             deriv_index: HashMap::default(),
         });
         id
@@ -249,6 +251,17 @@ impl<K: Field> Graph<K> {
         &mut self.funcs[f.0 as usize]
     }
 
+    /// Register a body a consumer compiled for the symbolic function `f`:
+    /// from now on a tape calls `body` (see [`Function::compiled`]). A tape
+    /// compiled before keeps the body it was compiled with.
+    pub fn set_func_body(&mut self, f: FuncId, body: crate::func::Body) {
+        assert!(
+            !self.funcs[f.0 as usize].is_extern(),
+            "an extern function is its own body"
+        );
+        self.funcs[f.0 as usize].compiled = Some(body);
+    }
+
     /// Define an extern function over the given formal parameters (the
     /// symbols already exist), see [`define_extern_func`](Self::define_extern_func).
     pub fn define_extern_func_with_params(
@@ -267,6 +280,7 @@ impl<K: Field> Graph<K> {
             outputs,
             output_roles: vec![OutputRole::Plain; n_out],
             body: FunctionBody::Extern(body),
+            compiled: None,
             deriv_index: HashMap::default(),
         });
         id

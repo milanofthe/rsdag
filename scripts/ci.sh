@@ -5,13 +5,19 @@ set -eu
 cd "$(dirname "$0")/.."
 export CARGO_TERM_COLOR=always
 FEATURES='rsdag/synth rsdag/serde'
-CARGO='rustup run stable cargo'
+# The toolchain's own binaries: `rustup run` leaves a Homebrew cargo on the
+# PATH ahead of the toolchain's, and that one lacks the wasm target.
+TC=$(dirname "$(rustup which cargo --toolchain stable)")
+CARGO="$TC/cargo"
+export RUSTC="$TC/rustc"
 run() { echo "== $*"; "$@"; }
 run $CARGO fmt --all -- --check
 run $CARGO clippy --workspace --exclude rsdag-py --all-targets --features "$FEATURES" -- -D warnings
 run $CARGO test --workspace --exclude rsdag-py --features "$FEATURES"
 run $CARGO clippy -p rsdag --all-targets -- -D warnings
 RUSTDOCFLAGS='-D warnings' run $CARGO doc --no-deps --workspace --exclude rsdag-py --features "$FEATURES"
+# The graph crate in the browser (a consumer's web build interprets there).
+run $CARGO check -p rsdag --features serde --target wasm32-unknown-unknown
 run $CARGO check -p rsdag-py
 # The Python job: the wheel, installed into the interpreter that runs the
 # tests. Skipped where maturin or pytest is missing.

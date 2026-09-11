@@ -11,6 +11,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       # rsdag-py links libpython; it is built and tested by the python job.
@@ -23,6 +24,8 @@ jobs:
       - run: cargo doc --no-deps --workspace --exclude rsdag-py --features 'rsdag/synth rsdag/serde'
         env:
           RUSTDOCFLAGS: -D warnings
+      # The graph crate in the browser: a consumer's web build interprets there.
+      - run: cargo check -p rsdag --features serde --target wasm32-unknown-unknown
   # The native backend on the two conventions this runner does not cover:
   # Windows x64 here, AArch64 on macOS.
   native:
