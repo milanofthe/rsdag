@@ -96,7 +96,7 @@ pub struct Function {
     /// interpreted body until the consumer registers one that covers it.
     /// The symbolic outputs stay: differentiation and printing read them,
     /// only the evaluation goes through the registered bundle.
-    pub compiled: Option<Body>,
+    pub compiled: Vec<Body>,
     /// Derivative output `d outputs[out] / d params[param]`, by index.
     pub(crate) deriv_index: HashMap<(u32, u32), u32>,
 }
@@ -140,21 +140,22 @@ impl Function {
     }
 
     /// [`body`](Self::body) for a program that calls the outputs `needed`:
-    /// the registered body when it carries each of them that is an
-    /// expression, the interpreted body otherwise.
+    /// among the registered bodies that carry each of them that is an
+    /// expression, the one computing the fewest outputs; the interpreted
+    /// body when none covers them.
     pub fn body_for<K: crate::field::Field>(
         &self,
         ctx: &crate::graph::Graph<K>,
         needed: &[u32],
     ) -> Body {
-        if let Some(c) = &self.compiled {
-            let covers = needed.iter().all(|&k| {
+        let covering = self.compiled.iter().filter(|c| {
+            needed.iter().all(|&k| {
                 !matches!(self.outputs[k as usize], Output::Expr(_))
                     || c.slot_of.get(k as usize).is_some_and(|s| s.is_some())
-            });
-            if covers {
-                return c.clone();
-            }
+            })
+        });
+        if let Some(c) = covering.min_by_key(|c| c.bundle.n_outputs()) {
+            return c.clone();
         }
         if let FunctionBody::Extern(b) = &self.body {
             return Body {

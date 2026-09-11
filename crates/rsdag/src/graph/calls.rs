@@ -29,7 +29,7 @@ impl<K: Field> Graph<K> {
             outputs: outputs.into_iter().map(Output::Expr).collect(),
             output_roles: vec![OutputRole::Plain; n_out],
             body: FunctionBody::Symbolic,
-            compiled: None,
+            compiled: Vec::new(),
             deriv_index: HashMap::default(),
         });
         id
@@ -217,7 +217,7 @@ impl<K: Field> Graph<K> {
             outputs,
             output_roles: vec![OutputRole::Plain; n_out],
             body: FunctionBody::Extern(body),
-            compiled: None,
+            compiled: Vec::new(),
             deriv_index: HashMap::default(),
         });
         id
@@ -259,7 +259,17 @@ impl<K: Field> Graph<K> {
             !self.funcs[f.0 as usize].is_extern(),
             "an extern function is its own body"
         );
-        self.funcs[f.0 as usize].compiled = Some(body);
+        // Several bodies may serve one function (a residual-only one and
+        // one with the partials); a program takes the smallest that covers
+        // the outputs it calls.
+        let bodies = &mut self.funcs[f.0 as usize].compiled;
+        let ptr = Arc::as_ptr(&body.bundle) as *const () as usize;
+        if !bodies
+            .iter()
+            .any(|b| Arc::as_ptr(&b.bundle) as *const () as usize == ptr)
+        {
+            bodies.push(body);
+        }
     }
 
     /// Define an extern function over the given formal parameters (the
@@ -280,7 +290,7 @@ impl<K: Field> Graph<K> {
             outputs,
             output_roles: vec![OutputRole::Plain; n_out],
             body: FunctionBody::Extern(body),
-            compiled: None,
+            compiled: Vec::new(),
             deriv_index: HashMap::default(),
         });
         id

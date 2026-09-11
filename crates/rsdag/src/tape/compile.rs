@@ -512,19 +512,36 @@ impl Forest {
         let mut pool: Vec<Ref> = Vec::with_capacity(2 * m);
         let mut bundles: Vec<Arc<dyn ExternBundle>> = Vec::new();
         let mut bundle_idx: HashMap<usize, u32> = HashMap::default();
-        // The outputs each function is called for: what a registered body
-        // must cover to serve this program.
-        let mut needed: HashMap<u32, Vec<u32>> = HashMap::default();
+        // The outputs each call (function and argument list) is made for:
+        // what a body must cover to serve it. Calls of one function made
+        // for different output sets (a residual alone, the residual with
+        // its partials) take different bodies, so they are keyed by the set.
+        let mut per_call: HashMap<(u32, crate::node::ArgList), Vec<u32>> = HashMap::default();
         for &id in base {
-            if let Node::Call(o, _) = *ctx.node(id) {
+            if let Node::Call(o, l) = *ctx.node(id) {
                 let (f, out) = ctx.output(o);
-                let v = needed.entry(f.0).or_default();
+                let v = per_call.entry((f.0, l)).or_default();
                 if !v.contains(&out) {
                     v.push(out);
                 }
             }
         }
-        let mut bodies: HashMap<u32, Body> = HashMap::default();
+        let mut set_ids: HashMap<(u32, Vec<u32>), u32> = HashMap::default();
+        let mut sets: Vec<Vec<u32>> = Vec::new();
+        let mut set_of: HashMap<(u32, crate::node::ArgList), u32> = HashMap::default();
+        for ((f, l), mut outs) in per_call {
+            outs.sort_unstable();
+            let id = *set_ids.entry((f, outs.clone())).or_insert_with(|| {
+                sets.push(outs);
+                sets.len() as u32 - 1
+            });
+            set_of.insert((f, l), id);
+        }
+        let needed = |f: u32, l: crate::node::ArgList| -> (u32, &Vec<u32>) {
+            let id = set_of[&(f, l)];
+            (id, &sets[id as usize])
+        };
+        let mut bodies: HashMap<(u32, u32), Body> = HashMap::default();
         // The value each base node is, once lowered.
         let mut value: Vec<Option<Ref>> = vec![None; m];
 
@@ -586,7 +603,8 @@ impl Forest {
         // members would be impure as a whole and pull the pure work out of
         // the prolog.
         enum GroupKey {
-            Call(u32, u32, bool),
+            /// Function, depth, purity, the id of the output set called for.
+            Call(u32, u32, bool, u32),
             Gemv(Vec<ExprId>, u32, bool),
             /// The rows (sorted) against every vector: a matrix product.
             Gemm(Vec<Vec<ExprId>>, Vec<Vec<ExprId>>),
@@ -602,7 +620,10 @@ impl Forest {
                 continue;
             }
             let key = match *ctx.node(id) {
-                Node::Call(o, _) => GroupKey::Call(ctx.output(o).0 .0, depth[i], self.pure[i]),
+                Node::Call(o, l) => {
+                    let f = ctx.output(o).0 .0;
+                    GroupKey::Call(f, depth[i], self.pure[i], needed(f, l).0)
+                }
                 Node::Dot(l) => GroupKey::Gemv(ctx.dot_args(l).1.to_vec(), depth[i], self.pure[i]),
                 Node::Solve(l, _) => GroupKey::Solve(l, self.pure[i]),
                 _ => unreachable!("members are calls, rows or components"),
@@ -889,11 +910,11 @@ impl Forest {
                 lowered_group[g] = true;
                 let (key, members) = &groups[g];
                 match key {
-                    GroupKey::Call(f, ..) => {
+                    GroupKey::Call(f, _, _, set) => {
                         let (bundle, n_out) = {
-                            let body = bodies
-                                .entry(*f)
-                                .or_insert_with(|| ctx.func(FuncId(*f)).body_for(ctx, &needed[f]));
+                            let body = bodies.entry((*f, *set)).or_insert_with(|| {
+                                ctx.func(FuncId(*f)).body_for(ctx, &sets[*set as usize])
+                            });
                             let ptr = Arc::as_ptr(&body.bundle) as *const () as usize;
                             let b = *bundle_idx.entry(ptr).or_insert_with(|| {
                                 bundles.push(body.bundle.clone());
@@ -931,7 +952,7 @@ impl Forest {
                             n_out: n_groups * n_out,
                             pure,
                         });
-                        let body = &bodies[f];
+                        let body = &bodies[&(*f, *set)];
                         for &mi in members {
                             let Node::Call(o, l) = *ctx.node(base[mi]) else {
                                 unreachable!()
@@ -1119,9 +1140,10 @@ impl Forest {
                     // them; other outputs of the same call join it.
                     let (f, _) = ctx.output(o);
                     let args = ctx.args(l).to_vec();
+                    let (set, outs) = needed(f.0, l);
                     let body = bodies
-                        .entry(f.0)
-                        .or_insert_with(|| ctx.func(f).body_for(ctx, &needed[&f.0]));
+                        .entry((f.0, set))
+                        .or_insert_with(|| ctx.func(f).body_for(ctx, outs));
                     let ptr = Arc::as_ptr(&body.bundle) as *const () as usize;
                     let bundle = *bundle_idx.entry(ptr).or_insert_with(|| {
                         bundles.push(body.bundle.clone());
