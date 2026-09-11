@@ -17,7 +17,7 @@ fn per_call(mut f: impl FnMut(), reps: usize) -> f64 {
     t.elapsed().as_secs_f64() * 1e9 / reps as f64
 }
 fn main() {
-    println!("vocab,steps,ops,interp_ns_per_op,native_ns_per_op,compile_ns_per_op");
+    println!("vocab,steps,ops,interp_ns_per_op,native_ns_per_op,compile_ns_per_op,tape_compile_ns_per_op");
     for (name, vocab) in [
         ("ring", Vocabulary::Ring),
         ("elementary", Vocabulary::Elementary),
@@ -34,6 +34,15 @@ fn main() {
                 .smooth();
             let (roots, syms) = build(&mut g, &mut spec);
             let tape = Tape::compile(&g, &roots, &syms);
+            // The tape compile itself, best of five.
+            let t_t = (0..5)
+                .map(|_| {
+                    let t = Instant::now();
+                    let _ = Tape::compile(&g, &roots, &syms);
+                    t.elapsed().as_secs_f64() * 1e9
+                })
+                .fold(f64::INFINITY, f64::min)
+                / tape.n_ops().max(1) as f64;
             let ins = inputs(&mut spec.rng(), syms.len());
             let n = tape.n_ops().max(1);
             let reps = (4_000_000 / n).clamp(3, 20_000);
@@ -44,7 +53,7 @@ fn main() {
             let t_c = t0.elapsed().as_secs_f64() * 1e9 / n as f64;
             let (mut nw, mut no) = (Vec::new(), Vec::new());
             let t_n = per_call(|| native.eval(&ins, &mut nw, &mut no), reps) / n as f64;
-            println!("{name},{steps},{n},{t_i:.3},{t_n:.3},{t_c:.2}");
+            println!("{name},{steps},{n},{t_i:.3},{t_n:.3},{t_c:.2},{t_t:.2}");
         }
     }
 }
