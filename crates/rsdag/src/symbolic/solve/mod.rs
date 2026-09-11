@@ -372,11 +372,12 @@ impl Plan {
                     }
                 }
             }
-            // Partial pivoting in the elimination order: at step k the row
-            // of largest magnitude in column `order[k]` among the rows not
-            // yet taken; on a tie (the unit entries of a source row) the
-            // sparsest row, lowest index first, so the choice depends on the
-            // values and the pattern alone and keeps the fill down.
+            // Threshold pivoting in the elimination order: at step k, among
+            // the rows not yet taken whose magnitude in column `order[k]`
+            // is within [`REPIVOT_CHOICE`] of the largest, the sparsest row,
+            // lowest index first: the pivot quality of a partial pivot to a
+            // factor of ten, the fill of a sparser choice, and a choice that
+            // depends on the values and the pattern alone.
             let order = &self.orders[b];
             let mut taken = vec![false; size];
             let mut row_len = vec![0usize; size];
@@ -390,16 +391,12 @@ impl Plan {
                 open.sort_unstable();
                 open.dedup();
                 let mag = |r: usize| a.get(&(r, c)).copied().unwrap_or(0.0).abs();
+                let largest = open.iter().map(|&r| mag(r)).fold(0.0f64, f64::max);
                 let r = open
                     .iter()
                     .copied()
-                    .max_by(|&x, &y| {
-                        mag(x)
-                            .partial_cmp(&mag(y))
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                            .then(row_len[y].cmp(&row_len[x]))
-                            .then(y.cmp(&x))
-                    })
+                    .filter(|&r| mag(r) >= REPIVOT_CHOICE * largest)
+                    .min_by_key(|&r| (row_len[r], r))
                     .expect("a structurally nonsingular block");
                 taken[r] = true;
                 rows.push(r);
@@ -536,6 +533,10 @@ pub struct Solved<N = ExprId> {
 /// Below this ratio of a pivot's magnitude to the largest in its column,
 /// the guard reports that the pivot rows should change (KLU's default).
 pub const PIVOT_TOLERANCE: f64 = 1e-3;
+
+/// [`Plan::repivot`] takes the sparsest row among those within this ratio
+/// of the largest magnitude in the column.
+pub const REPIVOT_CHOICE: f64 = 0.1;
 
 /// The solve of one block: Gaussian elimination in the given column order
 /// with the given pivot rows, over the matrix augmented by the right-hand
