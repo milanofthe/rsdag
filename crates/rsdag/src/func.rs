@@ -90,12 +90,12 @@ pub struct Function {
     /// A body a consumer compiled itself and registered with
     /// [`Graph::set_func_body`](crate::Graph::set_func_body), used in place
     /// of the interpreted body of a symbolic function (a consumer's body may
-    /// cache work over its solve-constant arguments, say) while it carries
-    /// every expression output; once an output it lacks exists (a derivative
-    /// demanded later), calls fall back to the interpreted body until the
-    /// consumer registers one that covers it. The symbolic outputs stay:
-    /// differentiation and printing read them, only the evaluation goes
-    /// through the registered bundle.
+    /// cache work over its solve-constant arguments, say) by every program
+    /// whose calls it covers ([`Function::body_for`]); a program that calls
+    /// an expression output it lacks (a derivative demanded later) takes the
+    /// interpreted body until the consumer registers one that covers it.
+    /// The symbolic outputs stay: differentiation and printing read them,
+    /// only the evaluation goes through the registered bundle.
     pub compiled: Option<Body>,
     /// Derivative output `d outputs[out] / d params[param]`, by index.
     pub(crate) deriv_index: HashMap<(u32, u32), u32>,
@@ -135,9 +135,22 @@ impl Function {
     /// a tape and interpreted (see [`InterpretedBody`]), every expression
     /// output a slot.
     pub fn body<K: crate::field::Field>(&self, ctx: &crate::graph::Graph<K>) -> Body {
+        let all: Vec<u32> = (0..self.outputs.len() as u32).collect();
+        self.body_for(ctx, &all)
+    }
+
+    /// [`body`](Self::body) for a program that calls the outputs `needed`:
+    /// the registered body when it carries each of them that is an
+    /// expression, the interpreted body otherwise.
+    pub fn body_for<K: crate::field::Field>(
+        &self,
+        ctx: &crate::graph::Graph<K>,
+        needed: &[u32],
+    ) -> Body {
         if let Some(c) = &self.compiled {
-            let covers = self.outputs.iter().enumerate().all(|(k, o)| {
-                !matches!(o, Output::Expr(_)) || c.slot_of.get(k).is_some_and(|s| s.is_some())
+            let covers = needed.iter().all(|&k| {
+                !matches!(self.outputs[k as usize], Output::Expr(_))
+                    || c.slot_of.get(k as usize).is_some_and(|s| s.is_some())
             });
             if covers {
                 return c.clone();

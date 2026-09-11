@@ -280,6 +280,18 @@ impl Forest {
         let mut pool: Vec<Ref> = Vec::with_capacity(2 * m);
         let mut bundles: Vec<Arc<dyn ExternBundle>> = Vec::new();
         let mut bundle_idx: HashMap<usize, u32> = HashMap::default();
+        // The outputs each function is called for: what a registered body
+        // must cover to serve this program.
+        let mut needed: HashMap<u32, Vec<u32>> = HashMap::default();
+        for &id in base {
+            if let Node::Call(o, _) = *ctx.node(id) {
+                let (f, out) = ctx.output(o);
+                let v = needed.entry(f.0).or_default();
+                if !v.contains(&out) {
+                    v.push(out);
+                }
+            }
+        }
         let mut bodies: HashMap<u32, Body> = HashMap::default();
         // The value each base node is, once lowered.
         let mut value: Vec<Option<Ref>> = vec![None; m];
@@ -573,7 +585,7 @@ impl Forest {
                         let (bundle, n_out) = {
                             let body = bodies
                                 .entry(*f)
-                                .or_insert_with(|| ctx.func(FuncId(*f)).body(ctx));
+                                .or_insert_with(|| ctx.func(FuncId(*f)).body_for(ctx, &needed[f]));
                             let ptr = Arc::as_ptr(&body.bundle) as *const () as usize;
                             let b = *bundle_idx.entry(ptr).or_insert_with(|| {
                                 bundles.push(body.bundle.clone());
@@ -769,7 +781,9 @@ impl Forest {
                     // them; other outputs of the same call join it.
                     let (f, _) = ctx.output(o);
                     let args = ctx.args(l).to_vec();
-                    let body = bodies.entry(f.0).or_insert_with(|| ctx.func(f).body(ctx));
+                    let body = bodies
+                        .entry(f.0)
+                        .or_insert_with(|| ctx.func(f).body_for(ctx, &needed[&f.0]));
                     let ptr = Arc::as_ptr(&body.bundle) as *const () as usize;
                     let bundle = *bundle_idx.entry(ptr).or_insert_with(|| {
                         bundles.push(body.bundle.clone());

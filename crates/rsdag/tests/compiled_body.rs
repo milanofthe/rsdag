@@ -1,7 +1,7 @@
 //! A consumer may register a body it compiled itself for a symbolic
-//! function: tapes and sweeps call that body while it covers every
-//! expression output, and fall back to the interpreted body once a
-//! derivative output it lacks exists; the symbolic outputs stay throughout.
+//! function: a program whose calls the body covers uses it, a program that
+//! calls an expression output it lacks (a derivative demanded later) takes
+//! the interpreted body; the symbolic outputs stay throughout.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -68,10 +68,16 @@ fn a_registered_body_serves_the_tape_and_the_symbolic_outputs_stay() {
     // calls revert to the interpreted body, the derivative is symbolic.
     let d: ExprId = rsdag::differentiate(&mut g, call, sy);
     assert_eq!(rsdag::eval(&g, &[d], &env), vec![2.0]);
-    assert_eq!(rsdag::eval(&g, &[call], &env), vec![3.0]);
+    assert_eq!(rsdag::eval(&g, &[call], &env), vec![15.0]);
+    // One sweep over both: one body for the whole sweep, the interpreted one.
+    assert_eq!(rsdag::eval(&g, &[call, d], &env), vec![3.0, 2.0]);
     let later = Tape::compile(&g, &[call, d], &[sy]);
     later.eval(&[1.5], &mut w, &mut o);
     assert_eq!(o, vec![3.0, 2.0]);
+    // A program that calls only what the registered body carries keeps it.
+    let only = Tape::compile(&g, &[call], &[sy]);
+    only.eval(&[1.5], &mut w, &mut o);
+    assert_eq!(o, vec![15.0]);
     assert!(
         g.func(f).compiled.is_some(),
         "the registration stays for the consumer to refresh"

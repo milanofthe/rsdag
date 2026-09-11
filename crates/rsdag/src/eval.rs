@@ -82,14 +82,18 @@ pub fn eval<T: Scalar, K: Field>(
     let n = ctx.len();
     let mut reach = vec![false; n];
     let mut stack: Vec<ExprId> = roots.to_vec();
+    let mut fe = FuncEval::new();
     while let Some(e) = stack.pop() {
         if std::mem::replace(&mut reach[e.0 as usize], true) {
             continue;
         }
+        if let Node::Call(o, _) = *ctx.node(e) {
+            let (f, out) = ctx.output(o);
+            fe.need(f, out);
+        }
         stack.extend(ctx.operands(e).iter().copied());
     }
     let mut w = vec![T::nan(); n];
-    let mut fe = FuncEval::new();
     // A dense system is solved once for all its components.
     let mut solved: HashMap<ArgList, Vec<T>> = HashMap::new();
     for i in 0..n {
@@ -147,6 +151,9 @@ pub fn eval_named<T: Scalar, K: Field>(
 pub struct FuncEval<T: Scalar> {
     bodies: rustc_hash::FxHashMap<FuncId, Body>,
     vals: rustc_hash::FxHashMap<(FuncId, ArgList), Vec<T>>,
+    /// The outputs the sweep calls per function, declared up front so one
+    /// body serves the whole sweep (see [`Function::body_for`]).
+    needed: rustc_hash::FxHashMap<FuncId, Vec<u32>>,
 }
 
 impl<T: Scalar> FuncEval<T> {
@@ -154,6 +161,16 @@ impl<T: Scalar> FuncEval<T> {
         Self {
             bodies: Default::default(),
             vals: Default::default(),
+            needed: Default::default(),
+        }
+    }
+
+    /// Declare that the sweep calls output `out` of `f`, before the first
+    /// call; a body is chosen for the declared set.
+    pub fn need(&mut self, f: FuncId, out: u32) {
+        let v = self.needed.entry(f).or_default();
+        if !v.contains(&out) {
+            v.push(out);
         }
     }
 
@@ -171,7 +188,11 @@ impl<T: Scalar> FuncEval<T> {
         if matches!(func.outputs[out as usize], Output::Zero) {
             return T::zero();
         }
-        let body = self.bodies.entry(f).or_insert_with(|| func.body(ctx));
+        let needed = self.needed.get(&f).cloned().unwrap_or_else(|| vec![out]);
+        let body = self
+            .bodies
+            .entry(f)
+            .or_insert_with(|| func.body_for(ctx, &needed));
         let Some(slot) = body.slot_of.get(out as usize).copied().flatten() else {
             // The cached body predates this output (a derivative demanded
             // later): rebuild it over every output.
