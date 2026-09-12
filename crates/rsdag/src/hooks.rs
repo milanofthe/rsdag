@@ -49,11 +49,20 @@ impl Log for Silent {
 
 struct Std;
 impl Clock for Std {
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     fn now_ns(&self) -> u64 {
         use std::sync::OnceLock;
         use std::time::Instant;
         static START: OnceLock<Instant> = OnceLock::new();
         START.get_or_init(Instant::now).elapsed().as_nanos() as u64
+    }
+
+    /// `wasm32-unknown-unknown` has no clock in `std`: `Instant::now()` is a
+    /// panic, not a reading. A host that wants timings there installs one
+    /// with [`set_clock`]; without it time simply stands still.
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    fn now_ns(&self) -> u64 {
+        0
     }
 }
 
@@ -108,7 +117,15 @@ pub fn now_ns() -> u64 {
 
 /// Run `f` and report how long it took, at [`Level::Debug`], as
 /// `"<what>: <nanoseconds> ns"`.
+///
+/// Without an installed sink there is nobody to report to, so `f` runs
+/// unmeasured: no clock reading, no formatting, and no requirement that the
+/// target have a clock at all.
 pub fn timed<T>(what: &str, f: impl FnOnce() -> T) -> T {
+    let sink = LOG.load(Ordering::Acquire);
+    if sink.is_null() {
+        return f();
+    }
     let t0 = now_ns();
     let out = f();
     let dt = now_ns().saturating_sub(t0);
