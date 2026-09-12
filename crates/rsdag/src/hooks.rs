@@ -34,6 +34,13 @@ pub enum Level {
 /// A sink for reports. The default discards them.
 pub trait Log: Sync {
     fn log(&self, level: Level, message: &str);
+
+    /// Whether the sink would keep a report at `level`. A consumer whose
+    /// logger is off overrides this, and [`timed`] then skips the clock and
+    /// the formatting entirely. Keeping everything is the default.
+    fn enabled(&self, _level: Level) -> bool {
+        true
+    }
 }
 
 /// A monotonic clock in nanoseconds. The default reads
@@ -45,6 +52,9 @@ pub trait Clock: Sync {
 struct Silent;
 impl Log for Silent {
     fn log(&self, _: Level, _: &str) {}
+    fn enabled(&self, _: Level) -> bool {
+        false
+    }
 }
 
 struct Std;
@@ -118,17 +128,17 @@ pub fn now_ns() -> u64 {
 /// Run `f` and report how long it took, at [`Level::Debug`], as
 /// `"<what>: <nanoseconds> ns"`.
 ///
-/// Without an installed sink there is nobody to report to, so `f` runs
-/// unmeasured: no clock reading, no formatting, and no requirement that the
-/// target have a clock at all.
+/// With no sink installed, or one that is not taking debug reports, there is
+/// nobody to report to: `f` then runs unmeasured, with no clock reading, no
+/// formatting, and no requirement that the target have a clock at all.
 pub fn timed<T>(what: &str, f: impl FnOnce() -> T) -> T {
-    let sink = LOG.load(Ordering::Acquire);
-    if sink.is_null() {
+    let sink = log_sink();
+    if !sink.enabled(Level::Debug) {
         return f();
     }
     let t0 = now_ns();
     let out = f();
     let dt = now_ns().saturating_sub(t0);
-    log(Level::Debug, &format!("{what}: {dt} ns"));
+    sink.log(Level::Debug, &format!("{what}: {dt} ns"));
     out
 }
