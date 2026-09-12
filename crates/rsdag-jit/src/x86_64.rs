@@ -16,16 +16,18 @@ const INPUTS: u8 = 13; // r13
 const BUNDLES: u8 = 14; // r14
 const WIN: bool = cfg!(windows);
 /// Integer argument registers: rdi rsi rdx rcx r8 r9, or rcx rdx r8 r9.
-const INT_ARGS: [u8; 6] = if WIN {
-    [1, 2, 8, 9, 0, 0]
+const INT_ARGS: &[u8] = if WIN {
+    &[1, 2, 8, 9]
 } else {
-    [7, 6, 2, 1, 8, 9]
+    &[7, 6, 2, 1, 8, 9]
 };
-/// The Windows frame below the six pushes: 32 bytes of shadow space, two
-/// stack argument slots, `xmm6` to `xmm15`, and 8 bytes of alignment.
-const WIN_FRAME: i32 = 216;
-const WIN_STACK_ARGS: i32 = 32;
-const WIN_XMM_SAVE: i32 = 48;
+/// The Windows frame below the six pushes: `xmm6` to `xmm15` and 8 bytes of
+/// alignment. Shadow space and stack arguments are not in it -- a call
+/// reserves what it needs (see [`X64::call`]), so no frame has to guess how
+/// wide the widest host routine is.
+const WIN_FRAME: i32 = 168;
+/// Windows wants 32 bytes of shadow space below every call's arguments.
+const WIN_SHADOW: i32 = 32;
 
 pub(crate) struct X64 {
     code: Vec<u8>,
@@ -104,6 +106,17 @@ impl X64 {
         self.rex(false, xmm, 0);
         self.bytes(&[0x0F, if store { 0x7F } else { 0x6F }]);
         self.modrm_rsp(xmm, disp);
+    }
+    /// `add rsp, n`, or `sub rsp, -n`. `n` stays a multiple of 16 so that
+    /// `rsp` keeps the alignment every call below relies on.
+    fn move_rsp(&mut self, n: i32) {
+        debug_assert_eq!(n % 16, 0, "rsp moves in 16-byte steps");
+        self.bytes(if n >= 0 {
+            &[0x48, 0x81, 0xC4]
+        } else {
+            &[0x48, 0x81, 0xEC]
+        });
+        self.bytes(&n.abs().to_le_bytes());
     }
     /// `mov [rsp + disp], r64`.
     fn store_rsp(&mut self, r: u8, disp: i32) {
@@ -191,7 +204,7 @@ impl Isa for X64 {
             self.bytes(&[0x48, 0x81, 0xEC]); // sub rsp, WIN_FRAME
             self.bytes(&WIN_FRAME.to_le_bytes());
             for x in 6..16u8 {
-                self.xmm_rsp(true, x, WIN_XMM_SAVE + 16 * (x as i32 - 6));
+                self.xmm_rsp(true, x, 16 * (x as i32 - 6));
             }
             self.bytes(&[0x48, 0x89, 0xCB]); // mov rbx, rcx
             self.bytes(&[0x49, 0x89, 0xD5]); // mov r13, rdx
@@ -210,7 +223,7 @@ impl Isa for X64 {
     fn epilogue(&mut self) {
         if WIN {
             for x in 6..16u8 {
-                self.xmm_rsp(false, x, WIN_XMM_SAVE + 16 * (x as i32 - 6));
+                self.xmm_rsp(false, x, 16 * (x as i32 - 6));
             }
             self.bytes(&[0x48, 0x81, 0xC4]); // add rsp, WIN_FRAME
             self.bytes(&WIN_FRAME.to_le_bytes());
@@ -322,8 +335,22 @@ impl Isa for X64 {
     }
 
     fn call(&mut self, addr: *const (), args: &[Arg]) {
-        // System V counts floats and integers apart; Windows counts them
-        // together, with everything past the fourth position on the stack.
+        // System V counts floats and integers apart and passes the first six
+        // integers in registers; Windows counts them together, passes four,
+        // and wants shadow space on top. What is left over goes on the stack,
+        // reserved right here and released after the call -- a kernel that
+        // grows an argument then costs one more slot, not a corrupted frame.
+        let stacked = if WIN {
+            args.len()
+        } else {
+            args.iter().filter(|a| matches!(a, Arg::I(_))).count()
+        }
+        .saturating_sub(INT_ARGS.len());
+        let shadow = if WIN { WIN_SHADOW } else { 0 };
+        let frame = (shadow + 8 * stacked as i32 + 15) & !15;
+        if frame > 0 {
+            self.move_rsp(-frame);
+        }
         let (mut nf, mut ni) = (0usize, 0usize);
         for (pos, arg) in args.iter().enumerate() {
             match *arg {
@@ -336,11 +363,14 @@ impl Isa for X64 {
                 Arg::I(iarg) => {
                     let k = if WIN { pos } else { ni };
                     ni += 1;
-                    if WIN && k >= 4 {
-                        self.int_arg(0, iarg);
-                        self.store_rsp(0, WIN_STACK_ARGS + 8 * (k as i32 - 4));
-                    } else {
-                        self.int_arg(INT_ARGS[k], iarg);
+                    // `rax` is the scratch the address goes through below, so
+                    // a stacked argument can borrow it here.
+                    match k.checked_sub(INT_ARGS.len()) {
+                        Some(slot) => {
+                            self.int_arg(0, iarg);
+                            self.store_rsp(0, shadow + 8 * slot as i32);
+                        }
+                        None => self.int_arg(INT_ARGS[k], iarg),
                     }
                 }
             }
@@ -351,6 +381,9 @@ impl Isa for X64 {
                 self.mov_imm(0, addr as usize as u64);
                 self.bytes(&[0xFF, 0xD0]); // call rax
             }
+        }
+        if frame > 0 {
+            self.move_rsp(frame);
         }
     }
 }
