@@ -26,7 +26,10 @@ Private for now. Licensed under PolyForm Noncommercial 1.0.0 (see LICENSE).
 - `rsdag-py`: Python package `rsdag` (`trace`, `jit`, `jacobian`, `grad`,
   `where`, `matmul`, `solve`), built with maturin.
 
-`rsdag` compiles for `wasm32-unknown-unknown` (interpreter only).
+`rsdag` compiles for `wasm32-unknown-unknown` (interpreter only). It reads
+no clock there unless a host installs one through `hooks::set_clock`: the
+compile timings are reported only when a `hooks::set_log` sink asks for
+them.
 
 ## Graph
 
