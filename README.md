@@ -8,7 +8,11 @@ x86-64, and a sparse linear solve compiled into the same tape.
 
 ![Pipeline](docs/diagrams/pipeline.svg)
 
-Private for now. Licensed under PolyForm Noncommercial 1.0.0 (see LICENSE).
+Licensed under the [GNU Affero General Public License v3.0](LICENSE): free to
+use, modify and distribute, including commercially, as long as the source of
+the combined work stays available under the same license, network use
+included. The copyright holder licenses rsdag on other terms as well (see
+NOTICE); for a commercial license contact info@milanrother.com.
 
 ## Crates
 
