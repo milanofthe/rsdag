@@ -4,8 +4,9 @@
 //! in the graph changes. A DAE is a function with `Free`, `State` and `Time`
 //! parameters and `Residual` outputs, a block diagram block one with `Input`,
 //! `State`, `Time`, `Memory` and `Param` parameters and `Output`,
-//! `StateDeriv` and `MemoryWrite` outputs, an event a `Guard` output plus an
-//! effect function with `StateWrite` outputs. Consumers keep their own
+//! `StateDeriv` and `MemoryWrite` outputs, an event a `Guard` output (with
+//! the [`Crossing`] direction that counts) plus an effect function with
+//! `StateWrite` outputs. Consumers keep their own
 //! integrators and schedulers; the backend guarantees that a function with
 //! roles can be evaluated, differentiated with respect to any role subset,
 //! specialized and lowered.
@@ -32,6 +33,33 @@ pub enum ParamRole {
     Memory { slot: u32, offset: u32 },
 }
 
+/// The direction of a sign change that counts as a crossing: Verilog-A's
+/// `@(cross(expr, dir))` argument, and what a switch declares about its
+/// threshold.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub enum Crossing {
+    /// Either direction (Verilog-A `0`).
+    #[default]
+    Either,
+    /// Negative to positive (`+1`).
+    Rising,
+    /// Positive to negative (`-1`).
+    Falling,
+}
+
+impl Crossing {
+    /// Whether a sign change from `before` to `after` crosses in this
+    /// direction. Zero counts as the sign it is left with.
+    pub fn crosses(self, before: f64, after: f64) -> bool {
+        match self {
+            Crossing::Either => before.signum() != after.signum(),
+            Crossing::Rising => before < 0.0 && after >= 0.0,
+            Crossing::Falling => before > 0.0 && after <= 0.0,
+        }
+    }
+}
+
 /// What an output of a function computes.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -48,8 +76,10 @@ pub enum OutputRole {
     StateWrite { id: u32 },
     /// A memory slot assignment.
     MemoryWrite { slot: u32, offset: u32 },
-    /// A guard whose sign change is an event.
-    Guard { id: u32 },
+    /// A guard `g(x, t)` whose sign change in `dir` is an event: the
+    /// consumer's integrator lands a step on the crossing and runs the
+    /// effect function (the [`StateWrite`](Self::StateWrite) outputs).
+    Guard { id: u32, dir: Crossing },
     /// A derivative output `d outputs[of] / d params[wrt]` (memoised by
     /// [`Graph::derivative_output`](crate::graph::Graph::derivative_output)).
     Derivative { of: u32, wrt: u32 },
