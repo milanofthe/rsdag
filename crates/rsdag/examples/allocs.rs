@@ -10,7 +10,8 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use rsdag::{Graph, Node, Tape, F64};
+use num_complex::Complex64;
+use rsdag::{Graph, Node, Scalar, Tape, F64};
 
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 static BYTES: AtomicUsize = AtomicUsize::new(0);
@@ -92,10 +93,49 @@ fn main() {
     let (mut work, mut out) = (Vec::new(), Vec::new());
 
     audit("Tape::eval residual", 4, 200, || {
-        tape_all.eval(&inputs, &mut work, &mut out)
+        tape_res.eval(&inputs, &mut work, &mut out)
     });
     audit("Tape::eval residual + jacobian", 4, 200, || {
-        tape_res.eval(&inputs, &mut work, &mut out)
+        tape_all.eval(&inputs, &mut work, &mut out)
+    });
+
+    // The same through caller-owned slices: what a solver writing straight
+    // into its own arrays does.
+    let mut w = vec![0.0; tape_all.work_len()];
+    let mut o = vec![0.0; tape_all.out_len()];
+    audit("Tape::eval_into, caller slices", 4, 200, || {
+        tape_all.eval_into(&inputs, &mut w, &mut o)
+    });
+
+    let mut run = tape_all.runner::<f64>();
+    audit("Tape::runner", 4, 200, || {
+        let _ = run.eval(&inputs);
+    });
+
+    // A function body called as a bundle, the device-per-instance path.
+    let f = g.define_func("body", syms.clone(), res.clone());
+    let body_handle = g.func(f).body(&g);
+    let body = &*body_handle.bundle;
+    let mut bwork = vec![0.0; body.work_len()];
+    let mut bout = vec![0.0; body.n_outputs()];
+    audit("ExternBundle::call_into", 4, 200, || {
+        body.call_into(&inputs, &mut bwork, &mut bout)
+    });
+    audit("ExternBundle::call (thread-local)", 4, 200, || {
+        body.call(&inputs, &mut bout)
+    });
+
+    // The generic scalar path: a bundle call in f32 and in Complex64, which
+    // convert both ways.
+    let f32_in: Vec<f32> = inputs.iter().map(|&v| v as f32).collect();
+    let mut f32_out = vec![0.0f32; body.n_outputs()];
+    audit("call_bundle, f32", 4, 200, || {
+        f32::call_bundle(body, &f32_in, &mut f32_out)
+    });
+    let cx_in: Vec<Complex64> = inputs.iter().map(|&v| Complex64::new(v, 0.0)).collect();
+    let mut cx_out = vec![Complex64::new(0.0, 0.0); body.n_outputs()];
+    audit("call_bundle, Complex64", 4, 200, || {
+        Complex64::call_bundle(body, &cx_in, &mut cx_out)
     });
 
     // The solve program: a static LU of a fixed pattern, factored and

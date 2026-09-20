@@ -58,6 +58,14 @@ output of the same kernel.
 `Tape::compile_split` marks parameter-pure inputs; the tape then has a
 prolog evaluated once per parameter binding and a main part evaluated per
 iteration. `Tape::eval` runs over any `Scalar` (`f64`, `f32`, `Complex64`).
+
+Evaluation is allocation-free once the buffers exist. `Tape::work_len` and
+`out_len` size them, `eval_into` writes into slices the caller owns (its
+factorization's values, a right-hand side, a numpy array), and
+`Tape::runner` is the holder for callers that would rather read values than
+manage memory. The same for function bodies: `ExternBundle::work_len` and
+`call_into` take a caller-owned buffer, `call` keeps a thread-local one for
+callers without. `tests/allocations.rs` holds the property.
 `NativeTape::compile` emits the same instruction sequence as machine code
 in chunked functions with a write-back register cache.
 

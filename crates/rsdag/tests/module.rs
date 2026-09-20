@@ -159,7 +159,7 @@ impl rsdag::ExternBundle for Pair {
     fn n_outputs(&self) -> usize {
         2
     }
-    fn call(&self, args: &[f64], out: &mut [f64]) {
+    fn call_into(&self, args: &[f64], _work: &mut [f64], out: &mut [f64]) {
         out[0] = args[0] + args[1];
         out[1] = args[0] * args[1];
     }
