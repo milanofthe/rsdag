@@ -49,13 +49,16 @@ pub enum Crossing {
 }
 
 impl Crossing {
-    /// Whether a sign change from `before` to `after` crosses in this
-    /// direction. Zero counts as the sign it is left with.
+    /// Whether the step from `before` to `after` crosses the surface in this
+    /// direction. A step that *starts* on the surface is not a crossing: the
+    /// integrator has just landed on it, and re-firing there would trap it.
     pub fn crosses(self, before: f64, after: f64) -> bool {
+        let rising = before < 0.0 && after >= 0.0;
+        let falling = before > 0.0 && after <= 0.0;
         match self {
-            Crossing::Either => before.signum() != after.signum(),
-            Crossing::Rising => before < 0.0 && after >= 0.0,
-            Crossing::Falling => before > 0.0 && after <= 0.0,
+            Crossing::Either => rising || falling,
+            Crossing::Rising => rising,
+            Crossing::Falling => falling,
         }
     }
 }
