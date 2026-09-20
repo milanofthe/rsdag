@@ -131,7 +131,13 @@ fn an_event_is_a_guard_output_and_a_state_write() {
     let dh = v;
     let gravity = s.konst_f64(-9.81);
     let f = s.close_with_roles(vec![
-        (OutputRole::Guard { id: 0 }, guard),
+        (
+            OutputRole::Guard {
+                id: 0,
+                dir: rsdag::Crossing::Falling,
+            },
+            guard,
+        ),
         (OutputRole::StateDeriv { id: 0 }, dh),
         (OutputRole::StateDeriv { id: 1 }, gravity),
     ]);

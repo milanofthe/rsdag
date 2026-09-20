@@ -42,7 +42,9 @@ fold constants in `K` and apply the algebraic identities. A function is a
 graph over positional parameters with named outputs; `Call` applies it;
 derivative outputs are derived from the body on first demand. Parameters
 and outputs carry roles (state, input, parameter, time; residual,
-derivative) as metadata.
+derivative, guard with its crossing direction, state write) as metadata, so
+a DAE, a block diagram block and an event are the same object seen through
+their signatures.
 
 ## Tape
 
