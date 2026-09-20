@@ -49,13 +49,28 @@ pub enum Crossing {
 }
 
 impl Crossing {
-    /// Whether a sign change from `before` to `after` crosses in this
-    /// direction. Zero counts as the sign it is left with.
+    /// Whether the step from `before` to `after` reaches or crosses the
+    /// surface in this direction.
+    ///
+    /// Deliberately generous at zero: touching the surface counts, from
+    /// either side. A guard exists so that a hard `Select` in the residual
+    /// flips on a step boundary, and a `Select` may compare with `>` or with
+    /// `>=`, so no single rule about the exact zero is right for both. The
+    /// cost of the two choices is not symmetric: a missed flip puts a jump
+    /// inside a step, where Newton and the error estimate see nonsense, while
+    /// a surplus landing costs one step. Keeping a consumer off a surface it
+    /// has already fired on is that consumer's business (arm the surface
+    /// again once the trajectory has left it), not this test's.
     pub fn crosses(self, before: f64, after: f64) -> bool {
+        if before == after {
+            return false;
+        }
+        let rising = before <= 0.0 && after >= 0.0;
+        let falling = before >= 0.0 && after <= 0.0;
         match self {
-            Crossing::Either => before.signum() != after.signum(),
-            Crossing::Rising => before < 0.0 && after >= 0.0,
-            Crossing::Falling => before > 0.0 && after <= 0.0,
+            Crossing::Either => rising || falling,
+            Crossing::Rising => rising,
+            Crossing::Falling => falling,
         }
     }
 }
