@@ -16,7 +16,7 @@ impl ExternBundle for TriBundle {
     fn n_outputs(&self) -> usize {
         3
     }
-    fn call(&self, args: &[f64], out: &mut [f64]) {
+    fn call_into(&self, args: &[f64], _work: &mut [f64], out: &mut [f64]) {
         self.calls.fetch_add(1, Ordering::Relaxed);
         let (a, b) = (args[0], args[1]);
         out[0] = a + b;

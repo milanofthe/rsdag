@@ -16,7 +16,7 @@ impl ExternBundle for TenTimes {
     fn n_outputs(&self) -> usize {
         1
     }
-    fn call(&self, args: &[f64], out: &mut [f64]) {
+    fn call_into(&self, args: &[f64], _work: &mut [f64], out: &mut [f64]) {
         out[0] = 10.0 * args[0];
     }
     fn call_batch(&self, args: &[f64], n_groups: usize, n_args: usize, out: &mut [f64]) {
@@ -91,7 +91,7 @@ impl ExternBundle for Hundred {
     fn n_outputs(&self) -> usize {
         1
     }
-    fn call(&self, args: &[f64], out: &mut [f64]) {
+    fn call_into(&self, args: &[f64], _work: &mut [f64], out: &mut [f64]) {
         out[0] = 100.0 * args[0];
     }
     fn call_batch(&self, args: &[f64], n_groups: usize, n_args: usize, out: &mut [f64]) {
@@ -108,7 +108,7 @@ impl ExternBundle for Thousands {
     fn n_outputs(&self) -> usize {
         2
     }
-    fn call(&self, args: &[f64], out: &mut [f64]) {
+    fn call_into(&self, args: &[f64], _work: &mut [f64], out: &mut [f64]) {
         out[0] = 1000.0 * args[0];
         out[1] = 2000.0 * args[0];
     }
