@@ -1472,8 +1472,20 @@ impl Program {
         // entry by entry is read in place. First come first served in
         // schedule order; a value already placed for one kernel keeps its
         // slot. Reserved slots are never reused.
-        let mut reserved = vec![u32::MAX; m];
+        // The state: every value the prolog computes and something after it
+        // reads (the main phase, or the outputs), in one block at the start
+        // of the work array, so an instance's prolog result is `work[..state]`
+        // whatever else the buffer holds, the same in every backend.
+        let mut state_base = vec![u32::MAX; m];
         let mut next: u32 = 0;
+        for &i in &order[..prolog_ops] {
+            if pinned[i as usize] {
+                state_base[i as usize] = next;
+                next += self.insts[i as usize].n_out;
+            }
+        }
+        let state_len = next as usize;
+        let mut reserved = vec![u32::MAX; m];
         for &i in order {
             let inst = &self.insts[i as usize];
             let runs: Vec<usize> = match inst.kind {
@@ -1514,7 +1526,9 @@ impl Program {
                 while s < operand.len() {
                     let placeable = |r: &Ref| match *r {
                         Ref::Value(j, 0) => {
-                            self.insts[j as usize].n_out == 1 && reserved[j as usize] == u32::MAX
+                            self.insts[j as usize].n_out == 1
+                                && reserved[j as usize] == u32::MAX
+                                && state_base[j as usize] == u32::MAX
                         }
                         _ => false,
                     };
@@ -1580,7 +1594,9 @@ impl Program {
                 let b = base[j as usize];
                 free.extend(b..b + self.insts[j as usize].n_out);
             }
-            let d = if inst.n_out == 1 && reserved[i as usize] != u32::MAX {
+            let d = if state_base[i as usize] != u32::MAX {
+                state_base[i as usize]
+            } else if inst.n_out == 1 && reserved[i as usize] != u32::MAX {
                 reserved[i as usize]
             } else if inst.n_out == 1 {
                 free.pop().unwrap_or_else(|| {
@@ -1744,6 +1760,7 @@ impl Program {
             max_args,
             bundles: self.bundles.clone(),
             prolog_ops,
+            state_len,
         }
     }
 }

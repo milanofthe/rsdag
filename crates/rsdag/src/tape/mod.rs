@@ -224,6 +224,9 @@ pub struct Tape {
     /// Instruction count of the parameter-pure prolog prefix (0 = no split;
     /// see [`compile_split`](Self::compile_split)).
     prolog_ops: usize,
+    /// The prolog's results the main phase reads: `work[..state_len]`
+    /// (see [`state_len`](Self::state_len)).
+    state_len: usize,
 }
 
 /// A backend that lowers a [`Tape`]'s instruction stream: the seam every
@@ -505,6 +508,15 @@ impl Tape {
         for (dst, &k) in out.iter_mut().zip(self.outputs.iter()) {
             *dst = read(inputs, work, k);
         }
+    }
+
+    /// The values the prolog leaves for the main phase are `work[..n]`:
+    /// everything a later [`eval_main_into`](Self::eval_main_into) needs of a
+    /// prolog run, so an instance's prolog result is saved and restored as
+    /// this prefix. The layout is the tape's, shared by every backend. `0`
+    /// without a split.
+    pub fn state_len(&self) -> usize {
+        self.state_len
     }
 
     /// Instruction count of the parameter-pure prolog (0 when compiled without

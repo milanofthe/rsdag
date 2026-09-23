@@ -285,6 +285,16 @@ impl Tape {
         let mut new_base = vec![u32::MAX; m];
         let mut free: Vec<u32> = Vec::new();
         let mut next: u32 = 0;
+        // The state first, as in `compile`: every emitted prolog op whose
+        // value something after the prolog reads, one block at the start.
+        let mut state_base = vec![u32::MAX; m];
+        for i in 0..self.prolog_ops {
+            if emitted(i) && pinned[i] {
+                state_base[i] = next;
+                next += width(&self.ops[i]);
+            }
+        }
+        let state_len = next as usize;
         let mut max_args = 0usize;
         let mut spec_prolog_ops = 0usize;
         let map_val = |v: Val, new_base: &[u32]| -> u32 {
@@ -520,7 +530,9 @@ impl Tape {
                 free.extend(new_base[j]..new_base[j] + w);
             }
             let w = width(&self.ops[i]);
-            let d = if w == 1 {
+            let d = if state_base[i] != u32::MAX {
+                state_base[i]
+            } else if w == 1 {
                 free.pop().unwrap_or_else(|| {
                     let s = next;
                     next += 1;
@@ -566,6 +578,7 @@ impl Tape {
                 max_args,
                 bundles: self.bundles.clone(),
                 prolog_ops: spec_prolog_ops,
+                state_len,
             },
             n_real,
             expected,
