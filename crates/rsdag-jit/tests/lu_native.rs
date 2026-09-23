@@ -22,6 +22,16 @@ fn lu(n: usize, num: &[Vec<f64>], panels: Option<Panels>) -> (LuProgram, Vec<f64
     (LuProgram::build(n, entries, p, panels), values)
 }
 
+/// Bit-identical, a NaN matching any NaN (its sign is the hardware's).
+fn same(a: &[f64], b: &[f64], what: &str) {
+    for (k, (p, q)) in a.iter().zip(b).enumerate() {
+        assert!(
+            p.to_bits() == q.to_bits() || (p.is_nan() && q.is_nan()),
+            "{what}[{k}]: {p} vs {q}"
+        );
+    }
+}
+
 fn check(lu: &LuProgram, values: &[f64], want_ok: bool) {
     let nt = NativeTape::compile(lu.tape()).unwrap();
     let mut inputs = vec![0.0; lu.input_len()];
@@ -34,22 +44,10 @@ fn check(lu: &LuProgram, values: &[f64], want_ok: bool) {
     assert_eq!(lu.factored(&inputs, &w0), want_ok);
     assert_eq!(lu.factored(&inputs, &w1), want_ok);
     let s = lu.tape().state_len();
-    assert_eq!(
-        w0[..s].iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-        w1[..s].iter().map(|v| v.to_bits()).collect::<Vec<_>>()
-    );
+    same(&w0[..s], &w1[..s], "state");
     lu.tape().eval_main(&inputs, &mut w0, &mut o0);
     nt.eval_main(&inputs, &mut w1, &mut o1);
-    assert_eq!(
-        lu.solution(&o0)
-            .iter()
-            .map(|v| v.to_bits())
-            .collect::<Vec<_>>(),
-        lu.solution(&o1)
-            .iter()
-            .map(|v| v.to_bits())
-            .collect::<Vec<_>>()
-    );
+    same(lu.solution(&o0), lu.solution(&o1), "solution");
 }
 
 #[test]
