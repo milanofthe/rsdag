@@ -30,8 +30,8 @@ NOTICE); for a commercial license contact info@milanrother.com.
 - `rsdag-py`: Python package `rsdag` (`trace`, `jit`, `jacobian`, `grad`,
   `where`, `matmul`, `solve`), built with maturin.
 
-The core of `rsdag` depends on `rustc-hash` and `libm` only and computes in
-`f64` (`Graph` is `Graph<F64>`). The rest is opt-in:
+Dependencies of the core: `rustc-hash`, `libm`. `Graph` is `Graph<F64>`.
+Features:
 
 | feature | adds | dependencies |
 |---|---|---|
@@ -40,22 +40,21 @@ The core of `rsdag` depends on `rustc-hash` and `libm` only and computes in
 | `egraph` | `simplify_egraph` (implies `exact`, native only) | egg |
 | `serde` | `Module` serialization | serde |
 
-`rsdag` compiles for `wasm32-unknown-unknown` (interpreter only) with every
-feature but `egraph`; CI links a probe of it and checks the module imports
-nothing. It reads no clock there unless a host installs one through
-`hooks::set_clock`: the compile timings are reported only when a
-`hooks::set_log` sink asks for them.
+`rsdag` builds for `wasm32-unknown-unknown` (interpreter only) with every
+feature except `egraph`. It reads no clock unless `hooks::set_clock`
+installs one.
 
 ## Graph
 
 Nodes are hash-consed; ascending ids are a topological order. Constructors
-fold constants in `K` and apply the algebraic identities. A function is a
+fold constants in `K` and apply the algebraic identities.
+`Graph::fingerprint` is a structural hash of a node, the same in any graph,
+on any platform and in any build order; the terms of a sum or product are
+ordered by it. A function is a
 graph over positional parameters with named outputs; `Call` applies it;
 derivative outputs are derived from the body on first demand. Parameters
 and outputs carry roles (state, input, parameter, time; residual,
-derivative, guard with its crossing direction, state write) as metadata, so
-a DAE, a block diagram block and an event are the same object seen through
-their signatures.
+derivative, guard with its crossing direction, state write).
 
 ## Tape
 
@@ -73,12 +72,9 @@ prolog evaluated once per parameter binding and a main part evaluated per
 iteration. `Tape::eval` runs over any `Scalar` (`f64`, `f32`, `Complex64`).
 
 Evaluation is allocation-free once the buffers exist. `Tape::work_len` and
-`out_len` size them, `eval_into` writes into slices the caller owns (its
-factorization's values, a right-hand side, a numpy array), and
-`Tape::runner` is the holder for callers that would rather read values than
-manage memory. The same for function bodies: `ExternBundle::work_len` and
-`call_into` take a caller-owned buffer, `call` keeps a thread-local one for
-callers without. `tests/allocations.rs` holds the property.
+`out_len` size them, `eval_into` writes into slices the caller owns,
+`Tape::runner` holds the buffers itself. Function bodies: `ExternBundle::work_len`
+and `call_into` take a caller-owned buffer, `call` uses a thread-local one.
 `NativeTape::compile` emits the same instruction sequence as machine code
 in chunked functions with a write-back register cache.
 
@@ -116,9 +112,8 @@ scalar ordering with the flops in the kernels.
 A multiply-instantiated model is one function and one call per instance.
 The body is compiled once; calls with the same shape lower to one kernel op
 that runs the body over all instances, on the rayon pool above a size
-threshold. `Graph::set_func_body` registers a body compiled by the caller
-(for instance with a per-instance prolog cache); programs whose calls it
-covers use it.
+threshold. `Graph::set_func_body` registers a body compiled by the caller;
+programs whose calls it covers use it.
 
 ## Choice specialization
 
