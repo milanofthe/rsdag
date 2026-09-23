@@ -211,6 +211,17 @@ pub enum Src {
     Pool(u32),
 }
 
+/// One op as a diagram draws it: its label and kind, the operands it
+/// reads (slots, or inputs tagged with [`INPUT`]), how many slots it writes
+/// from its destination, and the bundle a call calls.
+pub(crate) struct OpView {
+    pub label: String,
+    pub kind: crate::dot::Kind,
+    pub reads: Vec<u32>,
+    pub width: u32,
+    pub bundle: Option<u32>,
+}
+
 /// A dense operand as a backend sees it.
 #[derive(Clone, Copy, Debug)]
 pub enum Operand<'a> {
@@ -434,6 +445,149 @@ impl Tape {
     /// Human-readable instruction listing (diagnostics): one line per op
     /// with its destination slot, the prolog boundary marked; an operand
     /// `i7` is input 7.
+    /// Op `i` as a diagram draws it (see [`crate::dot`]).
+    pub(crate) fn op_view(&self, i: usize) -> OpView {
+        use crate::dot::Kind;
+        let pool = |start: u32, len: u32| -> Vec<u32> {
+            self.arg_pool[start as usize..(start + len) as usize].to_vec()
+        };
+        let src = |s: Src, len: u32| -> Vec<u32> {
+            match s {
+                Src::Inputs(k) => (k..k + len).map(|j| j | INPUT).collect(),
+                Src::Pool(start) => pool(start, len),
+            }
+        };
+        let acc = |a: Option<Accum>, len: u32| -> Vec<u32> {
+            match a {
+                Some(Accum { c: Some(c), .. }) => src(c, len),
+                _ => Vec::new(),
+            }
+        };
+        let state = |b: u32, at: u32, n: u32| -> Vec<u32> {
+            if at == NO_STATE {
+                return Vec::new();
+            }
+            let len = self.bundles[b as usize].state_len() as u32 * n;
+            (at..at + len).collect()
+        };
+        let cmp = |op: CmpOp| match op {
+            CmpOp::Gt => ">",
+            CmpOp::Ge => ">=",
+            CmpOp::Lt => "<",
+            CmpOp::Le => "<=",
+            CmpOp::Eq => "==",
+            CmpOp::Ne => "!=",
+        };
+        let reduce = |op: ReduceOp| match op {
+            ReduceOp::Sum => "sum",
+            ReduceOp::Product => "prod",
+            ReduceOp::Min => "min",
+            ReduceOp::Max => "max",
+        };
+        let v = |label: String, kind: Kind, reads: Vec<u32>, width: u32| OpView {
+            label,
+            kind,
+            reads,
+            width,
+            bundle: None,
+        };
+        match self.ops[i] {
+            Op::Const(c) => v(crate::dot::number(c), Kind::Const, Vec::new(), 1),
+            Op::Add(a, b) => v("+".into(), Kind::Op, vec![a, b], 1),
+            Op::Mul(a, b) => v("*".into(), Kind::Op, vec![a, b], 1),
+            Op::MulAdd(a, b, c) => v("*+".into(), Kind::Op, vec![a, b, c], 1),
+            Op::Sub(a, b) => v("-".into(), Kind::Op, vec![a, b], 1),
+            Op::Neg(a) => v("neg".into(), Kind::Op, vec![a], 1),
+            Op::Powi(a, n) => v(format!("^{n}"), Kind::Op, vec![a], 1),
+            Op::Unary(op, a) => v(op.name().into(), Kind::Op, vec![a], 1),
+            Op::Binary(op, a, b) => v(op.name().into(), Kind::Op, vec![a, b], 1),
+            Op::Cmp(op, a, b) => v(cmp(op).into(), Kind::Choice, vec![a, b], 1),
+            Op::Select(c, t, e) => v("select".into(), Kind::Choice, vec![c, t, e], 1),
+            Op::Reduce(op, s, l) => v(reduce(op).into(), Kind::Kernel, pool(s, l), 1),
+            Op::Dot(s, l) => v(format!("dot {l}"), Kind::Kernel, pool(s, 2 * l), 1),
+            Op::Call {
+                bundle,
+                start,
+                n_args,
+                n_out,
+                state: at,
+            } => {
+                let mut r = pool(start, n_args);
+                r.extend(state(bundle, at, 1));
+                OpView {
+                    bundle: Some(bundle),
+                    ..v("call".into(), Kind::Call, r, n_out)
+                }
+            }
+            Op::CallBatch {
+                bundle,
+                start,
+                n_groups,
+                n_args,
+                n_out,
+                state: at,
+            } => {
+                let mut r = pool(start, n_groups * n_args);
+                r.extend(state(bundle, at, n_groups));
+                OpView {
+                    bundle: Some(bundle),
+                    ..v(format!("call x{n_groups}"), Kind::Call, r, n_groups * n_out)
+                }
+            }
+            Op::CallProlog {
+                bundle,
+                start,
+                n_groups,
+                n_pure,
+            } => {
+                let w = self.bundles[bundle as usize].state_len() as u32 * n_groups;
+                OpView {
+                    bundle: Some(bundle),
+                    ..v(
+                        format!("prolog x{n_groups}"),
+                        Kind::Call,
+                        pool(start, n_groups * n_pure),
+                        w,
+                    )
+                }
+            }
+            Op::Gemv { a, x, m, n, acc: c } => {
+                let mut r = src(a, m * n);
+                r.extend(src(x, n));
+                r.extend(acc(c, m));
+                v(format!("gemv {m}x{n}"), Kind::Kernel, r, m)
+            }
+            Op::Gemm {
+                a,
+                b,
+                m,
+                k,
+                n,
+                acc: c,
+            } => {
+                let mut r = src(a, m * k);
+                r.extend(src(b, n * k));
+                r.extend(acc(c, m * n));
+                v(format!("gemm {m}x{k}x{n}"), Kind::Kernel, r, m * n)
+            }
+            Op::Solve { a, b, n } => {
+                let mut r = src(a, n * n);
+                r.extend(src(b, n));
+                v(format!("solve {n}"), Kind::Kernel, r, n)
+            }
+            Op::SolveMany { a, b, n, k } => {
+                let mut r = src(a, n * n);
+                r.extend(src(b, n * k));
+                v(format!("solve {n}, {k} rhs"), Kind::Kernel, r, n * k)
+            }
+        }
+    }
+
+    /// The instruction count and destinations a diagram walks.
+    pub(crate) fn op_dst(&self, i: usize) -> u32 {
+        self.dst[i]
+    }
+
     pub fn dump(&self) -> String {
         let name = |k: u32| match input_index(k) {
             Some(i) => format!("i{i}"),
