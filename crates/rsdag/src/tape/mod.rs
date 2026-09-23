@@ -38,6 +38,9 @@ use crate::scalar::Scalar;
 /// The tag bit of an operand that names an input rather than a slot.
 pub const INPUT: u32 = 1 << 31;
 
+/// The `state` of a call that keeps none: the bundle runs whole.
+pub const NO_STATE: u32 = u32::MAX;
+
 /// The input index of a tagged operand.
 #[inline]
 pub fn input_index(k: u32) -> Option<u32> {
@@ -70,21 +73,34 @@ pub enum Op {
     /// follow.
     Dot(u32, u32),
     /// `bundles[b]` on `arg_pool[start .. start+n_args]`, its outputs to
-    /// `dst .. dst+n_out`.
+    /// `dst .. dst+n_out`; with a `state` slot (not [`NO_STATE`]), the
+    /// bundle's main phase over the instance state there.
     Call {
         bundle: u32,
         start: u32,
         n_args: u32,
         n_out: u32,
+        state: u32,
     },
     /// `bundles[b]` on `n_groups` argument groups laid group-major in the
-    /// pool, group `g`'s outputs to `dst + g*n_out ..`.
+    /// pool, group `g`'s outputs to `dst + g*n_out ..`; with a `state`
+    /// slot, group `g`'s state at `state + g*state_len`.
     CallBatch {
         bundle: u32,
         start: u32,
         n_groups: u32,
         n_args: u32,
         n_out: u32,
+        state: u32,
+    },
+    /// The prolog of `bundles[b]` for `n_groups` instances, their pure
+    /// arguments group-major at `arg_pool[start ..]`, `n_pure` per group:
+    /// instance `g`'s state to `dst + g*state_len ..`.
+    CallProlog {
+        bundle: u32,
+        start: u32,
+        n_groups: u32,
+        n_pure: u32,
     },
     /// A matrix-vector product: `m` rows of `n` in `a` against `x`, the rows
     /// to `dst .. dst+m`, each row the fold of `Dot`; with `acc`, each row
@@ -220,10 +236,16 @@ pub struct Tape {
     n_work: usize,
     /// Widest gather any variadic op or kernel needs.
     max_args: usize,
+    /// The widest scratch a called bundle asks for ([`ExternBundle::work_len`]),
+    /// lent to it from the tail of the work buffer.
+    bundle_work: usize,
     bundles: Vec<Arc<dyn ExternBundle>>,
     /// Instruction count of the parameter-pure prolog prefix (0 = no split;
     /// see [`compile_split`](Self::compile_split)).
     prolog_ops: usize,
+    /// The prolog's results the main phase reads: `work[..state_len]`
+    /// (see [`state_len`](Self::state_len)).
+    state_len: usize,
 }
 
 /// A backend that lowers a [`Tape`]'s instruction stream: the seam every
@@ -253,10 +275,20 @@ pub trait TapeVisitor {
     fn select(&mut self, dst: u32, c: u32, t: u32, e: u32);
     fn reduce(&mut self, dst: u32, op: ReduceOp, args: &[u32]);
     fn dot(&mut self, dst: u32, a: &[u32], b: &[u32]);
-    /// Call `b` on `args`, its `n_out` outputs to `dst ..`.
-    fn call(&mut self, dst: u32, b: &Arc<dyn ExternBundle>, args: &[u32], n_out: u32);
+    /// Call `b` on `args`, its `n_out` outputs to `dst ..`; with `state`,
+    /// its main phase over the instance state at that slot.
+    fn call(
+        &mut self,
+        dst: u32,
+        b: &Arc<dyn ExternBundle>,
+        args: &[u32],
+        n_out: u32,
+        state: Option<u32>,
+    );
     /// Call `b` on `n_groups` argument groups (group-major `args`), group
-    /// `g`'s outputs to `dst + g*n_out ..`.
+    /// `g`'s outputs to `dst + g*n_out ..`; with `state`, group `g`'s state
+    /// at `state + g * b.state_len()`.
+    #[allow(clippy::too_many_arguments)]
     fn call_batch(
         &mut self,
         dst: u32,
@@ -265,7 +297,12 @@ pub trait TapeVisitor {
         n_groups: u32,
         n_args: u32,
         n_out: u32,
+        state: Option<u32>,
     );
+    /// The prolog of `b` for `n_groups` instances (their pure arguments
+    /// group-major in `pure`), instance `g`'s state to
+    /// `dst + g * b.state_len() ..`.
+    fn call_prolog(&mut self, dst: u32, b: &Arc<dyn ExternBundle>, pure: &[u32], n_groups: u32);
     /// `m` rows of `n` in `a` against `x`, to `dst .. dst+m`, each row the
     /// fold of [`dot`](Self::dot) (see [`crate::semantics::gemv_t`]).
     fn gemv(
@@ -373,16 +410,33 @@ impl Tape {
                     start,
                     n_args,
                     n_out,
-                } => format!("Call(b{bundle}, [{}]) -> {n_out}", list(start, n_args)),
+                    state,
+                } => format!(
+                    "Call(b{bundle}, [{}]{}) -> {n_out}",
+                    list(start, n_args),
+                    state_text(state)
+                ),
                 Op::CallBatch {
                     bundle,
                     start,
                     n_groups,
                     n_args,
                     n_out,
+                    state,
                 } => format!(
-                    "CallBatch(b{bundle}, {n_groups} x [{}]) -> {n_groups} x {n_out}",
-                    list(start, n_groups * n_args)
+                    "CallBatch(b{bundle}, {n_groups} x [{}]{}) -> {n_groups} x {n_out}",
+                    list(start, n_groups * n_args),
+                    state_text(state)
+                ),
+                Op::CallProlog {
+                    bundle,
+                    start,
+                    n_groups,
+                    n_pure,
+                } => format!(
+                    "CallProlog(b{bundle}, {n_groups} x [{}]) -> {n_groups} x {}",
+                    list(start, n_groups * n_pure),
+                    self.bundles[bundle as usize].state_len()
                 ),
                 Op::Gemv { a, x, m, n, acc } => {
                     format!(
@@ -492,7 +546,7 @@ impl Tape {
 
     /// The work buffer: the slots, then the gather scratch.
     fn buffer_len(&self) -> usize {
-        self.n_work + self.max_args
+        self.n_work + self.max_args + self.bundle_work
     }
 
     fn collect<T: Scalar>(&self, inputs: &[T], work: &[T], out: &mut Vec<T>) {
@@ -505,6 +559,15 @@ impl Tape {
         for (dst, &k) in out.iter_mut().zip(self.outputs.iter()) {
             *dst = read(inputs, work, k);
         }
+    }
+
+    /// The values the prolog leaves for the main phase are `work[..n]`:
+    /// everything a later [`eval_main_into`](Self::eval_main_into) needs of a
+    /// prolog run, so an instance's prolog result is saved and restored as
+    /// this prefix. The layout is the tape's, shared by every backend. `0`
+    /// without a split.
+    pub fn state_len(&self) -> usize {
+        self.state_len
     }
 
     /// Instruction count of the parameter-pure prolog (0 when compiled without
@@ -611,16 +674,27 @@ impl Tape {
                     start,
                     n_args,
                     n_out,
+                    state,
                 } => {
                     for (j, &k) in pool(start, n_args).iter().enumerate() {
                         scratch[j] = g(k);
                     }
                     let b = &*self.bundles[bundle as usize];
-                    T::call_bundle(
-                        b,
-                        &scratch[..n_args as usize],
-                        &mut work[d..d + n_out as usize],
-                    );
+                    let n_args = n_args as usize;
+                    if state == NO_STATE {
+                        let (args, bwork) = scratch.split_at_mut(self.max_args);
+                        T::call_bundle_whole(
+                            b,
+                            &args[..n_args],
+                            bwork,
+                            &mut work[d..d + n_out as usize],
+                        );
+                    } else {
+                        let (args, bwork) = scratch.split_at_mut(self.max_args);
+                        let (st, out) =
+                            state_and_out(work, state as usize, b.state_len(), d, n_out as usize);
+                        T::call_bundle_main(b, &args[..n_args], st, bwork, out);
+                    }
                     continue;
                 }
                 Op::CallBatch {
@@ -629,19 +703,55 @@ impl Tape {
                     n_groups,
                     n_args,
                     n_out,
+                    state,
                 } => {
                     let flat = (n_groups * n_args) as usize;
                     for (j, &k) in pool(start, n_groups * n_args).iter().enumerate() {
                         scratch[j] = g(k);
                     }
                     let b = &*self.bundles[bundle as usize];
-                    T::call_bundle_batch(
-                        b,
-                        &scratch[..flat],
-                        n_groups as usize,
-                        n_args as usize,
-                        &mut work[d..d + (n_groups * n_out) as usize],
-                    );
+                    let (n_args, n_out) = (n_args as usize, n_out as usize);
+                    if state == NO_STATE {
+                        T::call_bundle_batch(
+                            b,
+                            &scratch[..flat],
+                            n_groups as usize,
+                            n_args,
+                            &mut work[d..d + n_groups as usize * n_out],
+                        );
+                    } else {
+                        let (args, bwork) = scratch.split_at_mut(self.max_args);
+                        let sl = b.state_len();
+                        for gi in 0..n_groups as usize {
+                            let (st, out) = state_and_out(
+                                work,
+                                state as usize + gi * sl,
+                                sl,
+                                d + gi * n_out,
+                                n_out,
+                            );
+                            let a = &args[gi * n_args..(gi + 1) * n_args];
+                            T::call_bundle_main(b, a, st, bwork, out);
+                        }
+                    }
+                    continue;
+                }
+                Op::CallProlog {
+                    bundle,
+                    start,
+                    n_groups,
+                    n_pure,
+                } => {
+                    for (j, &k) in pool(start, n_groups * n_pure).iter().enumerate() {
+                        scratch[j] = g(k);
+                    }
+                    let b = &*self.bundles[bundle as usize];
+                    let (args, bwork) = scratch.split_at_mut(self.max_args);
+                    let (sl, np) = (b.state_len(), n_pure as usize);
+                    for gi in 0..n_groups as usize {
+                        let st = &mut work[d + gi * sl..d + (gi + 1) * sl];
+                        T::call_bundle_prolog(b, &args[gi * np..(gi + 1) * np], bwork, st);
+                    }
                     continue;
                 }
                 Op::Gemv { a, x, m, n, acc } => {
@@ -771,11 +881,13 @@ impl Tape {
                     start,
                     n_args,
                     n_out,
+                    state,
                 } => v.call(
                     dst,
                     &self.bundles[bundle as usize],
                     pool(start, n_args),
                     n_out,
+                    (state != NO_STATE).then_some(state),
                 ),
                 Op::CallBatch {
                     bundle,
@@ -783,6 +895,7 @@ impl Tape {
                     n_groups,
                     n_args,
                     n_out,
+                    state,
                 } => v.call_batch(
                     dst,
                     &self.bundles[bundle as usize],
@@ -790,6 +903,18 @@ impl Tape {
                     n_groups,
                     n_args,
                     n_out,
+                    (state != NO_STATE).then_some(state),
+                ),
+                Op::CallProlog {
+                    bundle,
+                    start,
+                    n_groups,
+                    n_pure,
+                } => v.call_prolog(
+                    dst,
+                    &self.bundles[bundle as usize],
+                    pool(start, n_groups * n_pure),
+                    n_groups,
                 ),
                 Op::Gemv { a, x, m, n, acc } => v.gemv(
                     dst,
@@ -994,6 +1119,27 @@ fn dense_operands<T: Scalar>(
 
 /// The accumulator part of a kernel's dump line: the operand and the
 /// fold codes.
+fn state_text(state: u32) -> String {
+    if state == NO_STATE {
+        String::new()
+    } else {
+        format!(", state @{state}")
+    }
+}
+
+/// A call's instance state `work[s .. s+len]` and its output block
+/// `work[d .. d+n]`, which the allocator keeps apart.
+fn state_and_out<T>(work: &mut [T], s: usize, len: usize, d: usize, n: usize) -> (&[T], &mut [T]) {
+    if s + len <= d {
+        let (a, b) = work.split_at_mut(d);
+        (&a[s..s + len], &mut b[..n])
+    } else {
+        assert!(d + n <= s, "a call's state overlaps its outputs");
+        let (a, b) = work.split_at_mut(s);
+        (&b[..len], &mut a[d..d + n])
+    }
+}
+
 fn acc_text(pool: &[u32], acc: Option<Accum>, len: u32) -> String {
     match acc {
         None => String::new(),

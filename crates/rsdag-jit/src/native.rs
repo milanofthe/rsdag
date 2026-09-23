@@ -60,6 +60,9 @@ pub struct NativeTape {
     layout: Layout,
     n_inputs: usize,
     n_ops: usize,
+    /// The tape's state prefix (see [`Tape::state_len`]); the slot layout
+    /// is the tape's, so an interpreter's state serves here and back.
+    state_len: usize,
 }
 
 /// A function body compiled natively, behind the bundle interface the
@@ -69,6 +72,9 @@ pub struct NativeTape {
 struct NativeBody {
     tape: NativeTape,
     n_out: usize,
+    /// The pure-argument flags of the body it replaces: its prolog runs on
+    /// those, the rest NaN.
+    pure: Vec<bool>,
 }
 
 /// Ops per batched call below which the loop stays on the calling thread.
@@ -123,10 +129,43 @@ impl ExternBundle for NativeBody {
         self.n_out
     }
     fn work_len(&self) -> usize {
-        self.tape.layout.total
+        self.tape.layout.total + self.pure.len()
     }
     fn call_into(&self, args: &[f64], work: &mut [f64], out: &mut [f64]) {
-        self.run_groups_into(work, args, args.len(), out, 0..1);
+        let w = &mut work[..self.tape.layout.total];
+        self.run_groups_into(w, args, args.len(), out, 0..1);
+    }
+    fn state_len(&self) -> usize {
+        self.tape.state_len
+    }
+    fn pure_args(&self) -> &[bool] {
+        &self.pure
+    }
+    fn prolog_into(&self, pure: &[f64], work: &mut [f64], state: &mut [f64]) {
+        let (w, a) = work.split_at_mut(self.tape.layout.total);
+        let a = &mut a[..self.pure.len()];
+        let mut p = pure.iter();
+        for (x, &is_pure) in a.iter_mut().zip(&self.pure) {
+            *x = if is_pure {
+                *p.next().expect("one value per pure argument")
+            } else {
+                f64::NAN
+            };
+        }
+        self.tape.run(0..self.tape.prolog_chunks, a, w);
+        state.copy_from_slice(&w[..state.len()]);
+    }
+    fn main_into(&self, args: &[f64], state: &[f64], work: &mut [f64], out: &mut [f64]) {
+        let w = &mut work[..self.tape.layout.total];
+        w[..state.len()].copy_from_slice(state);
+        self.tape
+            .run(self.tape.prolog_chunks..self.tape.chunks.len(), args, w);
+        for (k, &slot) in self.tape.outputs[..self.n_out].iter().enumerate() {
+            out[k] = match input_index(slot) {
+                Some(i) => args.get(i as usize).copied().unwrap_or(f64::NAN),
+                None => w[slot as usize],
+            };
+        }
     }
     fn call_batch(&self, args: &[f64], n_groups: usize, n_args: usize, out: &mut [f64]) {
         if n_groups * self.tape.n_ops < PAR_MIN_OPS || n_groups < 2 {
@@ -153,12 +192,15 @@ impl ExternBundle for NativeBody {
     }
 }
 
-/// The work array: the tape's slots, then the bundle scratch, then the
-/// gather area for host calls.
+/// The work array: the tape's slots, then the gather area for host calls,
+/// then the scratch a called bundle gets.
 #[derive(Clone, Copy)]
 struct Layout {
     /// First element of the gather area (after the slots).
     gather: usize,
+    /// First element of the bundle scratch, and its length.
+    scratch: usize,
+    scratch_len: usize,
     total: usize,
 }
 
@@ -167,6 +209,8 @@ struct Code {
     /// Kept alive for the code it holds; `func` points into it.
     _map: Mapping,
     func: ChunkFn,
+    /// The call descriptors the code holds the addresses of.
+    _descs: Vec<host::CallDesc>,
 }
 // The mapping is immutable after `Mapping::new`, so calling the code from
 // any thread is sound and the chunks can be built on a rayon pool.
@@ -206,6 +250,7 @@ impl NativeTape {
                 Some(body) => Ok(Arc::new(NativeBody {
                     tape: NativeTape::compile_with(body, chunk_ops)?,
                     n_out: b.n_outputs(),
+                    pure: b.pure_args().to_vec(),
                 }) as Arc<dyn ExternBundle>),
                 None => Ok(b.clone()),
             })
@@ -285,9 +330,12 @@ impl NativeTape {
                 last_use[o as usize] = u32::MAX;
             }
         }
+        let scratch_len = rec.bundles.iter().map(|b| b.work_len()).max().unwrap_or(0);
         let layout = Layout {
             gather: n_work,
-            total: (n_work + gather_len).max(1),
+            scratch: n_work + gather_len,
+            scratch_len,
+            total: (n_work + gather_len + scratch_len).max(1),
         };
         // Chunk the prolog and main phases separately so no chunk straddles
         // the split; the recorded stream is 1:1 with the tape's ops.
@@ -321,6 +369,7 @@ impl NativeTape {
             layout,
             n_inputs,
             n_ops: tape.n_ops(),
+            state_len: tape.state_len(),
         })
     }
 
@@ -448,6 +497,10 @@ struct Emitter<'a, I: Isa> {
     /// Round-robin victim pointers of the callee-saved and caller-saved pools.
     next: [usize; 2],
     pinned: Vec<bool>,
+    /// The chunk's call descriptors, allocated for all of them before the
+    /// first is emitted (their addresses go into the code).
+    descs: Vec<host::CallDesc>,
+    descs_cap: usize,
 }
 
 impl<'a, I: Isa> Emitter<'a, I> {
@@ -468,6 +521,8 @@ impl<'a, I: Isa> Emitter<'a, I> {
             index,
             next: [0, 0],
             pinned: vec![false; I::CACHE.len()],
+            descs: Vec::new(),
+            descs_cap: 0,
         }
     }
 
@@ -786,32 +841,38 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 let r = self.fold(Arith::Add, 0.0, a, Some(b));
                 self.put(dst, r);
             }
-            ROp::Call(dst, idx, ref args, n_out) => {
-                let at = self.gather(args);
+            ROp::Call(ref c) => {
+                let at = self.gather(&c.args);
+                let d = self.descs.len();
+                assert!(
+                    d < self.descs_cap,
+                    "call descriptors counted before emission"
+                );
+                let desc = host::CallDesc {
+                    bundle: c.bundle as u64,
+                    kind: c.kind as u64,
+                    batch: c.batch as u64,
+                    n_groups: c.n_groups as u64,
+                    n_args: c.n_args as u64,
+                    n_out: c.n_out as u64,
+                    state_len: c.state_len as u64,
+                    args: at as u64,
+                    out: c.dst as u64 * 8,
+                    state: c.state as u64 * 8,
+                    scratch: self.layout.scratch as u64 * 8,
+                    scratch_len: self.layout.scratch_len as u64,
+                };
+                // The table was sized up front: pushing never moves it, so
+                // the address baked into the code stays valid.
+                self.descs.push(desc);
+                let ptr = &self.descs[d] as *const host::CallDesc as u64;
                 let args = [
                     Arg::I(IArg::Bundles),
-                    Arg::I(IArg::Imm(idx as u64)),
-                    Arg::I(IArg::WorkAddr(at)),
-                    Arg::I(IArg::Imm(args.len() as u64)),
-                    Arg::I(IArg::WorkAddr(dst as usize * 8)),
-                    Arg::I(IArg::Imm(n_out as u64)),
+                    Arg::I(IArg::Imm(ptr)),
+                    Arg::I(IArg::WorkAddr(0)),
                 ];
-                self.call(host::h_bundle as *const (), &args);
-                self.invalidate(dst, n_out);
-            }
-            ROp::CallBatch(dst, idx, ref args, n_groups, n_args, n_out) => {
-                let at = self.gather(args);
-                let args = [
-                    Arg::I(IArg::Bundles),
-                    Arg::I(IArg::Imm(idx as u64)),
-                    Arg::I(IArg::WorkAddr(at)),
-                    Arg::I(IArg::Imm(n_groups as u64)),
-                    Arg::I(IArg::Imm(n_args as u64)),
-                    Arg::I(IArg::WorkAddr(dst as usize * 8)),
-                    Arg::I(IArg::Imm(n_out as u64)),
-                ];
-                self.call(host::h_bundle_batch as *const (), &args);
-                self.invalidate(dst, n_groups * n_out);
+                self.call(host::h_call as *const (), &args);
+                self.invalidate(c.dst, c.n_groups * c.n_out);
             }
             ROp::Gemv {
                 dst,
@@ -1066,6 +1127,9 @@ fn emit_chunk(
         };
     }
     let mut e: Emitter<Arch> = Emitter::new(layout, last_use, &hot);
+    let n_calls = ops.iter().filter(|op| matches!(op, ROp::Call(_))).count();
+    e.descs = Vec::with_capacity(n_calls);
+    e.descs_cap = n_calls;
     e.isa.prologue();
     for (k, op) in ops.iter().enumerate() {
         e.pos = (start + k) as u32;
@@ -1074,9 +1138,14 @@ fn emit_chunk(
     }
     e.flush();
     e.isa.epilogue();
+    let descs = std::mem::take(&mut e.descs);
     let map = Mapping::new(&e.isa.finish())?;
     let func: ChunkFn = unsafe { std::mem::transmute(map.ptr) };
-    Ok(Code { _map: map, func })
+    Ok(Code {
+        _map: map,
+        func,
+        _descs: descs,
+    })
 }
 
 // --- executable memory -----------------------------------------------------------

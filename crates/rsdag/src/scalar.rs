@@ -107,6 +107,39 @@ pub trait Scalar: Copy + Send + Sync + std::fmt::Debug + 'static {
             }
         })
     }
+    /// A call run whole over scratch the tape lends (`work`, the bundle's
+    /// [`work_len`](crate::extern_fn::ExternBundle::work_len)).
+    fn call_bundle_whole(
+        b: &dyn crate::extern_fn::ExternBundle,
+        args: &[Self],
+        _work: &mut [Self],
+        out: &mut [Self],
+    ) {
+        Self::call_bundle(b, args, out);
+    }
+    /// A stateful call's prolog: the bundle's state from its pure
+    /// arguments. Only `f64` evaluates bundles in phases; another scalar
+    /// runs every call whole ([`call_bundle_main`](Self::call_bundle_main)),
+    /// so its state is never read.
+    fn call_bundle_prolog(
+        _b: &dyn crate::extern_fn::ExternBundle,
+        _pure: &[Self],
+        _work: &mut [Self],
+        state: &mut [Self],
+    ) {
+        state.fill(Self::nan());
+    }
+    /// A stateful call's main phase; see
+    /// [`call_bundle_prolog`](Self::call_bundle_prolog).
+    fn call_bundle_main(
+        b: &dyn crate::extern_fn::ExternBundle,
+        args: &[Self],
+        _state: &[Self],
+        _work: &mut [Self],
+        out: &mut [Self],
+    ) {
+        Self::call_bundle(b, args, out);
+    }
     /// [`call_bundle`](Self::call_bundle) for `n_groups` argument groups.
     fn call_bundle_batch(
         b: &dyn crate::extern_fn::ExternBundle,
@@ -201,6 +234,31 @@ impl Scalar for f64 {
     }
     fn call_bundle(b: &dyn crate::extern_fn::ExternBundle, args: &[f64], out: &mut [f64]) {
         b.call(args, out);
+    }
+    fn call_bundle_whole(
+        b: &dyn crate::extern_fn::ExternBundle,
+        args: &[f64],
+        work: &mut [f64],
+        out: &mut [f64],
+    ) {
+        b.call_into(args, work, out);
+    }
+    fn call_bundle_prolog(
+        b: &dyn crate::extern_fn::ExternBundle,
+        pure: &[f64],
+        work: &mut [f64],
+        state: &mut [f64],
+    ) {
+        b.prolog_into(pure, work, state);
+    }
+    fn call_bundle_main(
+        b: &dyn crate::extern_fn::ExternBundle,
+        args: &[f64],
+        state: &[f64],
+        work: &mut [f64],
+        out: &mut [f64],
+    ) {
+        b.main_into(args, state, work, out);
     }
     fn call_bundle_batch(
         b: &dyn crate::extern_fn::ExternBundle,
