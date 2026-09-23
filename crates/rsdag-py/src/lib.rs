@@ -32,7 +32,7 @@ pub struct Scope {
 }
 
 /// An expression handle into a scope's graph.
-#[pyclass(unsendable)]
+#[pyclass(unsendable, skip_from_py_object)]
 #[derive(Clone)]
 pub struct Tracer {
     g: Shared,
@@ -50,11 +50,14 @@ enum BinOut {
     NotImplemented,
 }
 
-impl IntoPy<PyObject> for BinOut {
-    fn into_py(self, py: Python<'_>) -> PyObject {
+impl<'py> IntoPyObject<'py> for BinOut {
+    type Target = PyAny;
+    type Output = Bound<'py, PyAny>;
+    type Error = PyErr;
+    fn into_pyobject(self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         match self {
-            BinOut::Value(t) => t.into_py(py),
-            BinOut::NotImplemented => py.NotImplemented(),
+            BinOut::Value(t) => Ok(Bound::new(py, t)?.into_any()),
+            BinOut::NotImplemented => Ok(py.NotImplemented().into_bound(py)),
         }
     }
 }
@@ -70,7 +73,7 @@ impl Tracer {
     /// `None` when it is neither, so a binary operator can hand the pair
     /// back to Python (see [`BinOut`]).
     fn operand_opt(&self, other: &Bound<'_, PyAny>) -> PyResult<Option<ExprId>> {
-        if let Ok(t) = other.downcast::<Tracer>() {
+        if let Ok(t) = other.cast::<Tracer>() {
             let t = t.borrow();
             if !Rc::ptr_eq(&t.g, &self.g) {
                 return Err(PyValueError::new_err("tracers from different scopes"));
@@ -494,7 +497,7 @@ impl Scope {
     fn output_ids(&self, outputs: &Bound<'_, PyList>) -> PyResult<Vec<ExprId>> {
         let mut ids = Vec::with_capacity(outputs.len());
         for o in outputs.iter() {
-            if let Ok(t) = o.downcast::<Tracer>() {
+            if let Ok(t) = o.cast::<Tracer>() {
                 ids.push(t.borrow().id);
             } else if let Ok(v) = o.extract::<f64>() {
                 ids.push(self.g.borrow_mut().konst_f64(v));
@@ -508,33 +511,31 @@ impl Scope {
 
 /// A compiled function: the tape, evaluated by the interpreter or, after
 /// `compile_native()`, by the native backend.
-#[pyclass(unsendable)]
+#[pyclass(frozen)]
 pub struct Program {
     tape: Tape,
-    native: Option<rsdag_jit::NativeTape>,
+    native: std::sync::OnceLock<rsdag_jit::NativeTape>,
     n_in: usize,
     n_out: usize,
-    work: Vec<f64>,
-    out: Vec<f64>,
 }
 
 impl Program {
     fn new(tape: Tape, n_in: usize, n_out: usize) -> Self {
         Program {
             tape,
-            native: None,
+            native: std::sync::OnceLock::new(),
             n_in,
             n_out,
-            work: Vec::new(),
-            out: Vec::new(),
         }
     }
 }
 
 #[pymethods]
 impl Program {
-    /// Evaluate on a flat list of inputs; returns the flat outputs.
-    fn eval(&mut self, inputs: Vec<f64>) -> PyResult<Vec<f64>> {
+    /// Evaluate on a flat list of inputs; returns the flat outputs. The
+    /// GIL is released while the program runs, and a program is shared,
+    /// not borrowed: threads evaluate it at once, each on its own buffers.
+    fn eval(&self, py: Python<'_>, inputs: Vec<f64>) -> PyResult<Vec<f64>> {
         if inputs.len() != self.n_in {
             return Err(PyValueError::new_err(format!(
                 "expected {} inputs, got {}",
@@ -542,17 +543,49 @@ impl Program {
                 inputs.len()
             )));
         }
-        match &self.native {
-            Some(n) => n.eval(&inputs, &mut self.work, &mut self.out),
-            None => self.tape.eval(&inputs, &mut self.work, &mut self.out),
+        let (mut work, mut out) = (Vec::new(), Vec::new());
+        py.detach(|| match self.native.get() {
+            Some(n) => n.eval(&inputs, &mut work, &mut out),
+            None => self.tape.eval(&inputs, &mut work, &mut out),
+        });
+        Ok(out)
+    }
+    /// Evaluate `len(inputs) / n_inputs` input vectors laid back to back;
+    /// returns their outputs back to back. Natively the instances run in
+    /// parallel; the GIL is released throughout.
+    fn eval_many(&self, py: Python<'_>, inputs: Vec<f64>) -> PyResult<Vec<f64>> {
+        let n_in = self.n_in.max(1);
+        if !inputs.len().is_multiple_of(n_in) {
+            return Err(PyValueError::new_err(format!(
+                "{} inputs are not a whole number of vectors of {}",
+                inputs.len(),
+                self.n_in
+            )));
         }
-        Ok(self.out.clone())
+        Ok(py.detach(|| {
+            let mut all = Vec::with_capacity(inputs.len() / n_in * self.n_out);
+            match self.native.get() {
+                Some(n) => n.eval_many(&inputs, n_in, &mut all),
+                None => {
+                    let (mut work, mut out) = (Vec::new(), Vec::new());
+                    for ins in inputs.chunks(n_in) {
+                        self.tape.eval(ins, &mut work, &mut out);
+                        all.extend_from_slice(&out);
+                    }
+                }
+            }
+            all
+        }))
     }
     /// Compile the tape to native code; evaluation switches over.
-    fn compile_native(&mut self) -> PyResult<()> {
-        let c = rsdag_jit::NativeTape::compile(&self.tape)
+    fn compile_native(&self, py: Python<'_>) -> PyResult<()> {
+        if self.native.get().is_some() {
+            return Ok(());
+        }
+        let c = py
+            .detach(|| rsdag_jit::NativeTape::compile(&self.tape))
             .map_err(|e| PyValueError::new_err(format!("native compile failed: {e:?}")))?;
-        self.native = Some(c);
+        let _ = self.native.set(c);
         Ok(())
     }
     #[getter]
@@ -577,7 +610,7 @@ impl Program {
 fn select(cond: &Bound<'_, PyAny>, a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<Tracer> {
     let anchor = [cond, a, b]
         .into_iter()
-        .find_map(|x| x.downcast::<Tracer>().ok().map(|t| t.borrow().clone()))
+        .find_map(|x| x.cast::<Tracer>().ok().map(|t| t.borrow().clone()))
         .ok_or_else(|| PyTypeError::new_err("select needs at least one traced operand"))?;
     let (c, x, y) = (
         anchor.operand(cond)?,
@@ -590,10 +623,10 @@ fn select(cond: &Bound<'_, PyAny>, a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -
 
 /// The tracer among a list of operands, and the operands as expressions.
 fn traced_list(items: &Bound<'_, PyAny>) -> PyResult<(Tracer, Vec<ExprId>)> {
-    let items: Vec<Bound<'_, PyAny>> = items.iter()?.collect::<PyResult<_>>()?;
+    let items: Vec<Bound<'_, PyAny>> = items.try_iter()?.collect::<PyResult<_>>()?;
     let anchor = items
         .iter()
-        .find_map(|x| x.downcast::<Tracer>().ok().map(|t| t.borrow().clone()))
+        .find_map(|x| x.cast::<Tracer>().ok().map(|t| t.borrow().clone()))
         .ok_or_else(|| PyTypeError::new_err("a traced operand is needed"))?;
     let ids = items
         .iter()
@@ -608,7 +641,7 @@ fn traced_list(items: &Bound<'_, PyAny>) -> PyResult<(Tracer, Vec<ExprId>)> {
 fn dot(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<Tracer> {
     let both = a
         .py()
-        .eval_bound("lambda a, b: list(a) + list(b)", None, None)?
+        .eval(c"lambda a, b: list(a) + list(b)", None, None)?
         .call1((a, b))?;
     let (anchor, ids) = traced_list(&both)?;
     let n = ids.len() / 2;
@@ -640,7 +673,7 @@ fn reduce(op: &str, items: &Bound<'_, PyAny>) -> PyResult<Tracer> {
 fn solve(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<Vec<Tracer>> {
     let both = a
         .py()
-        .eval_bound("lambda a, b: list(a) + list(b)", None, None)?
+        .eval(c"lambda a, b: list(a) + list(b)", None, None)?
         .call1((a, b))?;
     let (anchor, ids) = traced_list(&both)?;
     let n = rsdag::Graph::<rsdag::F64>::solve_n(ids.len());
@@ -658,6 +691,6 @@ fn _rsdag(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(dot, m)?)?;
     m.add_function(wrap_pyfunction!(reduce, m)?)?;
     m.add_function(wrap_pyfunction!(solve, m)?)?;
-    let _ = PyTuple::empty_bound(m.py());
+    let _ = PyTuple::empty(m.py());
     Ok(())
 }

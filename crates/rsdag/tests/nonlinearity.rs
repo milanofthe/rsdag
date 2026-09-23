@@ -3,15 +3,16 @@
 
 use std::collections::BTreeSet;
 
+use rsdag::BigRational;
 use rsdag::{nonlinearity, nonlinearity_of, CmpOp, Degree, ExprId, Graph, SymbolId, UnaryOp};
 
-fn vars(g: &Graph, of: &[ExprId]) -> BTreeSet<SymbolId> {
+fn vars(g: &Graph<BigRational>, of: &[ExprId]) -> BTreeSet<SymbolId> {
     g.free_symbols_in(of)
 }
 
 #[test]
 fn polynomial_degree_is_exact() {
-    let mut g: Graph = Graph::new();
+    let mut g: Graph<BigRational> = Graph::new();
     let (x, a, b, c) = (g.sym("x"), g.sym("a"), g.sym("b"), g.sym("c"));
     let x2 = g.pow_i(x, 2);
     let ax2 = g.mul(a, x2);
@@ -27,7 +28,7 @@ fn polynomial_degree_is_exact() {
 
 #[test]
 fn parameters_do_not_raise_the_degree() {
-    let mut g: Graph = Graph::new();
+    let mut g: Graph<BigRational> = Graph::new();
     let (x, a) = (g.sym("x"), g.sym("a"));
     let ea = g.exp(a);
     let expr = g.mul(ea, x); // exp(a) * x is linear in x
@@ -38,7 +39,7 @@ fn parameters_do_not_raise_the_degree() {
 
 #[test]
 fn a_diode_is_transcendental() {
-    let mut g: Graph = Graph::new();
+    let mut g: Graph<BigRational> = Graph::new();
     let (x, vt) = (g.sym("x"), g.sym("vt"));
     let q = g.div(x, vt);
     let expr = g.exp(q);
@@ -51,7 +52,7 @@ fn a_diode_is_transcendental() {
 
 #[test]
 fn a_reciprocal_of_an_unknown_is_rational() {
-    let mut g: Graph = Graph::new();
+    let mut g: Graph<BigRational> = Graph::new();
     let x = g.sym("x");
     let expr = g.pow_i(x, -1);
     let nl = nonlinearity(&g, expr, &vars(&g, &[x]));
@@ -61,7 +62,7 @@ fn a_reciprocal_of_an_unknown_is_rational() {
 
 #[test]
 fn a_variable_branch_is_piecewise_and_a_fixed_one_is_not() {
-    let mut g: Graph = Graph::new();
+    let mut g: Graph<BigRational> = Graph::new();
     let (x, p) = (g.sym("x"), g.sym("p"));
     let zero = g.zero();
     let on_x = g.cmp(CmpOp::Gt, x, zero);
@@ -83,7 +84,7 @@ fn a_variable_branch_is_piecewise_and_a_fixed_one_is_not() {
 
 #[test]
 fn reductions_and_dots_follow_sum_and_product_rules() {
-    let mut g: Graph = Graph::new();
+    let mut g: Graph<BigRational> = Graph::new();
     let (x, y, a) = (g.sym("x"), g.sym("y"), g.sym("a"));
     let v = vars(&g, &[x, y]);
     let prod = g.reduce(rsdag::ReduceOp::Product, vec![x, y, a]);
@@ -100,7 +101,7 @@ fn reductions_and_dots_follow_sum_and_product_rules() {
 
 #[test]
 fn a_call_on_an_unknown_is_opaque() {
-    let mut g: Graph = Graph::new();
+    let mut g: Graph<BigRational> = Graph::new();
     let p = g.sym("p");
     let ps = match g.node(p) {
         rsdag::Node::Symbol(s) => *s,
@@ -117,7 +118,7 @@ fn a_call_on_an_unknown_is_opaque() {
 
 #[test]
 fn a_system_takes_the_worst_case() {
-    let mut g: Graph = Graph::new();
+    let mut g: Graph<BigRational> = Graph::new();
     let (x, y) = (g.sym("x"), g.sym("y"));
     let v = vars(&g, &[x, y]);
     let lin = g.add(x, y);

@@ -1,4 +1,5 @@
 use rsdag::node::Node;
+use rsdag::BigRational;
 use rsdag::*;
 use rustc_hash::FxHashMap as HashMap;
 
@@ -13,7 +14,7 @@ fn sid<K: Field>(ctx: &mut Graph<K>, name: &str) -> SymbolId {
 #[test]
 fn substitution_is_simultaneous() {
     // Swap x<->y in x - y: simultaneous, so the result is y - x (not 0).
-    let mut ctx: Graph = Graph::new();
+    let mut ctx: Graph<BigRational> = Graph::new();
     let x = ctx.sym("x");
     let y = ctx.sym("y");
     let f = ctx.sub(x, y);

@@ -1,5 +1,6 @@
 use num_complex::Complex64;
 use rsdag::graph::Graph;
+use rsdag::BigRational;
 use rsdag::*;
 use std::collections::HashMap;
 
@@ -9,7 +10,7 @@ fn complex_eval_is_linear_on_shared_dag() {
     // references x_k twice. 40 levels => 2^40 naive recursions but only 40
     // distinct nodes. Completing quickly proves `eval` memoizes (is linear in
     // reachable nodes, not exponential in paths).
-    let mut ctx: Graph = Graph::new();
+    let mut ctx: Graph<BigRational> = Graph::new();
     let s = ctx.sym("s");
     let mut e = s;
     for _ in 0..40 {

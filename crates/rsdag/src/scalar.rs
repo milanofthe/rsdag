@@ -12,6 +12,7 @@
 //! `Min`, `Max`) and the special real functions act on the real part and
 //! return a real value.
 
+#[cfg(feature = "complex")]
 use num_complex::Complex64;
 
 use crate::node::{BinOp, CmpOp, ReduceOp, UnaryOp};
@@ -324,6 +325,7 @@ impl Scalar for f32 {
     }
 }
 
+#[cfg(feature = "complex")]
 impl Scalar for Complex64 {
     fn div(self, o: Self) -> Self {
         self / o

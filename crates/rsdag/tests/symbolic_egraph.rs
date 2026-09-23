@@ -15,7 +15,7 @@ fn reachable(g: &Graph<BigRational>, root: ExprId) -> usize {
 
 #[test]
 fn passes_through_unsupported_nodes() {
-    let mut g: Graph = Graph::new();
+    let mut g: Graph<BigRational> = Graph::new();
     let (c, a, b) = (g.sym("c"), g.sym("a"), g.sym("b"));
     let sel = g.select(c, a, b);
     assert_eq!(simplify_egraph(&mut g, sel), sel);
@@ -23,7 +23,7 @@ fn passes_through_unsupported_nodes() {
 
 #[test]
 fn cancels_and_factors() {
-    let mut g: Graph = Graph::new();
+    let mut g: Graph<BigRational> = Graph::new();
     let (x, y) = (g.sym("x"), g.sym("y"));
     // x*y + x*y*1 + x*(y - y) -> 2*x*y (or x*(2*y))
     let xy = g.mul(x, y);

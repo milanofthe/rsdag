@@ -1,5 +1,6 @@
 use num_complex::Complex64;
 use rsdag::eval::eval;
+use rsdag::BigRational;
 use rsdag::*;
 use std::collections::HashMap;
 
@@ -13,7 +14,7 @@ fn sid<K: Field>(ctx: &mut Graph<K>, name: &str) -> SymbolId {
 
 #[test]
 fn derivative_matches_finite_difference() {
-    let mut ctx: Graph = Graph::new();
+    let mut ctx: Graph<BigRational> = Graph::new();
     // f = Is*(exp(v/Vt) - 1) + g*v^2  (a diode current plus a quadratic term)
     let v = ctx.sym("v");
     let vt = ctx.sym("Vt");
@@ -64,7 +65,7 @@ fn derivative_matches_finite_difference() {
 #[test]
 fn exp_derivative_shares_primal_and_matches_limexp_tail() {
     use rsdag::semantics::EXP_LIMIT;
-    let mut ctx: Graph = Graph::new();
+    let mut ctx: Graph<BigRational> = Graph::new();
     let x = ctx.sym("x");
     let e = ctx.exp(x);
     let xid = sid(&mut ctx, "x");
@@ -90,7 +91,7 @@ fn exp_derivative_shares_primal_and_matches_limexp_tail() {
 #[test]
 fn select_and_opaque_autodiff() {
     use rsdag::node::CmpOp;
-    let mut ctx: Graph = Graph::new();
+    let mut ctx: Graph<BigRational> = Graph::new();
     // f = select(x > 0, x*x, -x);  df/dx = select(x>0, 2x, -1)
     let x = ctx.sym("x");
     let zero = ctx.zero();
@@ -101,7 +102,7 @@ fn select_and_opaque_autodiff() {
     let xid = sid(&mut ctx, "x");
     let df = differentiate(&mut ctx, f, xid);
 
-    let eval_at = |ctx: &Graph, e: ExprId, xv: f64| {
+    let eval_at = |ctx: &Graph<BigRational>, e: ExprId, xv: f64| {
         let mut env = HashMap::new();
         env.insert(xid, Complex64::new(xv, 0.0));
         eval(ctx, &[e], &env)[0].re
@@ -129,7 +130,7 @@ fn select_and_opaque_autodiff() {
 fn gradient_matches_forward_mode() {
     // A device-like expression exercising every node kind the reverse sweep
     // handles: exp/ln guards, select subgradients, powers, reduce, dot.
-    let mut ctx: Graph = Graph::new();
+    let mut ctx: Graph<BigRational> = Graph::new();
     let x = ctx.sym("x");
     let y = ctx.sym("y");
     let z = ctx.sym("z");
@@ -180,7 +181,7 @@ fn gradient_matches_forward_mode() {
 
 #[test]
 fn gradient_handles_calls_and_absent_symbols() {
-    let mut ctx: Graph = Graph::new();
+    let mut ctx: Graph<BigRational> = Graph::new();
     let x = ctx.sym("x");
     let two = ctx.konst_int(2);
     let two_x = ctx.mul(two, x);
@@ -201,7 +202,7 @@ fn gradient_handles_calls_and_absent_symbols() {
 #[test]
 fn hessian_is_symmetric_and_correct() {
     // f = exp(x*y) + x^3*y  ->  d2f/dxdy = exp(xy)*(1 + xy) + 3x^2 (both orders).
-    let mut ctx: Graph = Graph::new();
+    let mut ctx: Graph<BigRational> = Graph::new();
     let x = ctx.sym("x");
     let y = ctx.sym("y");
     let xy = ctx.mul(x, y);
@@ -232,7 +233,7 @@ fn hessian_is_symmetric_and_correct() {
 
 #[test]
 fn the_jacobian_is_sparse() {
-    let mut ctx: Graph = Graph::new();
+    let mut ctx: Graph<BigRational> = Graph::new();
     // r0 = a*x + b*y ; r1 = x  (so dr1/dy = 0)
     let x = ctx.sym("x");
     let y = ctx.sym("y");

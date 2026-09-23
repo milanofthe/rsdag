@@ -1,5 +1,6 @@
 use rsdag::display::to_string;
 use rsdag::symbolic::{prune_poly, rational_form};
+use rsdag::BigRational;
 use rsdag::*;
 use std::collections::HashMap;
 
@@ -13,7 +14,7 @@ fn sym_id<K: Field>(g: &Graph<K>, e: ExprId) -> SymbolId {
 #[test]
 fn collects_a_transfer_function() {
     // H = 1 / (1 + s R C): numerator [1], denominator [1, R C]
-    let mut g: Graph = Graph::new();
+    let mut g: Graph<BigRational> = Graph::new();
     let (s, r, c) = (g.sym("s"), g.sym("R"), g.sym("C"));
     let rc = g.mul(r, c);
     let src = g.mul(s, rc);
@@ -34,7 +35,7 @@ fn collects_a_transfer_function() {
 
 #[test]
 fn prunes_small_terms() {
-    let mut g: Graph = Graph::new();
+    let mut g: Graph<BigRational> = Graph::new();
     let (a, b) = (g.sym("a"), g.sym("b"));
     let sum = g.add(a, b);
     let poly = vec![sum];

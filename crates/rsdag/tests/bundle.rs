@@ -5,6 +5,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use rsdag::BigRational;
 use rsdag::{ExternBundle, Graph, Output, Tape};
 
 /// Outputs `[a+b, a*b, a-b]` from `[a, b]`, counting how often it runs.
@@ -28,7 +29,7 @@ impl ExternBundle for TriBundle {
 #[test]
 fn bundle_scatters_and_runs_once() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut ctx: Graph = Graph::new();
+    let mut ctx: Graph<BigRational> = Graph::new();
     let x = ctx.sym("x");
     let y = ctx.sym("y");
     let xs = match ctx.node(x) {

@@ -6,3 +6,7 @@ dist/
 
 # local Claude Code settings
 /.claude/
+
+# built extension modules
+*.so
+*.pyd

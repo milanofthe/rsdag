@@ -1,10 +1,11 @@
 use rsdag::eval;
+use rsdag::BigRational;
 use rsdag::*;
 use std::collections::HashMap;
 
 #[test]
 fn rebuild_drops_dead_nodes_and_keeps_values() {
-    let mut g: Graph = Graph::new();
+    let mut g: Graph<BigRational> = Graph::new();
     let (x, y) = (g.sym("x"), g.sym("y"));
     let sx = g.sin(x);
     let _dead = g.exp(sx); // never reachable from the root
@@ -25,7 +26,7 @@ fn rebuild_drops_dead_nodes_and_keeps_values() {
 
 #[test]
 fn rebuild_carries_functions_and_calls() {
-    let mut g: Graph = Graph::new();
+    let mut g: Graph<BigRational> = Graph::new();
     let p = g.sym("p");
     let body = g.mul(p, p);
     let ps = match *g.node(p) {

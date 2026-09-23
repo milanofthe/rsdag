@@ -1,10 +1,11 @@
 use rsdag::display::to_string;
 use rsdag::symbolic::det::count_det_terms;
+use rsdag::BigRational;
 use rsdag::*;
 
 #[test]
 fn determinant_of_a_diagonal_and_a_2x2() {
-    let mut g: Graph = Graph::new();
+    let mut g: Graph<BigRational> = Graph::new();
     let (a, b, c, d) = (g.sym("a"), g.sym("b"), g.sym("c"), g.sym("d"));
     let z = g.zero();
     let det = determinant(&mut g, &[vec![a, z, z], vec![z, b, z], vec![z, z, c]]);
