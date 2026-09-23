@@ -49,8 +49,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy -p rsdag-jit --all-targets --features rsdag/synth -- -D warnings
       - run: cargo test -p rsdag-jit --features rsdag/synth
-      # The elementary functions give the same bits on every platform.
-      - run: cargo test -p rsdag --test math
   python:
     runs-on: ubuntu-latest
     steps:

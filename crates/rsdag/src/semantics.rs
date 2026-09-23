@@ -194,9 +194,9 @@ pub fn unary_f64(op: UnaryOp, x: f64) -> f64 {
     match op {
         UnaryOp::Exp => {
             if x > EXP_LIMIT {
-                crate::math::exp(EXP_LIMIT) * (1.0 + (x - EXP_LIMIT))
+                EXP_LIMIT.exp() * (1.0 + (x - EXP_LIMIT))
             } else {
-                crate::math::exp(x)
+                x.exp()
             }
         }
         // The guards test for the out-of-range side, so a NaN argument
@@ -204,9 +204,9 @@ pub fn unary_f64(op: UnaryOp, x: f64) -> f64 {
         // wild iterate, it does not turn a missing value into a number.
         UnaryOp::Ln => {
             if x <= LN_FLOOR {
-                crate::math::ln(LN_FLOOR)
+                LN_FLOOR.ln()
             } else {
-                crate::math::ln(x)
+                x.ln()
             }
         }
         UnaryOp::Sqrt => {
@@ -216,12 +216,12 @@ pub fn unary_f64(op: UnaryOp, x: f64) -> f64 {
                 x.sqrt()
             }
         }
-        UnaryOp::Sin => libm::sin(x),
-        UnaryOp::Cos => libm::cos(x),
-        UnaryOp::Sinh => crate::math::sinh(x),
-        UnaryOp::Cosh => crate::math::cosh(x),
-        UnaryOp::Tanh => crate::math::tanh(x),
-        UnaryOp::Atan => libm::atan(x),
+        UnaryOp::Sin => x.sin(),
+        UnaryOp::Cos => x.cos(),
+        UnaryOp::Sinh => x.sinh(),
+        UnaryOp::Cosh => x.cosh(),
+        UnaryOp::Tanh => x.tanh(),
+        UnaryOp::Atan => x.atan(),
         UnaryOp::Floor => x.floor(),
         UnaryOp::Tan => libm::tan(x),
         UnaryOp::Log10 => libm::log10(x),
