@@ -31,7 +31,9 @@ pub trait Field: Clone + PartialEq + Eq + Hash + std::fmt::Debug + Send + Sync +
     fn add(&self, other: &Self) -> Self;
     fn mul(&self, other: &Self) -> Self;
     fn neg(&self) -> Self;
-    /// `self^n` for an integer `n`, `None` for a negative power of zero.
+    /// `self^n` for an integer `n`; `None` leaves the power unfolded: a
+    /// negative power of zero, or an exact power too large to be worth
+    /// its digits.
     fn powi(&self, n: i64) -> Option<Self>;
     fn is_zero(&self) -> bool;
     fn is_one(&self) -> bool;
@@ -76,6 +78,11 @@ impl Field for BigRational {
         if Zero::is_zero(self) && n < 0 {
             return None;
         }
+        // Digits grow with the exponent; past this a power of a constant
+        // stays a node and evaluates in floating point.
+        if n.unsigned_abs() > EXACT_POWI_MAX && !One::is_one(&num_traits::Signed::abs(self)) {
+            return None;
+        }
         Some(ratio_powi(self, n))
     }
     fn is_zero(&self) -> bool {
@@ -98,6 +105,10 @@ impl Field for BigRational {
         }
     }
 }
+
+/// Largest exponent [`Field::powi`] folds exactly for a rational base
+/// other than `1` or `-1`.
+pub const EXACT_POWI_MAX: u64 = 1024;
 
 /// Exact integer power of a rational by repeated squaring (negative
 /// exponents invert; the caller excludes zero to a negative power).
@@ -214,7 +225,7 @@ impl Field for F64 {
         if self.0 == 0.0 && n < 0 {
             return None;
         }
-        Some(F64::new(self.0.powi(n as i32)))
+        Some(F64::new(self.0.powi(i32::try_from(n).ok()?)))
     }
     fn is_zero(&self) -> bool {
         self.0 == 0.0
