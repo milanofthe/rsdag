@@ -1,54 +1,62 @@
-//! rsdag's own elementary functions: within a small error of the platform
-//! library, and the same bits on every platform, which is what the pinned
-//! hash below asserts on each CI runner.
+//! rsdag's own elementary functions: within their error bounds of the
+//! exact values, and the same bits on every platform, which is what the
+//! pinned hash below asserts on each CI runner.
 
 use rsdag::math;
 use rsdag::semantics::unary_f64;
 use rsdag::synth::Rng;
-
-fn ulps(a: f64, b: f64) -> f64 {
-    if a == b || (a.is_nan() && b.is_nan()) {
-        return 0.0;
-    }
-    let ulp = b.abs().next_up() - b.abs();
-    (a - b).abs() / ulp
-}
 
 /// Uniform in `[0, 1)`.
 fn uniform(rng: &mut Rng) -> f64 {
     (rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64
 }
 
-fn samples(rng: &mut Rng, lo: f64, hi: f64, n: usize) -> Vec<f64> {
-    (0..n).map(|_| lo + (hi - lo) * uniform(rng)).collect()
-}
-
+/// Against exact values (mpmath, `scripts/math_ref.py`), the errors the
+/// README states: the kernels' own, on the ordinary range and toward the
+/// edges.
 #[test]
-fn kernels_are_close_to_the_platform_library() {
-    let mut rng = Rng::new(11);
-    let wide = samples(&mut rng, -740.0, 709.0, 200_000);
-    let near = samples(&mut rng, -3.0, 3.0, 200_000);
-    let pos: Vec<f64> = samples(&mut rng, -300.0, 300.0, 200_000)
-        .iter()
-        .map(|e| 10f64.powf(*e))
-        .collect();
-    // The platform is within about half an ulp; the kernels within the
-    // bound, so these are the kernels' own errors plus that half.
-    let cases: [(&str, &[f64], fn(f64) -> f64, fn(f64) -> f64, f64); 6] = [
-        ("exp", &wide, math::exp, f64::exp, 1.6),
-        ("exp", &near, math::exp, f64::exp, 1.6),
-        ("ln", &pos, math::ln, f64::ln, 1.4),
-        ("sinh", &near, math::sinh, f64::sinh, 2.4),
-        ("cosh", &near, math::cosh, f64::cosh, 1.6),
-        ("tanh", &near, math::tanh, f64::tanh, 2.7),
-    ];
-    for (name, xs, ours, platform, bound) in cases {
-        let worst = xs
-            .iter()
-            .map(|&x| (ulps(ours(x), platform(x)), x))
-            .fold((0.0, 0.0), |a, b| if b.0 > a.0 { b } else { a });
-        assert!(worst.0 <= bound, "{name}: {} ulp at {:e}", worst.0, worst.1);
+fn kernels_are_within_their_error_bounds() {
+    let data = include_str!("data/math_ref.txt");
+    let mut worst: std::collections::BTreeMap<&str, f64> = Default::default();
+    for line in data.lines() {
+        let mut it = line.split(' ');
+        let name = it.next().unwrap();
+        let mut p = || f64::from_bits(u64::from_str_radix(it.next().unwrap(), 16).unwrap());
+        let (x, hi, lo) = (p(), p(), p());
+        let got = match name {
+            "exp" => math::exp(x),
+            "ln" => math::ln(x),
+            "sinh" => math::sinh(x),
+            "cosh" => math::cosh(x),
+            "tanh" => math::tanh(x),
+            _ => unreachable!(),
+        };
+        let ulp = hi.abs().next_up() - hi.abs();
+        let err = if got == hi && lo == 0.0 {
+            0.0
+        } else {
+            ((got - hi) - lo).abs() / ulp
+        };
+        let key = if name == "exp" && x.abs() > 700.0 {
+            "exp near the edges"
+        } else {
+            name
+        };
+        let (bound, w) = (
+            match key {
+                "exp" => 0.52,
+                "exp near the edges" => 1.0,
+                "ln" => 0.78,
+                "sinh" => 1.75,
+                "cosh" => 1.01,
+                _ => 2.09,
+            },
+            worst.entry(key).or_default(),
+        );
+        *w = w.max(err);
+        assert!(err <= bound, "{key}({x:e}): {err} ulp");
     }
+    assert_eq!(worst.len(), 6, "every function and region sampled");
 }
 
 #[test]
@@ -65,7 +73,11 @@ fn the_edges_are_the_ieee_ones() {
     assert!(math::ln(-1.0).is_nan());
     assert_eq!(math::ln(f64::INFINITY), f64::INFINITY);
     assert!((math::ln(f64::from_bits(1)) + 744.4400719213812).abs() < 1e-12);
-    assert_eq!(math::cosh(710.0), 710f64.cosh());
+    let c = f64::from_bits(COSH_710);
+    assert!(
+        (math::cosh(710.0) - c).abs() <= c.next_up() - c,
+        "cosh(710) within an ulp"
+    );
     assert!(math::cosh(711.0).is_infinite());
     assert_eq!(math::sinh(-0.0).to_bits(), (-0.0f64).to_bits());
     assert_eq!(math::tanh(30.0), 1.0);
@@ -123,3 +135,6 @@ fn every_platform_computes_the_same_bits() {
 }
 
 const PINNED: u64 = 0x0ebc_5daf_2175_861b;
+
+/// `cosh(710)` correctly rounded (mpmath).
+const COSH_710: u64 = 0x7fe3_e21a_4645_07f9;

@@ -145,7 +145,7 @@ AArch64, x86-64 and wasm32.
 | `exp` | 0.51 ulp on [-700, 700], 1.0 ulp toward underflow | 1.8 |
 | `ln` | 0.78 ulp | 2.9 |
 | `sinh` | 1.75 ulp | 4.1 |
-| `cosh` | 1.0 ulp | 3.9 |
+| `cosh` | 1.01 ulp | 3.9 |
 | `tanh` | 2.1 ulp | 4.1 |
 
 ## Numbers
