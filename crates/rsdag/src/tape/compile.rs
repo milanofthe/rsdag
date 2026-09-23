@@ -87,7 +87,9 @@ impl Tape {
         let mut program = timed("tape lower", || forest.lower(ctx, roots));
         timed("tape fuse", || program.fuse_accumulators(pure_inputs));
         let order = timed("tape schedule", || program.schedule());
-        timed("tape emit", || program.emit(&order, pure_inputs.is_some()))
+        let mut tape = timed("tape emit", || program.emit(&order, pure_inputs.is_some()));
+        tape.n_inputs = input_syms.len();
+        tape
     }
 }
 
@@ -1877,6 +1879,7 @@ impl Program {
             bundles: self.bundles.clone(),
             prolog_ops,
             state_len,
+            n_inputs: 0,
         }
     }
 }

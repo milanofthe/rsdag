@@ -629,6 +629,7 @@ impl Tape {
                 bundles: self.bundles.clone(),
                 prolog_ops: spec_prolog_ops,
                 state_len,
+                n_inputs: self.n_inputs,
             },
             n_real,
             expected,

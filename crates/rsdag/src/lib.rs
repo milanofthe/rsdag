@@ -67,9 +67,6 @@ pub use simplify::rebuild;
 #[cfg(feature = "egraph")]
 pub use symbolic::simplify_egraph;
 pub use symbolic::{collect, determinant, newton_step, rational_form};
-pub use tape::{NoTrace, SpecializedTape, Tape, TapeVisitor, TraceSink};
-/// The execution form of a function (see the design: `Program<T>` is the
-/// tape evaluated in a [`Scalar`] `T`; the storage is `f64`, the typed
-/// evaluators convert once).
-pub type Program = Tape;
+pub use tape::{NoTrace, Program, SpecializedTape, Tape, TapeVisitor, TraceSink};
+
 pub use transform::substitute;

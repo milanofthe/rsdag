@@ -447,6 +447,22 @@ impl NativeTape {
         self.collect(ins, work, out);
     }
 
+    /// Write the outputs from `work` (and `inputs`, for an output that is
+    /// an input) into a slice the caller sized.
+    fn write(&self, inputs: &[f64], work: &[f64], out: &mut [f64]) {
+        assert_eq!(
+            out.len(),
+            self.outputs.len(),
+            "output buffer of the wrong size"
+        );
+        for (dst, &s) in out.iter_mut().zip(&self.outputs) {
+            *dst = match input_index(s) {
+                Some(i) => inputs.get(i as usize).copied().unwrap_or(f64::NAN),
+                None => work[s as usize],
+            };
+        }
+    }
+
     /// Evaluate many instances at once: `inputs` holds `n` input vectors of
     /// `stride` values back to back, `out` receives the `n` output vectors
     /// back to back. Instances share nothing, so they run on the rayon pool
@@ -1277,5 +1293,31 @@ impl Drop for Mapping {
         unsafe {
             VirtualFree(self.ptr, 0, MEM_RELEASE);
         }
+    }
+}
+
+impl rsdag::Program for NativeTape {
+    fn n_inputs(&self) -> usize {
+        self.n_inputs
+    }
+    fn work_len(&self) -> usize {
+        self.layout.total
+    }
+    fn out_len(&self) -> usize {
+        self.outputs.len()
+    }
+    fn state_len(&self) -> usize {
+        self.state_len
+    }
+    fn eval_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]) {
+        self.run(0..self.chunks.len(), inputs, work);
+        self.write(inputs, work, out);
+    }
+    fn eval_prolog_into(&self, inputs: &[f64], work: &mut [f64]) {
+        self.run(0..self.prolog_chunks, inputs, work);
+    }
+    fn eval_main_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]) {
+        self.run(self.prolog_chunks..self.chunks.len(), inputs, work);
+        self.write(inputs, work, out);
     }
 }

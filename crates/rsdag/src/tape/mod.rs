@@ -246,6 +246,52 @@ pub struct Tape {
     /// The prolog's results the main phase reads: `work[..state_len]`
     /// (see [`state_len`](Self::state_len)).
     state_len: usize,
+    /// The inputs it was compiled over (`input_syms.len()`).
+    n_inputs: usize,
+}
+
+/// A compiled program as a solver drives it, whichever backend runs it:
+/// buffers the caller owns and sizes from [`work_len`](Self::work_len) and
+/// [`out_len`](Self::out_len), the prolog/main split, and the state layout
+/// of [`Tape::state_len`], so a prolog one backend ran serves another's
+/// main phase. [`Tape`] implements it, and so does the native code.
+pub trait Program: Send + Sync {
+    /// Inputs the program reads; `inputs` holds at least this many.
+    fn n_inputs(&self) -> usize;
+    fn work_len(&self) -> usize;
+    fn out_len(&self) -> usize;
+    /// The prolog's results are `work[..state_len]`.
+    fn state_len(&self) -> usize;
+    /// Everything, prolog and main.
+    fn eval_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]);
+    /// The parameter-pure prolog, into `work`.
+    fn eval_prolog_into(&self, inputs: &[f64], work: &mut [f64]);
+    /// The main phase over a `work` whose state a prolog left.
+    fn eval_main_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]);
+}
+
+impl Program for Tape {
+    fn n_inputs(&self) -> usize {
+        self.n_inputs
+    }
+    fn work_len(&self) -> usize {
+        Tape::work_len(self)
+    }
+    fn out_len(&self) -> usize {
+        Tape::out_len(self)
+    }
+    fn state_len(&self) -> usize {
+        Tape::state_len(self)
+    }
+    fn eval_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]) {
+        Tape::eval_into(self, inputs, work, out)
+    }
+    fn eval_prolog_into(&self, inputs: &[f64], work: &mut [f64]) {
+        Tape::eval_prolog_into(self, inputs, work)
+    }
+    fn eval_main_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]) {
+        Tape::eval_main_into(self, inputs, work, out)
+    }
 }
 
 /// A backend that lowers a [`Tape`]'s instruction stream: the seam every
