@@ -166,3 +166,18 @@ def test_matmul_traces_to_one_gemm():
     assert d.count("Gemm(8x6") == 1 and "Gemv" not in d
     got = np.asarray(p.eval(np.concatenate([A0.ravel(), B0.ravel()]))).reshape(8, 3)
     assert np.allclose(got, A0 @ B0, rtol=1e-12)
+
+
+def test_a_program_runs_many_inputs_and_from_many_threads():
+    from concurrent.futures import ThreadPoolExecutor
+
+    for native in (False, True):
+        f = jit(lorenz, native=native)
+        program = f.program(np.zeros(3), 0.0)
+        xs = np.random.default_rng(0).standard_normal((64, 3))
+        flat = np.concatenate([np.append(x, 0.0) for x in xs]).tolist()
+        many = np.array(program.eval_many(flat)).reshape(64, 3)
+        assert np.allclose(many, np.array([lorenz(x, 0.0) for x in xs]), rtol=1e-15)
+        with ThreadPoolExecutor(4) as pool:
+            got = list(pool.map(lambda x: f(x, 0.0), xs))
+        assert np.array_equal(np.array(got), many)

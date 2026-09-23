@@ -17,7 +17,7 @@ rsdag.workspace = true
 rsdag-jit = { path = "../rsdag-jit" }
 # `extension-module` is added by maturin (pyproject.toml); a plain cargo build
 # links libpython so the workspace builds and tests as a whole.
-pyo3 = { version = "0.22", features = ["abi3-py39"] }
+pyo3 = { version = "0.29", features = ["abi3-py39"] }
 
 [lints]
 workspace = true
