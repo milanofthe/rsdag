@@ -84,13 +84,21 @@ fn the_edges_are_the_ieee_ones() {
     assert_eq!(math::tanh(-30.0), -1.0);
 }
 
+/// `powi` is square and multiply over the exponent's bits in a fixed order
+/// (the platforms do not agree on one: MSVC's differs from compiler-rt's),
+/// within `(|n| + 2)` ulps of the exact power (each squaring doubles the
+/// relative error it carries).
 #[test]
-fn powi_is_square_and_multiply() {
+fn powi_is_accurate() {
     let mut rng = Rng::new(3);
     for _ in 0..100_000 {
         let x = (uniform(&mut rng) - 0.5) * 8.0;
         let n = (uniform(&mut rng) * 80.0) as i32 - 40;
-        assert_eq!(math::powi(x, n).to_bits(), x.powi(n).to_bits(), "{x}^{n}");
+        let (got, exact) = (math::powi(x, n), libm::pow(x, n as f64));
+        if exact.is_finite() && exact.abs() > f64::MIN_POSITIVE {
+            let tol = (n.unsigned_abs() as f64 + 2.0) * f64::EPSILON * exact.abs();
+            assert!((got - exact).abs() <= tol, "{x}^{n}: {got} vs {exact}");
+        }
     }
 }
 
@@ -117,15 +125,22 @@ fn every_platform_computes_the_same_bits() {
         f64::NEG_INFINITY,
     ]);
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |v: f64| {
+        let bits = if v.is_nan() {
+            0x7ff8_0000_0000_0000
+        } else {
+            v.to_bits()
+        };
+        h = (h ^ bits).wrapping_mul(0x0000_0100_0000_01b3);
+    };
     for spec in rsdag::node::UNARY_OPS {
         for &x in &xs {
-            let v = unary_f64(spec.op, x);
-            let bits = if v.is_nan() {
-                0x7ff8_0000_0000_0000
-            } else {
-                v.to_bits()
-            };
-            h = (h ^ bits).wrapping_mul(0x0000_0100_0000_01b3);
+            mix(unary_f64(spec.op, x));
+        }
+    }
+    for n in -9..=9 {
+        for &x in &xs[..2000] {
+            mix(math::powi(x, n));
         }
     }
     assert_eq!(
@@ -134,7 +149,7 @@ fn every_platform_computes_the_same_bits() {
     );
 }
 
-const PINNED: u64 = 0x0ebc_5daf_2175_861b;
+const PINNED: u64 = 0x523d_556e_3368_8947;
 
 /// `cosh(710)` correctly rounded (mpmath).
 const COSH_710: u64 = 0x7fe3_e21a_4645_07f9;
