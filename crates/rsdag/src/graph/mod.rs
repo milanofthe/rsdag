@@ -2,9 +2,7 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet};
 
-use num_rational::BigRational;
-
-use crate::field::Field;
+use crate::field::{Field, F64};
 
 use crate::extern_fn::ExternBundle;
 use crate::func::{FuncId, Function, FunctionBody, Output, OutputId};
@@ -27,7 +25,7 @@ use crate::semantics::{binary_f64, unary_f64};
 /// is interned by hashing 16 bytes; a constant is hashed once when it is first
 /// seen; an operand list is interned by content so equal lists share one
 /// window (which is what makes `Reduce`/`Dot`/`Opaque` hash-cons structurally).
-pub struct Graph<K: Field = BigRational> {
+pub struct Graph<K: Field = F64> {
     nodes: Vec<Node>,
     dedup: HashMap<Node, ExprId>,
     consts: Vec<K>,

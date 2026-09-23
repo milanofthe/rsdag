@@ -3,7 +3,7 @@ use rsdag::*;
 #[test]
 fn roles_select_jacobian_blocks() {
     // A one-state system: residual r = x' - (-k x + u), output y = 2 x.
-    let mut g: Graph = Graph::new();
+    let mut g: Graph<BigRational> = Graph::new();
     let (x, xd, u, k) = (g.sym("x"), g.sym("xd"), g.sym("u"), g.sym("k"));
     let kx = g.mul(k, x);
     let rhs = g.sub(u, kx);
@@ -63,10 +63,11 @@ fn f64_field_builds_folds_and_evaluates() {
     assert_eq!(to_string(&g, e), "(x + 0.125)");
 }
 use num_complex::Complex64;
+use rsdag::BigRational;
 
 #[test]
 fn hash_consing_shares_identical_subexpressions() {
-    let mut ctx: Graph = Graph::new();
+    let mut ctx: Graph<BigRational> = Graph::new();
     let a = ctx.sym("a");
     let b = ctx.sym("b");
     let s1 = ctx.add(a, b);
@@ -82,7 +83,7 @@ fn hash_consing_shares_identical_subexpressions() {
 
 #[test]
 fn folds_constants_and_identities() {
-    let mut ctx: Graph = Graph::new();
+    let mut ctx: Graph<BigRational> = Graph::new();
     let a = ctx.sym("a");
     let zero = ctx.zero();
     let one = ctx.one();
@@ -102,7 +103,7 @@ fn folds_constants_and_identities() {
 #[test]
 fn evaluates_admittance_like_expression() {
     // Y = 1/R + s*C, a capacitor-in-parallel-with-resistor admittance.
-    let mut ctx: Graph = Graph::new();
+    let mut ctx: Graph<BigRational> = Graph::new();
     let r = ctx.sym("R");
     let c = ctx.sym("C");
     let s = ctx.sym("s");
@@ -126,7 +127,7 @@ fn evaluates_admittance_like_expression() {
 
 #[test]
 fn unary_folding_and_eval() {
-    let mut ctx: Graph = Graph::new();
+    let mut ctx: Graph<BigRational> = Graph::new();
     // exp(0) = 1, ln(1) = 0 fold structurally.
     let z = ctx.zero();
     let o = ctx.one();

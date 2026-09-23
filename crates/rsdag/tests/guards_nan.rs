@@ -4,6 +4,7 @@
 
 use rsdag::node::UnaryOp;
 use rsdag::semantics::{unary_f64, LN_FLOOR};
+use rsdag::BigRational;
 use rsdag::{differentiate, ExprId, Graph, Node, SymbolId, Tape, F64};
 
 fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
@@ -73,7 +74,7 @@ fn integer_powers_stay_in_range() {
 
     // An exact constant to a huge power stays a node instead of growing
     // millions of digits.
-    let mut q: Graph = Graph::new();
+    let mut q: Graph<BigRational> = Graph::new();
     let three = q.konst_int(3);
     let e = q.pow_i(three, 1_000_000);
     assert!(matches!(q.node(e), Node::Pow(..)));

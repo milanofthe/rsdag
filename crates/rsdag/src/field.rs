@@ -12,8 +12,11 @@
 
 use std::hash::Hash;
 
+#[cfg(feature = "exact")]
 use num_bigint::BigInt;
+#[cfg(feature = "exact")]
 use num_rational::BigRational;
+#[cfg(feature = "exact")]
 use num_traits::{One, ToPrimitive, Zero};
 
 /// A field with exact equality and hashing, the constant type of a graph.
@@ -46,6 +49,7 @@ pub trait Field: Clone + PartialEq + Eq + Hash + std::fmt::Debug + Send + Sync +
     fn render(&self) -> String;
 }
 
+#[cfg(feature = "exact")]
 impl Field for BigRational {
     fn zero() -> Self {
         <BigRational as Zero>::zero()
@@ -108,10 +112,12 @@ impl Field for BigRational {
 
 /// Largest exponent [`Field::powi`] folds exactly for a rational base
 /// other than `1` or `-1`.
+#[cfg(feature = "exact")]
 pub const EXACT_POWI_MAX: u64 = 1024;
 
 /// Exact integer power of a rational by repeated squaring (negative
 /// exponents invert; the caller excludes zero to a negative power).
+#[cfg(feature = "exact")]
 pub fn ratio_powi(base: &BigRational, n: i64) -> BigRational {
     if n == 0 {
         return <BigRational as One>::one();

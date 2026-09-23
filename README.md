@@ -30,10 +30,21 @@ NOTICE); for a commercial license contact info@milanrother.com.
 - `rsdag-py`: Python package `rsdag` (`trace`, `jit`, `jacobian`, `grad`,
   `where`, `matmul`, `solve`), built with maturin.
 
-`rsdag` compiles for `wasm32-unknown-unknown` (interpreter only). It reads
-no clock there unless a host installs one through `hooks::set_clock`: the
-compile timings are reported only when a `hooks::set_log` sink asks for
-them.
+The core of `rsdag` depends on `rustc-hash` and `libm` only and computes in
+`f64` (`Graph` is `Graph<F64>`). The rest is opt-in:
+
+| feature | adds | dependencies |
+|---|---|---|
+| `exact` | `Graph<BigRational>`, folding without rounding | num-bigint, num-rational |
+| `complex` | evaluation in `Complex64` | num-complex |
+| `egraph` | `simplify_egraph` (implies `exact`, native only) | egg |
+| `serde` | `Module` serialization | serde |
+
+`rsdag` compiles for `wasm32-unknown-unknown` (interpreter only) with every
+feature but `egraph`; CI links a probe of it and checks the module imports
+nothing. It reads no clock there unless a host installs one through
+`hooks::set_clock`: the compile timings are reported only when a
+`hooks::set_log` sink asks for them.
 
 ## Graph
 
@@ -155,7 +166,7 @@ The dense kernels' throughput over the matrix size:
 ```rust
 use rsdag::{Graph, Tape, SymbolId};
 
-let mut g: Graph = Graph::new();          // exact rational constants
+let mut g: Graph = Graph::new();          // f64 constants; Graph<BigRational> with `exact`
 let (x, y) = (g.sym("x"), g.sym("y"));
 let e = { let s = g.sin(x); g.mul(s, y) };
 let dx = rsdag::differentiate(&mut g, e, SymbolId(0));
