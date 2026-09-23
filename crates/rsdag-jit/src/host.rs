@@ -58,17 +58,57 @@ pub(crate) extern "C" fn h_reduce(op: u64, ptr: *const f64, len: usize) -> f64 {
     reduce_slice(op, xs)
 }
 
+// A panic out of a host call, held until the emitted code has returned:
+// unwinding cannot cross the emitted frames (they carry no unwind
+// tables, and an `extern "C"` boundary aborts), so a trampoline catches
+// it, the chunk runs to its end on whatever the failed call left in its
+// outputs, and `resume_panic` raises it again on the caller's side. The
+// first panic of an evaluation is the one kept.
+std::thread_local! {
+    static PANIC: std::cell::Cell<Option<Box<dyn std::any::Any + Send>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Run `f`, holding a panic out of it for [`resume_panic`].
+fn guarded(f: impl FnOnce()) {
+    if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        PANIC.with(|c| {
+            let first = c.take().unwrap_or(p);
+            c.set(Some(first));
+        });
+    }
+}
+
+/// Raise a panic a host call held while the emitted code ran.
+pub(crate) fn resume_panic() {
+    if let Some(p) = PANIC.with(|c| c.take()) {
+        std::panic::resume_unwind(p);
+    }
+}
+
+/// A bundle call: `n_out` is the block the compiled tape reserved at
+/// `out`, fixed when it was compiled, so a bundle that reports another
+/// count now is refused rather than trusted with the length of a raw
+/// write.
 pub(crate) extern "C" fn h_bundle(
     bundles: *const Bundles,
     idx: usize,
     args: *const f64,
     len: usize,
     out: *mut f64,
+    n_out: usize,
 ) {
     let b = unsafe { &(&*bundles)[idx] };
     let xs = unsafe { std::slice::from_raw_parts(args, len) };
-    let out = unsafe { std::slice::from_raw_parts_mut(out, b.n_outputs()) };
-    b.call(xs, out);
+    let out = unsafe { std::slice::from_raw_parts_mut(out, n_out) };
+    guarded(|| {
+        assert_eq!(
+            b.n_outputs(),
+            n_out,
+            "bundle output count changed since compile"
+        );
+        b.call(xs, out);
+    });
 }
 
 pub(crate) extern "C" fn h_solve(a: *const f64, b: *const f64, n: usize, out: *mut f64) {
@@ -78,6 +118,7 @@ pub(crate) extern "C" fn h_solve(a: *const f64, b: *const f64, n: usize, out: *m
     rsdag::semantics::solve(a, b, n, out);
 }
 
+/// A batch of bundle calls; `n_out` per group as for [`h_bundle`].
 pub(crate) extern "C" fn h_bundle_batch(
     bundles: *const Bundles,
     idx: usize,
@@ -85,11 +126,19 @@ pub(crate) extern "C" fn h_bundle_batch(
     n_groups: usize,
     n_args: usize,
     out: *mut f64,
+    n_out: usize,
 ) {
     let b = unsafe { &(&*bundles)[idx] };
     let xs = unsafe { std::slice::from_raw_parts(args, n_groups * n_args) };
-    let out = unsafe { std::slice::from_raw_parts_mut(out, n_groups * b.n_outputs()) };
-    b.call_batch(xs, n_groups, n_args, out);
+    let out = unsafe { std::slice::from_raw_parts_mut(out, n_groups * n_out) };
+    guarded(|| {
+        assert_eq!(
+            b.n_outputs(),
+            n_out,
+            "bundle output count changed since compile"
+        );
+        b.call_batch(xs, n_groups, n_args, out);
+    });
 }
 
 pub(crate) extern "C" fn h_solve_many(

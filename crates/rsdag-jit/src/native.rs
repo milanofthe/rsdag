@@ -354,6 +354,7 @@ impl NativeTape {
         );
         for c in &self.chunks[range] {
             (c.func)(wp, ip, bp);
+            host::resume_panic();
         }
     }
 
@@ -793,6 +794,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
                     Arg::I(IArg::WorkAddr(at)),
                     Arg::I(IArg::Imm(args.len() as u64)),
                     Arg::I(IArg::WorkAddr(dst as usize * 8)),
+                    Arg::I(IArg::Imm(n_out as u64)),
                 ];
                 self.call(host::h_bundle as *const (), &args);
                 self.invalidate(dst, n_out);
@@ -806,6 +808,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
                     Arg::I(IArg::Imm(n_groups as u64)),
                     Arg::I(IArg::Imm(n_args as u64)),
                     Arg::I(IArg::WorkAddr(dst as usize * 8)),
+                    Arg::I(IArg::Imm(n_out as u64)),
                 ];
                 self.call(host::h_bundle_batch as *const (), &args);
                 self.invalidate(dst, n_groups * n_out);
