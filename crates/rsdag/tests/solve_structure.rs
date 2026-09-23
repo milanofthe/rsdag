@@ -243,7 +243,9 @@ fn a_newton_step_on_a_grid_converges() {
             g.sub(acc, one)
         })
         .collect();
-    let step = rsdag::newton_step(&mut g, &f, &syms).x;
+    let step = rsdag::newton_step(&mut g, &f, &syms)
+        .expect("nonsingular")
+        .x;
     let step_tape = Tape::compile(&g, &step, &syms);
     let res_tape = Tape::compile(&g, &f, &syms);
     let mut x = vec![0.3; n];

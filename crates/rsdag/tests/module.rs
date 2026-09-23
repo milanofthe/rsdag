@@ -20,7 +20,7 @@ fn a_module_round_trips_bit_exactly() {
         let f = g.close("f", roots.clone());
 
         let module = g.to_module();
-        let (loaded, map) = Graph::from_module(&module);
+        let (loaded, map) = Graph::from_module(&module).unwrap();
         assert_eq!(map.funcs[f.0 as usize], f, "seed {seed}: function ids");
 
         let roots2: Vec<ExprId> = roots.iter().map(|e| map.exprs[e.0 as usize]).collect();
@@ -55,11 +55,11 @@ fn loading_into_a_populated_graph_shares_nodes() {
     let (roots, syms) = build(&mut a, &mut spec);
     let module = a.to_module();
 
-    let (mut b, first) = Graph::from_module(&module);
+    let (mut b, first) = Graph::from_module(&module).unwrap();
     let before = b.len();
     // Loading the same module a second time must not add a node: every
     // one of them is already interned, so the ids come back unchanged.
-    let map = b.load_module(&module);
+    let map = b.load_module(&module).unwrap();
     assert_eq!(b.len(), before, "reloading a module added nodes");
     assert_eq!(map.exprs, first.exprs);
     for (k, r) in roots.iter().enumerate() {
@@ -98,7 +98,7 @@ fn a_module_survives_json() {
     let back: Module<F64> = serde_json::from_str(&text).expect("deserialize");
     assert_eq!(back, module);
 
-    let (loaded, map) = Graph::from_module(&back);
+    let (loaded, map) = Graph::from_module(&back).unwrap();
     let roots2: Vec<ExprId> = roots.iter().map(|e| map.exprs[e.0 as usize]).collect();
     let syms2: Vec<SymbolId> = syms.iter().map(|s| map.symbols[s.0 as usize]).collect();
     let row = inputs(&mut spec.rng(), syms.len());
@@ -136,7 +136,7 @@ fn calls_and_nested_functions_round_trip() {
     let params = g.func(chain).params.clone();
 
     let module = g.to_module();
-    let (loaded, map) = Graph::from_module(&module);
+    let (loaded, map) = Graph::from_module(&module).unwrap();
     assert_eq!(map.funcs.len(), 2);
     let root2 = map.exprs[root.0 as usize];
     let params2: Vec<SymbolId> = params.iter().map(|p| map.symbols[p.0 as usize]).collect();
@@ -202,10 +202,12 @@ fn an_extern_function_round_trips_with_its_body_resolved_by_name() {
     assert_eq!(module.funcs[0].extern_body.as_deref(), Some("pair"));
 
     let mut loaded: Graph<F64> = Graph::new();
-    let map = loaded.load_module_with(&module, |name| {
-        assert_eq!(name, "pair");
-        Arc::new(Pair)
-    });
+    let map = loaded
+        .load_module_with(&module, |name| {
+            assert_eq!(name, "pair");
+            Some(Arc::new(Pair) as Arc<dyn rsdag::ExternBundle>)
+        })
+        .unwrap();
     let root2 = map.exprs[root.0 as usize];
     let syms2: Vec<SymbolId> = syms.iter().map(|s| map.symbols[s.0 as usize]).collect();
     let (mut w, mut o) = (Vec::new(), Vec::new());
@@ -215,7 +217,6 @@ fn an_extern_function_round_trips_with_its_body_resolved_by_name() {
 }
 
 #[test]
-#[should_panic(expected = "load_module_with")]
 fn loading_a_module_with_externs_without_bodies_says_so() {
     use std::sync::Arc;
     let mut g: Graph<F64> = Graph::new();
@@ -223,5 +224,72 @@ fn loading_a_module_with_externs_without_bodies_says_so() {
     let f = g.define_extern_func("pair", 2, Arc::new(Pair), vec![rsdag::Output::Slot(0)]);
     let _ = g.call(f, 0, &[x, x]);
     let module = g.to_module();
-    let _ = Graph::from_module(&module);
+    let err = Graph::from_module(&module).err();
+    assert_eq!(err, Some(rsdag::ModuleError::MissingExtern("pair".into())));
+}
+
+/// A module is outside data: every way of breaking one is reported, none
+/// panics, and the graph it was loaded into is left as it was.
+#[test]
+fn a_broken_module_is_refused_not_panicked_on() {
+    use rsdag::{ModuleError, Node};
+    let mut g: Graph<F64> = Graph::new();
+    let x = g.sym("x");
+    let y = g.sym("y");
+    let s = g.add(x, y);
+    let t = g.sin(s);
+    let d = g.dot(vec![x, y], vec![y, t]);
+    let _ = g.close("f", vec![d]);
+    let good = g.to_module();
+    assert!(good.validate().is_ok());
+
+    let mut breaks: Vec<(&str, rsdag::Module<F64>)> = Vec::new();
+    let mut m = good.clone();
+    m.version += 1;
+    breaks.push(("version", m));
+    let mut m = good.clone();
+    let last = m.nodes.len() - 1;
+    let i = m
+        .nodes
+        .iter()
+        .position(|n| matches!(n, Node::Add(..)))
+        .unwrap();
+    m.nodes[i] = Node::Add(rsdag::ExprId(last as u32), rsdag::ExprId(0));
+    breaks.push(("forward operand", m));
+    let mut m = good.clone();
+    let i = m
+        .nodes
+        .iter()
+        .position(|n| matches!(n, Node::Symbol(_)))
+        .unwrap();
+    m.nodes[i] = Node::Symbol(rsdag::SymbolId(99));
+    breaks.push(("symbol", m));
+    let mut m = good.clone();
+    m.arg_pool.pop();
+    breaks.push(("operand list", m));
+    let mut m = good.clone();
+    m.funcs[0].outputs[0] = rsdag::Output::Expr(rsdag::ExprId(10_000));
+    breaks.push(("function output", m));
+    let mut m = good.clone();
+    let i = m
+        .nodes
+        .iter()
+        .position(|n| matches!(n, Node::Dot(_)))
+        .unwrap();
+    if let Node::Dot(l) = m.nodes[i] {
+        m.nodes[i] = Node::Dot(rsdag::node::ArgList {
+            start: l.start,
+            len: l.len - 1,
+        });
+    }
+    breaks.push(("dot halves", m));
+
+    for (what, m) in breaks {
+        let mut into: Graph<F64> = Graph::new();
+        let _ = into.sym("keep");
+        let before = into.len();
+        let err: Result<_, ModuleError> = into.load_module(&m);
+        assert!(err.is_err(), "{what}: loaded");
+        assert_eq!(into.len(), before, "{what}: the graph changed");
+    }
 }

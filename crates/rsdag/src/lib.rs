@@ -41,7 +41,7 @@ pub use field::{ratio_powi, Field, F64};
 pub use func::{Body, FuncId, Function, FunctionBody, Output, OutputId};
 pub use graph::Graph;
 pub use mathfn::lower_call;
-pub use module::{IdMap, Module, MODULE_VERSION};
+pub use module::{IdMap, Module, ModuleError, MODULE_VERSION};
 pub use node::{
     ArgList, BinOp, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp, SymbolId, UnaryOp,
 };
