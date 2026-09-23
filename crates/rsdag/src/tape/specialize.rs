@@ -31,6 +31,9 @@ impl Tape {
                 Op::CallBatch {
                     n_groups, n_out, ..
                 } => n_groups * n_out,
+                Op::CallProlog {
+                    bundle, n_groups, ..
+                } => n_groups * self.bundles[bundle as usize].state_len() as u32,
                 Op::Gemv { m, .. } => m,
                 Op::Gemm { m, n, .. } => m * n,
                 Op::Solve { n, .. } => n,
@@ -59,13 +62,31 @@ impl Tape {
                 Op::Neg(a) | Op::Powi(a, _) | Op::Unary(_, a) => v.push(a),
                 Op::Reduce(_, s, l) => v.extend_from_slice(pool(s, l)),
                 Op::Dot(s, l) => v.extend_from_slice(pool(s, 2 * l)),
-                Op::Call { start, n_args, .. } => v.extend_from_slice(pool(start, n_args)),
+                Op::Call {
+                    start,
+                    n_args,
+                    state,
+                    ..
+                } => {
+                    v.extend_from_slice(pool(start, n_args));
+                    v.extend((state != super::NO_STATE).then_some(state));
+                }
                 Op::CallBatch {
                     start,
                     n_groups,
                     n_args,
+                    state,
                     ..
-                } => v.extend_from_slice(pool(start, n_groups * n_args)),
+                } => {
+                    v.extend_from_slice(pool(start, n_groups * n_args));
+                    v.extend((state != super::NO_STATE).then_some(state));
+                }
+                Op::CallProlog {
+                    start,
+                    n_groups,
+                    n_pure,
+                    ..
+                } => v.extend_from_slice(pool(start, n_groups * n_pure)),
                 Op::Gemv {
                     a,
                     x,
@@ -368,14 +389,21 @@ impl Tape {
                     bundle,
                     n_args,
                     n_out,
+                    state,
                     ..
                 } => {
                     let o = take(n_args as usize);
+                    let state = if state == super::NO_STATE {
+                        state
+                    } else {
+                        take(1)[0]
+                    };
                     Op::Call {
                         bundle,
                         start: gather(&o, &mut arg_pool, &mut max_args),
                         n_args,
                         n_out,
+                        state,
                     }
                 }
                 Op::CallBatch {
@@ -383,15 +411,36 @@ impl Tape {
                     n_groups,
                     n_args,
                     n_out,
+                    state,
                     ..
                 } => {
                     let o = take((n_groups * n_args) as usize);
+                    let state = if state == super::NO_STATE {
+                        state
+                    } else {
+                        take(1)[0]
+                    };
                     Op::CallBatch {
                         bundle,
                         start: gather(&o, &mut arg_pool, &mut max_args),
                         n_groups,
                         n_args,
                         n_out,
+                        state,
+                    }
+                }
+                Op::CallProlog {
+                    bundle,
+                    n_groups,
+                    n_pure,
+                    ..
+                } => {
+                    let o = take((n_groups * n_pure) as usize);
+                    Op::CallProlog {
+                        bundle,
+                        start: gather(&o, &mut arg_pool, &mut max_args),
+                        n_groups,
+                        n_pure,
                     }
                 }
                 Op::Gemv {
@@ -569,6 +618,7 @@ impl Tape {
         let n_selects_out = ops.iter().filter(|o| matches!(o, Op::Select(..))).count();
         SpecializedTape {
             tape: Tape {
+                bundle_work: self.bundle_work,
                 ops,
                 dst,
                 n_selects: n_selects_out,

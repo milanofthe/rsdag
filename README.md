@@ -69,12 +69,13 @@ folded by the kernel (`Fold`): the consumer vanishes and the kernel writes
 output of the same kernel.
 `Tape::compile_split` marks parameter-pure inputs; the tape then has a
 prolog evaluated once per parameter binding and a main part evaluated per
-iteration. `Tape::eval` runs over any `Scalar` (`f64`, `f32`, `Complex64`).
+iteration. The prolog's results are `work[..Tape::state_len()]`, the same
+layout in every backend. `Tape::eval` runs over any `Scalar` (`f64`, `f32`, `Complex64`).
 
 Evaluation is allocation-free once the buffers exist. `Tape::work_len` and
 `out_len` size them, `eval_into` writes into slices the caller owns,
 `Tape::runner` holds the buffers itself. Function bodies: `ExternBundle::work_len`
-and `call_into` take a caller-owned buffer, `call` uses a thread-local one.
+and `call_into` take a caller-owned buffer; a calling tape lends its own.
 `NativeTape::compile` emits the same instruction sequence as machine code
 in chunked functions with a write-back register cache.
 
@@ -114,6 +115,12 @@ The body is compiled once; calls with the same shape lower to one kernel op
 that runs the body over all instances, on the rayon pool above a size
 threshold. `Graph::set_func_body` registers a body compiled by the caller;
 programs whose calls it covers use it.
+
+Parameters with the `Param` role are a body's pure arguments; its tape is
+split over them. A caller compiled with `compile_split` whose prolog has
+those arguments runs the body's prolog per instance in its own prolog and
+keeps the result in its work buffer (`ExternBundle::state_len`,
+`prolog_into`, `main_into`); per evaluation only the rest of the body runs.
 
 ## Choice specialization
 

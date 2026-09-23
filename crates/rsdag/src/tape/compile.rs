@@ -32,6 +32,15 @@ use crate::node::{ExprId, Node, SymbolId};
 /// Row dots against one vector fuse into a `Gemv` from this many rows on.
 const GEMV_MIN_ROWS: usize = 8;
 
+/// A call's operands and the slot of its state block (the last operand of
+/// a stateful call), or [`NO_STATE`](super::NO_STATE).
+fn split_state(o: &[u32], stateful: bool) -> (&[u32], u32) {
+    match (stateful, o.split_last()) {
+        (true, Some((&state, args))) => (args, state),
+        _ => (o, super::NO_STATE),
+    }
+}
+
 /// Append operands to the pool; their range.
 fn pooled(pool: &mut Vec<Ref>, ins: Vec<Ref>) -> (u32, u32) {
     let start = pool.len() as u32;
@@ -169,6 +178,9 @@ struct Forest {
     /// `fused_into[p]` is the base position of the `Add` that absorbed the
     /// node at `p` as a superinstruction operand.
     fused_into: Vec<Option<usize>>,
+    /// Compiled with a prolog split: a call's parameter-pure part can run
+    /// in the prolog (see [`Forest::stateful`]).
+    split: bool,
 }
 
 /// One instruction of the lowered program, before scheduling.
@@ -214,13 +226,24 @@ pub enum Kind {
     Reduce(crate::node::ReduceOp),
     /// `n` pairs.
     Dot(u32),
+    /// With `stateful`, the last operand is the instance state block (the
+    /// value of a [`Kind::CallProlog`]).
     Call {
         bundle: u32,
+        stateful: bool,
     },
     CallBatch {
         bundle: u32,
         n_groups: u32,
         n_args: u32,
+        stateful: bool,
+    },
+    /// The prolog of `n_groups` instances over their pure arguments,
+    /// `n_pure` per group; a block of their states.
+    CallProlog {
+        bundle: u32,
+        n_groups: u32,
+        n_pure: u32,
     },
     /// With `acc`, the fold code per output and an accumulator operand per
     /// output after the factors.
@@ -491,6 +514,24 @@ impl Forest {
         self.tables.pos[e.0 as usize] as usize
     }
 
+    /// Whether calls of `b` on `lists` (argument lists of one or more
+    /// instances, all impure as a whole) keep their state in the caller:
+    /// under a split, when the bundle has a state and every argument it
+    /// flags pure is parameter-pure here, so its prolog can run in ours.
+    fn stateful(&self, b: &dyn ExternBundle, lists: &[&[ExprId]]) -> bool {
+        let mask = b.pure_args();
+        self.split
+            && b.state_len() > 0
+            && mask.iter().any(|&p| p)
+            && lists.iter().all(|args| {
+                args.len() == mask.len()
+                    && args
+                        .iter()
+                        .zip(mask)
+                        .all(|(&a, &p)| !p || self.pure[self.pos(a)])
+            })
+    }
+
     /// The input index of symbol `s`, if it is one.
     #[inline]
     fn input(&self, s: SymbolId) -> Option<u32> {
@@ -579,6 +620,7 @@ impl Forest {
             tables: t,
             pure,
             fused_into,
+            split: pure_inputs.is_some(),
         }
     }
 
@@ -1021,12 +1063,40 @@ impl Forest {
                         let n_args = arg_lists[0].len() as u32;
                         let n_groups = arg_lists.len() as u32;
                         let pure = members.iter().all(|&mi| self.pure[mi]);
+                        let b = bundles[bundle as usize].clone();
+                        let lists: Vec<&[ExprId]> = arg_lists.iter().map(Vec::as_slice).collect();
+                        let stateful = !pure && self.stateful(&*b, &lists);
+                        if stateful {
+                            let mask = b.pure_args();
+                            let ps = pool.len() as u32;
+                            for args in &arg_lists {
+                                pool.extend(
+                                    args.iter()
+                                        .zip(mask)
+                                        .filter(|&(_, &p)| p)
+                                        .map(|(&a, _)| val(a, &value)),
+                                );
+                            }
+                            let n_pure = mask.iter().filter(|&&p| p).count() as u32;
+                            insts.push(Inst {
+                                kind: Kind::CallProlog {
+                                    bundle,
+                                    n_groups,
+                                    n_pure,
+                                },
+                                ins: (ps, pool.len() as u32 - ps),
+                                n_out: n_groups * b.state_len() as u32,
+                                pure: true,
+                            });
+                            ins.push(Ref::Value(insts.len() as u32 - 1, 0));
+                        }
                         let inst = insts.len() as u32;
                         insts.push(Inst {
                             kind: Kind::CallBatch {
                                 bundle,
                                 n_groups,
                                 n_args,
+                                stateful,
                             },
                             ins: pooled(&mut pool, ins),
                             n_out: n_groups * n_out,
@@ -1257,10 +1327,35 @@ impl Forest {
                         bundles.len() as u32 - 1
                     });
                     let n_out = body.bundle.n_outputs() as u32;
+                    let args = ctx.args(l);
+                    let stateful = !self.pure[i] && self.stateful(&*body.bundle, &[args]);
+                    let state = stateful.then(|| {
+                        let mask = body.bundle.pure_args();
+                        let ps = pool.len() as u32;
+                        pool.extend(
+                            args.iter()
+                                .zip(mask)
+                                .filter(|&(_, &p)| p)
+                                .map(|(&a, _)| val(a, &value)),
+                        );
+                        insts.push(Inst {
+                            kind: Kind::CallProlog {
+                                bundle,
+                                n_groups: 1,
+                                n_pure: pool.len() as u32 - ps,
+                            },
+                            ins: (ps, pool.len() as u32 - ps),
+                            n_out: body.bundle.state_len() as u32,
+                            pure: true,
+                        });
+                        Ref::Value(insts.len() as u32 - 1, 0)
+                    });
+                    let start = pool.len() as u32;
+                    pool.extend(args.iter().map(|&a| val(a, &value)));
+                    pool.extend(state);
                     let inst = insts.len() as u32;
-                    pool.extend(ctx.args(l).iter().map(|&a| val(a, &value)));
                     insts.push(Inst {
-                        kind: Kind::Call { bundle },
+                        kind: Kind::Call { bundle, stateful },
                         ins: (start, pool.len() as u32 - start),
                         n_out,
                         pure: self.pure[i],
@@ -1654,27 +1749,46 @@ impl Program {
                     let start = gather(&mut arg_pool, &mut max_args, o);
                     Op::Dot(start, n)
                 }
-                Kind::Call { bundle } => {
-                    let start = gather(&mut arg_pool, &mut max_args, o);
+                Kind::Call { bundle, stateful } => {
+                    // A stateful call's last operand is its state block.
+                    let (args, state) = split_state(o, stateful);
+                    let start = gather(&mut arg_pool, &mut max_args, args);
                     Op::Call {
                         bundle,
                         start,
-                        n_args: o.len() as u32,
+                        n_args: args.len() as u32,
                         n_out: inst.n_out,
+                        state,
                     }
                 }
                 Kind::CallBatch {
                     bundle,
                     n_groups,
                     n_args,
+                    stateful,
                 } => {
-                    let start = gather(&mut arg_pool, &mut max_args, o);
+                    let (args, state) = split_state(o, stateful);
+                    let start = gather(&mut arg_pool, &mut max_args, args);
                     Op::CallBatch {
                         bundle,
                         start,
                         n_groups,
                         n_args,
                         n_out: inst.n_out / n_groups,
+                        state,
+                    }
+                }
+                Kind::CallProlog {
+                    bundle,
+                    n_groups,
+                    n_pure,
+                } => {
+                    let start = gather(&mut arg_pool, &mut max_args, o);
+                    Op::CallProlog {
+                        bundle,
+                        start,
+                        n_groups,
+                        n_pure,
                     }
                 }
                 Kind::Gemv {
@@ -1750,7 +1864,9 @@ impl Program {
             dst.push(d);
         }
         let outputs: Vec<u32> = self.roots.iter().map(|&r| slot_of(r, &base)).collect();
+        let bundle_work = self.bundles.iter().map(|b| b.work_len()).max().unwrap_or(0);
         Tape {
+            bundle_work,
             ops,
             dst,
             n_selects,
