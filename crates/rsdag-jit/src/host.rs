@@ -36,7 +36,7 @@ pub(crate) extern "C" fn h_binary(op: u32, x: f64, y: f64) -> f64 {
     binary_f64(BinOp::from_code(op), x, y)
 }
 pub(crate) extern "C" fn h_powi(x: f64, n: i64) -> f64 {
-    x.powi(n as i32)
+    rsdag::math::powi(x, n as i32)
 }
 
 pub(crate) fn reduce_code(op: ReduceOp) -> u64 {

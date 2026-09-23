@@ -17,6 +17,7 @@ pub mod field;
 pub mod func;
 pub mod graph;
 pub mod hooks;
+pub mod math;
 pub mod mathfn;
 pub mod module;
 pub mod node;
