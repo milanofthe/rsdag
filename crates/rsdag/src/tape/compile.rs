@@ -277,6 +277,9 @@ struct Program {
     pool: Vec<Ref>,
     bundles: Vec<Arc<dyn ExternBundle>>,
     roots: Vec<Ref>,
+    /// The accumulator operand of the kernels' plain folds (see
+    /// [`Program::fuse_accumulators`]): never read, so never part of the state.
+    placeholder: Option<u32>,
 }
 
 impl Program {
@@ -353,6 +356,7 @@ impl Program {
                     pure: true,
                 });
                 dead.push(false);
+                self.placeholder = Some(self.insts.len() as u32 - 1);
                 Ref::Value(self.insts.len() as u32 - 1, 0)
             });
             let mut accs: Vec<Ref> = vec![placeholder; n_out as usize];
@@ -477,6 +481,7 @@ impl Program {
         for r in self.roots.iter_mut() {
             *r = map(*r);
         }
+        self.placeholder = self.placeholder.map(|i| renumber[i as usize]);
         let old = std::mem::take(&mut self.insts);
         self.insts = old
             .into_iter()
@@ -1404,6 +1409,7 @@ impl Forest {
             pool,
             bundles,
             roots,
+            placeholder: None,
         }
     }
 }
@@ -1538,7 +1544,8 @@ impl Program {
 
         // Last use of each instruction's block (the highest position that
         // reads any of its values); roots and, under a split, prolog values
-        // read by the main phase are pinned.
+        // read by the main phase are pinned (not the kernels' placeholder
+        // accumulator, which nothing reads).
         let mut last = vec![0usize; m];
         let mut pinned = vec![false; m];
         for (k, &i) in order.iter().enumerate() {
@@ -1556,7 +1563,10 @@ impl Program {
         }
         if split {
             for i in 0..m {
-                if pos[i] < prolog_ops && last[i] >= prolog_ops {
+                if pos[i] < prolog_ops
+                    && last[i] >= prolog_ops
+                    && self.placeholder != Some(i as u32)
+                {
                     pinned[i] = true;
                     last[i] = usize::MAX;
                 }
