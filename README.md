@@ -1,12 +1,18 @@
 # rsdag
 
-Expression graph compiler for the equation systems of simulators (DAEs,
-ODEs, circuits, state-space blocks): a hash-consed expression graph with
-forward and reverse differentiation, a flat instruction tape, an
-interpreter over any scalar type, a native code backend for AArch64 and
-x86-64, and a sparse linear solve compiled into the same tape.
+Expression graph backend for hybrid event and continuous ODE and DAE
+simulators: a hash-consed expression graph with functions and calls,
+forward and reverse differentiation, a flat instruction tape split into a
+per-parameter prolog and a per-iteration main phase, an interpreter over
+any scalar type, a native code backend for AArch64 and x86-64, and sparse
+linear solves and Newton steps compiled into the same tape.
 
 ![Pipeline](docs/diagrams/pipeline.svg)
+
+The diagrams below are drawn by rsdag from the graphs and programs they
+show (`rsdag::dot`, `scripts/diagrams.sh`):
+
+![Legend](docs/diagrams/legend.svg)
 
 Licensed under the [GNU Affero General Public License v3.0](LICENSE): free to
 use, modify and distribute, including commercially, as long as the source of
@@ -23,7 +29,7 @@ NOTICE); for a commercial license contact info@milanrother.com.
   batching, `Gemv`, `Gemm` and dense `Solve` kernels, prolog/main split),
   `semantics` (the reference arithmetic), `symbolic` (`determinant`,
   `collect`, `rational_form`, `simplify_egraph`, the sparse solve,
-  `newton_step`).
+  `LuProgram`, `newton_step`), `dot` (Graphviz of graphs and tapes).
 - `rsdag-jit`: `NativeTape`, machine code for AArch64 and x86-64 on Linux,
   macOS and Windows; function bodies compiled once and batched over
   instances; `eval_many` over many input sets in parallel
@@ -58,6 +64,11 @@ derivative outputs are derived from the body on first demand. Parameters
 and outputs carry roles (state, input, parameter, time; residual,
 derivative, guard with its crossing direction, state write).
 
+![Derivative](docs/diagrams/derivative.svg)
+
+`f = sin(x y) + x y` and `differentiate(f, x)` in one graph: the
+derivative reuses `x y`; the nodes only `f` reads are faded.
+
 ## Tape
 
 `Tape::compile` lowers a set of roots into an instruction IR, schedules it
@@ -72,7 +83,14 @@ output of the same kernel.
 `Tape::compile_split` marks parameter-pure inputs; the tape then has a
 prolog evaluated once per parameter binding and a main part evaluated per
 iteration. The prolog's results are `work[..Tape::state_len()]`, the same
-layout in every backend. `Tape::eval` runs over any `Scalar` (`f64`, `f32`, `Complex64`).
+layout in every backend.
+
+![Prolog and main split](docs/diagrams/split.svg)
+
+A diode current and its derivative in `v` with parameters `is`, `n`, `vt`,
+compiled with `compile_split`: `1/(n vt)` is the prolog, the dashed edges
+are the state the main phase reads.
+ `Tape::eval` runs over any `Scalar` (`f64`, `f32`, `Complex64`).
 `Adaptive` serves a tape by the interpreter, its choice specialization or
 native code (with a `Compiler`, compiled in the background), chosen per
 call; `Policy` sets the thresholds.
@@ -97,7 +115,17 @@ guard, `|pivot| >= 1e-3 max|column|`; on a failed guard `Plan::repivot`
 takes the rows of a numeric elimination on the current values and the
 program is rebuilt. With the matrix entries as parameter-pure inputs and
 the right-hand side as main inputs, the prolog is the factorization and
-the main part the substitution.
+the main part the substitution. `LuProgram` builds this program for a
+pattern and a `Plan`, scalar or supernodal (`Panels`), writes values and
+right-hand sides into its input layout, reads the guard and the factors'
+finiteness from the state after a prolog (`factored`) and rebuilds on the
+values (`repivot`).
+
+![LU program](docs/diagrams/lu.svg)
+
+The `LuProgram` of a 3 by 3 arrow pattern: the prolog takes the
+reciprocal pivots, the Schur update and the pivot guard (`pivots ok`), the
+main phase the forward and back substitution.
 
 The eliminations are generic over the scalar (`Num`): a real expression,
 or a complex one as a pair of real expressions (`Cx`), which lowers a
@@ -118,14 +146,18 @@ scalar ordering with the flops in the kernels.
 A multiply-instantiated model is one function and one call per instance.
 The body is compiled once; calls with the same shape lower to one kernel op
 that runs the body over all instances, serially or on the current rayon
-pool as `rsdag_jit::Options::batch` says. `Graph::set_func_body` registers a body compiled by the caller;
-programs whose calls it covers use it.
+pool as `rsdag_jit::Options::batch` says. `Graph::set_func_body` registers
+a body compiled by the caller; programs whose calls it covers use it.
 
 Parameters with the `Param` role are a body's pure arguments; its tape is
 split over them. A caller compiled with `compile_split` whose prolog has
 those arguments runs the body's prolog per instance in its own prolog and
 keeps the result in its work buffer (`ExternBundle::state_len`,
 `prolog_into`, `main_into`); per evaluation only the rest of the body runs.
+
+Above: three instances of a `diode(a, b, is, n)` body in a ring, `is` and
+`n` with the `Param` role. The prolog runs the body's parameter part for
+all three instances, the main phase one batched call.
 
 ## Choice specialization
 
@@ -137,6 +169,21 @@ conditions remain as guards. A failed guard means the region changed: the
 full tape is retraced and the specialization rebuilt. Guards that depend
 only on parameters are in the prolog and checked once per parameter
 binding.
+
+Above: a piecewise model at `v = 1` (on, linear region). The arms taken
+and the conditions that guard them are kept; the faded arms are not in the
+specialized tape.
+
+## Diagrams
+
+`dot::GraphView` draws a graph under some roots: one node per expression,
+a shared subexpression once, a focus set at full strength and the rest
+faded, clusters and extra dashed links. `dot::TapeView` draws a tape's
+dataflow: one node per instruction, the prolog and the main phase as
+clusters, the state edges dashed, named inputs, outputs and function
+bodies. `dot::Theme` sets fonts and colors; the default has a transparent
+background and grey text and edges. `scripts/diagrams.sh` renders the
+diagrams in this README with Graphviz.
 
 ## Bit-exactness
 
@@ -206,5 +253,6 @@ with `gt`, `lt`, ... expresses elementwise conditions.
 ```
 cargo test --workspace
 scripts/ci.sh                                            # the CI gate, locally
+scripts/diagrams.sh                                      # the README diagrams (needs Graphviz)
 maturin build --release -m crates/rsdag-py/Cargo.toml   # the Python wheel
 ```
