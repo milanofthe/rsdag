@@ -58,7 +58,7 @@ pub use nonlinearity::{nonlinearity, nonlinearity_of, Degree, Nonlinearity};
 /// The exact constant field (feature `exact`).
 #[cfg(feature = "exact")]
 pub use num_rational::BigRational;
-pub use role::{Crossing, OutputRole, ParamRole};
+pub use role::{Crossing, OutputRole, ParamRole, Signature};
 pub use scalar::Scalar;
 pub use scope::Scope;
 pub use semantics::{
