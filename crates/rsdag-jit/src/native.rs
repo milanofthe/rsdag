@@ -1090,25 +1090,28 @@ struct Mapping {
 
 #[cfg(unix)]
 impl Mapping {
+    /// The code is never writable and executable at once: mapped writable,
+    /// filled, then switched to read and execute (macOS toggles its JIT
+    /// write protection per thread instead, `MAP_JIT` requires it).
     fn new(bytes: &[u8]) -> Result<Mapping, JitError> {
         let len = bytes.len().max(1);
         unsafe {
             #[cfg(target_os = "macos")]
-            let flags = libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_JIT;
-            #[cfg(not(target_os = "macos"))]
-            let flags = libc::MAP_PRIVATE | libc::MAP_ANON;
-            let ptr = libc::mmap(
-                std::ptr::null_mut(),
-                len,
+            let (flags, prot) = (
+                libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_JIT,
                 libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
-                flags,
-                -1,
-                0,
             );
+            #[cfg(not(target_os = "macos"))]
+            let (flags, prot) = (
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                libc::PROT_READ | libc::PROT_WRITE,
+            );
+            let ptr = libc::mmap(std::ptr::null_mut(), len, prot, flags, -1, 0);
             if ptr == libc::MAP_FAILED {
                 return Err(JitError::Codegen("mmap of executable memory failed".into()));
             }
             let ptr = ptr as *mut u8;
+            let map = Mapping { ptr, len };
             #[cfg(target_os = "macos")]
             pthread_jit_write_protect_np(0);
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
@@ -1119,17 +1122,18 @@ impl Mapping {
             }
             #[cfg(not(target_os = "macos"))]
             {
-                libc::mprotect(
-                    ptr as *mut libc::c_void,
-                    len,
-                    libc::PROT_READ | libc::PROT_EXEC,
-                );
+                let rx = libc::PROT_READ | libc::PROT_EXEC;
+                if libc::mprotect(ptr as *mut libc::c_void, len, rx) != 0 {
+                    return Err(JitError::Codegen(
+                        "mprotect of the code to read and execute failed".into(),
+                    ));
+                }
                 __clear_cache(
                     ptr as *mut libc::c_char,
                     ptr.add(bytes.len()) as *mut libc::c_char,
                 );
             }
-            Ok(Mapping { ptr, len })
+            Ok(map)
         }
     }
 }
@@ -1158,31 +1162,41 @@ extern "C" {
 extern "system" {
     fn VirtualAlloc(addr: *mut u8, size: usize, kind: u32, protect: u32) -> *mut u8;
     fn VirtualFree(addr: *mut u8, size: usize, kind: u32) -> i32;
+    fn VirtualProtect(addr: *mut u8, size: usize, protect: u32, old: *mut u32) -> i32;
     fn GetCurrentProcess() -> isize;
     fn FlushInstructionCache(process: isize, addr: *const u8, size: usize) -> i32;
 }
 
 #[cfg(windows)]
 impl Mapping {
+    /// Committed writable, filled, then switched to read and execute.
     fn new(bytes: &[u8]) -> Result<Mapping, JitError> {
         const MEM_COMMIT_RESERVE: u32 = 0x1000 | 0x2000;
-        const PAGE_EXECUTE_READWRITE: u32 = 0x40;
+        const PAGE_READWRITE: u32 = 0x04;
+        const PAGE_EXECUTE_READ: u32 = 0x20;
         let len = bytes.len().max(1);
         unsafe {
             let ptr = VirtualAlloc(
                 std::ptr::null_mut(),
                 len,
                 MEM_COMMIT_RESERVE,
-                PAGE_EXECUTE_READWRITE,
+                PAGE_READWRITE,
             );
             if ptr.is_null() {
                 return Err(JitError::Codegen(
                     "VirtualAlloc of executable memory failed".into(),
                 ));
             }
+            let map = Mapping { ptr, len };
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+            let mut old = 0u32;
+            if VirtualProtect(ptr, len, PAGE_EXECUTE_READ, &mut old) == 0 {
+                return Err(JitError::Codegen(
+                    "VirtualProtect of the code to read and execute failed".into(),
+                ));
+            }
             FlushInstructionCache(GetCurrentProcess(), ptr, bytes.len());
-            Ok(Mapping { ptr, len })
+            Ok(map)
         }
     }
 }
