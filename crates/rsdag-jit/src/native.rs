@@ -947,11 +947,11 @@ impl<'a, I: Isa> Emitter<'a, I> {
         let r = self.fresh_for(dst);
         let inline = match uop {
             UnaryOp::Sqrt => {
-                // x > 0 ? sqrt(x) : 0, the reference's guard.
+                // x <= 0 ? 0 : sqrt(x), the reference's guard (NaN stays NaN).
                 let zero = self.fconst(0.0);
                 let s = self.fresh();
                 self.isa.sqrt(s, x);
-                self.isa.cmp_select(CmpOp::Gt, x, zero, s, zero, r);
+                self.isa.cmp_select(CmpOp::Le, x, zero, zero, s, r);
                 true
             }
             UnaryOp::Floor => self.isa.round(Round::Floor, r, x),

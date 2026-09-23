@@ -175,18 +175,21 @@ pub fn unary_f64(op: UnaryOp, x: f64) -> f64 {
                 x.exp()
             }
         }
+        // The guards test for the out-of-range side, so a NaN argument
+        // falls through to the bare op and stays NaN: a guard clamps a
+        // wild iterate, it does not turn a missing value into a number.
         UnaryOp::Ln => {
-            if x > LN_FLOOR {
-                x.ln()
-            } else {
+            if x <= LN_FLOOR {
                 LN_FLOOR.ln()
+            } else {
+                x.ln()
             }
         }
         UnaryOp::Sqrt => {
-            if x > 0.0 {
-                x.sqrt()
-            } else {
+            if x <= 0.0 {
                 0.0
+            } else {
+                x.sqrt()
             }
         }
         UnaryOp::Sin => x.sin(),
