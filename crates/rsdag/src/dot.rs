@@ -40,19 +40,34 @@ pub enum Kind {
     Output,
 }
 
-/// Colors and fonts of every diagram: a transparent page, grey text and
-/// edges, each node kind in its hue as a line and a faint fill, so a
-/// diagram reads on a light and a dark page alike.
+/// How a graph's operators are labelled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Notation {
+    /// `*`, `neg`, `^-1`, `exp`, `>`, `select`, `sum`, `dot`.
+    Ascii,
+    /// `×`, `−(·)`, `(·)^-1`, `exp(·)`, `(·) > (·)`, `(·) ? (·) : (·)`,
+    /// `Σ`, `<·,·>`.
+    Math,
+}
+
+/// Colors and fonts of every diagram. The default: a transparent page,
+/// grey text and edges, each node kind in its hue as a line and a faint
+/// fill, so a diagram reads on a light and a dark page alike.
 #[derive(Clone, Debug)]
 pub struct Theme {
     pub font: &'static str,
     pub font_size: f64,
     /// Labels, edges and cluster frames.
     pub text: &'static str,
-    /// Alpha of a node's fill, two hex digits.
+    /// One line color for every node; `None` draws a node in its hue.
+    pub line: Option<&'static str>,
+    /// Alpha of a node's fill, two hex digits (empty: the hue as is).
     pub fill_alpha: &'static str,
-    /// Alpha of a faded node or edge, two hex digits.
+    /// Alpha of a faded node's line, text and edges, two hex digits.
     pub fade_alpha: &'static str,
+    /// Alpha of a faded node's fill, two hex digits.
+    pub fade_fill_alpha: &'static str,
+    pub notation: Notation,
     pub input: &'static str,
     pub param: &'static str,
     pub constant: &'static str,
@@ -71,8 +86,11 @@ impl Default for Theme {
             font: "Helvetica,Arial,sans-serif",
             font_size: 11.0,
             text: "#808080",
+            line: None,
             fill_alpha: "26",
             fade_alpha: "38",
+            fade_fill_alpha: "0d",
+            notation: Notation::Ascii,
             input: "#3b82f6",
             param: "#22c55e",
             constant: "#94a3b8",
@@ -118,9 +136,15 @@ impl Theme {
     }
 
     /// The attributes of a node of `kind` labelled `label`, faded or not.
+    /// An operator or kernel with a label of at most two characters is a
+    /// circle.
     pub fn node(&self, kind: Kind, label: &str, faded: bool) -> String {
         let hue = self.hue(kind);
+        let line = self.line.unwrap_or(hue);
         let shape = match kind {
+            Kind::Op | Kind::Choice | Kind::Kernel if label.chars().count() <= 2 => {
+                "circle, style=\"filled\", width=0.3, fixedsize=false"
+            }
             Kind::Input | Kind::Param | Kind::Output | Kind::Call | Kind::Kernel => {
                 "box, style=\"rounded,filled\""
             }
@@ -129,15 +153,16 @@ impl Theme {
         };
         if faded {
             format!(
-                "label=\"{}\", shape={shape}, color=\"{hue}{a}\", fillcolor=\"{hue}0d\", \
+                "label=\"{}\", shape={shape}, color=\"{line}{a}\", fillcolor=\"{hue}{}\", \
                  fontcolor=\"{}{a}\"",
                 escape(label),
+                self.fade_fill_alpha,
                 self.text,
                 a = self.fade_alpha,
             )
         } else {
             format!(
-                "label=\"{}\", shape={shape}, color=\"{hue}\", fillcolor=\"{hue}{}\"",
+                "label=\"{}\", shape={shape}, color=\"{line}\", fillcolor=\"{hue}{}\"",
                 escape(label),
                 self.fill_alpha,
             )
@@ -269,6 +294,7 @@ impl<'g, K: Field> GraphView<'g, K> {
     /// The label and kind of node `e`.
     fn style(&self, e: ExprId) -> (String, Kind) {
         let g = self.g;
+        let math = self.theme.notation == Notation::Math;
         match *g.node(e) {
             Node::Const(c) => {
                 let exact = g.const_val(c).render();
@@ -287,35 +313,52 @@ impl<'g, K: Field> GraphView<'g, K> {
                 },
             ),
             Node::Add(..) => ("+".into(), Kind::Op),
-            Node::Mul(..) => ("*".into(), Kind::Op),
-            Node::Neg(_) => ("neg".into(), Kind::Op),
+            Node::Mul(..) => (if math { "\u{00d7}" } else { "*" }.into(), Kind::Op),
+            Node::Neg(_) => (
+                if math { "\u{2212}(\u{00b7})" } else { "neg" }.into(),
+                Kind::Op,
+            ),
+            Node::Pow(_, n) if math => (format!("(\u{00b7})^{n}"), Kind::Op),
             Node::Pow(_, n) => (format!("^{n}"), Kind::Op),
+            Node::Unary(op, _) if math => (format!("{}(\u{00b7})", op.name()), Kind::Op),
             Node::Unary(op, _) => (op.name().into(), Kind::Op),
             Node::Binary(op, ..) => (op.name().into(), Kind::Op),
-            Node::Cmp(op, ..) => (
-                match op {
+            Node::Cmp(op, ..) => {
+                let c = match op {
                     CmpOp::Gt => ">",
                     CmpOp::Ge => ">=",
                     CmpOp::Lt => "<",
                     CmpOp::Le => "<=",
                     CmpOp::Eq => "==",
                     CmpOp::Ne => "!=",
-                }
-                .into(),
-                Kind::Choice,
-            ),
+                };
+                let label = if math {
+                    format!("(\u{00b7}) {c} (\u{00b7})")
+                } else {
+                    c.to_string()
+                };
+                (label, Kind::Choice)
+            }
+            Node::Select(..) if math => {
+                ("(\u{00b7}) ? (\u{00b7}) : (\u{00b7})".into(), Kind::Choice)
+            }
             Node::Select(..) => ("select".into(), Kind::Choice),
             Node::Reduce(op, _) => (
-                match op {
-                    ReduceOp::Sum => "sum",
-                    ReduceOp::Product => "prod",
-                    ReduceOp::Min => "min",
-                    ReduceOp::Max => "max",
+                match (op, math) {
+                    (ReduceOp::Sum, true) => "\u{03a3}",
+                    (ReduceOp::Product, true) => "\u{03a0}",
+                    (ReduceOp::Sum, false) => "sum",
+                    (ReduceOp::Product, false) => "prod",
+                    (ReduceOp::Min, _) => "min",
+                    (ReduceOp::Max, _) => "max",
                 }
                 .into(),
                 Kind::Kernel,
             ),
-            Node::Dot(_) => ("dot".into(), Kind::Kernel),
+            Node::Dot(_) => (
+                if math { "<\u{00b7},\u{00b7}>" } else { "dot" }.into(),
+                Kind::Kernel,
+            ),
             Node::Solve(_, i) => (format!("solve[{i}]"), Kind::Kernel),
             Node::Call(o, _) => {
                 let (f, k) = g.output(o);

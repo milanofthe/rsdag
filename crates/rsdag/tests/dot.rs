@@ -2,7 +2,7 @@
 //! subexpression once, faded nodes outside the focus, the prolog and main
 //! phase as clusters with the state crossing between them as dashed edges.
 
-use rsdag::dot::{number, reachable, GraphView, TapeView};
+use rsdag::dot::{number, reachable, GraphView, Notation, TapeView, Theme};
 use rsdag::{differentiate, ExprId, Graph, Node, SymbolId, Tape, F64};
 
 fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
@@ -98,4 +98,29 @@ fn numbers_are_short() {
     assert_eq!(number(0.001), "0.001");
     assert_eq!(number(5.5406e34), "5.541e34");
     assert_eq!(number(1.0 / 3.0), "0.3333");
+}
+
+#[test]
+fn a_theme_with_one_line_color_and_opaque_fills() {
+    let mut g: Graph<F64> = Graph::new();
+    let (x, y) = (g.sym("x"), g.sym("y"));
+    let xy = g.mul(x, y);
+    let s = g.sin(xy);
+    let f = g.add(s, xy);
+    let theme = Theme {
+        text: "#000000",
+        line: Some("#000000"),
+        fill_alpha: "",
+        op: "#E0E0E0",
+        notation: Notation::Math,
+        ..Theme::default()
+    };
+    let dot = GraphView::new(&g).theme(theme).root(f, "F").render();
+    assert!(dot.contains("label=\"\u{00d7}\", shape=circle"), "{dot}");
+    assert!(dot.contains("label=\"sin(\u{00b7})\""), "{dot}");
+    assert!(
+        dot.contains("color=\"#000000\", fillcolor=\"#E0E0E0\""),
+        "{dot}"
+    );
+    assert!(!dot.contains("#E0E0E026"));
 }

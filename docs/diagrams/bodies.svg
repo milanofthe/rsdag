@@ -147,74 +147,74 @@
 <!-- o2 -->
 <g id="node10" class="node">
 <title>o2</title>
-<ellipse fill="#808080" fill-opacity="0.149020" stroke="#808080" stroke-width="1.2" cx="337" cy="-58.14" rx="27" ry="11.54"/>
-<text xml:space="preserve" text-anchor="middle" x="337" y="-53.69" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">&#45;</text>
+<ellipse fill="#808080" fill-opacity="0.149020" stroke="#808080" stroke-width="1.2" cx="322" cy="-58.14" rx="11.54" ry="11.54"/>
+<text xml:space="preserve" text-anchor="middle" x="322" y="-53.69" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">&#45;</text>
 </g>
 <!-- o1&#45;&gt;o2 -->
 <g id="edge13" class="edge">
 <title>o1&#45;&gt;o2</title>
-<path fill="none" stroke="#808080" stroke-width="0.9" d="M343.22,-94.42C342.33,-89.35 341.22,-83.06 340.19,-77.2"/>
-<polygon fill="#808080" stroke="#808080" stroke-width="0.9" points="342.29,-77.01 339.18,-71.47 338.15,-77.74 342.29,-77.01"/>
+<path fill="none" stroke="#808080" stroke-width="0.9" d="M339.9,-94.42C337.06,-88.82 333.46,-81.73 330.23,-75.37"/>
+<polygon fill="#808080" stroke="#808080" stroke-width="0.9" points="332.14,-74.48 327.55,-70.08 328.39,-76.38 332.14,-74.48"/>
 </g>
 <!-- o3 -->
 <g id="node11" class="node">
 <title>o3</title>
-<ellipse fill="#808080" fill-opacity="0.149020" stroke="#808080" stroke-width="1.2" cx="409" cy="-58.14" rx="27" ry="11.54"/>
-<text xml:space="preserve" text-anchor="middle" x="409" y="-53.69" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">&#45;</text>
+<ellipse fill="#808080" fill-opacity="0.149020" stroke="#808080" stroke-width="1.2" cx="363" cy="-58.14" rx="11.54" ry="11.54"/>
+<text xml:space="preserve" text-anchor="middle" x="363" y="-53.69" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">&#45;</text>
 </g>
 <!-- o1&#45;&gt;o3 -->
 <g id="edge14" class="edge">
 <title>o1&#45;&gt;o3</title>
-<path fill="none" stroke="#808080" stroke-width="0.9" d="M359.52,-94.19C368.56,-87.79 380.29,-79.48 390.05,-72.56"/>
-<polygon fill="#808080" stroke="#808080" stroke-width="0.9" points="391.05,-74.43 394.73,-69.25 388.62,-71 391.05,-74.43"/>
+<path fill="none" stroke="#808080" stroke-width="0.9" d="M348.99,-94.42C351.11,-89.09 353.76,-82.41 356.19,-76.29"/>
+<polygon fill="#808080" stroke="#808080" stroke-width="0.9" points="358.13,-77.11 358.39,-70.75 354.22,-75.56 358.13,-77.11"/>
 </g>
 <!-- o4 -->
 <g id="node12" class="node">
 <title>o4</title>
-<ellipse fill="#808080" fill-opacity="0.149020" stroke="#808080" stroke-width="1.2" cx="481" cy="-58.14" rx="27" ry="11.54"/>
-<text xml:space="preserve" text-anchor="middle" x="481" y="-53.69" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">&#45;</text>
+<ellipse fill="#808080" fill-opacity="0.149020" stroke="#808080" stroke-width="1.2" cx="420" cy="-58.14" rx="11.54" ry="11.54"/>
+<text xml:space="preserve" text-anchor="middle" x="420" y="-53.69" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">&#45;</text>
 </g>
 <!-- o1&#45;&gt;o4 -->
 <g id="edge15" class="edge">
 <title>o1&#45;&gt;o4</title>
-<path fill="none" stroke="#808080" stroke-width="0.9" d="M375.86,-94.19C399.2,-86.41 430.95,-75.83 453.44,-68.33"/>
-<polygon fill="#808080" stroke="#808080" stroke-width="0.9" points="454.07,-70.33 459.1,-66.44 452.74,-66.35 454.07,-70.33"/>
+<path fill="none" stroke="#808080" stroke-width="0.9" d="M362.02,-94.19C374.68,-86.54 391.83,-76.17 404.19,-68.7"/>
+<polygon fill="#808080" stroke="#808080" stroke-width="0.9" points="404.96,-70.69 409.01,-65.79 402.78,-67.09 404.96,-70.69"/>
 </g>
 <!-- r0 -->
 <g id="node13" class="node">
 <title>r0</title>
-<path fill="#ef4444" fill-opacity="0.149020" stroke="#ef4444" stroke-width="1.2" d="M356.8,-21.6C356.8,-21.6 317.2,-21.6 317.2,-21.6 313.6,-21.6 310,-18 310,-14.4 310,-14.4 310,-7.2 310,-7.2 310,-3.6 313.6,0 317.2,0 317.2,0 356.8,0 356.8,0 360.4,0 364,-3.6 364,-7.2 364,-7.2 364,-14.4 364,-14.4 364,-18 360.4,-21.6 356.8,-21.6"/>
-<text xml:space="preserve" text-anchor="middle" x="337" y="-6.35" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">kcl0</text>
+<path fill="#ef4444" fill-opacity="0.149020" stroke="#ef4444" stroke-width="1.2" d="M310.8,-21.6C310.8,-21.6 271.2,-21.6 271.2,-21.6 267.6,-21.6 264,-18 264,-14.4 264,-14.4 264,-7.2 264,-7.2 264,-3.6 267.6,0 271.2,0 271.2,0 310.8,0 310.8,0 314.4,0 318,-3.6 318,-7.2 318,-7.2 318,-14.4 318,-14.4 318,-18 314.4,-21.6 310.8,-21.6"/>
+<text xml:space="preserve" text-anchor="middle" x="291" y="-6.35" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">kcl0</text>
 </g>
 <!-- o2&#45;&gt;r0 -->
 <g id="edge16" class="edge">
 <title>o2&#45;&gt;r0</title>
-<path fill="none" stroke="#808080" stroke-width="0.9" d="M337,-46.16C337,-41.12 337,-35.01 337,-29.35"/>
-<polygon fill="#808080" stroke="#808080" stroke-width="0.9" points="339.1,-29.42 337,-23.42 334.9,-29.42 339.1,-29.42"/>
+<path fill="none" stroke="#808080" stroke-width="0.9" d="M315.73,-47.96C311.77,-42.18 306.56,-34.55 301.93,-27.79"/>
+<polygon fill="#808080" stroke="#808080" stroke-width="0.9" points="303.8,-26.8 298.68,-23.03 300.33,-29.17 303.8,-26.8"/>
 </g>
 <!-- r1 -->
 <g id="node14" class="node">
 <title>r1</title>
-<path fill="#ef4444" fill-opacity="0.149020" stroke="#ef4444" stroke-width="1.2" d="M428.8,-21.6C428.8,-21.6 389.2,-21.6 389.2,-21.6 385.6,-21.6 382,-18 382,-14.4 382,-14.4 382,-7.2 382,-7.2 382,-3.6 385.6,0 389.2,0 389.2,0 428.8,0 428.8,0 432.4,0 436,-3.6 436,-7.2 436,-7.2 436,-14.4 436,-14.4 436,-18 432.4,-21.6 428.8,-21.6"/>
-<text xml:space="preserve" text-anchor="middle" x="409" y="-6.35" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">kcl1</text>
+<path fill="#ef4444" fill-opacity="0.149020" stroke="#ef4444" stroke-width="1.2" d="M382.8,-21.6C382.8,-21.6 343.2,-21.6 343.2,-21.6 339.6,-21.6 336,-18 336,-14.4 336,-14.4 336,-7.2 336,-7.2 336,-3.6 339.6,0 343.2,0 343.2,0 382.8,0 382.8,0 386.4,0 390,-3.6 390,-7.2 390,-7.2 390,-14.4 390,-14.4 390,-18 386.4,-21.6 382.8,-21.6"/>
+<text xml:space="preserve" text-anchor="middle" x="363" y="-6.35" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">kcl1</text>
 </g>
 <!-- o3&#45;&gt;r1 -->
 <g id="edge17" class="edge">
 <title>o3&#45;&gt;r1</title>
-<path fill="none" stroke="#808080" stroke-width="0.9" d="M409,-46.16C409,-41.12 409,-35.01 409,-29.35"/>
-<polygon fill="#808080" stroke="#808080" stroke-width="0.9" points="411.1,-29.42 409,-23.42 406.9,-29.42 411.1,-29.42"/>
+<path fill="none" stroke="#808080" stroke-width="0.9" d="M363,-46.16C363,-41.12 363,-35.01 363,-29.35"/>
+<polygon fill="#808080" stroke="#808080" stroke-width="0.9" points="365.1,-29.42 363,-23.42 360.9,-29.42 365.1,-29.42"/>
 </g>
 <!-- r2 -->
 <g id="node15" class="node">
 <title>r2</title>
-<path fill="#ef4444" fill-opacity="0.149020" stroke="#ef4444" stroke-width="1.2" d="M500.8,-21.6C500.8,-21.6 461.2,-21.6 461.2,-21.6 457.6,-21.6 454,-18 454,-14.4 454,-14.4 454,-7.2 454,-7.2 454,-3.6 457.6,0 461.2,0 461.2,0 500.8,0 500.8,0 504.4,0 508,-3.6 508,-7.2 508,-7.2 508,-14.4 508,-14.4 508,-18 504.4,-21.6 500.8,-21.6"/>
-<text xml:space="preserve" text-anchor="middle" x="481" y="-6.35" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">kcl2</text>
+<path fill="#ef4444" fill-opacity="0.149020" stroke="#ef4444" stroke-width="1.2" d="M454.8,-21.6C454.8,-21.6 415.2,-21.6 415.2,-21.6 411.6,-21.6 408,-18 408,-14.4 408,-14.4 408,-7.2 408,-7.2 408,-3.6 411.6,0 415.2,0 415.2,0 454.8,0 454.8,0 458.4,0 462,-3.6 462,-7.2 462,-7.2 462,-14.4 462,-14.4 462,-18 458.4,-21.6 454.8,-21.6"/>
+<text xml:space="preserve" text-anchor="middle" x="435" y="-6.35" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">kcl2</text>
 </g>
 <!-- o4&#45;&gt;r2 -->
 <g id="edge18" class="edge">
 <title>o4&#45;&gt;r2</title>
-<path fill="none" stroke="#808080" stroke-width="0.9" d="M481,-46.16C481,-41.12 481,-35.01 481,-29.35"/>
-<polygon fill="#808080" stroke="#808080" stroke-width="0.9" points="483.1,-29.42 481,-23.42 478.9,-29.42 483.1,-29.42"/>
+<path fill="none" stroke="#808080" stroke-width="0.9" d="M423.48,-46.62C425.25,-41.28 427.43,-34.67 429.43,-28.64"/>
+<polygon fill="#808080" stroke="#808080" stroke-width="0.9" points="431.32,-29.6 431.22,-23.24 427.34,-28.28 431.32,-29.6"/>
 </g>
 </g>
 </svg>
