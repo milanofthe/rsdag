@@ -44,10 +44,12 @@ pub mod block;
 pub mod btf;
 pub mod num;
 pub mod predict;
+pub mod program;
 pub mod supernodal;
 
 pub use block::{block_pattern, solve_block_planned, solve_block_planned_sizes, Block, BlockRows};
 pub use num::{Cx, Num};
+pub use program::{LuProgram, Panels};
 pub use supernodal::{solve_supernodal_planned, supernodes, Supernodes};
 
 use rustc_hash::FxHashMap as HashMap;
