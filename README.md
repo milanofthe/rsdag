@@ -49,7 +49,11 @@ nothing. It reads no clock there unless a host installs one through
 ## Graph
 
 Nodes are hash-consed; ascending ids are a topological order. Constructors
-fold constants in `K` and apply the algebraic identities. A function is a
+fold constants in `K` and apply the algebraic identities. Every node has a
+structural fingerprint (`Graph::fingerprint`), a hash of what it computes
+that is the same in any graph, platform and build order; the terms of a
+sum or product are ordered by it, so a graph's values do not depend on the
+order it was built in. A function is a
 graph over positional parameters with named outputs; `Call` applies it;
 derivative outputs are derived from the body on first demand. Parameters
 and outputs carry roles (state, input, parameter, time; residual,

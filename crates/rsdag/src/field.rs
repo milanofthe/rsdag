@@ -47,6 +47,9 @@ pub trait Field: Clone + PartialEq + Eq + Hash + std::fmt::Debug + Send + Sync +
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering>;
     /// Exact textual form for the printer (`3/2`, `-7`, `0.1`).
     fn render(&self) -> String;
+    /// A hash of the value that is the same on every platform and in every
+    /// run (the constants' part of [`Graph::fingerprint`](crate::Graph::fingerprint)).
+    fn stable_hash(&self) -> u64;
 }
 
 #[cfg(feature = "exact")]
@@ -107,6 +110,13 @@ impl Field for BigRational {
         } else {
             format!("{}/{}", self.numer(), self.denom())
         }
+    }
+    fn stable_hash(&self) -> u64 {
+        // The canonical bytes, not the digits: those are 64 bits wide on a
+        // 64-bit host and 32 on wasm32.
+        let n = crate::node::shape::of_hash(&self.numer().to_signed_bytes_le()[..]);
+        let d = crate::node::shape::of_hash(&self.denom().to_signed_bytes_le()[..]);
+        crate::node::shape::mix(n, d)
     }
 }
 
@@ -247,5 +257,8 @@ impl Field for F64 {
     }
     fn render(&self) -> String {
         format!("{:?}", self.0)
+    }
+    fn stable_hash(&self) -> u64 {
+        crate::node::shape::mix(0, self.0.to_bits())
     }
 }
