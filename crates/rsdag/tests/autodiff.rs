@@ -255,3 +255,64 @@ fn the_jacobian_is_sparse() {
     assert_eq!(jac[0][0].1, a);
     assert_eq!(jac[1][0].1, ctx.one());
 }
+
+/// Rows touching many unknowns take a reverse sweep, the rest forward
+/// sweeps shared across rows; either way every entry is the forward
+/// derivative's value, and the pattern is the same.
+#[test]
+fn sparse_jacobian_modes_agree_with_forward_derivatives() {
+    use rsdag::synth::{build, inputs, Spec, Vocabulary};
+    use rsdag::{autodiff::REVERSE_MIN_TOUCHED, differentiate, sparse_jacobian, Tape, F64};
+    for (seed, params) in [(1u64, 4usize), (2, 40), (3, 64)] {
+        let mut g: Graph<F64> = Graph::new();
+        let mut spec = Spec::new(seed)
+            .steps(1500)
+            .params(params)
+            .outputs(6)
+            .vocab(Vocabulary::Elementary)
+            .width(params.max(8))
+            .smooth();
+        let (roots, syms) = build(&mut g, &mut spec);
+        let jac = sparse_jacobian(&mut g, &roots, &syms);
+        let mut fast = Vec::new();
+        let mut slow = Vec::new();
+        let mut reverse_rows = 0;
+        for (i, row) in jac.iter().enumerate() {
+            if g.free_symbols(roots[i]).len() >= REVERSE_MIN_TOUCHED {
+                reverse_rows += 1;
+            }
+            for &(j, e) in row {
+                fast.push(e);
+                slow.push(differentiate(&mut g, roots[i], syms[j]));
+            }
+        }
+        if params >= REVERSE_MIN_TOUCHED {
+            assert!(
+                reverse_rows > 0,
+                "seed {seed}: no row took the reverse sweep"
+            );
+        }
+        let ins = inputs(&mut spec.rng(), syms.len());
+        let (mut w, mut a, mut b) = (Vec::new(), Vec::new(), Vec::new());
+        Tape::compile(&g, &fast, &syms).eval(&ins, &mut w, &mut a);
+        Tape::compile(&g, &slow, &syms).eval(&ins, &mut w, &mut b);
+        for (k, (x, y)) in a.iter().zip(&b).enumerate() {
+            let tol = 1e-12 * (1.0 + x.abs().max(y.abs()));
+            let same = (x.is_nan() && y.is_nan()) || x == y || (x - y).abs() <= tol;
+            assert!(same, "seed {seed} entry {k}: {x} vs {y}");
+        }
+        // No structural nonzero is lost: a forward entry that is not zero
+        // symbolically is in the sparse pattern.
+        for (i, row) in jac.iter().enumerate() {
+            for (j, &s) in syms.iter().enumerate() {
+                let d = differentiate(&mut g, roots[i], s);
+                if !g.is_zero(d) {
+                    assert!(
+                        row.iter().any(|&(c, _)| c == j),
+                        "seed {seed}: ({i}, {j}) missing"
+                    );
+                }
+            }
+        }
+    }
+}

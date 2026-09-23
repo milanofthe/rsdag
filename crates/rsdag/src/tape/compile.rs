@@ -82,13 +82,88 @@ impl Tape {
     }
 }
 
+/// Dense tables over a graph's nodes and symbols, reused by every
+/// compilation on a thread: allocated once to the largest graph seen and
+/// valid by generation stamp, so compiling a small tape out of a large
+/// graph costs the tape, not the graph. A compilation takes the thread's
+/// tables and gives them back when its [`Forest`] drops (a nested one, a
+/// body compiled while lowering, gets fresh tables).
+#[derive(Default)]
+struct Scratch {
+    generation: u32,
+    /// Node `k` is in this compilation's forest when `seen[k]` is the
+    /// generation; `pos[k]` is then its base position.
+    seen: Vec<u32>,
+    pos: Vec<u32>,
+    /// Symbol `s` is input `input[s]` when `input_seen[s]` is the generation.
+    input_seen: Vec<u32>,
+    input: Vec<u32>,
+}
+
+std::thread_local! {
+    static SCRATCH: std::cell::Cell<Option<Scratch>> = const { std::cell::Cell::new(None) };
+}
+
+impl Scratch {
+    fn take(n_nodes: usize, n_symbols: usize) -> Scratch {
+        let mut t = SCRATCH.with(|c| c.take()).unwrap_or_default();
+        t.generation = t.generation.wrapping_add(1);
+        if t.generation == 0 {
+            // Every stamp could be a stale match after a wrap: start over.
+            t.seen.fill(0);
+            t.input_seen.fill(0);
+            t.generation = 1;
+        }
+        if t.seen.len() < n_nodes {
+            t.seen.resize(n_nodes, 0);
+            t.pos.resize(n_nodes, u32::MAX);
+        }
+        if t.input_seen.len() < n_symbols {
+            t.input_seen.resize(n_symbols, 0);
+            t.input.resize(n_symbols, u32::MAX);
+        }
+        t
+    }
+
+    /// Mark node `e`; whether it was unmarked.
+    #[inline]
+    fn mark(&mut self, e: ExprId) -> bool {
+        let k = e.0 as usize;
+        let fresh = self.seen[k] != self.generation;
+        self.seen[k] = self.generation;
+        fresh
+    }
+
+    /// Input `k` is symbol `s` (a later listing of one symbol wins).
+    fn set_input(&mut self, s: SymbolId, k: u32) {
+        if let Some(slot) = self.input.get_mut(s.0 as usize) {
+            *slot = k;
+            self.input_seen[s.0 as usize] = self.generation;
+        }
+    }
+
+    #[inline]
+    fn input(&self, s: SymbolId) -> Option<u32> {
+        let k = s.0 as usize;
+        (self.input_seen.get(k) == Some(&self.generation)).then(|| self.input[k])
+    }
+}
+
+impl Drop for Forest {
+    fn drop(&mut self) {
+        let t = std::mem::take(&mut self.tables);
+        SCRATCH.with(|c| c.set(Some(t)));
+    }
+}
+
 /// The reachable forest of one compilation, in dependency order, with the
 /// tables the later passes index by *base position* (the index into
 /// [`Forest::base`], not the arena id).
 struct Forest {
     base: Vec<ExprId>,
-    bpos: Vec<u32>,
-    input_of: HashMap<SymbolId, u32>,
+    /// Base positions and input indices, in tables sized to the arena but
+    /// valid only for this compilation's nodes and inputs (see [`Scratch`]).
+    tables: Scratch,
     /// Parameter-purity for the prolog split; all false without one.
     pure: Vec<bool>,
     /// `fused_into[p]` is the base position of the `Add` that absorbed the
@@ -413,7 +488,13 @@ impl Program {
 impl Forest {
     #[inline]
     fn pos(&self, e: ExprId) -> usize {
-        self.bpos[e.0 as usize] as usize
+        self.tables.pos[e.0 as usize] as usize
+    }
+
+    /// The input index of symbol `s`, if it is one.
+    #[inline]
+    fn input(&self, s: SymbolId) -> Option<u32> {
+        self.tables.input(s)
     }
 
     /// Pass 1: reachability, purity, use counts and superinstruction fusion.
@@ -423,31 +504,28 @@ impl Forest {
         input_syms: &[SymbolId],
         pure_inputs: Option<&[bool]>,
     ) -> Forest {
-        let mut input_of: HashMap<SymbolId, u32> =
-            HashMap::with_capacity_and_hasher(input_syms.len(), Default::default());
+        let mut t = Scratch::take(ctx.len(), ctx.n_symbols());
         for (k, &s) in input_syms.iter().enumerate() {
-            input_of.insert(s, k as u32);
+            t.set_input(s, k as u32);
         }
-        let n_arena = ctx.len();
-        let mut mark = vec![false; n_arena];
+        // The reachable nodes, marked in the stamped table; ascending ids
+        // are a dependency order. The walk and the sort cost the forest's
+        // size, not the graph's.
+        let mut base: Vec<ExprId> = Vec::new();
         let mut stack = roots.to_vec();
         while let Some(id) = stack.pop() {
-            let k = id.0 as usize;
-            if mark[k] {
+            if !t.mark(id) {
                 continue;
             }
-            mark[k] = true;
+            base.push(id);
             stack.extend_from_slice(&ctx.operands(id));
         }
-        let base: Vec<ExprId> = (0..n_arena)
-            .filter(|&k| mark[k])
-            .map(|k| ExprId(k as u32))
-            .collect();
+        base.sort_unstable_by_key(|e| e.0);
         let m = base.len();
-        let mut bpos = vec![u32::MAX; n_arena];
         for (i, id) in base.iter().enumerate() {
-            bpos[id.0 as usize] = i as u32;
+            t.pos[id.0 as usize] = i as u32;
         }
+        let bpos = &t.pos;
         let bp = |e: ExprId| bpos[e.0 as usize] as usize;
 
         // Purity: a node is parameter-pure when every operand is; an
@@ -457,9 +535,9 @@ impl Forest {
             for (i, id) in base.iter().enumerate() {
                 pure[i] = match ctx.node(*id) {
                     Node::Const(_) => true,
-                    Node::Symbol(s) => match input_of.get(s) {
+                    Node::Symbol(s) => match t.input(*s) {
                         None => true,
-                        Some(&k) => mask.get(k as usize).copied().unwrap_or(false),
+                        Some(k) => mask.get(k as usize).copied().unwrap_or(false),
                     },
                     _ => ctx.operands(*id).iter().all(|a| pure[bp(*a)]),
                 };
@@ -498,8 +576,7 @@ impl Forest {
         }
         Forest {
             base,
-            bpos,
-            input_of,
+            tables: t,
             pure,
             fused_into,
         }
@@ -811,8 +888,12 @@ impl Forest {
         // over thousands of rows names its operands hundreds of thousands
         // of times.
         let mut stamp: Vec<usize> = vec![usize::MAX; m];
-        let mut deps_of_unit = |u: usize| -> Vec<usize> {
-            let mut raw = Vec::new();
+        // One buffer for every unit's raw operands and one for the distinct
+        // ones, reused: a million units are not two million allocations.
+        let mut raw: Vec<usize> = Vec::new();
+        let mut deps: Vec<usize> = Vec::new();
+        let mut deps_of_unit = |u: usize, deps: &mut Vec<usize>| {
+            raw.clear();
             match kernel_of[u] {
                 Some(g) => {
                     for &mi in &groups[g].1 {
@@ -821,14 +902,13 @@ impl Forest {
                 }
                 None => deps_of_node(u, &mut raw),
             }
-            let mut out = Vec::with_capacity(raw.len().min(64));
-            for d in raw {
+            deps.clear();
+            for &d in &raw {
                 if stamp[d] != u {
                     stamp[d] = u;
-                    out.push(d);
+                    deps.push(d);
                 }
             }
-            out
         };
         let mut done = vec![false; m];
         let mut order: Vec<usize> = Vec::with_capacity(m);
@@ -846,7 +926,8 @@ impl Forest {
                 continue;
             }
             stack.push((u, true));
-            for d in deps_of_unit(u) {
+            deps_of_unit(u, &mut deps);
+            for &d in &deps {
                 if !done[d] {
                     stack.push((d, false));
                 }
@@ -856,9 +937,7 @@ impl Forest {
         // --- the instructions, in that order --------------------------------
         let leaf = |e: ExprId| -> Option<Ref> {
             match ctx.node(e) {
-                Node::Symbol(s) => Some(Ref::Input(
-                    self.input_of.get(s).copied().unwrap_or(u32::MAX),
-                )),
+                Node::Symbol(s) => Some(Ref::Input(self.input(*s).unwrap_or(u32::MAX))),
                 _ => None,
             }
         };
@@ -1094,7 +1173,9 @@ impl Forest {
             }
             // An ordinary node, one instruction; an Add with a fused
             // operand reads through it.
-            let (kind, ins): (Kind, Vec<Ref>) = match node {
+            // The operands go straight into the program's pool.
+            let start = pool.len() as u32;
+            let kind = match node {
                 Node::Add(a, b) => {
                     let (pa, pb) = (self.pos(a), self.pos(b));
                     if self.fused_into[pa] == Some(i) || self.fused_into[pb] == Some(i) {
@@ -1104,43 +1185,68 @@ impl Forest {
                             (b, a)
                         };
                         match *ctx.node(fused) {
-                            Node::Mul(x, y) => (
-                                Kind::MulAdd,
-                                vec![val(x, &value), val(y, &value), val(other, &value)],
-                            ),
-                            Node::Neg(x) => (Kind::Sub, vec![val(other, &value), val(x, &value)]),
+                            Node::Mul(x, y) => {
+                                pool.extend_from_slice(&[
+                                    val(x, &value),
+                                    val(y, &value),
+                                    val(other, &value),
+                                ]);
+                                Kind::MulAdd
+                            }
+                            Node::Neg(x) => {
+                                pool.extend_from_slice(&[val(other, &value), val(x, &value)]);
+                                Kind::Sub
+                            }
                             _ => unreachable!("only a Mul or a Neg fuses"),
                         }
                     } else {
-                        (Kind::Add, vec![val(a, &value), val(b, &value)])
+                        {
+                            pool.extend_from_slice(&[val(a, &value), val(b, &value)]);
+                            Kind::Add
+                        }
                     }
                 }
-                Node::Mul(a, b) => (Kind::Mul, vec![val(a, &value), val(b, &value)]),
-                Node::Neg(a) => (Kind::Neg, vec![val(a, &value)]),
-                Node::Pow(a, n) => (Kind::Powi(n as i32), vec![val(a, &value)]),
-                Node::Unary(op, a) => (Kind::Unary(op), vec![val(a, &value)]),
-                Node::Binary(op, a, b) => (Kind::Binary(op), vec![val(a, &value), val(b, &value)]),
-                Node::Cmp(op, a, b) => (Kind::Cmp(op), vec![val(a, &value), val(b, &value)]),
-                Node::Select(c, t, e) => (
-                    Kind::Select,
-                    vec![val(c, &value), val(t, &value), val(e, &value)],
-                ),
-                Node::Reduce(op, l) => (
-                    Kind::Reduce(op),
-                    ctx.args(l).iter().map(|&a| val(a, &value)).collect(),
-                ),
+                Node::Mul(a, b) => {
+                    pool.extend_from_slice(&[val(a, &value), val(b, &value)]);
+                    Kind::Mul
+                }
+                Node::Neg(a) => {
+                    pool.extend_from_slice(&[val(a, &value)]);
+                    Kind::Neg
+                }
+                Node::Pow(a, n) => {
+                    pool.extend_from_slice(&[val(a, &value)]);
+                    Kind::Powi(n as i32)
+                }
+                Node::Unary(op, a) => {
+                    pool.extend_from_slice(&[val(a, &value)]);
+                    Kind::Unary(op)
+                }
+                Node::Binary(op, a, b) => {
+                    pool.extend_from_slice(&[val(a, &value), val(b, &value)]);
+                    Kind::Binary(op)
+                }
+                Node::Cmp(op, a, b) => {
+                    pool.extend_from_slice(&[val(a, &value), val(b, &value)]);
+                    Kind::Cmp(op)
+                }
+                Node::Select(c, t, e) => {
+                    pool.extend_from_slice(&[val(c, &value), val(t, &value), val(e, &value)]);
+                    Kind::Select
+                }
+                Node::Reduce(op, l) => {
+                    pool.extend(ctx.args(l).iter().map(|&a| val(a, &value)));
+                    Kind::Reduce(op)
+                }
                 Node::Dot(l) => {
                     let (a, b) = ctx.dot_args(l);
-                    (
-                        Kind::Dot(a.len() as u32),
-                        a.iter().chain(b).map(|&e| val(e, &value)).collect(),
-                    )
+                    pool.extend(a.iter().chain(b).map(|&e| val(e, &value)));
+                    Kind::Dot(a.len() as u32)
                 }
                 Node::Call(o, l) => {
                     // A single call: its outputs a block, this node one of
                     // them; other outputs of the same call join it.
                     let (f, _) = ctx.output(o);
-                    let args = ctx.args(l).to_vec();
                     let (set, outs) = needed(f.0, l);
                     let body = bodies
                         .entry((f.0, set))
@@ -1152,10 +1258,10 @@ impl Forest {
                     });
                     let n_out = body.bundle.n_outputs() as u32;
                     let inst = insts.len() as u32;
-                    let ins: Vec<Ref> = args.iter().map(|&a| val(a, &value)).collect();
+                    pool.extend(ctx.args(l).iter().map(|&a| val(a, &value)));
                     insts.push(Inst {
                         kind: Kind::Call { bundle },
-                        ins: pooled(&mut pool, ins),
+                        ins: (start, pool.len() as u32 - start),
                         n_out,
                         pure: self.pure[i],
                     });
@@ -1186,7 +1292,7 @@ impl Forest {
             };
             insts.push(Inst {
                 kind,
-                ins: pooled(&mut pool, ins),
+                ins: (start, pool.len() as u32 - start),
                 n_out: 1,
                 pure: self.pure[i],
             });
@@ -1219,28 +1325,29 @@ impl Program {
         let m = self.insts.len();
         let is_const = |i: usize| matches!(self.insts[i].kind, Kind::Const(_));
         // Distinct value dependencies of each instruction, as instruction
-        // indices; a constant is placed on demand and counts as no
-        // dependency.
+        // indices, in one flat list (`dep_list[dep_start[i]..dep_start[i+1]]`);
+        // a constant is placed on demand and counts as no dependency.
         let mut stamp: Vec<u32> = vec![u32::MAX; m];
-        let deps: Vec<Vec<u32>> = (0..m)
-            .map(|i| {
-                let mut d: Vec<u32> = Vec::new();
-                for r in self.ins(i) {
-                    if let Ref::Value(j, _) = *r {
-                        if stamp[j as usize] != i as u32 {
-                            stamp[j as usize] = i as u32;
-                            d.push(j);
-                        }
+        let mut dep_start: Vec<u32> = Vec::with_capacity(m + 1);
+        let mut dep_list: Vec<u32> = Vec::with_capacity(self.pool.len());
+        dep_start.push(0);
+        for i in 0..m {
+            for r in self.ins(i) {
+                if let Ref::Value(j, _) = *r {
+                    if stamp[j as usize] != i as u32 {
+                        stamp[j as usize] = i as u32;
+                        dep_list.push(j);
                     }
                 }
-                d
-            })
-            .collect();
+            }
+            dep_start.push(dep_list.len() as u32);
+        }
+        let deps = |i: usize| &dep_list[dep_start[i] as usize..dep_start[i + 1] as usize];
         let mut user_count = vec![0u32; m];
         let mut pending = vec![0u32; m];
-        for (i, d) in deps.iter().enumerate() {
-            pending[i] = d.iter().filter(|&&x| !is_const(x as usize)).count() as u32;
-            for &x in d {
+        for i in 0..m {
+            pending[i] = deps(i).iter().filter(|&&x| !is_const(x as usize)).count() as u32;
+            for &x in deps(i) {
                 user_count[x as usize] += 1;
             }
         }
@@ -1250,54 +1357,41 @@ impl Program {
         }
         let mut users = vec![0u32; user_start[m] as usize];
         let mut fill = user_start.clone();
-        for (i, d) in deps.iter().enumerate() {
-            for &x in d {
+        for i in 0..m {
+            for &x in deps(i) {
                 users[fill[x as usize] as usize] = i as u32;
                 fill[x as usize] += 1;
             }
         }
         let mut remaining = user_count.clone();
         let kills_of = |i: usize, remaining: &[u32]| -> u32 {
-            deps[i]
+            deps(i)
                 .iter()
                 .filter(|&&d| remaining[d as usize] == 1)
                 .count() as u32
         };
-        let mut heap: std::collections::BinaryHeap<(bool, u32, u64, u32)> =
-            std::collections::BinaryHeap::new();
-        let mut seq: u64 = 0;
+        let mut ready = Ready::default();
         for i in (0..m).rev() {
             if !is_const(i) && pending[i] == 0 {
-                heap.push((self.insts[i].pure, kills_of(i, &remaining), seq, i as u32));
-                seq += 1;
+                ready.push(self.insts[i].pure, kills_of(i, &remaining), i as u32);
             }
         }
         let mut order: Vec<u32> = Vec::with_capacity(m);
         let mut placed = vec![false; m];
         let mut last: Option<usize> = None;
-        while let Some(top) = heap.pop() {
-            let (pure, kills, _, iu) = top;
+        while let Some((pure, kills, iu)) = ready.pop() {
             let mut i = iu as usize;
-            if placed[i] {
-                continue;
-            }
             // Interleave two chains when an equally good candidate does not
             // read the instruction just placed, so the CPU overlaps them.
-            if let (Some(lo), Some(&(p2, k2, _, iu2))) = (last, heap.peek()) {
+            if let (Some(lo), Some(iu2)) = (last, ready.peek_same(pure, kills)) {
                 let i2 = iu2 as usize;
-                if p2 == pure
-                    && k2 == kills
-                    && !placed[i2]
-                    && deps[i].contains(&(lo as u32))
-                    && !deps[i2].contains(&(lo as u32))
-                {
-                    heap.pop();
-                    heap.push(top);
+                if deps(i).contains(&(lo as u32)) && !deps(i2).contains(&(lo as u32)) {
+                    ready.swap_top(pure, kills, iu);
                     i = i2;
                 }
             }
             last = Some(i);
-            for &d in &deps[i] {
+            for &d in deps(i) {
                 let d = d as usize;
                 if is_const(d) && !placed[d] {
                     placed[d] = true;
@@ -1306,15 +1400,14 @@ impl Program {
             }
             placed[i] = true;
             order.push(i as u32);
-            for &d in &deps[i] {
+            for &d in deps(i) {
                 remaining[d as usize] -= 1;
             }
             for k in user_start[i]..user_start[i + 1] {
                 let u = users[k as usize] as usize;
                 pending[u] -= 1;
                 if pending[u] == 0 {
-                    heap.push((self.insts[u].pure, kills_of(u, &remaining), seq, u as u32));
-                    seq += 1;
+                    ready.push(self.insts[u].pure, kills_of(u, &remaining), u as u32);
                 }
             }
         }
@@ -1461,27 +1554,29 @@ impl Program {
                 Ref::Input(k) => k | INPUT,
             }
         };
+        // Per-instruction scratch, reused across the stream.
+        let mut operands: Vec<u32> = Vec::new();
+        let mut dying: Vec<u32> = Vec::new();
         for (k, &i) in order.iter().enumerate() {
             let inst = &self.insts[i as usize];
             // The operands, before any slot of this step is freed.
             let ins = self.ins(i as usize);
-            let operands: Vec<u32> = ins.iter().map(|&r| slot_of(r, &base)).collect();
-            let mut dying: Vec<u32> = ins
-                .iter()
-                .filter_map(|r| match *r {
-                    Ref::Value(j, _)
-                        if last[j as usize] == k
-                            && !pinned[j as usize]
-                            && reserved[j as usize] == u32::MAX =>
-                    {
-                        Some(j)
-                    }
-                    _ => None,
-                })
-                .collect();
+            operands.clear();
+            operands.extend(ins.iter().map(|&r| slot_of(r, &base)));
+            dying.clear();
+            dying.extend(ins.iter().filter_map(|r| match *r {
+                Ref::Value(j, _)
+                    if last[j as usize] == k
+                        && !pinned[j as usize]
+                        && reserved[j as usize] == u32::MAX =>
+                {
+                    Some(j)
+                }
+                _ => None,
+            }));
             dying.sort_unstable();
             dying.dedup();
-            for j in dying {
+            for &j in &dying {
                 let b = base[j as usize];
                 free.extend(b..b + self.insts[j as usize].n_out);
             }
@@ -1650,5 +1745,72 @@ impl Program {
             bundles: self.bundles.clone(),
             prolog_ops,
         }
+    }
+}
+
+/// The ready instructions of the list scheduler, best first: pure before
+/// impure, more kills before fewer, and among equals the most recently
+/// enabled. A stack per `(pure, kills)` bucket gives that order without a
+/// heap: pushes come in enabling order, so a bucket's top is its most
+/// recent entry, and the best bucket is the highest non-empty one.
+#[derive(Default)]
+struct Ready {
+    /// `buckets[pure][kills]`.
+    buckets: [Vec<Vec<u32>>; 2],
+    /// Per level, no bucket above this one holds anything.
+    hi: [usize; 2],
+    len: usize,
+}
+
+impl Ready {
+    fn push(&mut self, pure: bool, kills: u32, i: u32) {
+        let (p, k) = (pure as usize, kills as usize);
+        let level = &mut self.buckets[p];
+        if level.len() <= k {
+            level.resize_with(k + 1, Vec::new);
+        }
+        level[k].push(i);
+        self.hi[p] = self.hi[p].max(k);
+        self.len += 1;
+    }
+
+    /// The best bucket, `(pure, kills)`, if any holds anything.
+    fn best(&mut self) -> Option<(usize, usize)> {
+        if self.len == 0 {
+            return None;
+        }
+        for p in [1, 0] {
+            let level = &self.buckets[p];
+            while self.hi[p] > 0 && level.get(self.hi[p]).is_none_or(Vec::is_empty) {
+                self.hi[p] -= 1;
+            }
+            if level.get(self.hi[p]).is_some_and(|b| !b.is_empty()) {
+                return Some((p, self.hi[p]));
+            }
+        }
+        None
+    }
+
+    fn pop(&mut self) -> Option<(bool, u32, u32)> {
+        let (p, k) = self.best()?;
+        let i = self.buckets[p][k].pop()?;
+        self.len -= 1;
+        Some((p == 1, k as u32, i))
+    }
+
+    /// The next best entry when it is in the bucket `(pure, kills)`.
+    fn peek_same(&self, pure: bool, kills: u32) -> Option<u32> {
+        self.buckets[pure as usize]
+            .get(kills as usize)?
+            .last()
+            .copied()
+    }
+
+    /// Take the top of bucket `(pure, kills)` in place of `i`, which goes
+    /// back on top: it was that bucket's most recent entry and stays so.
+    fn swap_top(&mut self, pure: bool, kills: u32, i: u32) {
+        let b = &mut self.buckets[pure as usize][kills as usize];
+        let top = b.len() - 1;
+        b[top] = i;
     }
 }
