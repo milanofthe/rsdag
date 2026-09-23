@@ -12,6 +12,7 @@ pub mod adaptive;
 pub mod autodiff;
 pub mod builder;
 pub mod display;
+pub mod dot;
 pub mod eval;
 pub mod extern_fn;
 pub mod field;

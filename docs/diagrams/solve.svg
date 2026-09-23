@@ -1,113 +1,110 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="770" height="330" viewBox="0 0 770 330" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12">
-  <defs>
-    <marker id="sv-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8b8b8b"/>
-    </marker>
-  </defs>
-
-  <!-- Sparse pattern, 6 by 6 -->
-  <g stroke="#8b8b8b" stroke-width="0.8">
-    <line x1="24" y1="76" x2="96" y2="76"/>
-    <line x1="24" y1="88" x2="96" y2="88"/>
-    <line x1="24" y1="100" x2="96" y2="100"/>
-    <line x1="24" y1="112" x2="96" y2="112"/>
-    <line x1="24" y1="124" x2="96" y2="124"/>
-    <line x1="24" y1="136" x2="96" y2="136"/>
-    <line x1="24" y1="148" x2="96" y2="148"/>
-    <line x1="24" y1="76" x2="24" y2="148"/>
-    <line x1="36" y1="76" x2="36" y2="148"/>
-    <line x1="48" y1="76" x2="48" y2="148"/>
-    <line x1="60" y1="76" x2="60" y2="148"/>
-    <line x1="72" y1="76" x2="72" y2="148"/>
-    <line x1="84" y1="76" x2="84" y2="148"/>
-    <line x1="96" y1="76" x2="96" y2="148"/>
-  </g>
-  <g fill="#8b8b8b">
-    <circle cx="30" cy="82" r="2.6"/>
-    <circle cx="66" cy="82" r="2.6"/>
-    <circle cx="42" cy="94" r="2.6"/>
-    <circle cx="78" cy="94" r="2.6"/>
-    <circle cx="90" cy="94" r="2.6"/>
-    <circle cx="30" cy="106" r="2.6"/>
-    <circle cx="54" cy="106" r="2.6"/>
-    <circle cx="42" cy="118" r="2.6"/>
-    <circle cx="66" cy="118" r="2.6"/>
-    <circle cx="54" cy="130" r="2.6"/>
-    <circle cx="78" cy="130" r="2.6"/>
-    <circle cx="66" cy="142" r="2.6"/>
-    <circle cx="90" cy="142" r="2.6"/>
-  </g>
-  <text x="60" y="168" text-anchor="middle" fill="#8b8b8b">pattern fixed</text>
-  <text x="60" y="184" text-anchor="middle" fill="#8b8b8b">at build time</text>
-
-  <!-- BTF -->
-  <rect x="120" y="60" width="82" height="104" rx="4" fill="none" stroke="#8b8b8b" stroke-width="1.2"/>
-  <text x="161" y="86" text-anchor="middle" font-size="14" font-weight="bold" fill="#8b8b8b">BTF</text>
-  <text x="161" y="108" text-anchor="middle" fill="#8b8b8b">
-    <tspan x="161" y="108">block</tspan>
-    <tspan x="161" y="125">triangular</tspan>
-    <tspan x="161" y="142">form</tspan>
-  </text>
-
-  <!-- AMD -->
-  <rect x="226" y="60" width="80" height="104" rx="4" fill="none" stroke="#8b8b8b" stroke-width="1.2"/>
-  <text x="266" y="86" text-anchor="middle" font-size="14" font-weight="bold" fill="#8b8b8b">AMD</text>
-  <text x="266" y="108" text-anchor="middle" fill="#8b8b8b">
-    <tspan x="266" y="108">minimum</tspan>
-    <tspan x="266" y="125">degree</tspan>
-    <tspan x="266" y="142">ordering</tspan>
-  </text>
-
-  <!-- Cost predictor -->
-  <rect x="330" y="60" width="120" height="104" rx="4" fill="none" stroke="#8b8b8b" stroke-width="1.2"/>
-  <text x="390" y="86" text-anchor="middle" font-size="14" font-weight="bold" fill="#8b8b8b">cost predictor</text>
-  <text x="390" y="108" text-anchor="middle" fill="#8b8b8b">
-    <tspan x="390" y="108">fill and flops</tspan>
-    <tspan x="390" y="125">from the</tspan>
-    <tspan x="390" y="142">elimination tree</tspan>
-  </text>
-
-  <!-- Static LU -->
-  <rect x="474" y="60" width="110" height="104" rx="4" fill="none" stroke="#8b8b8b" stroke-width="1.2"/>
-  <text x="529" y="86" text-anchor="middle" font-size="14" font-weight="bold" fill="#8b8b8b">static LU</text>
-  <text x="529" y="108" text-anchor="middle" fill="#8b8b8b">
-    <tspan x="529" y="108">Crout form,</tspan>
-    <tspan x="529" y="125">guarded pivots</tspan>
-    <tspan x="529" y="142">as graph ops</tspan>
-  </text>
-
-  <!-- Tape with prolog and main -->
-  <rect x="608" y="24" width="134" height="200" rx="4" fill="none" stroke="#8b8b8b" stroke-width="1.2"/>
-  <text x="675" y="42" text-anchor="middle" font-size="14" font-weight="bold" fill="#8b8b8b">tape</text>
-  <rect x="618" y="50" width="114" height="96" rx="4" fill="none" stroke="#8b8b8b" stroke-width="1.2"/>
-  <text x="675" y="68" text-anchor="middle" font-weight="bold" fill="#8b8b8b">prolog</text>
-  <text x="675" y="85" text-anchor="middle" fill="#8b8b8b">
-    <tspan x="675" y="85">factorization</tspan>
-    <tspan x="675" y="102">parameter-pure</tspan>
-    <tspan x="675" y="119">inputs = matrix</tspan>
-    <tspan x="675" y="136">entries</tspan>
-  </text>
-  <rect x="618" y="156" width="114" height="60" rx="4" fill="none" stroke="#8b8b8b" stroke-width="1.2"/>
-  <text x="675" y="174" text-anchor="middle" font-weight="bold" fill="#8b8b8b">main</text>
-  <text x="675" y="191" text-anchor="middle" fill="#8b8b8b">
-    <tspan x="675" y="191">substitution</tspan>
-    <tspan x="675" y="208">right-hand side</tspan>
-  </text>
-
-  <!-- Flow arrows -->
-  <g stroke="#8b8b8b" stroke-width="1.2" fill="none" marker-end="url(#sv-arrow)">
-    <line x1="96" y1="112" x2="120" y2="112"/>
-    <line x1="202" y1="112" x2="226" y2="112"/>
-    <line x1="306" y1="112" x2="330" y2="112"/>
-    <line x1="450" y1="112" x2="474" y2="112"/>
-    <line x1="584" y1="112" x2="608" y2="112"/>
-  </g>
-
-  <!-- Pivot guard note -->
-  <line x1="529" y1="164" x2="529" y2="250" stroke="#c55a11" stroke-width="1.2" stroke-dasharray="4 3"/>
-  <rect x="330" y="250" width="412" height="64" rx="4" fill="none" stroke="#c55a11" stroke-width="1.2"/>
-  <text x="536" y="274" text-anchor="middle" fill="#8b8b8b">
-    <tspan x="536" y="274">pivot guard: |pivot| &gt;= 1e-3 max|column|</tspan>
-    <tspan x="536" y="294">fails -&gt; Plan::repivot on the values, rebuild</tspan>
-  </text>
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+ "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<!-- Generated by graphviz version 16.1.0 (20260904.0139)
+ -->
+<!-- Title: G Pages: 1 -->
+<svg width="866pt" height="55pt"
+ viewBox="0.00 0.00 866.00 55.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 50.79)">
+<title>G</title>
+<!-- pattern -->
+<g id="node1" class="node">
+<title>pattern</title>
+<path fill="#3b82f6" fill-opacity="0.149020" stroke="#3b82f6" stroke-width="1.2" d="M62.08,-40.79C62.08,-40.79 9.44,-40.79 9.44,-40.79 4.72,-40.79 0,-36.07 0,-31.35 0,-31.35 0,-21.91 0,-21.91 0,-17.19 4.72,-12.47 9.44,-12.47 9.44,-12.47 62.08,-12.47 62.08,-12.47 66.8,-12.47 71.52,-17.19 71.52,-21.91 71.52,-21.91 71.52,-31.35 71.52,-31.35 71.52,-36.07 66.8,-40.79 62.08,-40.79"/>
+<text xml:space="preserve" text-anchor="middle" x="35.76" y="-28.18" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">pattern</text>
+<text xml:space="preserve" text-anchor="middle" x="35.76" y="-16.18" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">fixed at build</text>
+</g>
+<!-- btf -->
+<g id="node2" class="node">
+<title>btf</title>
+<path fill="#808080" fill-opacity="0.149020" stroke="#808080" stroke-width="1.2" d="M198.1,-40.79C198.1,-40.79 107.96,-40.79 107.96,-40.79 103.24,-40.79 98.52,-36.07 98.52,-31.35 98.52,-31.35 98.52,-21.91 98.52,-21.91 98.52,-17.19 103.24,-12.47 107.96,-12.47 107.96,-12.47 198.1,-12.47 198.1,-12.47 202.82,-12.47 207.54,-17.19 207.54,-21.91 207.54,-21.91 207.54,-31.35 207.54,-31.35 207.54,-36.07 202.82,-40.79 198.1,-40.79"/>
+<text xml:space="preserve" text-anchor="middle" x="153.03" y="-28.18" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">BTF</text>
+<text xml:space="preserve" text-anchor="middle" x="153.03" y="-16.18" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">block triangular form</text>
+</g>
+<!-- pattern&#45;&gt;btf -->
+<g id="edge1" class="edge">
+<title>pattern&#45;&gt;btf</title>
+<path fill="none" stroke="#808080" stroke-width="0.9" d="M71.97,-26.63C78,-26.63 84.42,-26.63 90.89,-26.63"/>
+<polygon fill="#808080" stroke="#808080" stroke-width="0.9" points="90.57,-28.73 96.57,-26.63 90.57,-24.53 90.57,-28.73"/>
+</g>
+<!-- amd -->
+<g id="node3" class="node">
+<title>amd</title>
+<path fill="#808080" fill-opacity="0.149020" stroke="#808080" stroke-width="1.2" d="M316.87,-40.79C316.87,-40.79 243.98,-40.79 243.98,-40.79 239.26,-40.79 234.54,-36.07 234.54,-31.35 234.54,-31.35 234.54,-21.91 234.54,-21.91 234.54,-17.19 239.26,-12.47 243.98,-12.47 243.98,-12.47 316.87,-12.47 316.87,-12.47 321.59,-12.47 326.31,-17.19 326.31,-21.91 326.31,-21.91 326.31,-31.35 326.31,-31.35 326.31,-36.07 321.59,-40.79 316.87,-40.79"/>
+<text xml:space="preserve" text-anchor="middle" x="280.42" y="-28.18" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">AMD</text>
+<text xml:space="preserve" text-anchor="middle" x="280.42" y="-16.18" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">minimum degree</text>
+</g>
+<!-- btf&#45;&gt;amd -->
+<g id="edge2" class="edge">
+<title>btf&#45;&gt;amd</title>
+<path fill="none" stroke="#808080" stroke-width="0.9" d="M207.94,-26.63C214.23,-26.63 220.65,-26.63 226.93,-26.63"/>
+<polygon fill="#808080" stroke="#808080" stroke-width="0.9" points="226.86,-28.73 232.86,-26.63 226.86,-24.53 226.86,-28.73"/>
+</g>
+<!-- cost -->
+<g id="node4" class="node">
+<title>cost</title>
+<path fill="#808080" fill-opacity="0.149020" stroke="#808080" stroke-width="1.2" d="M411.64,-40.79C411.64,-40.79 362.75,-40.79 362.75,-40.79 358.03,-40.79 353.31,-36.07 353.31,-31.35 353.31,-31.35 353.31,-21.91 353.31,-21.91 353.31,-17.19 358.03,-12.47 362.75,-12.47 362.75,-12.47 411.64,-12.47 411.64,-12.47 416.36,-12.47 421.08,-17.19 421.08,-21.91 421.08,-21.91 421.08,-31.35 421.08,-31.35 421.08,-36.07 416.36,-40.79 411.64,-40.79"/>
+<text xml:space="preserve" text-anchor="middle" x="387.19" y="-28.18" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">cost</text>
+<text xml:space="preserve" text-anchor="middle" x="387.19" y="-16.18" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">fill and flops</text>
+</g>
+<!-- amd&#45;&gt;cost -->
+<g id="edge3" class="edge">
+<title>amd&#45;&gt;cost</title>
+<path fill="none" stroke="#808080" stroke-width="0.9" d="M326.77,-26.63C333.05,-26.63 339.47,-26.63 345.65,-26.63"/>
+<polygon fill="#808080" stroke="#808080" stroke-width="0.9" points="345.42,-28.73 351.42,-26.63 345.42,-24.53 345.42,-28.73"/>
+</g>
+<!-- lu -->
+<g id="node5" class="node">
+<title>lu</title>
+<path fill="#06b6d4" fill-opacity="0.149020" stroke="#06b6d4" stroke-width="1.2" d="M518.1,-46.79C518.1,-46.79 460.08,-46.79 460.08,-46.79 454.08,-46.79 448.08,-40.79 448.08,-34.79 448.08,-34.79 448.08,-18.47 448.08,-18.47 448.08,-12.47 454.08,-6.47 460.08,-6.47 460.08,-6.47 518.1,-6.47 518.1,-6.47 524.1,-6.47 530.1,-12.47 530.1,-18.47 530.1,-18.47 530.1,-34.79 530.1,-34.79 530.1,-40.79 524.1,-46.79 518.1,-46.79"/>
+<text xml:space="preserve" text-anchor="middle" x="489.09" y="-34.18" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">static LU</text>
+<text xml:space="preserve" text-anchor="middle" x="489.09" y="-22.18" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">guarded pivots</text>
+<text xml:space="preserve" text-anchor="middle" x="489.09" y="-10.18" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">as graph ops</text>
+</g>
+<!-- cost&#45;&gt;lu -->
+<g id="edge4" class="edge">
+<title>cost&#45;&gt;lu</title>
+<path fill="none" stroke="#808080" stroke-width="0.9" d="M421.46,-26.63C427.63,-26.63 434.18,-26.63 440.67,-26.63"/>
+<polygon fill="#808080" stroke="#808080" stroke-width="0.9" points="440.32,-28.73 446.32,-26.63 440.32,-24.53 440.32,-28.73"/>
+</g>
+<!-- prolog -->
+<g id="node6" class="node">
+<title>prolog</title>
+<path fill="#22c55e" fill-opacity="0.149020" stroke="#22c55e" stroke-width="1.2" d="M675.62,-46.79C675.62,-46.79 613.85,-46.79 613.85,-46.79 607.85,-46.79 601.85,-40.79 601.85,-34.79 601.85,-34.79 601.85,-18.47 601.85,-18.47 601.85,-12.47 607.85,-6.47 613.85,-6.47 613.85,-6.47 675.62,-6.47 675.62,-6.47 681.62,-6.47 687.62,-12.47 687.62,-18.47 687.62,-18.47 687.62,-34.79 687.62,-34.79 687.62,-40.79 681.62,-46.79 675.62,-46.79"/>
+<text xml:space="preserve" text-anchor="middle" x="644.73" y="-34.18" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">prolog</text>
+<text xml:space="preserve" text-anchor="middle" x="644.73" y="-22.18" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">factorization</text>
+<text xml:space="preserve" text-anchor="middle" x="644.73" y="-10.18" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">over the entries</text>
+</g>
+<!-- lu&#45;&gt;prolog -->
+<g id="edge5" class="edge">
+<title>lu&#45;&gt;prolog</title>
+<path fill="none" stroke="#808080" stroke-width="0.9" d="M530.46,-26.63C550.02,-26.63 573.7,-26.63 594.33,-26.63"/>
+<polygon fill="#808080" stroke="#808080" stroke-width="0.9" points="594.13,-28.73 600.13,-26.63 594.13,-24.53 594.13,-28.73"/>
+<text xml:space="preserve" text-anchor="middle" x="565.97" y="-27.83" font-family="Helvetica,Arial,sans-serif" font-size="9.00" fill="#808080">LuProgram</text>
+</g>
+<!-- prolog&#45;&gt;lu -->
+<g id="edge7" class="edge">
+<title>prolog&#45;&gt;lu</title>
+<path fill="none" stroke="#808080" stroke-width="0.9" d="M601.43,-6.55C597.25,-5.16 593.01,-3.98 588.85,-3.13 568.93,0.96 562.99,1.08 543.1,-3.13 541.29,-3.51 539.47,-3.96 537.64,-4.46"/>
+<polygon fill="#808080" stroke="#808080" stroke-width="0.9" points="537.02,-2.46 531.92,-6.25 538.27,-6.47 537.02,-2.46"/>
+<text xml:space="preserve" text-anchor="middle" x="565.97" y="-14.08" font-family="Helvetica,Arial,sans-serif" font-size="9.00" fill="#808080">guard fails:</text>
+<text xml:space="preserve" text-anchor="middle" x="565.97" y="-4.33" font-family="Helvetica,Arial,sans-serif" font-size="9.00" fill="#808080">repivot</text>
+</g>
+<!-- main -->
+<g id="node7" class="node">
+<title>main</title>
+<path fill="#3b82f6" fill-opacity="0.149020" stroke="#3b82f6" stroke-width="1.2" d="M845.89,-46.79C845.89,-46.79 745.12,-46.79 745.12,-46.79 739.12,-46.79 733.12,-40.79 733.12,-34.79 733.12,-34.79 733.12,-18.47 733.12,-18.47 733.12,-12.47 739.12,-6.47 745.12,-6.47 745.12,-6.47 845.89,-6.47 845.89,-6.47 851.89,-6.47 857.89,-12.47 857.89,-18.47 857.89,-18.47 857.89,-34.79 857.89,-34.79 857.89,-40.79 851.89,-46.79 845.89,-46.79"/>
+<text xml:space="preserve" text-anchor="middle" x="795.5" y="-34.18" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">main</text>
+<text xml:space="preserve" text-anchor="middle" x="795.5" y="-22.18" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">substitution</text>
+<text xml:space="preserve" text-anchor="middle" x="795.5" y="-10.18" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#808080">over the right&#45;hand side</text>
+</g>
+<!-- prolog&#45;&gt;main -->
+<g id="edge6" class="edge">
+<title>prolog&#45;&gt;main</title>
+<path fill="none" stroke="#3b82f6" stroke-width="0.9" stroke-dasharray="5,2" d="M687.97,-26.63C699.71,-26.63 712.78,-26.63 725.62,-26.63"/>
+<polygon fill="#3b82f6" stroke="#3b82f6" stroke-width="0.9" points="725.36,-28.73 731.36,-26.63 725.36,-24.53 725.36,-28.73"/>
+<text xml:space="preserve" text-anchor="middle" x="710.37" y="-27.83" font-family="Helvetica,Arial,sans-serif" font-size="9.00" fill="#808080">state</text>
+</g>
+</g>
 </svg>
