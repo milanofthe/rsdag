@@ -26,7 +26,8 @@ NOTICE); for a commercial license contact info@milanrother.com.
   `newton_step`).
 - `rsdag-jit`: `NativeTape`, machine code for AArch64 and x86-64 on Linux,
   macOS and Windows; function bodies compiled once and batched over
-  instances; `eval_many` over many input sets. `rsdag_jit::compiler()` is
+  instances; `eval_many` over many input sets in parallel
+  (`Program::eval_many_into` serially, on either backend). `rsdag_jit::compiler()` is
   the native `Compiler` for `Adaptive`.
 - `rsdag-py`: Python package `rsdag` (`trace`, `jit`, `jacobian`, `grad`,
   `where`, `matmul`, `solve`), built with maturin.
@@ -116,8 +117,8 @@ scalar ordering with the flops in the kernels.
 
 A multiply-instantiated model is one function and one call per instance.
 The body is compiled once; calls with the same shape lower to one kernel op
-that runs the body over all instances, on the rayon pool above a size
-threshold. `Graph::set_func_body` registers a body compiled by the caller;
+that runs the body over all instances, serially or on the current rayon
+pool as `rsdag_jit::Options::batch` says. `Graph::set_func_body` registers a body compiled by the caller;
 programs whose calls it covers use it.
 
 Parameters with the `Param` role are a body's pure arguments; its tape is

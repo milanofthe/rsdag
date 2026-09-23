@@ -21,6 +21,37 @@
 /// so the size is a matter of parallel build granularity.
 pub const CHUNK_OPS: usize = 1024;
 
+/// How a natively compiled function body runs a batch of instances (the
+/// calls one `CallBatch` makes).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Batch {
+    /// One after the other on the calling thread.
+    #[default]
+    Serial,
+    /// Split over the current rayon pool (the caller's `install`, else the
+    /// global one) when the batch has at least `min_ops` ops, serially
+    /// below. The result is the serial loop's, bit for bit.
+    Parallel { min_ops: usize },
+}
+
+/// What [`NativeTape::compile_opts`] builds.
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    /// Ops per emitted function.
+    pub chunk_ops: usize,
+    /// How the function bodies it calls run their batches.
+    pub batch: Batch,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            chunk_ops: CHUNK_OPS,
+            batch: Batch::Serial,
+        }
+    }
+}
+
 /// Reasons a tape cannot be compiled (callers fall back to the interpreter).
 #[derive(Debug)]
 pub enum JitError {
@@ -55,13 +86,12 @@ pub use native::NativeTape;
 /// The native backend as an [`rsdag::Compiler`]: [`NativeTape`] compiled on
 /// the [`background`] queue, for an [`rsdag::Adaptive`].
 pub struct Jit {
-    /// Ops per emitted function.
-    pub chunk_ops: usize,
+    pub options: Options,
 }
 
 impl rsdag::Compiler for Jit {
     fn compile(&self, tape: &rsdag::Tape, live: &[u32]) -> Option<Box<dyn rsdag::Program>> {
-        NativeTape::compile_live(tape, self.chunk_ops, live)
+        NativeTape::compile_opts(tape, &self.options, live)
             .ok()
             .map(|n| Box::new(n) as Box<dyn rsdag::Program>)
     }
@@ -70,12 +100,12 @@ impl rsdag::Compiler for Jit {
     }
 }
 
-/// [`Jit`] with the default chunk size, shared.
+/// [`Jit`] with the default [`Options`], shared.
 pub fn compiler() -> std::sync::Arc<dyn rsdag::Compiler> {
     static C: std::sync::OnceLock<std::sync::Arc<dyn rsdag::Compiler>> = std::sync::OnceLock::new();
     C.get_or_init(|| {
         std::sync::Arc::new(Jit {
-            chunk_ops: CHUNK_OPS,
+            options: Options::default(),
         })
     })
     .clone()

@@ -268,6 +268,24 @@ pub trait Program: Send + Sync {
     fn eval_prolog_into(&self, inputs: &[f64], work: &mut [f64]);
     /// The main phase over a `work` whose state a prolog left.
     fn eval_main_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]);
+    /// Instances of `stride` inputs back to back (`stride` at least
+    /// [`n_inputs`](Self::n_inputs)), their outputs back to back into `out`,
+    /// one after the other over one `work`. Running parts of a batch in
+    /// parallel is the caller's choice: split `inputs` and `out` alike.
+    fn eval_many_into(&self, inputs: &[f64], stride: usize, work: &mut [f64], out: &mut [f64]) {
+        let n_out = self.out_len();
+        if stride == 0 || n_out == 0 {
+            return;
+        }
+        assert_eq!(
+            out.len() / n_out,
+            inputs.len() / stride,
+            "one output vector per input vector"
+        );
+        for (ins, dst) in inputs.chunks_exact(stride).zip(out.chunks_exact_mut(n_out)) {
+            self.eval_into(ins, work, dst);
+        }
+    }
 }
 
 impl Program for Tape {
