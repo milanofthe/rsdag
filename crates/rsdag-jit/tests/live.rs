@@ -3,7 +3,7 @@
 //! to, and the check then agrees with the interpreter's.
 
 use rsdag::{CmpOp, Graph, Node, SymbolId, Tape, F64};
-use rsdag_jit::{NativeTape, CHUNK_OPS};
+use rsdag_jit::{NativeTape, Options};
 
 #[test]
 fn prolog_guards_are_checked_against_the_native_prolog() {
@@ -31,7 +31,8 @@ fn prolog_guards_are_checked_against_the_native_prolog() {
     let spec = tape.specialize(&choices, &vec![true; tape.n_selects()]);
     let guards: Vec<u32> = spec.prolog_guards().iter().map(|&(s, _)| s).collect();
     assert!(!guards.is_empty(), "{}", spec.tape().dump());
-    let native = NativeTape::compile_live(spec.tape(), CHUNK_OPS, &guards).expect("compile");
+    let native =
+        NativeTape::compile_opts(spec.tape(), &Options::default(), &guards).expect("compile");
     for (inputs, holds) in [
         ([1.0, 0.5], true),
         ([-1.0, 0.5], false),

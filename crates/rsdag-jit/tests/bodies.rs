@@ -4,7 +4,7 @@
 //! interpreter's to the bit.
 
 use rsdag::{ExprId, Graph, Node, SymbolId, Tape, F64};
-use rsdag_jit::NativeTape;
+use rsdag_jit::{Batch, NativeTape, Options};
 
 fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
     match g.node(e) {
@@ -55,6 +55,31 @@ fn batched_instances_of_a_body_match_the_interpreter() {
         tape.eval(&row, &mut w1, &mut o1);
         native.eval(&row, &mut w2, &mut o2);
         assert!(same(&o1, &o2), "n = {n}: {o1:?} vs {o2:?}");
+    }
+}
+
+#[test]
+fn a_parallel_batch_is_the_serial_loop() {
+    for n in [2usize, 64, 5000] {
+        let mut g: Graph<F64> = Graph::new();
+        let f = cell(&mut g);
+        let xs: Vec<ExprId> = (0..n).map(|i| g.sym(&format!("x{i}"))).collect();
+        let syms: Vec<SymbolId> = xs.iter().map(|&e| sym(&g, e)).collect();
+        let roots: Vec<ExprId> = (0..n)
+            .map(|i| g.call(f, 0, &[xs[(i + n - 1) % n], xs[i], xs[(i + 1) % n]]))
+            .collect();
+        let tape = Tape::compile(&g, &roots, &syms);
+        let opts = Options {
+            batch: Batch::Parallel { min_ops: 0 },
+            ..Options::default()
+        };
+        let par = NativeTape::compile_opts(&tape, &opts, &[]).expect("compile");
+        let ser = NativeTape::compile(&tape).expect("compile");
+        let row: Vec<f64> = (0..n).map(|i| 0.1 + (i % 9) as f64 * 0.07).collect();
+        let (mut w1, mut o1, mut w2, mut o2) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        ser.eval(&row, &mut w1, &mut o1);
+        par.eval(&row, &mut w2, &mut o2);
+        assert!(same(&o1, &o2), "n = {n}");
     }
 }
 

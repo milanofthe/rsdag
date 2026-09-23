@@ -37,7 +37,7 @@ use std::sync::Arc;
 use crate::host::{self, Bundles};
 use crate::ir::{Dense, ROp, Recorder};
 use crate::isa::{Arg, Arith, Base, IArg, Isa, Round};
-use crate::{JitError, CHUNK_OPS};
+use crate::{Batch, JitError, Options};
 
 #[cfg(target_arch = "aarch64")]
 type Arch = crate::aarch64::A64;
@@ -67,18 +67,28 @@ pub struct NativeTape {
 
 /// A function body compiled natively, behind the bundle interface the
 /// tape calls bodies through: emitted once, called per instance. A batch
-/// of instances runs on the rayon pool when it is worth a fork; either way
-/// the result is the serial loop's, bit for bit.
+/// of instances runs as its [`Batch`] says; either way the result is the
+/// serial loop's, bit for bit.
 struct NativeBody {
     tape: NativeTape,
     n_out: usize,
     /// The pure-argument flags of the body it replaces: its prolog runs on
     /// those, the rest NaN.
     pure: Vec<bool>,
+    batch: Batch,
 }
 
-/// Ops per batched call below which the loop stays on the calling thread.
-const PAR_MIN_OPS: usize = 1 << 16;
+/// Run `f` on a work buffer of this thread's, kept for its next call (a
+/// stack, so a body calling bodies takes one each).
+fn with_work<R>(f: impl FnOnce(&mut Vec<f64>) -> R) -> R {
+    thread_local! {
+        static FREE: std::cell::RefCell<Vec<Vec<f64>>> = Default::default();
+    }
+    let mut work = FREE.with(|p| p.borrow_mut().pop()).unwrap_or_default();
+    let r = f(&mut work);
+    FREE.with(|p| p.borrow_mut().push(work));
+    r
+}
 /// A min or max over at most this many terms is a chain of instructions
 /// where the ISA has one; longer ones go through the host routine, whose
 /// call costs about as much as this many terms.
@@ -168,28 +178,34 @@ impl ExternBundle for NativeBody {
         }
     }
     fn call_batch(&self, args: &[f64], n_groups: usize, n_args: usize, out: &mut [f64]) {
-        if n_groups * self.tape.n_ops < PAR_MIN_OPS || n_groups < 2 {
-            thread_local! {
-                static POOL: std::cell::RefCell<Vec<Vec<f64>>> = Default::default();
+        let parallel = match self.batch {
+            Batch::Serial => false,
+            Batch::Parallel { min_ops } => {
+                n_groups >= 2 && self.n_out > 0 && n_groups * self.tape.n_ops >= min_ops
             }
-            let mut work = POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default();
-            self.run_groups(&mut work, args, n_args, out, 0..n_groups);
-            POOL.with(|p| p.borrow_mut().push(work));
+        };
+        if !parallel {
+            with_work(|work| self.run_groups(work, args, n_args, out, 0..n_groups));
             return;
         }
-        // Blocks of instances per task, so a thread amortises its buffer
-        // and the scheduler's hand-offs over many bodies.
-        let block = (n_groups / (rayon::current_num_threads() * 4)).clamp(1, 4096);
-        let n_out = self.n_out.max(1);
-        out.par_chunks_mut(block * n_out)
+        // Blocks of instances per task, so a thread amortises the
+        // scheduler's hand-offs over many bodies.
+        let block = blocks(n_groups);
+        out.par_chunks_mut(block * self.n_out)
             .enumerate()
-            .for_each_init(Vec::new, |work, (b, dst)| {
+            .for_each(|(b, dst)| {
                 let g0 = b * block;
                 let g1 = (g0 + block).min(n_groups);
                 let ins = &args[g0 * n_args..g1 * n_args];
-                self.run_groups(work, ins, n_args, dst, 0..g1 - g0);
+                with_work(|work| self.run_groups(work, ins, n_args, dst, 0..g1 - g0));
             });
     }
+}
+
+/// Instances per parallel task: about four tasks per thread of the
+/// current pool.
+fn blocks(n: usize) -> usize {
+    (n / (rayon::current_num_threads() * 4)).clamp(1, 4096)
 }
 
 /// The work array: the tape's slots, then the gather area for host calls,
@@ -219,24 +235,25 @@ unsafe impl Sync for Code {}
 
 impl NativeTape {
     pub fn compile(tape: &Tape) -> Result<NativeTape, JitError> {
-        Self::compile_with(tape, CHUNK_OPS)
+        Self::compile_opts(tape, &Options::default(), &[])
     }
 
     /// Compile with `chunk_ops` ops per emitted function.
     pub fn compile_with(tape: &Tape, chunk_ops: usize) -> Result<NativeTape, JitError> {
-        Self::compile_live(tape, chunk_ops, &[])
+        let opts = Options {
+            chunk_ops,
+            ..Options::default()
+        };
+        Self::compile_opts(tape, &opts, &[])
     }
 
-    /// Compile with `chunk_ops` ops per emitted function, keeping the slots
-    /// `live` written to the work array at the end of the program, as the
-    /// outputs are: what a consumer that reads a specialized tape's
-    /// prolog guards from `work` after [`eval_prolog`](Self::eval_prolog)
-    /// passes ([`rsdag::SpecializedTape::prolog_guards`]).
-    pub fn compile_live(
-        tape: &Tape,
-        chunk_ops: usize,
-        live: &[u32],
-    ) -> Result<NativeTape, JitError> {
+    /// Compile as `opts` says, keeping the slots `live` written to the work
+    /// array at the end of the program, as the outputs are: what a consumer
+    /// that reads a specialized tape's prolog guards from `work` after
+    /// [`eval_prolog`](Self::eval_prolog) passes
+    /// ([`rsdag::SpecializedTape::prolog_guards`]).
+    pub fn compile_opts(tape: &Tape, opts: &Options, live: &[u32]) -> Result<NativeTape, JitError> {
+        let chunk_ops = opts.chunk_ops;
         if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
             return Err(JitError::Unsupported);
         }
@@ -248,9 +265,10 @@ impl NativeTape {
             .iter()
             .map(|b| match b.body() {
                 Some(body) => Ok(Arc::new(NativeBody {
-                    tape: NativeTape::compile_with(body, chunk_ops)?,
+                    tape: NativeTape::compile_opts(body, opts, &[])?,
                     n_out: b.n_outputs(),
                     pure: b.pure_args().to_vec(),
+                    batch: opts.batch,
                 }) as Arc<dyn ExternBundle>),
                 None => Ok(b.clone()),
             })
@@ -463,25 +481,41 @@ impl NativeTape {
         }
     }
 
-    /// Evaluate many instances at once: `inputs` holds `n` input vectors of
-    /// `stride` values back to back, `out` receives the `n` output vectors
-    /// back to back. Instances share nothing, so they run on the rayon pool
-    /// with a work buffer per thread; this is what a batch of identical
-    /// devices, a parameter sweep or an ensemble amounts to.
+    /// Evaluate many instances in parallel: `inputs` holds `n` input
+    /// vectors of `stride` values back to back (NaN-padded when shorter
+    /// than the program's), `out` receives the `n` output vectors back to
+    /// back. Instances share nothing, so blocks of them run on the current
+    /// rayon pool (the caller's `install`, else the global one), each over
+    /// a work buffer of its thread's; this is what a batch of identical
+    /// devices, a parameter sweep or an ensemble amounts to. The serial
+    /// form is [`Program::eval_many_into`](rsdag::Program::eval_many_into).
     pub fn eval_many(&self, inputs: &[f64], stride: usize, out: &mut Vec<f64>) {
+        use rsdag::Program;
         let n = inputs.len().checked_div(stride).unwrap_or(0);
         let n_out = self.outputs.len();
         out.clear();
         out.resize(n * n_out, 0.0);
-        out.par_chunks_mut(n_out.max(1))
-            .zip(inputs.par_chunks(stride.max(1)))
-            .for_each_init(
-                || (Vec::new(), Vec::new()),
-                |(work, o), (dst, ins)| {
-                    self.eval(ins, work, o);
-                    dst.copy_from_slice(o);
-                },
-            );
+        if n == 0 || n_out == 0 {
+            return;
+        }
+        let block = blocks(n);
+        let n_in = self.n_inputs.max(stride);
+        out.par_chunks_mut(block * n_out)
+            .zip(inputs.par_chunks(block * stride))
+            .for_each(|(dst, ins)| {
+                with_work(|work| {
+                    work.resize(self.layout.total, 0.0);
+                    if n_in == stride {
+                        self.eval_many_into(ins, stride, work, dst);
+                        return;
+                    }
+                    let mut padded = vec![f64::NAN; ins.len() / stride * n_in];
+                    for (p, i) in padded.chunks_exact_mut(n_in).zip(ins.chunks_exact(stride)) {
+                        p[..stride].copy_from_slice(i);
+                    }
+                    self.eval_many_into(&padded, n_in, work, dst);
+                });
+            });
     }
 }
 

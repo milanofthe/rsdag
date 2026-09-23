@@ -577,13 +577,18 @@ impl Program {
             all
         }))
     }
-    /// Compile the tape to native code; evaluation switches over.
+    /// Compile the tape to native code; evaluation switches over. A large
+    /// batch of function-body calls runs on the thread pool.
     fn compile_native(&self, py: Python<'_>) -> PyResult<()> {
         if self.native.get().is_some() {
             return Ok(());
         }
+        let opts = rsdag_jit::Options {
+            batch: rsdag_jit::Batch::Parallel { min_ops: 1 << 16 },
+            ..rsdag_jit::Options::default()
+        };
         let c = py
-            .detach(|| rsdag_jit::NativeTape::compile(&self.tape))
+            .detach(|| rsdag_jit::NativeTape::compile_opts(&self.tape, &opts, &[]))
             .map_err(|e| PyValueError::new_err(format!("native compile failed: {e:?}")))?;
         let _ = self.native.set(c);
         Ok(())
