@@ -8,6 +8,7 @@
 #[cfg(all(target_arch = "wasm32", feature = "egraph"))]
 compile_error!("the `egraph` feature needs a clock (egg reads one) and does not build for wasm32");
 
+pub mod adaptive;
 pub mod autodiff;
 pub mod builder;
 pub mod display;
@@ -35,6 +36,7 @@ pub mod tape;
 // re-exports below, not as a module path.
 pub(crate) mod transform;
 
+pub use adaptive::{Adaptive, Compiler, Episode, Policy, Stats};
 pub use autodiff::{
     differentiate, gradient, hessian, sparse_jacobian, time_derivative, SparseRows,
 };

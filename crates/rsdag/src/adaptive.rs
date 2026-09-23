@@ -3,9 +3,9 @@
 //! Three backends evaluate one tape, and every one is bit-exact against the
 //! others, so switching mid-solve is sound:
 //!
-//! 1. **Native code** ([`NativeTape`]): after a few evaluations the tape is
-//!    compiled in the background ([`crate::background`]); once it lands it
-//!    wins.
+//! 1. **Native code**, when a [`Compiler`] is given (`rsdag-jit` has one):
+//!    after a few evaluations the tape is compiled in the background; once
+//!    it lands it wins.
 //! 2. **Choice specialization** (interpreter): models branch by operating
 //!    region (`Select`) and the full tape evaluates both arms. After a
 //!    traced evaluation the tape is shortened against the current choices
@@ -25,10 +25,21 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use rsdag::hooks::{log, Level};
-use rsdag::{Program, SpecializedTape, Tape};
+use crate::hooks::{log, Level};
+use crate::{Program, SpecializedTape, Tape};
 
-use crate::NativeTape;
+/// Native code for [`Adaptive`], from outside the core: `rsdag-jit`
+/// implements it; without one the interpreter and its specialization serve.
+pub trait Compiler: Send + Sync {
+    /// `tape` as native code, keeping the slots `live` in the work array
+    /// after a run (the prolog guards of a specialization are read there);
+    /// `None` when it cannot be compiled.
+    fn compile(&self, tape: &Tape, live: &[u32]) -> Option<Box<dyn Program>>;
+    /// Run `job` in the background, after the jobs submitted before it.
+    fn submit(&self, job: Box<dyn FnOnce() + Send>);
+}
+
+type Native = Arc<dyn Program>;
 
 /// When to compile and when to specialize. The defaults are what a circuit
 /// simulator's Newton loop measured best with.
@@ -56,8 +67,6 @@ pub struct Policy {
     /// runs only when this many times shorter (an interpreted op costs
     /// about this many native ones).
     pub spec_interp_cost: usize,
-    /// Ops per emitted native function.
-    pub chunk_ops: usize,
 }
 
 impl Default for Policy {
@@ -72,7 +81,6 @@ impl Default for Policy {
             spec_compile_after: 16,
             spec_compile_budget: 4,
             spec_interp_cost: 4,
-            chunk_ops: crate::CHUNK_OPS,
         }
     }
 }
@@ -80,7 +88,7 @@ impl Default for Policy {
 /// The native form of the full tape, compiled in the background.
 struct Jit {
     /// `None` until the compile lands; `Some(None)` if it failed.
-    compiled: OnceLock<Option<NativeTape>>,
+    compiled: OnceLock<Option<Native>>,
     kicked: AtomicBool,
     evals: AtomicU32,
 }
@@ -107,7 +115,7 @@ struct Spec {
     inflight: bool,
     /// No specialization is rebuilt before this evaluation count.
     cooldown_until: u64,
-    native: Option<(u64, Arc<NativeTape>)>,
+    native: Option<(u64, Native)>,
     built: u64,
 }
 
@@ -136,24 +144,28 @@ enum Kind {
     /// The full tape's layout: the interpreter or the native code.
     Full,
     SpecInterp(Arc<SpecializedTape>, u64),
-    SpecNative(Arc<NativeTape>, Arc<SpecializedTape>),
+    SpecNative(Native, Arc<SpecializedTape>),
 }
 
 /// A tape and its accelerated forms, arbitrated per call.
 pub struct Adaptive {
     tape: Arc<Tape>,
     policy: Policy,
+    compiler: Option<Arc<dyn Compiler>>,
     spec: Option<Arc<Mutex<Spec>>>,
     jit: Arc<Jit>,
 }
 
 impl Adaptive {
-    pub fn new(tape: Tape, policy: Policy) -> Adaptive {
+    /// `compiler` supplies the native code; without it the interpreter and
+    /// its specialization serve.
+    pub fn new(tape: Tape, policy: Policy, compiler: Option<Arc<dyn Compiler>>) -> Adaptive {
         let spec = (policy.specialize && tape.n_selects() >= policy.spec_min_selects)
             .then(|| Arc::new(Mutex::new(Spec::default())));
         Adaptive {
             tape: Arc::new(tape),
             policy,
+            compiler,
             spec,
             jit: Arc::new(Jit {
                 compiled: OnceLock::new(),
@@ -184,8 +196,8 @@ impl Adaptive {
     }
 
     /// The native code of the full tape, once compiled.
-    pub fn native(&self) -> Option<&NativeTape> {
-        self.jit.compiled.get().and_then(Option::as_ref)
+    pub fn native(&self) -> Option<&dyn Program> {
+        self.jit.compiled.get().and_then(Option::as_deref)
     }
 
     /// The whole program on the best rung: native specialization, native
@@ -203,7 +215,7 @@ impl Adaptive {
             }
         }
         match self.native() {
-            Some(native) => native.eval(inputs, work, out),
+            Some(native) => run(native, inputs, work, out),
             None => self.tape.eval(inputs, work, out),
         }
     }
@@ -220,7 +232,7 @@ impl Adaptive {
         st.evals += 1;
         if let (Some((ver, native)), Some(sp)) = (st.native.clone(), st.spec.clone()) {
             if ver == st.version {
-                native.eval(inputs, work, out);
+                run(&*native, inputs, work, out);
                 let ok = out[sp.n_real()..]
                     .iter()
                     .zip(sp.expected())
@@ -299,7 +311,7 @@ impl Adaptive {
         }
         if let (Some((ver, native)), Some(sp)) = (st.native.clone(), st.spec.clone()) {
             if ver == st.version {
-                native.eval_prolog(inputs, work);
+                prolog(&*native, inputs, work);
                 if sp.check_prolog_guards(inputs, work) {
                     return Some(Kind::SpecNative(native, sp));
                 }
@@ -332,7 +344,7 @@ impl Adaptive {
     /// same either way.
     fn full_prolog(&self, inputs: &[f64], work: &mut Vec<f64>) {
         match self.native() {
-            Some(native) => native.eval_prolog(inputs, work),
+            Some(native) => prolog(native, inputs, work),
             None => self.tape.eval_prolog(inputs, work),
         }
     }
@@ -351,7 +363,7 @@ impl Adaptive {
         self.maybe_kick();
         match &ep.0 {
             Kind::SpecNative(native, sp) => {
-                native.eval_main(inputs, work, out);
+                main(&**native, inputs, work, out);
                 if sp.check_outputs(out) {
                     return;
                 }
@@ -372,16 +384,10 @@ impl Adaptive {
                 self.flip_retrace(inputs, work, out);
                 ep.0 = Kind::Full;
             }
+            // Mid-episode, the interpreter's state serves the native code
+            // as it is (`main` only lengthens the buffer).
             Kind::Full => match self.native() {
-                Some(native) => {
-                    // Mid-episode, the interpreter's state serves as it is;
-                    // the native code only wants the longer buffer.
-                    let n = Program::work_len(native);
-                    if work.len() < n {
-                        work.resize(n, 0.0);
-                    }
-                    native.eval_main(inputs, work, out);
-                }
+                Some(native) => main(native, inputs, work, out),
                 None => self.tape.eval_main(inputs, work, out),
             },
         }
@@ -504,14 +510,17 @@ impl Adaptive {
         {
             return;
         }
+        let Some(compiler) = self.compiler.clone() else {
+            return;
+        };
         st.inflight = true;
         st.compiles += 1;
-        let (sp, cache, chunk) = (sp.clone(), cache.clone(), self.policy.chunk_ops);
-        crate::background::submit(move || {
+        let (sp, cache) = (sp.clone(), cache.clone());
+        let job = move || {
             // The prolog guards are read from the work buffer after a
             // prolog, so their slots stay materialized.
             let guards: Vec<u32> = sp.prolog_guards().iter().map(|&(s, _)| s).collect();
-            let compiled = NativeTape::compile_live(sp.tape(), chunk, &guards).ok();
+            let compiled = compiler.compile(sp.tape(), &guards);
             let mut st = cache.lock().unwrap_or_else(|e| e.into_inner());
             st.inflight = false;
             if st.version == ver {
@@ -520,24 +529,31 @@ impl Adaptive {
                         Level::Debug,
                         "specialized tape compiled, native backend active",
                     );
-                    st.native = Some((ver, Arc::new(native)));
+                    st.native = Some((ver, Arc::from(native)));
                 }
             }
-        });
+        };
+        if let Some(c) = &self.compiler {
+            c.submit(Box::new(job));
+        }
     }
 
     /// Count the call; past the threshold, queue the full-tape compile. A
     /// failed compile leaves the interpreter in place for good.
     fn maybe_kick(&self) {
+        let Some(compiler) = self.compiler.clone() else {
+            return;
+        };
         if !self.policy.jit
             || self.jit.evals.fetch_add(1, Ordering::Relaxed) + 1 < self.policy.kick_after
             || self.jit.kicked.swap(true, Ordering::Relaxed)
         {
             return;
         }
-        let (tape, jit, chunk) = (self.tape.clone(), self.jit.clone(), self.policy.chunk_ops);
-        crate::background::submit(move || {
-            let compiled = NativeTape::compile_with(&tape, chunk).ok();
+        let (tape, jit) = (self.tape.clone(), self.jit.clone());
+        let c = compiler.clone();
+        compiler.submit(Box::new(move || {
+            let compiled = c.compile(&tape, &[]);
             log(
                 Level::Debug,
                 if compiled.is_some() {
@@ -546,7 +562,32 @@ impl Adaptive {
                     "tape compile failed, staying interpreted"
                 },
             );
-            let _ = jit.compiled.set(compiled);
-        });
+            let _ = jit.compiled.set(compiled.map(Arc::from));
+        }));
     }
+}
+
+/// The Vec-buffer forms over a [`Program`]: the buffers grow to its
+/// lengths (never shrink, so a state a prolog left stays in place).
+fn fit(p: &dyn Program, work: &mut Vec<f64>) {
+    if work.len() < p.work_len() {
+        work.resize(p.work_len(), 0.0);
+    }
+}
+
+fn run(p: &dyn Program, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
+    fit(p, work);
+    out.resize(p.out_len(), 0.0);
+    p.eval_into(inputs, work, out);
+}
+
+fn prolog(p: &dyn Program, inputs: &[f64], work: &mut Vec<f64>) {
+    fit(p, work);
+    p.eval_prolog_into(inputs, work);
+}
+
+fn main(p: &dyn Program, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
+    fit(p, work);
+    out.resize(p.out_len(), 0.0);
+    p.eval_main_into(inputs, work, out);
 }

@@ -40,9 +40,8 @@ impl std::fmt::Display for JitError {
 }
 impl std::error::Error for JitError {}
 
-mod aarch64;
 #[cfg(target_arch = "aarch64")]
-pub mod adaptive;
+mod aarch64;
 pub mod background;
 mod host;
 mod ir;
@@ -51,5 +50,33 @@ mod native;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
-pub use adaptive::{Adaptive, Episode, Policy, Stats};
 pub use native::NativeTape;
+
+/// The native backend as an [`rsdag::Compiler`]: [`NativeTape`] compiled on
+/// the [`background`] queue, for an [`rsdag::Adaptive`].
+pub struct Jit {
+    /// Ops per emitted function.
+    pub chunk_ops: usize,
+}
+
+impl rsdag::Compiler for Jit {
+    fn compile(&self, tape: &rsdag::Tape, live: &[u32]) -> Option<Box<dyn rsdag::Program>> {
+        NativeTape::compile_live(tape, self.chunk_ops, live)
+            .ok()
+            .map(|n| Box::new(n) as Box<dyn rsdag::Program>)
+    }
+    fn submit(&self, job: Box<dyn FnOnce() + Send>) {
+        background::submit(job);
+    }
+}
+
+/// [`Jit`] with the default chunk size, shared.
+pub fn compiler() -> std::sync::Arc<dyn rsdag::Compiler> {
+    static C: std::sync::OnceLock<std::sync::Arc<dyn rsdag::Compiler>> = std::sync::OnceLock::new();
+    C.get_or_init(|| {
+        std::sync::Arc::new(Jit {
+            chunk_ops: CHUNK_OPS,
+        })
+    })
+    .clone()
+}

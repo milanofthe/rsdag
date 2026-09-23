@@ -26,9 +26,8 @@ NOTICE); for a commercial license contact info@milanrother.com.
   `newton_step`).
 - `rsdag-jit`: `NativeTape`, machine code for AArch64 and x86-64 on Linux,
   macOS and Windows; function bodies compiled once and batched over
-  instances; `eval_many` over many input sets. `Adaptive`: a tape served by
-  the interpreter, its choice specialization or native code, chosen per
-  call, compiled in the background (`Policy` sets when).
+  instances; `eval_many` over many input sets. `rsdag_jit::compiler()` is
+  the native `Compiler` for `Adaptive`.
 - `rsdag-py`: Python package `rsdag` (`trace`, `jit`, `jacobian`, `grad`,
   `where`, `matmul`, `solve`), built with maturin.
 
@@ -73,6 +72,9 @@ output of the same kernel.
 prolog evaluated once per parameter binding and a main part evaluated per
 iteration. The prolog's results are `work[..Tape::state_len()]`, the same
 layout in every backend. `Tape::eval` runs over any `Scalar` (`f64`, `f32`, `Complex64`).
+`Adaptive` serves a tape by the interpreter, its choice specialization or
+native code (with a `Compiler`, compiled in the background), chosen per
+call; `Policy` sets the thresholds.
 
 Evaluation is allocation-free once the buffers exist. `Tape::work_len` and
 `out_len` size them, `eval_into` writes into slices the caller owns,

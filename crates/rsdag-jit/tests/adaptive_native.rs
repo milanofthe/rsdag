@@ -3,8 +3,8 @@
 //! episodes, and the native code landing in the middle of an episode.
 
 use rsdag::synth::{build, inputs, Rng, Spec, Vocabulary};
+use rsdag::{Adaptive, Policy};
 use rsdag::{Graph, Tape, F64};
-use rsdag_jit::{Adaptive, Policy};
 
 fn same(a: &[f64], b: &[f64]) -> bool {
     a.len() == b.len()
@@ -49,7 +49,7 @@ fn every_rung_is_the_interpreter() {
             kick_after: 2,
             ..Policy::default()
         };
-        let a = Adaptive::new(tape, policy);
+        let a = Adaptive::new(tape, policy, Some(rsdag_jit::compiler()));
         let reference = a.tape();
         let mut rng = Rng::new(seed + 100);
         let (mut w, mut o, mut rw, mut ro) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -97,6 +97,7 @@ fn without_the_jit_it_stays_interpreted_and_correct() {
             jit: false,
             ..Policy::default()
         },
+        Some(rsdag_jit::compiler()),
     );
     let reference = a.tape();
     let (mut w, mut o, mut rw, mut ro) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
