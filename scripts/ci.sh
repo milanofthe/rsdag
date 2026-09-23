@@ -16,9 +16,14 @@ run $CARGO fmt --all -- --check
 run $CARGO clippy --workspace --exclude rsdag-py --all-targets --features "$FEATURES" -- -D warnings
 run $CARGO test --workspace --exclude rsdag-py --features "$FEATURES"
 run $CARGO clippy -p rsdag --all-targets -- -D warnings
-RUSTDOCFLAGS='-D warnings' run $CARGO doc --no-deps --workspace --exclude rsdag-py --features "$FEATURES"
-# The graph crate in the browser (a consumer's web build interprets there).
-run $CARGO check -p rsdag --features serde --target wasm32-unknown-unknown
+RUSTDOCFLAGS='-D warnings' run $CARGO doc --no-deps --workspace --exclude rsdag-py --features "$FEATURES rsdag/exact rsdag/egraph rsdag/complex"
+for f in "" exact complex serde egraph exact,serde; do
+    run $CARGO clippy -p rsdag --lib --no-default-features --features "$f" -- -D warnings
+done
+# The graph crate in the browser (a consumer's web build interprets there),
+# linked and importing nothing.
+run $CARGO build --release -p rsdag --example wasm_probe --target wasm32-unknown-unknown --features exact,complex,serde
+run python3 scripts/wasm_imports.py target/wasm32-unknown-unknown/release/examples/wasm_probe.wasm
 run $CARGO check -p rsdag-py
 # The Python job: the wheel, installed into the interpreter that runs the
 # tests. Skipped where maturin or pytest is missing.

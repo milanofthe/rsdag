@@ -18,20 +18,28 @@ jobs:
       - run: cargo clippy --workspace --exclude rsdag-py --all-targets --features 'rsdag/synth rsdag/serde' -- -D warnings
       - run: cargo test --workspace --exclude rsdag-py --features 'rsdag/synth rsdag/serde'
       # The optional features must also build and lint on their own, so a
-      # consumer that takes neither of them still compiles.
+      # consumer that takes none or one of them still compiles.
       - run: cargo clippy -p rsdag --all-targets -- -D warnings
+      - run: |
+          for f in "" exact complex serde egraph exact,serde; do
+            cargo clippy -p rsdag --lib --no-default-features --features "$f" -- -D warnings
+          done
       # A dangling doc link is a stale doc: fail on it.
-      - run: cargo doc --no-deps --workspace --exclude rsdag-py --features 'rsdag/synth rsdag/serde'
+      - run: cargo doc --no-deps --workspace --exclude rsdag-py --features 'rsdag/synth rsdag/serde rsdag/exact rsdag/egraph rsdag/complex'
         env:
           RUSTDOCFLAGS: -D warnings
-      # The graph crate in the browser: a consumer's web build interprets there.
-      - run: cargo check -p rsdag --features serde --target wasm32-unknown-unknown
-  # The native backend on the two conventions this runner does not cover:
-  # Windows x64 here, AArch64 on macOS.
+      # The graph crate in the browser: a consumer's web build interprets
+      # there. Linked, not only checked, and the module must import nothing,
+      # since a plain browser module gets no host functions.
+      - run: cargo build --release -p rsdag --example wasm_probe --target wasm32-unknown-unknown --features exact,complex,serde
+      - run: python3 scripts/wasm_imports.py target/wasm32-unknown-unknown/release/examples/wasm_probe.wasm
+  # The native backend on the conventions and platforms the first runner
+  # does not cover: Windows x64, AArch64 on macOS (MAP_JIT) and on Linux
+  # (mprotect, cache flush).
   native:
     strategy:
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [windows-latest, macos-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -53,3 +61,10 @@ jobs:
       - run: maturin build --release -m crates/rsdag-py/Cargo.toml -o dist
       - run: pip install dist/*.whl
       - run: python -m pytest -q crates/rsdag-py/tests
+  # Known advisories in the locked dependency tree.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@cargo-audit
+      - run: cargo audit
