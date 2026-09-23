@@ -388,13 +388,19 @@ impl<K: Field> Graph<K> {
         self.intern(Node::Neg(a))
     }
 
-    /// Integer power. Folds constants and collapses nested powers.
+    /// Integer power. Folds constants and collapses nested powers. A
+    /// `Pow` node's exponent fits `i32` (what every backend evaluates);
+    /// a wider one becomes a real power, `Powf` of the exponent's value.
     pub fn pow_i(&mut self, a: ExprId, n: i64) -> ExprId {
         if n == 0 {
             return self.one;
         }
         if n == 1 {
             return a;
+        }
+        if i32::try_from(n).is_err() {
+            let e = self.konst_f64(n as f64);
+            return self.binary(BinOp::Powf, a, e);
         }
         if let Some(x) = self.const_of(a) {
             // `0^(negative)` has no exact rational value (it is `inf` numerically).
@@ -408,7 +414,9 @@ impl<K: Field> Graph<K> {
             }
         }
         if let Node::Pow(base, m) = *self.node(a) {
-            return self.pow_i(base, m * n);
+            if let Some(k) = m.checked_mul(n).filter(|&k| i32::try_from(k).is_ok()) {
+                return self.pow_i(base, k);
+            }
         }
         self.intern(Node::Pow(a, n))
     }

@@ -62,8 +62,8 @@ fn separate_blocks_compose_into_one_graph() {
     // One arena for the system. Loading re-interns, so shared structure
     // between the blocks is shared here, and each block's ids are mapped.
     let mut sys: Graph<F64> = Graph::new();
-    let lag_map = sys.load_module(&lag_mod);
-    let sat_map = sys.load_module(&sat_mod);
+    let lag_map = sys.load_module(&lag_mod).unwrap();
+    let sat_map = sys.load_module(&sat_mod).unwrap();
 
     let (lag_dx, lag_u) = {
         let f = sys.func(lag_map.funcs[0]);
@@ -231,9 +231,9 @@ fn loading_a_block_twice_shares_its_structure() {
     let module = src.to_module();
 
     let mut sys: Graph<F64> = Graph::new();
-    let first = sys.load_module(&module);
+    let first = sys.load_module(&module).unwrap();
     let after_first = sys.len();
-    let second = sys.load_module(&module);
+    let second = sys.load_module(&module).unwrap();
     assert_eq!(sys.len(), after_first, "the second instance added nodes");
     assert_eq!(first.exprs, second.exprs);
 

@@ -125,7 +125,7 @@ fn a_newton_step_composed_of_graph_ops_converges() {
     let n = 64;
     let mut g: Graph<F64> = Graph::new();
     let (f, syms) = residual(&mut g, n);
-    let ns = newton_step(&mut g, &f, &syms);
+    let ns = newton_step(&mut g, &f, &syms).expect("nonsingular");
     let (step, fill) = (ns.x, ns.fill);
     // The solve pivots at run time; the rows that could pivot at a step
     // take the union of their structures, so the fill counts those unions.

@@ -58,29 +58,33 @@ fn unary_factor<K: Field>(ctx: &mut Graph<K>, op: UnaryOp, a: ExprId) -> ExprId 
             // one transcendental per junction per evaluation instead of two.
             // Values are identical: for a <= EXP_LIMIT `unary_f64` evaluates
             // the bare `a.exp()`.
+            // The condition names the out-of-range side, so a NaN `a`
+            // takes the exp arm and stays NaN, as the value does.
             let hi = ctx.konst_f64(crate::semantics::EXP_LIMIT);
-            let below = ctx.cmp(CmpOp::Le, a, hi);
+            let above = ctx.cmp(CmpOp::Gt, a, hi);
             let ea = ctx.exp(a);
             let slope = ctx.konst_f64(crate::semantics::EXP_LIMIT.exp());
-            ctx.select(below, ea, slope)
+            ctx.select(above, slope, ea)
         }
         UnaryOp::Ln => {
-            // 1/a above the floor, 0 below it (ln is clamped flat there).
+            // 1/a above the floor, 0 at or below it (ln is clamped flat
+            // there); a NaN `a` takes the 1/a arm.
             let lo = ctx.konst_f64(crate::semantics::LN_FLOOR);
-            let above = ctx.cmp(CmpOp::Gt, a, lo);
+            let clamped = ctx.cmp(CmpOp::Le, a, lo);
             let inv_a = ctx.recip(a);
             let zero = ctx.zero();
-            ctx.select(above, inv_a, zero)
+            ctx.select(clamped, zero, inv_a)
         }
         UnaryOp::Sqrt => {
-            // 1/(2*sqrt(a)) for a>0, else 0 (matches sqrt clamped to 0).
+            // 1/(2*sqrt(a)) for a>0, else 0 (matches sqrt clamped to 0);
+            // a NaN `a` takes the first arm.
             let s = ctx.sqrt(a);
             let rs = ctx.recip(s);
             let half = ctx.ratio(1, 2);
             let d = ctx.mul(half, rs);
             let zero = ctx.zero();
-            let pos = ctx.cmp(CmpOp::Gt, a, zero);
-            ctx.select(pos, d, zero)
+            let clamped = ctx.cmp(CmpOp::Le, a, zero);
+            ctx.select(clamped, zero, d)
         }
         UnaryOp::Sin => ctx.cos(a),
         UnaryOp::Cos => {

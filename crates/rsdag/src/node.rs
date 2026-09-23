@@ -503,7 +503,8 @@ pub enum Node {
     Mul(ExprId, ExprId),
     /// Unary negation.
     Neg(ExprId),
-    /// Integer power (covers reciprocals via negative exponents).
+    /// Integer power (covers reciprocals via negative exponents). The
+    /// exponent fits `i32` ([`Graph::pow_i`](crate::Graph::pow_i) sees to it).
     Pow(ExprId, i64),
     /// Elementary unary function.
     Unary(UnaryOp, ExprId),
