@@ -26,7 +26,9 @@ NOTICE); for a commercial license contact info@milanrother.com.
   `newton_step`).
 - `rsdag-jit`: `NativeTape`, machine code for AArch64 and x86-64 on Linux,
   macOS and Windows; function bodies compiled once and batched over
-  instances; `eval_many` over many input sets.
+  instances; `eval_many` over many input sets. `Adaptive`: a tape served by
+  the interpreter, its choice specialization or native code, chosen per
+  call, compiled in the background (`Policy` sets when).
 - `rsdag-py`: Python package `rsdag` (`trace`, `jit`, `jacobian`, `grad`,
   `where`, `matmul`, `solve`), built with maturin.
 

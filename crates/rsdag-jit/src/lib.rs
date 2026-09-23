@@ -40,8 +40,10 @@ impl std::fmt::Display for JitError {
 }
 impl std::error::Error for JitError {}
 
-#[cfg(target_arch = "aarch64")]
 mod aarch64;
+#[cfg(target_arch = "aarch64")]
+pub mod adaptive;
+pub mod background;
 mod host;
 mod ir;
 mod isa;
@@ -49,4 +51,5 @@ mod native;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
+pub use adaptive::{Adaptive, Episode, Policy, Stats};
 pub use native::NativeTape;
