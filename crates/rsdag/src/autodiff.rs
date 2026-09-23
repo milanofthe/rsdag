@@ -63,7 +63,7 @@ fn unary_factor<K: Field>(ctx: &mut Graph<K>, op: UnaryOp, a: ExprId) -> ExprId 
             let hi = ctx.konst_f64(crate::semantics::EXP_LIMIT);
             let above = ctx.cmp(CmpOp::Gt, a, hi);
             let ea = ctx.exp(a);
-            let slope = ctx.konst_f64(crate::semantics::EXP_LIMIT.exp());
+            let slope = ctx.konst_f64(crate::math::exp(crate::semantics::EXP_LIMIT));
             ctx.select(above, slope, ea)
         }
         UnaryOp::Ln => {

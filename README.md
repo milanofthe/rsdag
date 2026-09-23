@@ -135,6 +135,19 @@ guards. `rsdag::synth` generates random programs over the whole op
 vocabulary; the test suites compare the arena sweep, the tape, the native
 code and the typed evaluation on them bit for bit.
 
+The elementary functions are Rust code, no platform library: `exp`, `ln`,
+`sinh`, `cosh`, `tanh` and `powi` in `rsdag::math`, the rest from the `libm`
+crate, complex ones built from these. Results are the same bits on
+AArch64, x86-64 and wasm32.
+
+| | max error | ns per call (M3) |
+|---|---|---|
+| `exp` | 0.51 ulp on [-700, 700], 1.0 ulp toward underflow | 1.8 |
+| `ln` | 0.78 ulp | 2.9 |
+| `sinh` | 1.75 ulp | 4.1 |
+| `cosh` | 1.01 ulp | 3.9 |
+| `tanh` | 2.1 ulp | 4.1 |
+
 ## Numbers
 
 One core of an Apple M3, release profile. `docs/bench/plot.py` draws the
