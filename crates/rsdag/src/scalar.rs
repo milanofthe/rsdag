@@ -294,7 +294,7 @@ impl Scalar for f64 {
         -self
     }
     fn powi(self, n: i32) -> Self {
-        crate::math::powi(self, n)
+        f64::powi(self, n)
     }
     fn unary(op: UnaryOp, x: Self) -> Self {
         unary_f64(op, x)
@@ -389,7 +389,7 @@ impl Scalar for Complex64 {
         self / o
     }
     fn magnitude(self) -> f64 {
-        crate::math::complex::norm(self)
+        self.norm()
     }
     fn to_f64(self) -> f64 {
         assert!(self.im == 0.0, "a bundle call takes real arguments");
@@ -423,29 +423,28 @@ impl Scalar for Complex64 {
         Complex64::powi(&self, n)
     }
     fn unary(op: UnaryOp, x: Self) -> Self {
-        use crate::math::complex as m;
         match op {
-            UnaryOp::Exp => m::exp_c(x),
-            UnaryOp::Ln => m::ln_c(x),
-            UnaryOp::Sqrt => m::sqrt_c(x),
-            UnaryOp::Sin => m::sin_c(x),
-            UnaryOp::Cos => m::cos_c(x),
-            UnaryOp::Sinh => m::sinh_c(x),
-            UnaryOp::Cosh => m::cosh_c(x),
-            UnaryOp::Tanh => m::tanh_c(x),
-            UnaryOp::Atan => m::atan_c(x),
-            UnaryOp::Tan => m::tan_c(x),
-            UnaryOp::Log10 => m::ln_c(x) / std::f64::consts::LN_10,
-            UnaryOp::Log2 => m::ln_c(x) / std::f64::consts::LN_2,
-            UnaryOp::Log1p => m::ln_c(x + 1.0),
-            UnaryOp::Expm1 => m::exp_c(x) - 1.0,
-            UnaryOp::Cbrt => m::cbrt_c(x),
-            UnaryOp::Abs => Complex64::new(m::norm(x), 0.0),
-            UnaryOp::Asin => m::asin_c(x),
-            UnaryOp::Acos => m::acos_c(x),
-            UnaryOp::Asinh => m::asinh_c(x),
-            UnaryOp::Acosh => m::acosh_c(x),
-            UnaryOp::Atanh => m::atanh_c(x),
+            UnaryOp::Exp => x.exp(),
+            UnaryOp::Ln => x.ln(),
+            UnaryOp::Sqrt => x.sqrt(),
+            UnaryOp::Sin => x.sin(),
+            UnaryOp::Cos => x.cos(),
+            UnaryOp::Sinh => x.sinh(),
+            UnaryOp::Cosh => x.cosh(),
+            UnaryOp::Tanh => x.tanh(),
+            UnaryOp::Atan => x.atan(),
+            UnaryOp::Tan => x.tan(),
+            UnaryOp::Log10 => x.ln() / std::f64::consts::LN_10,
+            UnaryOp::Log2 => x.ln() / std::f64::consts::LN_2,
+            UnaryOp::Log1p => (x + 1.0).ln(),
+            UnaryOp::Expm1 => x.exp() - 1.0,
+            UnaryOp::Cbrt => x.powf(1.0 / 3.0),
+            UnaryOp::Abs => Complex64::new(x.norm(), 0.0),
+            UnaryOp::Asin => x.asin(),
+            UnaryOp::Acos => x.acos(),
+            UnaryOp::Asinh => x.asinh(),
+            UnaryOp::Acosh => x.acosh(),
+            UnaryOp::Atanh => x.atanh(),
             UnaryOp::Floor
             | UnaryOp::Sign
             | UnaryOp::Ceil
@@ -461,9 +460,8 @@ impl Scalar for Complex64 {
         }
     }
     fn binary(op: BinOp, x: Self, y: Self) -> Self {
-        use crate::math::complex as m;
         match op {
-            BinOp::Powf => m::pow_c(x, y),
+            BinOp::Powf => x.powc(y),
             BinOp::Mod | BinOp::Atan2 | BinOp::Hypot => {
                 Complex64::new(binary_f64(op, x.re, y.re), 0.0)
             }

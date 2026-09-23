@@ -102,20 +102,8 @@ pub fn binary_f64(op: BinOp, x: f64, y: f64) -> f64 {
 }
 
 /// Digamma `psi(x)`: recurrence into the asymptotic zone, then the series.
-pub fn digamma(x: f64) -> f64 {
-    if x.is_nan() || x == f64::INFINITY {
-        return x;
-    }
-    if x <= 0.0 {
-        // A pole at every non-positive integer; elsewhere the reflection
-        // `psi(x) = psi(1 - x) - pi / tan(pi x)`, so the recurrence below
-        // never walks up from a huge negative `x` (where `x + 1 == x`).
-        if x == x.floor() {
-            return f64::NAN;
-        }
-        return digamma(1.0 - x) - std::f64::consts::PI / libm::tan(std::f64::consts::PI * x);
-    }
-    let (mut x, mut result) = (x, 0.0);
+pub fn digamma(mut x: f64) -> f64 {
+    let mut result = 0.0;
     while x < 6.0 {
         result -= 1.0 / x;
         x += 1.0;
@@ -127,21 +115,9 @@ pub fn digamma(x: f64) -> f64 {
         - inv2 * (1.0 / 12.0 - inv2 * (1.0 / 120.0 - inv2 * (1.0 / 252.0)))
 }
 
-/// Trigamma `psi'(x)`: recurrence into the asymptotic zone, then the series;
-/// for `x <= 0` the reflection `psi'(x) = pi^2 / sin^2(pi x) - psi'(1 - x)`.
-pub fn trigamma(x: f64) -> f64 {
-    if x.is_nan() || x == f64::INFINITY {
-        return if x.is_nan() { x } else { 0.0 };
-    }
-    if x <= 0.0 {
-        if x == x.floor() {
-            return f64::INFINITY;
-        }
-        let s = libm::sin(std::f64::consts::PI * x);
-        let pi2 = std::f64::consts::PI * std::f64::consts::PI;
-        return pi2 / (s * s) - trigamma(1.0 - x);
-    }
-    let (mut x, mut result) = (x, 0.0);
+/// Trigamma `psi'(x)`: recurrence into the asymptotic zone, then the series.
+pub fn trigamma(mut x: f64) -> f64 {
+    let mut result = 0.0;
     while x < 6.0 {
         result += 1.0 / (x * x);
         x += 1.0;
@@ -194,9 +170,9 @@ pub fn unary_f64(op: UnaryOp, x: f64) -> f64 {
     match op {
         UnaryOp::Exp => {
             if x > EXP_LIMIT {
-                crate::math::exp(EXP_LIMIT) * (1.0 + (x - EXP_LIMIT))
+                EXP_LIMIT.exp() * (1.0 + (x - EXP_LIMIT))
             } else {
-                crate::math::exp(x)
+                x.exp()
             }
         }
         // The guards test for the out-of-range side, so a NaN argument
@@ -204,9 +180,9 @@ pub fn unary_f64(op: UnaryOp, x: f64) -> f64 {
         // wild iterate, it does not turn a missing value into a number.
         UnaryOp::Ln => {
             if x <= LN_FLOOR {
-                crate::math::ln(LN_FLOOR)
+                LN_FLOOR.ln()
             } else {
-                crate::math::ln(x)
+                x.ln()
             }
         }
         UnaryOp::Sqrt => {
@@ -216,12 +192,12 @@ pub fn unary_f64(op: UnaryOp, x: f64) -> f64 {
                 x.sqrt()
             }
         }
-        UnaryOp::Sin => libm::sin(x),
-        UnaryOp::Cos => libm::cos(x),
-        UnaryOp::Sinh => crate::math::sinh(x),
-        UnaryOp::Cosh => crate::math::cosh(x),
-        UnaryOp::Tanh => crate::math::tanh(x),
-        UnaryOp::Atan => libm::atan(x),
+        UnaryOp::Sin => x.sin(),
+        UnaryOp::Cos => x.cos(),
+        UnaryOp::Sinh => x.sinh(),
+        UnaryOp::Cosh => x.cosh(),
+        UnaryOp::Tanh => x.tanh(),
+        UnaryOp::Atan => x.atan(),
         UnaryOp::Floor => x.floor(),
         UnaryOp::Tan => libm::tan(x),
         UnaryOp::Log10 => libm::log10(x),
