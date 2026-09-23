@@ -655,17 +655,24 @@ impl Tape {
                             f.c.map(|c| place_operand(inputs, work, scratch, pool, c, m, &mut at));
                         (c, f.codes)
                     });
-                    let av: &[T] = dense_slice(inputs, work.as_ptr(), scratch, ra, m * n);
-                    let xv: &[T] = dense_slice(inputs, work.as_ptr(), scratch, rx, n);
+                    let base = work.as_mut_ptr();
+                    let av: &[T] = dense_slice(inputs, base, scratch, ra, m * n);
+                    let xv: &[T] = dense_slice(inputs, base, scratch, rx, n);
+                    // The kernel's outputs are fresh slots: no operand, the
+                    // accumulator included, lives where they go.
+                    let reads = [
+                        Some((ra, m * n)),
+                        Some((rx, n)),
+                        rc.and_then(|(c, _)| c.map(|c| (c, m))),
+                    ];
+                    let out = unsafe { out_block(base, work.len(), d, m, &reads) };
                     match rc {
-                        None => T::gemv(av, xv, m, n, &mut work[d..d + m]),
+                        None => T::gemv(av, xv, m, n, out),
                         Some((rc, codes)) => {
-                            // The kernel's outputs are fresh slots: the
-                            // accumulator never lives where they go.
                             let cv: Option<&[T]> =
-                                rc.map(|rc| dense_slice(inputs, work.as_ptr(), scratch, rc, m));
+                                rc.map(|rc| dense_slice(inputs, base, scratch, rc, m));
                             let codes = &self.arg_pool[codes as usize..codes as usize + m];
-                            T::gemv_fold(av, xv, m, n, cv, codes, &mut work[d..d + m]);
+                            T::gemv_fold(av, xv, m, n, cv, codes, out);
                         }
                     }
                     continue;
@@ -682,15 +689,22 @@ impl Tape {
                             .map(|c| place_operand(inputs, work, scratch, pool, c, m * n, &mut at));
                         (c, f.codes)
                     });
-                    let av: &[T] = dense_slice(inputs, work.as_ptr(), scratch, ra, m * k);
-                    let bv: &[T] = dense_slice(inputs, work.as_ptr(), scratch, rb, n * k);
+                    let base = work.as_mut_ptr();
+                    let av: &[T] = dense_slice(inputs, base, scratch, ra, m * k);
+                    let bv: &[T] = dense_slice(inputs, base, scratch, rb, n * k);
+                    let reads = [
+                        Some((ra, m * k)),
+                        Some((rb, n * k)),
+                        rc.and_then(|(c, _)| c.map(|c| (c, m * n))),
+                    ];
+                    let out = unsafe { out_block(base, work.len(), d, m * n, &reads) };
                     match rc {
-                        None => T::gemm(av, bv, m, k, n, &mut work[d..d + m * n]),
+                        None => T::gemm(av, bv, m, k, n, out),
                         Some((rc, codes)) => {
                             let cv: Option<&[T]> =
-                                rc.map(|rc| dense_slice(inputs, work.as_ptr(), scratch, rc, m * n));
+                                rc.map(|rc| dense_slice(inputs, base, scratch, rc, m * n));
                             let codes = &self.arg_pool[codes as usize..codes as usize + m * n];
-                            T::gemm_fold(av, bv, m, k, n, cv, codes, &mut work[d..d + m * n]);
+                            T::gemm_fold(av, bv, m, k, n, cv, codes, out);
                         }
                     }
                     continue;
@@ -699,18 +713,24 @@ impl Tape {
                     let (n, k) = (n as usize, k as usize);
                     let (ra, rb) =
                         dense_operands(inputs, work, scratch, &self.arg_pool, a, n * n, b, n * k);
-                    let av: &[T] = dense_slice(inputs, work.as_ptr(), scratch, ra, n * n);
-                    let bv: &[T] = dense_slice(inputs, work.as_ptr(), scratch, rb, n * k);
-                    solve_many_t(av, bv, n, k, &mut work[d..d + n * k]);
+                    let base = work.as_mut_ptr();
+                    let av: &[T] = dense_slice(inputs, base, scratch, ra, n * n);
+                    let bv: &[T] = dense_slice(inputs, base, scratch, rb, n * k);
+                    let reads = [Some((ra, n * n)), Some((rb, n * k)), None];
+                    let out = unsafe { out_block(base, work.len(), d, n * k, &reads) };
+                    solve_many_t(av, bv, n, k, out);
                     continue;
                 }
                 Op::Solve { a, b, n } => {
                     let n = n as usize;
                     let (ra, rb) =
                         dense_operands(inputs, work, scratch, &self.arg_pool, a, n * n, b, n);
-                    let av: &[T] = dense_slice(inputs, work.as_ptr(), scratch, ra, n * n);
-                    let bv: &[T] = dense_slice(inputs, work.as_ptr(), scratch, rb, n);
-                    solve_t(av, bv, n, &mut work[d..d + n]);
+                    let base = work.as_mut_ptr();
+                    let av: &[T] = dense_slice(inputs, base, scratch, ra, n * n);
+                    let bv: &[T] = dense_slice(inputs, base, scratch, rb, n);
+                    let reads = [Some((ra, n * n)), Some((rb, n)), None];
+                    let out = unsafe { out_block(base, work.len(), d, n, &reads) };
+                    solve_t(av, bv, n, out);
                     continue;
                 }
             };
@@ -853,6 +873,7 @@ fn read<T: Scalar>(inputs: &[T], work: &[T], k: u32) -> T {
 
 /// A dense operand resolved for a kernel: in place in the inputs, or in
 /// the scratch from an element on.
+#[derive(Clone, Copy)]
 enum Dense {
     Inputs(usize),
     Scratch(usize),
@@ -861,12 +882,13 @@ enum Dense {
 }
 
 /// The slice a resolved dense operand names, `len` values long. `work` is
-/// the work array's base pointer: a run read in place is disjoint from the
-/// kernel's output block (the allocator gives a kernel a fresh block), so
-/// the read may overlap the `&mut` the kernel holds on its outputs.
+/// the work array's base pointer, the one the kernel's output block is
+/// derived from too (see [`out_block`]): a run read in place is disjoint
+/// from that block (the allocator gives a kernel a fresh block), and both
+/// come from one pointer, so neither borrow invalidates the other.
 fn dense_slice<'a, T: Scalar>(
     inputs: &'a [T],
-    work: *const T,
+    work: *mut T,
     scratch: &'a [T],
     d: Dense,
     len: usize,
@@ -878,6 +900,37 @@ fn dense_slice<'a, T: Scalar>(
         // slots) and no kernel writes it while it is read.
         Dense::Work(s) => unsafe { std::slice::from_raw_parts(work.add(s), len) },
     }
+}
+
+/// A kernel's output block `d .. d + len` of the work array at `work`
+/// (`work_len` long), derived from the same pointer as its in-place reads
+/// `reads`, which it must not overlap.
+///
+/// # Safety
+///
+/// `work` points to `work_len` initialized values that nothing else
+/// borrows for the returned lifetime except the in-place reads, which lie
+/// outside the block.
+unsafe fn out_block<'a, T>(
+    work: *mut T,
+    work_len: usize,
+    d: usize,
+    len: usize,
+    reads: &[Option<(Dense, usize)>],
+) -> &'a mut [T] {
+    assert!(
+        d + len <= work_len,
+        "kernel output block past the work array"
+    );
+    for &(r, rlen) in reads.iter().flatten() {
+        if let Dense::Work(s) = r {
+            assert!(
+                s + rlen <= d || d + len <= s,
+                "kernel reads its own output block"
+            );
+        }
+    }
+    std::slice::from_raw_parts_mut(work.add(d), len)
 }
 
 /// Resolve a kernel's two dense operands: an input run that the inputs
