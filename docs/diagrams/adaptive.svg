@@ -81,17 +81,17 @@
 <!-- flip -->
 <g id="node5" class="node">
 <title>flip</title>
-<path fill="none" stroke="#c55a11" stroke-width="1.2" stroke-dasharray="5,2" d="M776.26,-64.4C776.26,-64.4 623.59,-64.4 623.59,-64.4 617.59,-64.4 611.59,-58.4 611.59,-52.4 611.59,-52.4 611.59,-12 611.59,-12 611.59,-6 617.59,0 623.59,0 623.59,0 776.26,0 776.26,0 782.26,0 788.26,-6 788.26,-12 788.26,-12 788.26,-52.4 788.26,-52.4 788.26,-58.4 782.26,-64.4 776.26,-64.4"/>
-<text xml:space="preserve" text-anchor="start" x="667.3" y="-44.9" font-family="Helvetica,Arial,sans-serif" font-weight="bold" font-size="14.00" fill="#c55a11">region flip</text>
-<text xml:space="preserve" text-anchor="start" x="634.68" y="-32.8" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#c55a11">retrace and respecialize;</text>
-<text xml:space="preserve" text-anchor="start" x="628.3" y="-20.8" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#c55a11">a select seen flipping stays</text>
-<text xml:space="preserve" text-anchor="start" x="624.55" y="-8.8" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#c55a11">unpinned; thrashing opts out</text>
+<path fill="none" stroke="#3b82f6" stroke-width="1.2" stroke-dasharray="5,2" d="M776.26,-64.4C776.26,-64.4 623.59,-64.4 623.59,-64.4 617.59,-64.4 611.59,-58.4 611.59,-52.4 611.59,-52.4 611.59,-12 611.59,-12 611.59,-6 617.59,0 623.59,0 623.59,0 776.26,0 776.26,0 782.26,0 788.26,-6 788.26,-12 788.26,-12 788.26,-52.4 788.26,-52.4 788.26,-58.4 782.26,-64.4 776.26,-64.4"/>
+<text xml:space="preserve" text-anchor="start" x="667.3" y="-44.9" font-family="Helvetica,Arial,sans-serif" font-weight="bold" font-size="14.00" fill="#3b82f6">region flip</text>
+<text xml:space="preserve" text-anchor="start" x="634.68" y="-32.8" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#3b82f6">retrace and respecialize;</text>
+<text xml:space="preserve" text-anchor="start" x="628.3" y="-20.8" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#3b82f6">a select seen flipping stays</text>
+<text xml:space="preserve" text-anchor="start" x="624.55" y="-8.8" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#3b82f6">unpinned; thrashing opts out</text>
 </g>
 <!-- spec&#45;&gt;flip -->
 <g id="edge5" class="edge">
 <title>spec&#45;&gt;flip</title>
-<path fill="none" stroke="#c55a11" stroke-width="1.2" stroke-dasharray="5,2" d="M479.73,-56.29C516.45,-52.25 561.64,-47.29 601.43,-42.91"/>
-<polygon fill="#c55a11" stroke="#c55a11" stroke-width="1.2" points="601.71,-45.7 609.35,-42.04 601.09,-40.14 601.71,-45.7"/>
+<path fill="none" stroke="#3b82f6" stroke-width="1.2" stroke-dasharray="5,2" d="M479.73,-56.29C516.45,-52.25 561.64,-47.29 601.43,-42.91"/>
+<polygon fill="#3b82f6" stroke="#3b82f6" stroke-width="1.2" points="601.71,-45.7 609.35,-42.04 601.09,-40.14 601.71,-45.7"/>
 </g>
 <!-- native&#45;&gt;ep -->
 <g id="edge7" class="edge">
@@ -102,8 +102,8 @@
 <!-- flip&#45;&gt;interp -->
 <g id="edge6" class="edge">
 <title>flip&#45;&gt;interp</title>
-<path fill="none" stroke="#c55a11" stroke-width="1.2" stroke-dasharray="5,2" d="M611.25,-13.89C535.48,-2.03 424.27,5.78 334.17,-27.2 294.57,-41.69 258.83,-74.65 235.51,-100.19"/>
-<polygon fill="#c55a11" stroke="#c55a11" stroke-width="1.2" points="233.42,-98.32 230.18,-106.16 237.6,-102.05 233.42,-98.32"/>
+<path fill="none" stroke="#3b82f6" stroke-width="1.2" stroke-dasharray="5,2" d="M611.25,-13.89C535.48,-2.03 424.27,5.78 334.17,-27.2 294.57,-41.69 258.83,-74.65 235.51,-100.19"/>
+<polygon fill="#3b82f6" stroke="#3b82f6" stroke-width="1.2" points="233.42,-98.32 230.18,-106.16 237.6,-102.05 233.42,-98.32"/>
 </g>
 </g>
 </svg>

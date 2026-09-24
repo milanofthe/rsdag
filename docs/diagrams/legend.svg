@@ -30,8 +30,8 @@
 <!-- k3 -->
 <g id="node4" class="node">
 <title>k3</title>
-<ellipse fill="none" stroke="#c55a11" stroke-width="1.2" cx="322" cy="-13.09" rx="36.17" ry="13.09"/>
-<text xml:space="preserve" text-anchor="middle" x="322" y="-8.06" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#c55a11">branch</text>
+<ellipse fill="none" stroke="#3b82f6" stroke-width="1.2" cx="322" cy="-13.09" rx="36.17" ry="13.09"/>
+<text xml:space="preserve" text-anchor="middle" x="322" y="-8.06" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#3b82f6">branch</text>
 </g>
 <!-- k2&#45;&gt;k3 -->
 <!-- k4 -->
@@ -71,9 +71,9 @@
 <!-- s0&#45;&gt;s1 -->
 <g id="edge8" class="edge">
 <title>s0&#45;&gt;s1</title>
-<path fill="none" stroke="#c55a11" stroke-width="1.2" stroke-dasharray="5,2" d="M682.01,-13.09C701.47,-13.09 728.38,-13.09 749.87,-13.09"/>
-<polygon fill="#c55a11" stroke="#c55a11" stroke-width="1.2" points="749.8,-15.89 757.8,-13.09 749.8,-10.29 749.8,-15.89"/>
-<text xml:space="preserve" text-anchor="middle" x="720.79" y="-14.64" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#c55a11">state</text>
+<path fill="none" stroke="#3b82f6" stroke-width="1.2" stroke-dasharray="5,2" d="M682.01,-13.09C701.47,-13.09 728.38,-13.09 749.87,-13.09"/>
+<polygon fill="#3b82f6" stroke="#3b82f6" stroke-width="1.2" points="749.8,-15.89 757.8,-13.09 749.8,-10.29 749.8,-15.89"/>
+<text xml:space="preserve" text-anchor="middle" x="720.79" y="-14.64" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#3b82f6">state</text>
 </g>
 </g>
 </svg>

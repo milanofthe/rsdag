@@ -144,7 +144,7 @@ fn blocks_have_bold_titles_notes_and_patterns() {
     assert_eq!(count(&dot, "BGCOLOR="), 2, "{dot}");
     assert_eq!(count(&dot, "subgraph cluster_0"), 1);
     assert!(
-        dot.contains("style=\"rounded,dashed\", color=\"#c55a11\""),
+        dot.contains("style=\"rounded,dashed\", color=\"#3b82f6\""),
         "{dot}"
     );
     assert!(dot.contains("labelloc=b"));

@@ -81,17 +81,17 @@
 <!-- pro -->
 <g id="node8" class="node">
 <title>pro</title>
-<path fill="none" stroke="#c55a11" stroke-width="1.2" stroke-dasharray="5,2" d="M522.09,-64.4C522.09,-64.4 385.17,-64.4 385.17,-64.4 379.17,-64.4 373.17,-58.4 373.17,-52.4 373.17,-52.4 373.17,-12 373.17,-12 373.17,-6 379.17,0 385.17,0 385.17,0 522.09,0 522.09,0 528.09,0 534.09,-6 534.09,-12 534.09,-12 534.09,-52.4 534.09,-52.4 534.09,-58.4 528.09,-64.4 522.09,-64.4"/>
-<text xml:space="preserve" text-anchor="start" x="391" y="-44.9" font-family="Helvetica,Arial,sans-serif" font-weight="bold" font-size="14.00" fill="#c55a11">prolog per instance</text>
-<text xml:space="preserve" text-anchor="start" x="392.13" y="-32.8" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#c55a11">over its parameter&#45;pure</text>
-<text xml:space="preserve" text-anchor="start" x="386.13" y="-20.8" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#c55a11">arguments, its state in the</text>
-<text xml:space="preserve" text-anchor="start" x="404.13" y="-8.8" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#c55a11">caller&#39;s work buffer</text>
+<path fill="none" stroke="#3b82f6" stroke-width="1.2" stroke-dasharray="5,2" d="M522.09,-64.4C522.09,-64.4 385.17,-64.4 385.17,-64.4 379.17,-64.4 373.17,-58.4 373.17,-52.4 373.17,-52.4 373.17,-12 373.17,-12 373.17,-6 379.17,0 385.17,0 385.17,0 522.09,0 522.09,0 528.09,0 534.09,-6 534.09,-12 534.09,-12 534.09,-52.4 534.09,-52.4 534.09,-58.4 528.09,-64.4 522.09,-64.4"/>
+<text xml:space="preserve" text-anchor="start" x="391" y="-44.9" font-family="Helvetica,Arial,sans-serif" font-weight="bold" font-size="14.00" fill="#3b82f6">prolog per instance</text>
+<text xml:space="preserve" text-anchor="start" x="392.13" y="-32.8" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#3b82f6">over its parameter&#45;pure</text>
+<text xml:space="preserve" text-anchor="start" x="386.13" y="-20.8" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#3b82f6">arguments, its state in the</text>
+<text xml:space="preserve" text-anchor="start" x="404.13" y="-8.8" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#3b82f6">caller&#39;s work buffer</text>
 </g>
 <!-- body&#45;&gt;pro -->
 <g id="edge7" class="edge">
 <title>body&#45;&gt;pro</title>
-<path fill="none" stroke="#c55a11" stroke-width="1.2" stroke-dasharray="5,2" d="M453.63,-107.46C453.63,-96.43 453.63,-85.4 453.63,-74.38"/>
-<polygon fill="#c55a11" stroke="#c55a11" stroke-width="1.2" points="456.43,-74.5 453.63,-66.5 450.83,-74.5 456.43,-74.5"/>
+<path fill="none" stroke="#3b82f6" stroke-width="1.2" stroke-dasharray="5,2" d="M453.63,-107.46C453.63,-96.43 453.63,-85.4 453.63,-74.38"/>
+<polygon fill="#3b82f6" stroke="#3b82f6" stroke-width="1.2" points="456.43,-74.5 453.63,-66.5 450.83,-74.5 456.43,-74.5"/>
 </g>
 <!-- own -->
 <g id="node7" class="node">

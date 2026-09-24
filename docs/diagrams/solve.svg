@@ -188,30 +188,30 @@
 <!-- prolog&#45;&gt;main -->
 <g id="edge9" class="edge">
 <title>prolog&#45;&gt;main</title>
-<path fill="none" stroke="#c55a11" stroke-width="1.2" stroke-dasharray="5,2" d="M1326.92,-104.41C1346.97,-104.41 1370.26,-104.41 1392.45,-104.41"/>
-<polygon fill="#c55a11" stroke="#c55a11" stroke-width="1.2" points="1392.39,-107.21 1400.39,-104.41 1392.39,-101.61 1392.39,-107.21"/>
-<text xml:space="preserve" text-anchor="middle" x="1357.96" y="-105.96" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#c55a11">state</text>
+<path fill="none" stroke="#3b82f6" stroke-width="1.2" stroke-dasharray="5,2" d="M1326.92,-104.41C1346.97,-104.41 1370.26,-104.41 1392.45,-104.41"/>
+<polygon fill="#3b82f6" stroke="#3b82f6" stroke-width="1.2" points="1392.39,-107.21 1400.39,-104.41 1392.39,-101.61 1392.39,-107.21"/>
+<text xml:space="preserve" text-anchor="middle" x="1357.96" y="-105.96" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#3b82f6">state</text>
 </g>
 <!-- guard -->
 <g id="node10" class="node">
 <title>guard</title>
-<path fill="none" stroke="#c55a11" stroke-width="1.2" stroke-dasharray="5,2" d="M1555,-56.61C1555,-56.61 1401.58,-56.61 1401.58,-56.61 1395.58,-56.61 1389.58,-50.61 1389.58,-44.61 1389.58,-44.61 1389.58,-16.21 1389.58,-16.21 1389.58,-10.21 1395.58,-4.21 1401.58,-4.21 1401.58,-4.21 1555,-4.21 1555,-4.21 1561,-4.21 1567,-10.21 1567,-16.21 1567,-16.21 1567,-44.61 1567,-44.61 1567,-50.61 1561,-56.61 1555,-56.61"/>
-<text xml:space="preserve" text-anchor="start" x="1441.54" y="-37.11" font-family="Helvetica,Arial,sans-serif" font-weight="bold" font-size="14.00" fill="#c55a11">pivot guard</text>
-<text xml:space="preserve" text-anchor="start" x="1404.04" y="-25.01" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#c55a11">|pivot| &gt;= 1e&#45;3 max|column|,</text>
-<text xml:space="preserve" text-anchor="start" x="1402.54" y="-13.01" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#c55a11">read from the state (factored)</text>
+<path fill="none" stroke="#3b82f6" stroke-width="1.2" stroke-dasharray="5,2" d="M1555,-56.61C1555,-56.61 1401.58,-56.61 1401.58,-56.61 1395.58,-56.61 1389.58,-50.61 1389.58,-44.61 1389.58,-44.61 1389.58,-16.21 1389.58,-16.21 1389.58,-10.21 1395.58,-4.21 1401.58,-4.21 1401.58,-4.21 1555,-4.21 1555,-4.21 1561,-4.21 1567,-10.21 1567,-16.21 1567,-16.21 1567,-44.61 1567,-44.61 1567,-50.61 1561,-56.61 1555,-56.61"/>
+<text xml:space="preserve" text-anchor="start" x="1441.54" y="-37.11" font-family="Helvetica,Arial,sans-serif" font-weight="bold" font-size="14.00" fill="#3b82f6">pivot guard</text>
+<text xml:space="preserve" text-anchor="start" x="1404.04" y="-25.01" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#3b82f6">|pivot| &gt;= 1e&#45;3 max|column|,</text>
+<text xml:space="preserve" text-anchor="start" x="1402.54" y="-13.01" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#3b82f6">read from the state (factored)</text>
 </g>
 <!-- prolog&#45;&gt;guard -->
 <g id="edge10" class="edge">
 <title>prolog&#45;&gt;guard</title>
-<path fill="none" stroke="#c55a11" stroke-width="1.2" stroke-dasharray="5,2" d="M1326.92,-84.97C1347.65,-77.45 1371.86,-68.66 1394.72,-60.37"/>
-<polygon fill="#c55a11" stroke="#c55a11" stroke-width="1.2" points="1395.47,-63.08 1402.03,-57.72 1393.56,-57.81 1395.47,-63.08"/>
+<path fill="none" stroke="#3b82f6" stroke-width="1.2" stroke-dasharray="5,2" d="M1326.92,-84.97C1347.65,-77.45 1371.86,-68.66 1394.72,-60.37"/>
+<polygon fill="#3b82f6" stroke="#3b82f6" stroke-width="1.2" points="1395.47,-63.08 1402.03,-57.72 1393.56,-57.81 1395.47,-63.08"/>
 </g>
 <!-- guard&#45;&gt;lu -->
 <g id="edge11" class="edge">
 <title>guard&#45;&gt;lu</title>
-<path fill="none" stroke="#c55a11" stroke-width="1.2" stroke-dasharray="5,2" d="M1389.28,-17.54C1275.23,-3.41 1070.76,13.26 899.91,-19.41 871.78,-24.79 842.28,-35.08 816.45,-45.81"/>
-<polygon fill="#c55a11" stroke="#c55a11" stroke-width="1.2" points="815.41,-43.21 809.14,-48.91 817.6,-48.36 815.41,-43.21"/>
-<text xml:space="preserve" text-anchor="middle" x="1136.83" y="-3.31" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#c55a11">fails: Plan::repivot, rebuild</text>
+<path fill="none" stroke="#3b82f6" stroke-width="1.2" stroke-dasharray="5,2" d="M1389.28,-17.54C1275.23,-3.41 1070.76,13.26 899.91,-19.41 871.78,-24.79 842.28,-35.08 816.45,-45.81"/>
+<polygon fill="#3b82f6" stroke="#3b82f6" stroke-width="1.2" points="815.41,-43.21 809.14,-48.91 817.6,-48.36 815.41,-43.21"/>
+<text xml:space="preserve" text-anchor="middle" x="1136.83" y="-3.31" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#3b82f6">fails: Plan::repivot, rebuild</text>
 </g>
 </g>
 </svg>

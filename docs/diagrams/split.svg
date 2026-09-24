@@ -69,8 +69,8 @@
 <!-- o1&#45;&gt;o2 -->
 <g id="edge5" class="edge">
 <title>o1&#45;&gt;o2</title>
-<path fill="none" stroke="#c55a11" stroke-width="1.2" stroke-dasharray="5,2" d="M306.28,-314.07C299.52,-310.45 291.54,-306.5 284,-303.61 254.31,-292.19 218.51,-283.6 195.75,-278.74"/>
-<polygon fill="#c55a11" stroke="#c55a11" stroke-width="1.2" points="196.46,-276.03 188.06,-277.15 195.32,-281.51 196.46,-276.03"/>
+<path fill="none" stroke="#3b82f6" stroke-width="1.2" stroke-dasharray="5,2" d="M306.28,-314.07C299.52,-310.45 291.54,-306.5 284,-303.61 254.31,-292.19 218.51,-283.6 195.75,-278.74"/>
+<polygon fill="#3b82f6" stroke="#3b82f6" stroke-width="1.2" points="196.46,-276.03 188.06,-277.15 195.32,-281.51 196.46,-276.03"/>
 </g>
 <!-- o8 -->
 <g id="node13" class="node">
@@ -81,8 +81,8 @@
 <!-- o1&#45;&gt;o8 -->
 <g id="edge12" class="edge">
 <title>o1&#45;&gt;o8</title>
-<path fill="none" stroke="#c55a11" stroke-width="1.2" stroke-dasharray="5,2" d="M320.17,-311.28C314.75,-288.97 301.59,-241.05 281,-204.97 265.22,-177.32 260.1,-169.64 235,-150.06 218.06,-136.84 195.69,-126.63 179.42,-120.25"/>
-<polygon fill="#c55a11" stroke="#c55a11" stroke-width="1.2" points="180.82,-117.78 172.34,-117.58 178.84,-123.02 180.82,-117.78"/>
+<path fill="none" stroke="#3b82f6" stroke-width="1.2" stroke-dasharray="5,2" d="M320.17,-311.28C314.75,-288.97 301.59,-241.05 281,-204.97 265.22,-177.32 260.1,-169.64 235,-150.06 218.06,-136.84 195.69,-126.63 179.42,-120.25"/>
+<polygon fill="#3b82f6" stroke="#3b82f6" stroke-width="1.2" points="180.82,-117.78 172.34,-117.58 178.84,-123.02 180.82,-117.78"/>
 </g>
 <!-- in0 -->
 <g id="node5" class="node">
@@ -129,8 +129,8 @@
 <!-- o4 -->
 <g id="node9" class="node">
 <title>o4</title>
-<ellipse fill="none" stroke="#c55a11" stroke-width="1.2" cx="113" cy="-219.92" rx="14.96" ry="14.96"/>
-<text xml:space="preserve" text-anchor="middle" x="113" y="-214.9" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#c55a11">&gt;</text>
+<ellipse fill="none" stroke="#3b82f6" stroke-width="1.2" cx="113" cy="-219.92" rx="14.96" ry="14.96"/>
+<text xml:space="preserve" text-anchor="middle" x="113" y="-214.9" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#3b82f6">&gt;</text>
 </g>
 <!-- o2&#45;&gt;o4 -->
 <g id="edge6" class="edge">
@@ -164,8 +164,8 @@
 <!-- o7 -->
 <g id="node12" class="node">
 <title>o7</title>
-<ellipse fill="none" stroke="#c55a11" stroke-width="1.2" cx="146" cy="-165.01" rx="32.46" ry="13.09"/>
-<text xml:space="preserve" text-anchor="middle" x="146" y="-159.99" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#c55a11">select</text>
+<ellipse fill="none" stroke="#3b82f6" stroke-width="1.2" cx="146" cy="-165.01" rx="32.46" ry="13.09"/>
+<text xml:space="preserve" text-anchor="middle" x="146" y="-159.99" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#3b82f6">select</text>
 </g>
 <!-- o4&#45;&gt;o7 -->
 <g id="edge9" class="edge">

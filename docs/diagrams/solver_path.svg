@@ -117,9 +117,9 @@
 <!-- pro&#45;&gt;main -->
 <g id="edge7" class="edge">
 <title>pro&#45;&gt;main</title>
-<path fill="none" stroke="#c55a11" stroke-width="1.2" stroke-dasharray="5,2" d="M684.68,-100.2C712.69,-100.2 746.08,-100.2 775.82,-100.2"/>
-<polygon fill="#c55a11" stroke="#c55a11" stroke-width="1.2" points="775.52,-103 783.52,-100.2 775.52,-97.4 775.52,-103"/>
-<text xml:space="preserve" text-anchor="middle" x="735.01" y="-101.75" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#c55a11">state</text>
+<path fill="none" stroke="#3b82f6" stroke-width="1.2" stroke-dasharray="5,2" d="M684.68,-100.2C712.69,-100.2 746.08,-100.2 775.82,-100.2"/>
+<polygon fill="#3b82f6" stroke="#3b82f6" stroke-width="1.2" points="775.52,-103 783.52,-100.2 775.52,-97.4 775.52,-103"/>
+<text xml:space="preserve" text-anchor="middle" x="735.01" y="-101.75" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#3b82f6">state</text>
 </g>
 <!-- loop -->
 <g id="node8" class="node">
@@ -139,17 +139,17 @@
 <!-- ev -->
 <g id="node9" class="node">
 <title>ev</title>
-<path fill="none" stroke="#c55a11" stroke-width="1.2" stroke-dasharray="5,2" d="M1358.02,-132.4C1358.02,-132.4 1211.35,-132.4 1211.35,-132.4 1205.35,-132.4 1199.35,-126.4 1199.35,-120.4 1199.35,-120.4 1199.35,-80 1199.35,-80 1199.35,-74 1205.35,-68 1211.35,-68 1211.35,-68 1358.02,-68 1358.02,-68 1364.02,-68 1370.02,-74 1370.02,-80 1370.02,-80 1370.02,-120.4 1370.02,-120.4 1370.02,-126.4 1364.02,-132.4 1358.02,-132.4"/>
-<text xml:space="preserve" text-anchor="start" x="1263.31" y="-112.9" font-family="Helvetica,Arial,sans-serif" font-weight="bold" font-size="14.00" fill="#c55a11">events</text>
-<text xml:space="preserve" text-anchor="start" x="1212.31" y="-100.8" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#c55a11">a guard&#39;s sign change in its</text>
-<text xml:space="preserve" text-anchor="start" x="1213.44" y="-88.8" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#c55a11">crossing direction: land the</text>
-<text xml:space="preserve" text-anchor="start" x="1220.56" y="-76.8" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#c55a11">step, run the state writes</text>
+<path fill="none" stroke="#3b82f6" stroke-width="1.2" stroke-dasharray="5,2" d="M1358.02,-132.4C1358.02,-132.4 1211.35,-132.4 1211.35,-132.4 1205.35,-132.4 1199.35,-126.4 1199.35,-120.4 1199.35,-120.4 1199.35,-80 1199.35,-80 1199.35,-74 1205.35,-68 1211.35,-68 1211.35,-68 1358.02,-68 1358.02,-68 1364.02,-68 1370.02,-74 1370.02,-80 1370.02,-80 1370.02,-120.4 1370.02,-120.4 1370.02,-126.4 1364.02,-132.4 1358.02,-132.4"/>
+<text xml:space="preserve" text-anchor="start" x="1263.31" y="-112.9" font-family="Helvetica,Arial,sans-serif" font-weight="bold" font-size="14.00" fill="#3b82f6">events</text>
+<text xml:space="preserve" text-anchor="start" x="1212.31" y="-100.8" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#3b82f6">a guard&#39;s sign change in its</text>
+<text xml:space="preserve" text-anchor="start" x="1213.44" y="-88.8" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#3b82f6">crossing direction: land the</text>
+<text xml:space="preserve" text-anchor="start" x="1220.56" y="-76.8" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#3b82f6">step, run the state writes</text>
 </g>
 <!-- loop&#45;&gt;ev -->
 <g id="edge9" class="edge">
 <title>loop&#45;&gt;ev</title>
-<path fill="none" stroke="#c55a11" stroke-width="1.2" stroke-dasharray="5,2" d="M1158.8,-100.2C1168.93,-100.2 1179.23,-100.2 1189.35,-100.2"/>
-<polygon fill="#c55a11" stroke="#c55a11" stroke-width="1.2" points="1189.16,-103 1197.16,-100.2 1189.16,-97.4 1189.16,-103"/>
+<path fill="none" stroke="#3b82f6" stroke-width="1.2" stroke-dasharray="5,2" d="M1158.8,-100.2C1168.93,-100.2 1179.23,-100.2 1189.35,-100.2"/>
+<polygon fill="#3b82f6" stroke="#3b82f6" stroke-width="1.2" points="1189.16,-103 1197.16,-100.2 1189.16,-97.4 1189.16,-103"/>
 </g>
 </g>
 </svg>
