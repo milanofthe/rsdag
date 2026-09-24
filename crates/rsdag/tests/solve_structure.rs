@@ -98,6 +98,38 @@ fn the_quotient_graph_ordering_is_a_permutation_that_reduces_fill() {
 }
 
 #[test]
+fn a_deferred_hub_is_ordered_once_and_last() {
+    // A ring with a rail on every other vertex: the rail's degree is far
+    // above the deferral threshold, and eliminating its neighbours touches
+    // it on every step.
+    let n = 1000;
+    let mut adj: Vec<Vec<usize>> = (0..n).map(|i| vec![(i + 1) % n, (i + n - 1) % n]).collect();
+    for i in (2..n).step_by(2) {
+        adj[i].push(0);
+        adj[0].push(i);
+    }
+    for a in adj.iter_mut() {
+        a.sort_unstable();
+        a.dedup();
+    }
+    let order = amd(&adj);
+    let mut seen = order.clone();
+    seen.sort_unstable();
+    assert_eq!(seen, (0..n).collect::<Vec<_>>());
+    assert_eq!(order.last(), Some(&0));
+    let pattern: Vec<Vec<usize>> = adj
+        .iter()
+        .enumerate()
+        .map(|(i, nb)| {
+            let mut row = nb.clone();
+            row.push(i);
+            row
+        })
+        .collect();
+    assert!(plan(&pattern).is_some());
+}
+
+#[test]
 fn the_predicted_fill_is_the_factorization_fill() {
     for seed in 0..12u64 {
         let mut rng = Spec::new(seed).rng();
