@@ -20,7 +20,7 @@ fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
 /// Front ends, graph, transforms, tape, the backends under `Adaptive`, the
 /// solver driving them.
 fn pipeline() -> String {
-    Blocks::new(Theme::default(), "LR")
+    Blocks::new(Theme::default(), "TB")
         .block("rust", "Rust", &["Graph constructors,", "Scope, Builder"])
         .block(
             "py",
@@ -58,6 +58,7 @@ fn pipeline() -> String {
                 "prolog / main split",
             ],
         )
+        .row(&["dag", "tf", "tape"])
         .block(
             "interp",
             "Interpreter",
@@ -74,6 +75,7 @@ fn pipeline() -> String {
             &["interp", "spec", "native"],
         )
         .block("solver", "Solver", &["Newton, ODE, DAE,", "events, sweeps"])
+        .row(&["interp", "spec", "native", "solver"])
         .edge("rust", "dag", "")
         .edge("py", "dag", "")
         .edge("module", "dag", "")
@@ -82,15 +84,14 @@ fn pipeline() -> String {
         .edge("tape", "interp", "")
         .edge("tape", "spec", "")
         .edge("tape", "native", "")
-        .edge("spec", "solver", "Program")
-        .raw("interp -> solver; native -> solver;")
+        .edge("native", "solver", "Program")
         .caption("semantics: one reference arithmetic every backend mirrors, bit for bit")
         .render()
 }
 
 /// A simulator's model through rsdag to the solver loop.
 fn solver_path() -> String {
-    Blocks::new(Theme::default(), "LR")
+    Blocks::new(Theme::default(), "TB")
         .block(
             "model",
             "Model",
@@ -109,6 +110,7 @@ fn solver_path() -> String {
         .block("f", "F(x, x', p, t)", &["residuals"])
         .block("j", "Jacobian", &["sparse_jacobian", "dF/dx, dF/dx'"])
         .block("step", "Newton step", &["x - J^-1 F", "static LU, guarded"])
+        .row(&["sig", "f", "j", "step"])
         .block(
             "pro",
             "prolog",
@@ -143,6 +145,7 @@ fn solver_path() -> String {
             ],
         )
         .group("the consumer", &["loop", "ev"])
+        .row(&["pro", "main", "loop", "ev"])
         .edge("model", "sig", "")
         .edge("model", "f", "")
         .edge("f", "j", "")
@@ -157,7 +160,7 @@ fn solver_path() -> String {
 
 /// How `Adaptive` serves one tape.
 fn adaptive() -> String {
-    Blocks::new(Theme::default(), "LR")
+    Blocks::new(Theme::default(), "TB")
         .block("tape", "tape", &["prolog / main"])
         .block(
             "interp",
@@ -193,14 +196,20 @@ fn adaptive() -> String {
                 "interpreter and native",
             ],
         )
+        .row(&["tape", "interp", "flip"])
+        .row(&["spec", "native"])
         .edge("tape", "interp", "")
         .edge("interp", "spec", "traced")
         .edge("interp", "native", "after a few evals")
         .edge("spec", "native", "holds: compiled too")
-        .accent_edge("spec", "flip", "")
-        .back("flip", "interp", "")
+        // The flip sits above, right of the interpreter it returns to;
+        // both edges drawn against the rank, arrows as they flow.
+        .raw(&format!(
+            "flip -> spec [dir=back, style=dashed, color=\"{0}\"];\n  \
+             interp -> flip [dir=back, style=dashed, color=\"{0}\"];",
+            Theme::default().accent
+        ))
         .edge("native", "ep", "")
-        .raw("interp -> ep [style=invis];")
         .render()
 }
 
@@ -238,18 +247,21 @@ fn legend() -> String {
 
 /// Planning a sparse solve, and the program it builds.
 fn solve() -> String {
-    Blocks::new(Theme::default(), "LR")
+    Blocks::new(Theme::default(), "TB")
         .pattern(
             "pat",
             &["x..x..", ".x..xx", "x.x...", ".x.x..", "..x.x.", "...x.x"],
             "pattern fixed at build time",
         )
-        .block("btf", "BTF", &["block triangular", "form"])
-        .block("amd", "AMD", &["minimum degree", "per block"])
         .block(
-            "cost",
-            "cost predictor",
-            &["fill and flops from", "the elimination tree"],
+            "plan",
+            "Plan",
+            &[
+                "block triangular form,",
+                "minimum degree per block,",
+                "fill and flops predicted",
+                "from the elimination tree",
+            ],
         )
         .block(
             "lu",
@@ -260,11 +272,12 @@ fn solve() -> String {
                 "real or complex (Cx)",
             ],
         )
+        .row(&["pat", "plan", "lu"])
         .block("scalar", "scalar", &["one dot per entry"])
         .block(
             "panels",
             "supernodal",
-            &["panels as dense", "kernels (Gemm, Solve)"],
+            &["wide panels as dense", "kernels (Gemm, Solve)"],
         )
         .group("LuProgram", &["scalar", "panels"])
         .block("prolog", "prolog", &["factorization", "over the entries"])
@@ -282,16 +295,19 @@ fn solve() -> String {
                 "read from the state (factored)",
             ],
         )
-        .edge("pat", "btf", "")
-        .edge("btf", "amd", "")
-        .edge("amd", "cost", "")
-        .edge("cost", "lu", "")
+        .row(&["scalar", "panels", "guard"])
+        .row(&["prolog", "main"])
+        .edge("pat", "plan", "")
+        .edge("plan", "lu", "")
         .edge("lu", "scalar", "")
-        .edge("lu", "panels", "wide panels")
+        .edge("lu", "panels", "")
         .edge("scalar", "prolog", "")
         .edge("panels", "prolog", "")
         .accent_edge("prolog", "main", "state")
-        .accent_edge("prolog", "guard", "")
+        .raw(&format!(
+            "prolog -> guard [style=dashed, color=\"{}\", constraint=false];",
+            Theme::default().accent
+        ))
         .back("guard", "lu", "fails: Plan::repivot, rebuild")
         .render()
 }
@@ -381,11 +397,11 @@ fn specialize_concept() -> String {
                 "prolog, once per binding",
             ],
         )
+        .row(&["trace", "spec"])
         .edge("tape", "trace", "eval")
         .edge("trace", "spec", "specialize")
         .accent_edge("spec", "guards", "")
         .accent_edge("guards", "trace", "fails: retrace")
-        .raw("{ rank=same; spec; guards; }")
         .render()
 }
 

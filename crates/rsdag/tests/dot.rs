@@ -132,6 +132,7 @@ fn blocks_have_bold_titles_notes_and_patterns() {
         .note("n", "guard", &["x < y"])
         .pattern("p", &["x.", ".x"], "pattern")
         .group("tape", &["a", "n"])
+        .row(&["a", "p"])
         .edge("a", "p", "")
         .accent_edge("a", "n", "")
         .caption("under it all")
@@ -148,4 +149,6 @@ fn blocks_have_bold_titles_notes_and_patterns() {
         "{dot}"
     );
     assert!(dot.contains("labelloc=b"));
+    // A row lines up across the group's border.
+    assert!(dot.contains("{ rank=same; a; p; }") && dot.contains("newrank=true"));
 }
