@@ -268,7 +268,8 @@ impl Blocks {
         let mut body = theme.header(rankdir);
         // Blocks breathe more than expression nodes, and a column of them
         // lines up at one width.
-        body.push_str("  graph [ranksep=0.55, nodesep=0.3];\n  node [width=1.5];\n");
+        // `newrank` lets a row of blocks line up across group borders.
+        body.push_str("  graph [ranksep=0.55, nodesep=0.3, newrank=true];\n  node [width=1.5];\n");
         Blocks { theme, body }
     }
 
@@ -400,6 +401,13 @@ impl Blocks {
              constraint=false];",
             escape(label)
         );
+        self
+    }
+
+    /// Blocks side by side in one rank: a row in a top-down diagram, a
+    /// column in a left-right one.
+    pub fn row(mut self, ids: &[&str]) -> Self {
+        let _ = writeln!(self.body, "  {{ rank=same; {}; }}", ids.join("; "));
         self
     }
 
