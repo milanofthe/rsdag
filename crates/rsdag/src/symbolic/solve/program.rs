@@ -19,12 +19,18 @@ use super::{solve_planned, solve_supernodal_planned, supernodes, Pattern, Plan, 
 /// When the supernodal program (panels, dense kernels) replaces the scalar
 /// one: the system has at least `min_n` unknowns (below that the analysis
 /// is skipped), and panels at least `min_width` wide (the width from which
-/// a panel's products are kernels) cover a `min_share` of them.
+/// a panel's products are kernels) cover a `min_share` of them, or the
+/// factorization predicts at least `min_flops` and such panels carry a
+/// `min_flop_share` of them. The second is a large system whose flops
+/// gather in a few wide separators (a mesh): its many narrow panels cost
+/// more than scalar steps, and the kernels pay for that only at scale.
 #[derive(Clone, Copy, Debug)]
 pub struct Panels {
     pub min_n: usize,
     pub min_width: usize,
     pub min_share: f64,
+    pub min_flops: usize,
+    pub min_flop_share: f64,
 }
 
 impl Default for Panels {
@@ -33,6 +39,8 @@ impl Default for Panels {
             min_n: 64,
             min_width: 8,
             min_share: 0.5,
+            min_flops: 10_000_000,
+            min_flop_share: 0.8,
         }
     }
 }
@@ -81,6 +89,8 @@ impl LuProgram {
             .filter(|(p, sn)| {
                 let wide: usize = sn.widths().iter().filter(|&&w| w >= p.min_width).sum();
                 wide as f64 >= p.min_share * n.max(1) as f64
+                    || (plan.cost.flops >= p.min_flops
+                        && sn.flop_share(p.min_width) >= p.min_flop_share)
             })
             .map(|(_, sn)| sn);
         let (entry_pos, rhs_pos) = match &sn {

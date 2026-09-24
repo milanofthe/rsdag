@@ -2,7 +2,7 @@
 //! values, a solve the main phase over a right-hand side, and the pivot
 //! guard is read from the prolog's state.
 
-use rsdag::symbolic::solve::{plan, LuProgram, Panels, Pattern};
+use rsdag::symbolic::solve::{plan, supernodes, LuProgram, Panels, Pattern};
 use rsdag::synth::Spec;
 use rsdag::{Builder, Numeric};
 
@@ -177,6 +177,7 @@ fn the_supernodal_program_solves_alike() {
         min_n: 0,
         min_width: 1,
         min_share: 0.0,
+        ..Panels::default()
     };
     let lu = program(n, &entries, Some(panels));
     assert!(lu.supernodal().is_some());
@@ -184,4 +185,79 @@ fn the_supernodal_program_solves_alike() {
     let (ok, xs) = run(&lu, &values, None, std::slice::from_ref(&b));
     assert!(ok);
     close(&Numeric.solve(&num, &b), &xs[0], "supernodal");
+}
+
+/// The five-point Laplacian pattern of a `side` by `side` grid.
+fn grid(side: usize) -> Vec<(usize, usize)> {
+    let mut entries = Vec::new();
+    for r in 0..side {
+        for c in 0..side {
+            let i = r * side + c;
+            entries.push((i, i));
+            if r > 0 {
+                entries.push((i, i - side));
+            }
+            if r + 1 < side {
+                entries.push((i, i + side));
+            }
+            if c > 0 {
+                entries.push((i, i - 1));
+            }
+            if c + 1 < side {
+                entries.push((i, i + 1));
+            }
+        }
+    }
+    entries
+}
+
+#[test]
+fn a_mesh_goes_supernodal_on_its_flops_not_its_unknowns() {
+    // On a grid the wide panels are the separators: a small share of the
+    // unknowns, most of the flops.
+    let side = 24;
+    let n = side * side;
+    let entries = grid(side);
+    let mut pattern: Pattern = vec![Vec::new(); n];
+    for &(i, j) in &entries {
+        pattern[i].push(j);
+    }
+    let p = plan(&pattern).unwrap();
+    let sn = supernodes(&pattern, &p);
+    let unknowns: usize = sn.widths().iter().filter(|&&w| w >= 8).sum();
+    assert!((unknowns as f64) < 0.5 * n as f64);
+    let share = sn.flop_share(8);
+    assert!(share > 0.5 && share <= 1.0, "{share}");
+    assert!((sn.flop_share(1) - 1.0).abs() < 1e-12);
+    assert!(sn.flop_share(16) <= share);
+    // The default wants more flops than this system has.
+    assert!(p.cost.flops < Panels::default().min_flops);
+    assert!(program(n, &entries, Some(Panels::default()))
+        .supernodal()
+        .is_none());
+    let at_scale = Panels {
+        min_flops: 0,
+        min_flop_share: share,
+        ..Panels::default()
+    };
+    let lu = program(n, &entries, Some(at_scale));
+    assert!(lu.supernodal().is_some());
+    let values: Vec<f64> = entries
+        .iter()
+        .map(|&(i, j)| if i == j { 4.5 } else { -1.0 })
+        .collect();
+    let mut num = vec![vec![0.0; n]; n];
+    for (&(i, j), &v) in entries.iter().zip(&values) {
+        num[i][j] = v;
+    }
+    let b: Vec<f64> = (0..n).map(|i| 1.0 + (i % 5) as f64).collect();
+    let (ok, xs) = run(&lu, &values, None, std::slice::from_ref(&b));
+    assert!(ok);
+    close(&Numeric.solve(&num, &b), &xs[0], "mesh");
+    let above = Panels {
+        min_flops: 0,
+        min_flop_share: share + 1e-9,
+        ..Panels::default()
+    };
+    assert!(program(n, &entries, Some(above)).supernodal().is_none());
 }
