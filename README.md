@@ -9,6 +9,14 @@ linear solves and Newton steps compiled into the same tape.
 
 ![Pipeline](docs/diagrams/pipeline.svg)
 
+A simulator's model through rsdag: roles order the inputs, the residuals
+and their Jacobian become a guarded Newton step, compiled into one program
+whose prolog runs once per parameter binding and whose main phase runs per
+iteration; the consumer's loop drives it and handles the events its
+guards report.
+
+![Solver path](docs/diagrams/solver_path.svg)
+
 The diagrams are drawn by rsdag (`rsdag::dot`, `scripts/diagrams.sh`), the
 graphs and programs among them from the code they show. Their nodes:
 
@@ -90,10 +98,16 @@ layout in every backend.
 A diode current and its derivative in `v` with parameters `is`, `n`, `vt`,
 compiled with `compile_split`: `1/(n vt)` is the prolog, the dashed edges
 are the state the main phase reads.
- `Tape::eval` runs over any `Scalar` (`f64`, `f32`, `Complex64`).
+
+`Tape::eval` runs over any `Scalar` (`f64`, `f32`, `Complex64`).
 `Adaptive` serves a tape by the interpreter, its choice specialization or
 native code (with a `Compiler`, compiled in the background), chosen per
-call; `Policy` sets the thresholds.
+call; `Policy` sets the thresholds. `Adaptive::eval_prolog` returns the
+`Episode` its main phases run in; interpreter and native code share the
+state layout, so an episode moves between them, and a specialized one
+falls back to the full tape when a region flips.
+
+![Adaptive](docs/diagrams/adaptive.svg)
 
 Evaluation is allocation-free once the buffers exist. `Tape::work_len` and
 `out_len` size them, `eval_into` writes into slices the caller owns,

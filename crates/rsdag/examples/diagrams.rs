@@ -17,35 +17,42 @@ fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
     }
 }
 
-/// Graph, transforms, tape, the two backends, the solver driving them.
+/// Front ends, graph, transforms, tape, the backends under `Adaptive`, the
+/// solver driving them.
 fn pipeline() -> String {
     Blocks::new(Theme::default(), "LR")
+        .block("rust", "Rust", &["Graph constructors,", "Scope, Builder"])
+        .block(
+            "py",
+            "Python",
+            &["trace a function,", "jit, grad, jacobian"],
+        )
+        .block("module", "Module", &["a serialized graph"])
+        .group("front ends", &["rust", "py", "module"])
         .block(
             "dag",
             "Graph",
             &[
-                "hash-consed expression DAG",
-                "over exact rationals or f64",
-                "constructors fold",
-                "functions with calls and roles",
+                "hash-consed DAG",
+                "exact rationals or f64",
+                "functions, calls, roles",
             ],
         )
         .block(
             "tf",
             "Transforms",
             &[
-                "differentiate: forward, reverse",
+                "differentiate, gradient",
                 "sparse_jacobian, hessian",
-                "substitute, inline, simplify",
                 "sparse solve, Newton step",
+                "substitute, simplify",
             ],
         )
         .block(
             "tape",
             "Tape",
             &[
-                "flat instruction IR",
-                "scheduled for register pressure",
+                "scheduled instructions",
                 "kernels: Gemv, Gemm, Solve",
                 "batched calls of bodies",
                 "prolog / main split",
@@ -54,25 +61,146 @@ fn pipeline() -> String {
         .block(
             "interp",
             "Interpreter",
-            &["one loop over any Scalar:", "f64, f32, Complex64"],
+            &["any Scalar: f64,", "f32, Complex64"],
         )
+        .block("spec", "Specialization", &["the arms taken,", "guarded"])
         .block(
             "native",
             "Native code",
-            &["AArch64, x86-64", "chunked functions", "bit-identical"],
+            &["AArch64, x86-64,", "compiled in the", "background"],
         )
-        .block(
-            "solver",
-            "Solver",
-            &["Newton, ODE, sweeps", "through Program", "or Adaptive"],
+        .group(
+            "Adaptive: per call, the fastest that serves",
+            &["interp", "spec", "native"],
         )
+        .block("solver", "Solver", &["Newton, ODE, DAE,", "events, sweeps"])
+        .edge("rust", "dag", "")
+        .edge("py", "dag", "")
+        .edge("module", "dag", "")
         .edge("dag", "tf", "")
         .edge("tf", "tape", "compile")
         .edge("tape", "interp", "")
+        .edge("tape", "spec", "")
         .edge("tape", "native", "")
-        .edge("interp", "solver", "")
-        .edge("native", "solver", "")
-        .caption("semantics: one reference arithmetic every backend mirrors")
+        .edge("spec", "solver", "Program")
+        .raw("interp -> solver; native -> solver;")
+        .caption("semantics: one reference arithmetic every backend mirrors, bit for bit")
+        .render()
+}
+
+/// A simulator's model through rsdag to the solver loop.
+fn solver_path() -> String {
+    Blocks::new(Theme::default(), "LR")
+        .block(
+            "model",
+            "Model",
+            &[
+                "functions with roles:",
+                "state, state', param,",
+                "time, history;",
+                "residual, guard, state write",
+            ],
+        )
+        .block(
+            "sig",
+            "Signature",
+            &["the inputs in role", "order, the pure mask"],
+        )
+        .block("f", "F(x, x', p, t)", &["residuals"])
+        .block("j", "Jacobian", &["sparse_jacobian", "dF/dx, dF/dx'"])
+        .block("step", "Newton step", &["x - J^-1 F", "static LU, guarded"])
+        .block(
+            "pro",
+            "prolog",
+            &["the parameter part,", "once per binding"],
+        )
+        .block(
+            "main",
+            "main",
+            &[
+                "F, J, factor, substitute,",
+                "guard values,",
+                "per iteration",
+            ],
+        )
+        .group("one program", &["pro", "main"])
+        .block(
+            "loop",
+            "Solver loop",
+            &[
+                "iterates the main phase,",
+                "steps in time,",
+                "rebinds on a parameter change",
+            ],
+        )
+        .note(
+            "ev",
+            "events",
+            &[
+                "a guard's sign change in its",
+                "crossing direction: land the",
+                "step, run the state writes",
+            ],
+        )
+        .group("the consumer", &["loop", "ev"])
+        .edge("model", "sig", "")
+        .edge("model", "f", "")
+        .edge("f", "j", "")
+        .edge("j", "step", "")
+        .edge("sig", "pro", "inputs")
+        .edge("step", "main", "compile_split")
+        .accent_edge("pro", "main", "state")
+        .edge("main", "loop", "")
+        .accent_edge("loop", "ev", "")
+        .render()
+}
+
+/// How `Adaptive` serves one tape.
+fn adaptive() -> String {
+    Blocks::new(Theme::default(), "LR")
+        .block("tape", "tape", &["prolog / main"])
+        .block(
+            "interp",
+            "interpreter",
+            &["always correct,", "always available"],
+        )
+        .block(
+            "spec",
+            "specialization",
+            &["after a traced eval,", "guarded by its choices"],
+        )
+        .block(
+            "native",
+            "native code",
+            &["compiled in the", "background, wins", "once it lands"],
+        )
+        .note(
+            "flip",
+            "region flip",
+            &[
+                "retrace and respecialize;",
+                "a select seen flipping stays",
+                "unpinned; thrashing opts out",
+            ],
+        )
+        .block(
+            "ep",
+            "episode",
+            &[
+                "eval_prolog once per binding,",
+                "eval_main per iteration;",
+                "the state moves between",
+                "interpreter and native",
+            ],
+        )
+        .edge("tape", "interp", "")
+        .edge("interp", "spec", "traced")
+        .edge("interp", "native", "after a few evals")
+        .edge("spec", "native", "holds: compiled too")
+        .accent_edge("spec", "flip", "")
+        .back("flip", "interp", "")
+        .edge("native", "ep", "")
+        .raw("interp -> ep [style=invis];")
         .render()
 }
 
@@ -117,7 +245,7 @@ fn solve() -> String {
             "pattern fixed at build time",
         )
         .block("btf", "BTF", &["block triangular", "form"])
-        .block("amd", "AMD", &["minimum degree", "ordering"])
+        .block("amd", "AMD", &["minimum degree", "per block"])
         .block(
             "cost",
             "cost predictor",
@@ -126,8 +254,19 @@ fn solve() -> String {
         .block(
             "lu",
             "static LU",
-            &["Crout form,", "guarded pivots", "as graph ops"],
+            &[
+                "Crout form, pivot rows",
+                "fixed, guarded;",
+                "real or complex (Cx)",
+            ],
         )
+        .block("scalar", "scalar", &["one dot per entry"])
+        .block(
+            "panels",
+            "supernodal",
+            &["panels as dense", "kernels (Gemm, Solve)"],
+        )
+        .group("LuProgram", &["scalar", "panels"])
         .block("prolog", "prolog", &["factorization", "over the entries"])
         .block(
             "main",
@@ -139,18 +278,21 @@ fn solve() -> String {
             "guard",
             "pivot guard",
             &[
-                "|pivot| >= 1e-3 max|column|",
-                "fails: Plan::repivot on the values, rebuild",
+                "|pivot| >= 1e-3 max|column|,",
+                "read from the state (factored)",
             ],
         )
         .edge("pat", "btf", "")
         .edge("btf", "amd", "")
         .edge("amd", "cost", "")
         .edge("cost", "lu", "")
-        .edge("lu", "prolog", "LuProgram")
+        .edge("lu", "scalar", "")
+        .edge("lu", "panels", "wide panels")
+        .edge("scalar", "prolog", "")
+        .edge("panels", "prolog", "")
         .accent_edge("prolog", "main", "state")
-        .accent_edge("lu", "guard", "")
-        .raw("{ rank=same; lu; guard; }")
+        .accent_edge("prolog", "guard", "")
+        .back("guard", "lu", "fails: Plan::repivot, rebuild")
         .render()
 }
 
@@ -165,7 +307,7 @@ fn bodies_concept() -> String {
             "batch",
             "batched call",
             &[
-                "one op, all instances",
+                "one op, all instances,",
                 "serially or on the",
                 "current thread pool",
             ],
@@ -173,22 +315,32 @@ fn bodies_concept() -> String {
         .block(
             "body",
             "body",
-            &["one tape,", "compiled once,", "called per instance"],
+            &[
+                "one tape, compiled once:",
+                "interpreted, or one native",
+                "function called per instance",
+            ],
+        )
+        .block(
+            "own",
+            "set_func_body",
+            &["a body the consumer", "compiled itself"],
         )
         .note(
             "pro",
             "prolog per instance",
             &[
                 "over its parameter-pure",
-                "arguments, in the",
-                "caller's prolog",
+                "arguments, its state in the",
+                "caller's work buffer",
             ],
         )
         .edge("i1", "batch", "")
         .edge("i2", "batch", "")
         .raw("dots -> batch [style=invis];")
         .edge("in", "batch", "")
-        .edge("batch", "body", "runs the body")
+        .edge("batch", "body", "runs")
+        .edge("own", "body", "replaces")
         .accent_edge("body", "pro", "")
         .raw("{ rank=same; body; pro; }")
         .render()
@@ -222,7 +374,12 @@ fn specialize_concept() -> String {
         .note(
             "guards",
             "guards",
-            &["c1 == 1, c2 == 0, c3 == 1", "checked on every eval"],
+            &[
+                "c1 == 1, c2 == 0, c3 == 1,",
+                "checked on every eval;",
+                "on parameters only: in the",
+                "prolog, once per binding",
+            ],
         )
         .edge("tape", "trace", "eval")
         .edge("trace", "spec", "specialize")
@@ -398,6 +555,8 @@ fn main() {
     std::fs::create_dir_all(&dir).expect("create the output directory");
     for (name, dot) in [
         ("pipeline", pipeline()),
+        ("solver_path", solver_path()),
+        ("adaptive", adaptive()),
         ("legend", legend()),
         ("derivative", derivative()),
         ("split", split()),
