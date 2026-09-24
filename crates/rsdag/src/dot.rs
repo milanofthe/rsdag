@@ -50,15 +50,33 @@ pub enum Notation {
     Math,
 }
 
-/// Colors and fonts of every diagram. The default: a transparent page,
-/// grey text and edges, each node kind in its hue as a line and a faint
-/// fill, so a diagram reads on a light and a dark page alike.
+/// How nodes are drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Style {
+    /// Lines only, no fill: every node in its hue as line and text, a
+    /// constant as plain text, a result with a bold label, clusters as
+    /// solid frames with a bold title.
+    Outline,
+    /// A fill per node kind under one line color (or the hue), clusters as
+    /// dashed frames.
+    Filled,
+}
+
+/// Colors and fonts of every diagram. The default is rsdag's: a
+/// transparent page, everything in one grey, the branches, guards and the
+/// state in one accent, lines only; it reads on a light and a dark page
+/// alike.
 #[derive(Clone, Debug)]
 pub struct Theme {
+    pub style: Style,
     pub font: &'static str,
     pub font_size: f64,
+    /// A block's title ([`Blocks`]), bold.
+    pub title_size: f64,
     /// Labels, edges and cluster frames.
     pub text: &'static str,
+    /// Notes and emphasis ([`Blocks`]).
+    pub accent: &'static str,
     /// One line color for every node; `None` draws a node in its hue.
     pub line: Option<&'static str>,
     /// Alpha of a node's fill, two hex digits (empty: the hue as is).
@@ -80,26 +98,32 @@ pub struct Theme {
     pub state: &'static str,
 }
 
+const GREY: &str = "#8b8b8b";
+const ACCENT: &str = "#c55a11";
+
 impl Default for Theme {
     fn default() -> Self {
         Theme {
+            style: Style::Outline,
             font: "Helvetica,Arial,sans-serif",
-            font_size: 11.0,
-            text: "#808080",
+            font_size: 12.0,
+            title_size: 14.0,
+            text: GREY,
+            accent: ACCENT,
             line: None,
-            fill_alpha: "26",
-            fade_alpha: "38",
-            fade_fill_alpha: "0d",
+            fill_alpha: "",
+            fade_alpha: "40",
+            fade_fill_alpha: "",
             notation: Notation::Ascii,
-            input: "#3b82f6",
-            param: "#22c55e",
-            constant: "#94a3b8",
-            op: "#808080",
-            choice: "#a855f7",
-            kernel: "#06b6d4",
-            call: "#f59e0b",
-            output: "#ef4444",
-            state: "#3b82f6",
+            input: GREY,
+            param: GREY,
+            constant: GREY,
+            op: GREY,
+            choice: ACCENT,
+            kernel: GREY,
+            call: GREY,
+            output: GREY,
+            state: ACCENT,
         }
     }
 }
@@ -120,17 +144,21 @@ impl Theme {
 
     /// The opening of a digraph in this theme, `rankdir` `TB` or `LR`.
     pub fn header(&self, rankdir: &str) -> String {
+        let (arrow, pen, margin, edge_font) = match self.style {
+            Style::Outline => (0.8, 1.2, "0.1,0.04", 1.0),
+            Style::Filled => (0.6, 0.9, "0.08,0.03", 2.0),
+        };
         format!(
             "digraph G {{\n  bgcolor=\"transparent\";\n  rankdir={rankdir};\n  \
              nodesep=0.25;\n  ranksep=0.35;\n  compound=true;\n  \
              fontname=\"{f}\";\n  fontsize={s};\n  fontcolor=\"{t}\";\n  \
              node [fontname=\"{f}\", fontsize={s}, fontcolor=\"{t}\", penwidth=1.2, \
-             margin=\"0.08,0.03\", height=0.3];\n  \
+             margin=\"{margin}\", height=0.3];\n  \
              edge [color=\"{t}\", fontname=\"{f}\", fontsize={e}, fontcolor=\"{t}\", \
-             arrowsize=0.6, penwidth=0.9];\n",
+             arrowsize={arrow}, penwidth={pen}];\n",
             f = self.font,
             s = self.font_size,
-            e = self.font_size - 2.0,
+            e = self.font_size - edge_font,
             t = self.text,
         )
     }
@@ -139,6 +167,34 @@ impl Theme {
     /// An operator or kernel with a label of at most two characters is a
     /// circle.
     pub fn node(&self, kind: Kind, label: &str, faded: bool) -> String {
+        match self.style {
+            Style::Outline => self.outline_node(kind, label, faded),
+            Style::Filled => self.filled_node(kind, label, faded),
+        }
+    }
+
+    fn outline_node(&self, kind: Kind, label: &str, faded: bool) -> String {
+        let hue = self.hue(kind);
+        let a = if faded { self.fade_alpha } else { "" };
+        let shape = match kind {
+            Kind::Op | Kind::Choice | Kind::Kernel if label.chars().count() <= 2 => {
+                "circle, width=0.3, fixedsize=false"
+            }
+            Kind::Input | Kind::Param | Kind::Output => "box, style=\"rounded\"",
+            Kind::Kernel => "box",
+            Kind::Call => "component",
+            Kind::Const => "plaintext",
+            Kind::Op | Kind::Choice => "ellipse",
+        };
+        let label = if kind == Kind::Output {
+            format!("<<B>{}</B>>", html(label))
+        } else {
+            format!("\"{}\"", escape(label))
+        };
+        format!("label={label}, shape={shape}, color=\"{hue}{a}\", fontcolor=\"{hue}{a}\"")
+    }
+
+    fn filled_node(&self, kind: Kind, label: &str, faded: bool) -> String {
         let hue = self.hue(kind);
         let line = self.line.unwrap_or(hue);
         let shape = match kind {
@@ -171,15 +227,187 @@ impl Theme {
 
     /// The attributes of a cluster labelled `label`.
     pub fn cluster(&self, label: &str) -> String {
-        format!(
-            "label=\"{}\"; labeljust=l; style=\"rounded,dashed\"; color=\"{}\"; penwidth=0.8;",
-            escape(label),
-            self.text
-        )
+        match self.style {
+            Style::Outline => format!(
+                "label=<<B>{}</B>>; labeljust=l; fontsize={}; style=\"rounded\"; \
+                 color=\"{}\"; penwidth=1.2;",
+                html(label),
+                self.title_size,
+                self.text
+            ),
+            Style::Filled => format!(
+                "label=\"{}\"; labeljust=l; style=\"rounded,dashed\"; color=\"{}\"; penwidth=0.8;",
+                escape(label),
+                self.text
+            ),
+        }
     }
 
     fn faded_edge(&self) -> String {
         format!("color=\"{}{}\"", self.text, self.fade_alpha)
+    }
+}
+
+/// Text for a Graphviz HTML-like label: `&`, `<`, `>` escaped.
+pub fn html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// An architecture diagram in a [`Theme`]: blocks with a bold title over
+/// lines of text, edges, groups of blocks, notes in the accent, and
+/// sparsity patterns as grids.
+pub struct Blocks {
+    theme: Theme,
+    body: String,
+}
+
+impl Blocks {
+    pub fn new(theme: Theme, rankdir: &str) -> Self {
+        let body = theme.header(rankdir);
+        Blocks { theme, body }
+    }
+
+    fn label(&self, title: &str, lines: &[&str]) -> String {
+        let mut l = format!(
+            "<<FONT POINT-SIZE=\"{}\"><B>{}</B></FONT>",
+            self.theme.title_size,
+            html(title)
+        );
+        for line in lines {
+            l.push_str("<BR/>");
+            match line.strip_prefix("**").and_then(|r| r.strip_suffix("**")) {
+                Some(bold) => {
+                    let _ = write!(l, "<B>{}</B>", html(bold));
+                }
+                None => l.push_str(&html(line)),
+            }
+        }
+        l.push('>');
+        l
+    }
+
+    /// A block: `title` in bold over `lines` (a line wrapped in `**` bold).
+    pub fn block(mut self, id: &str, title: &str, lines: &[&str]) -> Self {
+        let label = self.label(title, lines);
+        let _ = writeln!(
+            self.body,
+            "  {id} [label={label}, shape=box, style=\"rounded\", color=\"{}\", \
+             margin=\"0.18,0.1\"];",
+            self.theme.text
+        );
+        self
+    }
+
+    /// A note in the accent, dashed, `title` in bold over `lines`.
+    pub fn note(mut self, id: &str, title: &str, lines: &[&str]) -> Self {
+        let label = self.label(title, lines);
+        let a = self.theme.accent;
+        let _ = writeln!(
+            self.body,
+            "  {id} [label={label}, shape=box, style=\"rounded,dashed\", color=\"{a}\", \
+             fontcolor=\"{a}\", margin=\"0.18,0.1\"];"
+        );
+        self
+    }
+
+    /// Plain text.
+    pub fn text(mut self, id: &str, lines: &[&str]) -> Self {
+        let label: Vec<String> = lines.iter().map(|l| html(l)).collect();
+        let _ = writeln!(
+            self.body,
+            "  {id} [label=<{}>, shape=plaintext];",
+            label.join("<BR/>")
+        );
+        self
+    }
+
+    /// A sparsity pattern as a grid, a mark per entry (any character but
+    /// `.` and space), `caption` below.
+    pub fn pattern(mut self, id: &str, rows: &[&str], caption: &str) -> Self {
+        let t = self.theme.text;
+        let mut l = String::from("<<TABLE BORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"0\">");
+        for row in rows {
+            l.push_str("<TR>");
+            for c in row.chars() {
+                let dot = if c == '.' || c == ' ' {
+                    String::new()
+                } else {
+                    format!(
+                        "<TABLE BORDER=\"0\" CELLPADDING=\"0\" CELLSPACING=\"0\"><TR>\
+                         <TD WIDTH=\"6\" HEIGHT=\"6\" FIXEDSIZE=\"TRUE\" BGCOLOR=\"{t}\"></TD>\
+                         </TR></TABLE>"
+                    )
+                };
+                let _ = write!(
+                    l,
+                    "<TD WIDTH=\"14\" HEIGHT=\"14\" FIXEDSIZE=\"TRUE\" BORDER=\"1\" \
+                     COLOR=\"{t}\">{dot}</TD>"
+                );
+            }
+            l.push_str("</TR>");
+        }
+        let _ = write!(
+            l,
+            "<TR><TD COLSPAN=\"{}\" CELLPADDING=\"4\">{}</TD></TR></TABLE>>",
+            rows.first().map_or(1, |r| r.chars().count()),
+            html(caption)
+        );
+        let _ = writeln!(self.body, "  {id} [label={l}, shape=plaintext];");
+        self
+    }
+
+    /// A frame around `ids`, `title` in bold.
+    pub fn group(mut self, title: &str, ids: &[&str]) -> Self {
+        let n = self.body.matches("subgraph cluster_").count();
+        let _ = writeln!(
+            self.body,
+            "  subgraph cluster_{n} {{\n    {}\n    {};\n  }}",
+            self.theme.cluster(title),
+            ids.join("; ")
+        );
+        self
+    }
+
+    /// An edge, labelled when `label` is not empty.
+    pub fn edge(mut self, a: &str, b: &str, label: &str) -> Self {
+        let _ = writeln!(self.body, "  {a} -> {b} [label=\"{}\"];", escape(label));
+        self
+    }
+
+    /// A dashed edge in the accent: a note's reference, a feedback.
+    pub fn accent_edge(mut self, a: &str, b: &str, label: &str) -> Self {
+        let c = self.theme.accent;
+        let _ = writeln!(
+            self.body,
+            "  {a} -> {b} [label=\"{}\", style=dashed, color=\"{c}\", fontcolor=\"{c}\"];",
+            escape(label)
+        );
+        self
+    }
+
+    /// A line of text under the whole diagram.
+    pub fn caption(mut self, text: &str) -> Self {
+        let _ = writeln!(
+            self.body,
+            "  label=\"{}\"; labelloc=b; labeljust=c;",
+            escape(text)
+        );
+        self
+    }
+
+    /// Any DOT statement.
+    pub fn raw(mut self, line: &str) -> Self {
+        self.body.push_str("  ");
+        self.body.push_str(line);
+        self.body.push('\n');
+        self
+    }
+
+    pub fn render(mut self) -> String {
+        self.body.push_str("}\n");
+        self.body
     }
 }
 

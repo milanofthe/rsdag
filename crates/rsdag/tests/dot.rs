@@ -2,7 +2,7 @@
 //! subexpression once, faded nodes outside the focus, the prolog and main
 //! phase as clusters with the state crossing between them as dashed edges.
 
-use rsdag::dot::{number, reachable, GraphView, Notation, TapeView, Theme};
+use rsdag::dot::{number, reachable, Blocks, GraphView, Notation, Style, TapeView, Theme};
 use rsdag::{differentiate, ExprId, Graph, Node, SymbolId, Tape, F64};
 
 fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
@@ -57,8 +57,7 @@ fn nodes_outside_the_focus_are_faded() {
         .render();
     let faded = dot
         .lines()
-        .filter(|l| l.contains("fillcolor=\"#"))
-        .filter(|l| l.contains("0d\""))
+        .filter(|l| l.contains("fontcolor=\"#8b8b8b40\""))
         .count();
     let all = reachable(&g, &[f, df]);
     // Every node only f reaches is faded, and f's result with them.
@@ -87,7 +86,7 @@ fn a_split_tape_has_two_phases_and_state_edges() {
         assert!(dot.contains(&format!("o{i} [")), "op {i} drawn");
     }
     assert!(count(&dot, "style=dashed") >= 1, "the state crosses: {dot}");
-    assert!(dot.contains("label=\"v\"") && dot.contains("label=\"e\""));
+    assert!(dot.contains("label=\"v\"") && dot.contains("label=<<B>e</B>>"));
 }
 
 #[test]
@@ -108,6 +107,7 @@ fn a_theme_with_one_line_color_and_opaque_fills() {
     let s = g.sin(xy);
     let f = g.add(s, xy);
     let theme = Theme {
+        style: Style::Filled,
         text: "#000000",
         line: Some("#000000"),
         fill_alpha: "",
@@ -123,4 +123,29 @@ fn a_theme_with_one_line_color_and_opaque_fills() {
         "{dot}"
     );
     assert!(!dot.contains("#E0E0E026"));
+}
+
+#[test]
+fn blocks_have_bold_titles_notes_and_patterns() {
+    let dot = Blocks::new(Theme::default(), "LR")
+        .block("a", "Graph", &["one line", "**bold line**"])
+        .note("n", "guard", &["x < y"])
+        .pattern("p", &["x.", ".x"], "pattern")
+        .group("tape", &["a", "n"])
+        .edge("a", "p", "")
+        .accent_edge("a", "n", "")
+        .caption("under it all")
+        .render();
+    assert!(
+        dot.contains("<B>Graph</B></FONT><BR/>one line<BR/><B>bold line</B>>"),
+        "{dot}"
+    );
+    assert!(dot.contains("x &lt; y"), "{dot}");
+    assert_eq!(count(&dot, "BGCOLOR="), 2, "{dot}");
+    assert_eq!(count(&dot, "subgraph cluster_0"), 1);
+    assert!(
+        dot.contains("style=\"rounded,dashed\", color=\"#c55a11\""),
+        "{dot}"
+    );
+    assert!(dot.contains("labelloc=b"));
 }

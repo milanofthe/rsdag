@@ -9,8 +9,8 @@ linear solves and Newton steps compiled into the same tape.
 
 ![Pipeline](docs/diagrams/pipeline.svg)
 
-The diagrams below are drawn by rsdag from the graphs and programs they
-show (`rsdag::dot`, `scripts/diagrams.sh`):
+The diagrams are drawn by rsdag (`rsdag::dot`, `scripts/diagrams.sh`), the
+graphs and programs among them from the code they show. Their nodes:
 
 ![Legend](docs/diagrams/legend.svg)
 
@@ -155,9 +155,11 @@ those arguments runs the body's prolog per instance in its own prolog and
 keeps the result in its work buffer (`ExternBundle::state_len`,
 `prolog_into`, `main_into`); per evaluation only the rest of the body runs.
 
-Above: three instances of a `diode(a, b, is, n)` body in a ring, `is` and
-`n` with the `Param` role. The prolog runs the body's parameter part for
-all three instances, the main phase one batched call.
+![Function bodies as a tape](docs/diagrams/bodies_tape.svg)
+
+Three instances of a `diode(a, b, is, n)` body in a ring, `is` and `n`
+with the `Param` role: the prolog runs the body's parameter part for all
+three instances, the main phase one batched call.
 
 ## Choice specialization
 
@@ -170,8 +172,10 @@ full tape is retraced and the specialization rebuilt. Guards that depend
 only on parameters are in the prolog and checked once per parameter
 binding.
 
-Above: a piecewise model at `v = 1` (on, linear region). The arms taken
-and the conditions that guard them are kept; the faded arms are not in the
+![Choice specialization of a graph](docs/diagrams/specialize_graph.svg)
+
+A piecewise model at `v = 1` (on, linear region): the arms taken and the
+conditions that guard them are kept; the faded arms are not in the
 specialized tape.
 
 ## Diagrams
@@ -181,9 +185,13 @@ a shared subexpression once, a focus set at full strength and the rest
 faded, clusters and extra dashed links. `dot::TapeView` draws a tape's
 dataflow: one node per instruction, the prolog and the main phase as
 clusters, the state edges dashed, named inputs, outputs and function
-bodies. `dot::Theme` sets fonts and colors; the default has a transparent
-background and grey text and edges. `scripts/diagrams.sh` renders the
-diagrams in this README with Graphviz.
+bodies. `dot::Blocks` draws architecture diagrams: blocks with a bold
+title over lines of text, groups, notes, sparsity patterns. `dot::Theme`
+sets fonts, colors and the style: `Outline` (the default: lines only, one
+grey, the branches, guards and state in one accent, a transparent
+background) or `Filled` (a fill per node kind, the notation `Ascii` or
+`Math`). `scripts/diagrams.sh` renders the diagrams in this README with
+Graphviz.
 
 ## Bit-exactness
 
