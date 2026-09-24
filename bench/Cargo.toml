@@ -1,0 +1,11 @@
+[package]
+name = "rsdag-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "The sparse solve comparison behind the README's figure; run by scripts/bench.sh, outside the workspace and CI"
+
+[dependencies]
+rsdag = { path = "../crates/rsdag" }
+rsdag-jit = { path = "../crates/rsdag-jit" }
+rslab = { git = "https://github.com/milanofthe/rslab", tag = "v0.36.0" }

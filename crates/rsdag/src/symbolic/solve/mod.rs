@@ -28,8 +28,10 @@
 //! circuit-like pattern is a program of a few tens of ops per unknown.
 //! Every flop of the factorization is a node, so a pattern with heavy fill
 //! (a 2D mesh past a few thousand unknowns) is a large program, which is
-//! what [`Plan::cost`] is for: below a few hundred flops per unknown the
-//! graph wins, above it a sparse solver does. The elimination order and
+//! what [`Plan::cost`] is for: against a KLU-type solver the graph wins
+//! below about a hundred ops per unknown while the whole program stays
+//! within a few million ops (past that its straight-line code runs slower
+//! per op), and a sparse solver wins above. The elimination order and
 //! the pivot rows are fixed at build time, as in a static solver, and
 //! guarded: each step whose column has more than one structural
 //! candidate checks at run time that its pivot row still dominates the
