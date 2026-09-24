@@ -109,8 +109,8 @@
 <!-- o0&#45;&gt;o1 -->
 <g id="edge12" class="edge">
 <title>o0&#45;&gt;o1</title>
-<path fill="none" stroke="#c55a11" stroke-width="1.2" stroke-dasharray="5,2" d="M124.6,-143.86C134.02,-141.14 144.36,-138.41 154,-136.38 203.15,-126.04 260.07,-118.79 300.05,-114.47"/>
-<polygon fill="#c55a11" stroke="#c55a11" stroke-width="1.2" points="300.11,-117.27 307.77,-113.65 299.52,-111.71 300.11,-117.27"/>
+<path fill="none" stroke="#3b82f6" stroke-width="1.2" stroke-dasharray="5,2" d="M124.6,-143.86C134.02,-141.14 144.36,-138.41 154,-136.38 203.15,-126.04 260.07,-118.79 300.05,-114.47"/>
+<polygon fill="#3b82f6" stroke="#3b82f6" stroke-width="1.2" points="300.11,-117.27 307.77,-113.65 299.52,-111.71 300.11,-117.27"/>
 </g>
 <!-- in0 -->
 <g id="node6" class="node">

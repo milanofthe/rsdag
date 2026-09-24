@@ -99,7 +99,7 @@ pub struct Theme {
 }
 
 const GREY: &str = "#8b8b8b";
-const ACCENT: &str = "#c55a11";
+const ACCENT: &str = "#3b82f6";
 
 impl Default for Theme {
     fn default() -> Self {
