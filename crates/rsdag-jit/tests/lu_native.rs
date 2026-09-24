@@ -70,6 +70,7 @@ fn the_native_prolog_holds_the_guard_alike() {
         min_n: 0,
         min_width: 1,
         min_share: 0.0,
+        ..Panels::default()
     };
     let (supernodal, values) = lu(n, &num, Some(panels));
     assert!(supernodal.supernodal().is_some());
