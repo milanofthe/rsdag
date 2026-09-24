@@ -144,21 +144,21 @@ impl Theme {
 
     /// The opening of a digraph in this theme, `rankdir` `TB` or `LR`.
     pub fn header(&self, rankdir: &str) -> String {
-        let (arrow, pen) = match self.style {
-            Style::Outline => (0.8, 1.2),
-            Style::Filled => (0.7, 1.0),
+        let (arrow, pen, margin, edge_font) = match self.style {
+            Style::Outline => (0.8, 1.2, "0.1,0.04", 1.0),
+            Style::Filled => (0.6, 0.9, "0.08,0.03", 2.0),
         };
         format!(
             "digraph G {{\n  bgcolor=\"transparent\";\n  rankdir={rankdir};\n  \
              nodesep=0.25;\n  ranksep=0.35;\n  compound=true;\n  \
              fontname=\"{f}\";\n  fontsize={s};\n  fontcolor=\"{t}\";\n  \
              node [fontname=\"{f}\", fontsize={s}, fontcolor=\"{t}\", penwidth=1.2, \
-             margin=\"0.1,0.04\", height=0.3];\n  \
+             margin=\"{margin}\", height=0.3];\n  \
              edge [color=\"{t}\", fontname=\"{f}\", fontsize={e}, fontcolor=\"{t}\", \
              arrowsize={arrow}, penwidth={pen}];\n",
             f = self.font,
             s = self.font_size,
-            e = self.font_size - 1.0,
+            e = self.font_size - edge_font,
             t = self.text,
         )
     }
