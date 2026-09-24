@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
-use rsdag::dot::{reachable, GraphView, Kind, TapeView, Theme};
+use rsdag::dot::{reachable, Blocks, GraphView, Kind, TapeView, Theme};
 use rsdag::symbolic::solve::{plan, LuProgram, Pattern};
 use rsdag::{differentiate, CmpOp, ExprId, Graph, Node, ParamRole, SymbolId, Tape, F64};
 
@@ -17,70 +17,71 @@ fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
     }
 }
 
-/// A diagram of labelled boxes and edges in the theme: `(id, kind, label)`
-/// and `(from, to, label)`.
-fn boxes(rankdir: &str, nodes: &[(&str, Kind, &str)], edges: &[(&str, &str, &str)]) -> String {
-    let t = Theme::default();
-    let mut s = t.header(rankdir);
-    for (id, kind, label) in nodes {
-        let _ = writeln!(
-            s,
-            "  {id} [{}, shape=box, style=\"rounded,filled\"];",
-            t.node(*kind, label, false)
-        );
-    }
-    for (a, b, label) in edges {
-        // A value the prolog leaves for the main phase is drawn as in a tape.
-        let style = if *label == "state" {
-            format!(", style=dashed, color=\"{}\"", t.state)
-        } else {
-            String::new()
-        };
-        let _ = writeln!(s, "  {a} -> {b} [label=\"{label}\"{style}];");
-    }
-    s.push_str("}\n");
-    s
-}
-
-/// Graph, transforms, tape, the two backends.
+/// Graph, transforms, tape, the two backends, the solver driving them.
 fn pipeline() -> String {
-    boxes(
-        "LR",
-        &[
-            ("dag", Kind::Input, "Graph\nhash-consed DAG\nexact or f64"),
-            (
-                "ad",
-                Kind::Op,
-                "Transforms\ndifferentiate, sparse_jacobian\nsubstitute, inline, simplify",
-            ),
-            (
-                "tape",
-                Kind::Kernel,
-                "Tape\nscheduled instructions\nkernels, batched calls\nprolog / main split",
-            ),
-            ("interp", Kind::Call, "Interpreter\nf64, f32, Complex64"),
-            ("native", Kind::Call, "Native code\nAArch64, x86-64"),
-            ("solver", Kind::Output, "Solver\nNewton, ODE, sweeps"),
-        ],
-        &[
-            ("dag", "ad", ""),
-            ("ad", "dag", ""),
-            ("dag", "tape", "compile"),
-            ("tape", "interp", ""),
-            ("tape", "native", ""),
-            ("interp", "solver", "Program"),
-            ("native", "solver", "Program"),
-        ],
-    )
+    Blocks::new(Theme::default(), "LR")
+        .block(
+            "dag",
+            "Graph",
+            &[
+                "hash-consed expression DAG",
+                "over exact rationals or f64",
+                "constructors fold",
+                "functions with calls and roles",
+            ],
+        )
+        .block(
+            "tf",
+            "Transforms",
+            &[
+                "differentiate: forward, reverse",
+                "sparse_jacobian, hessian",
+                "substitute, inline, simplify",
+                "sparse solve, Newton step",
+            ],
+        )
+        .block(
+            "tape",
+            "Tape",
+            &[
+                "flat instruction IR",
+                "scheduled for register pressure",
+                "kernels: Gemv, Gemm, Solve",
+                "batched calls of bodies",
+                "prolog / main split",
+            ],
+        )
+        .block(
+            "interp",
+            "Interpreter",
+            &["one loop over any Scalar:", "f64, f32, Complex64"],
+        )
+        .block(
+            "native",
+            "Native code",
+            &["AArch64, x86-64", "chunked functions", "bit-identical"],
+        )
+        .block(
+            "solver",
+            "Solver",
+            &["Newton, ODE, sweeps", "through Program", "or Adaptive"],
+        )
+        .edge("dag", "tf", "")
+        .edge("tf", "tape", "compile")
+        .edge("tape", "interp", "")
+        .edge("tape", "native", "")
+        .edge("interp", "solver", "")
+        .edge("native", "solver", "")
+        .caption("semantics: one reference arithmetic every backend mirrors")
+        .render()
 }
 
-/// The node kinds and the state edge.
+/// How the graph and tape diagrams draw a node, and the state edge.
 fn legend() -> String {
     let t = Theme::default();
     let mut s = t.header("LR");
     let kinds = [
         (Kind::Input, "input"),
-        (Kind::Param, "parameter"),
         (Kind::Const, "constant"),
         (Kind::Op, "operation"),
         (Kind::Choice, "branch"),
@@ -95,12 +96,13 @@ fn legend() -> String {
             let _ = writeln!(s, "  k{} -> k{k} [style=invis];", k - 1);
         }
     }
-    let _ = writeln!(s, "  k{} -> s0 [style=invis];", kinds.len() - 1);
     let _ = writeln!(
         s,
-        "  s0 [label=\"prolog\", shape=plaintext];\n  s1 [label=\"main\", shape=plaintext];\n  \
-         s0 -> s1 [style=dashed, color=\"{}\", label=\"state\"];",
-        t.state
+        "  k{} -> s0 [style=invis];\n  s0 [label=\"prolog\", shape=plaintext];\n  \
+         s1 [label=\"main\", shape=plaintext];\n  \
+         s0 -> s1 [style=dashed, color=\"{c}\", fontcolor=\"{c}\", label=\"state\", minlen=2];",
+        kinds.len() - 1,
+        c = t.state
     );
     s.push_str("}\n");
     s
@@ -108,39 +110,126 @@ fn legend() -> String {
 
 /// Planning a sparse solve, and the program it builds.
 fn solve() -> String {
-    boxes(
-        "LR",
-        &[
-            ("pattern", Kind::Input, "pattern\nfixed at build"),
-            ("btf", Kind::Op, "BTF\nblock triangular form"),
-            ("amd", Kind::Op, "AMD\nminimum degree"),
-            ("cost", Kind::Op, "cost\nfill and flops"),
-            (
-                "lu",
-                Kind::Kernel,
-                "static LU\nguarded pivots\nas graph ops",
-            ),
-            (
-                "prolog",
-                Kind::Param,
-                "prolog\nfactorization\nover the entries",
-            ),
-            (
-                "main",
-                Kind::Input,
-                "main\nsubstitution\nover the right-hand side",
-            ),
-        ],
-        &[
-            ("pattern", "btf", ""),
-            ("btf", "amd", ""),
-            ("amd", "cost", ""),
-            ("cost", "lu", ""),
-            ("lu", "prolog", "LuProgram"),
-            ("prolog", "main", "state"),
-            ("prolog", "lu", "guard fails:\nrepivot"),
-        ],
-    )
+    Blocks::new(Theme::default(), "LR")
+        .pattern(
+            "pat",
+            &["x..x..", ".x..xx", "x.x...", ".x.x..", "..x.x.", "...x.x"],
+            "pattern fixed at build time",
+        )
+        .block("btf", "BTF", &["block triangular", "form"])
+        .block("amd", "AMD", &["minimum degree", "ordering"])
+        .block(
+            "cost",
+            "cost predictor",
+            &["fill and flops from", "the elimination tree"],
+        )
+        .block(
+            "lu",
+            "static LU",
+            &["Crout form,", "guarded pivots", "as graph ops"],
+        )
+        .block("prolog", "prolog", &["factorization", "over the entries"])
+        .block(
+            "main",
+            "main",
+            &["substitution", "over the right-hand side"],
+        )
+        .group("tape", &["prolog", "main"])
+        .note(
+            "guard",
+            "pivot guard",
+            &[
+                "|pivot| >= 1e-3 max|column|",
+                "fails: Plan::repivot on the values, rebuild",
+            ],
+        )
+        .edge("pat", "btf", "")
+        .edge("btf", "amd", "")
+        .edge("amd", "cost", "")
+        .edge("cost", "lu", "")
+        .edge("lu", "prolog", "LuProgram")
+        .accent_edge("prolog", "main", "state")
+        .accent_edge("lu", "guard", "")
+        .raw("{ rank=same; lu; guard; }")
+        .render()
+}
+
+/// A function body over many instances.
+fn bodies_concept() -> String {
+    Blocks::new(Theme::default(), "LR")
+        .block("i1", "instance 1", &["args x1, p1"])
+        .block("i2", "instance 2", &["args x2, p2"])
+        .text("dots", &["..."])
+        .block("in", "instance N", &["args xN, pN"])
+        .block(
+            "batch",
+            "batched call",
+            &[
+                "one op, all instances",
+                "serially or on the",
+                "current thread pool",
+            ],
+        )
+        .block(
+            "body",
+            "body",
+            &["one tape,", "compiled once,", "called per instance"],
+        )
+        .note(
+            "pro",
+            "prolog per instance",
+            &[
+                "over its parameter-pure",
+                "arguments, in the",
+                "caller's prolog",
+            ],
+        )
+        .edge("i1", "batch", "")
+        .edge("i2", "batch", "")
+        .raw("dots -> batch [style=invis];")
+        .edge("in", "batch", "")
+        .edge("batch", "body", "runs the body")
+        .accent_edge("body", "pro", "")
+        .raw("{ rank=same; body; pro; }")
+        .render()
+}
+
+/// Specializing a tape on the arms its selects took.
+fn specialize_concept() -> String {
+    Blocks::new(Theme::default(), "LR")
+        .block(
+            "tape",
+            "tape",
+            &[
+                "v1 = mul x, p",
+                "**v2 = select c1, v1, x**",
+                "v3 = exp v2",
+                "**v4 = select c2, v3, p**",
+                "v5 = add v4, v1",
+                "**v6 = select c3, v5, v3**",
+            ],
+        )
+        .block(
+            "trace",
+            "trace",
+            &["eval_with records", "the arm taken:", "c1=1, c2=0, c3=1"],
+        )
+        .block(
+            "spec",
+            "specialized tape",
+            &["v1 = mul x, p", "v3 = exp v1", "v5 = add p, v1"],
+        )
+        .note(
+            "guards",
+            "guards",
+            &["c1 == 1, c2 == 0, c3 == 1", "checked on every eval"],
+        )
+        .edge("tape", "trace", "eval")
+        .edge("trace", "spec", "specialize")
+        .accent_edge("spec", "guards", "")
+        .accent_edge("guards", "trace", "fails: retrace")
+        .raw("{ rank=same; spec; guards; }")
+        .render()
 }
 
 /// `f = sin(x y) + x y` and its derivative in `x`: the derivative's nodes,
@@ -187,7 +276,7 @@ fn split() -> String {
 
 /// Three instances of one body in a ring: the body's parameter-pure part
 /// runs once per instance in the prolog, all instances in one batched call.
-fn bodies() -> String {
+fn bodies_tape() -> String {
     let mut g: Graph<F64> = Graph::new();
     let (a, b, is, n) = (g.sym("a"), g.sym("b"), g.sym("is"), g.sym("n"));
     let vt = g.konst_f64(0.025);
@@ -226,7 +315,7 @@ fn bodies() -> String {
 
 /// A piecewise model at one operating point: the arms a specialization
 /// keeps at full strength, the ones it drops faded.
-fn specialize() -> String {
+fn specialize_graph() -> String {
     let mut g: Graph<F64> = Graph::new();
     let (v, vth, vsat, k) = (g.sym("v"), g.sym("vth"), g.sym("vsat"), g.sym("k"));
     let vo = g.sub(v, vth);
@@ -308,13 +397,15 @@ fn main() {
         .unwrap_or_else(|| "target/diagrams".into());
     std::fs::create_dir_all(&dir).expect("create the output directory");
     for (name, dot) in [
-        ("legend", legend()),
         ("pipeline", pipeline()),
-        ("solve", solve()),
+        ("legend", legend()),
         ("derivative", derivative()),
         ("split", split()),
-        ("bodies", bodies()),
-        ("specialize", specialize()),
+        ("bodies", bodies_concept()),
+        ("bodies_tape", bodies_tape()),
+        ("specialize", specialize_concept()),
+        ("specialize_graph", specialize_graph()),
+        ("solve", solve()),
         ("lu", lu()),
     ] {
         let path = format!("{dir}/{name}.dot");
