@@ -265,7 +265,10 @@ pub struct Blocks {
 
 impl Blocks {
     pub fn new(theme: Theme, rankdir: &str) -> Self {
-        let body = theme.header(rankdir);
+        let mut body = theme.header(rankdir);
+        // Blocks breathe more than expression nodes, and a column of them
+        // lines up at one width.
+        body.push_str("  graph [ranksep=0.55, nodesep=0.3];\n  node [width=1.5];\n");
         Blocks { theme, body }
     }
 
@@ -382,6 +385,19 @@ impl Blocks {
         let _ = writeln!(
             self.body,
             "  {a} -> {b} [label=\"{}\", style=dashed, color=\"{c}\", fontcolor=\"{c}\"];",
+            escape(label)
+        );
+        self
+    }
+
+    /// A dashed feedback edge in the accent from `a` back to `b`, not
+    /// taking part in the ranking.
+    pub fn back(mut self, a: &str, b: &str, label: &str) -> Self {
+        let c = self.theme.accent;
+        let _ = writeln!(
+            self.body,
+            "  {a} -> {b} [label=\"{}\", style=dashed, color=\"{c}\", fontcolor=\"{c}\", \
+             constraint=false];",
             escape(label)
         );
         self
