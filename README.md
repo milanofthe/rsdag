@@ -216,20 +216,21 @@ guards. `rsdag::synth` generates random programs over the whole op
 vocabulary; the test suites compare the arena sweep, the tape, the native
 code and the typed evaluation on them bit for bit.
 
-## Numbers
+## Benchmarks
 
-One core of an Apple M3, release profile. `docs/bench/plot.py` draws the
-figures from the CSVs in `docs/bench/data` (sources in
-`docs/bench/README.md`).
+Measured on one core of an Apple M3 by `scripts/bench.sh`.
 
-Evaluation cost per op, interpreter and native, and native compile cost
-per op, over program size and op vocabulary:
+Evaluation cost per op, interpreter and native, and compile cost per op,
+tape and native, over program size and op vocabulary:
 
 ![Evaluation and compile cost per op](docs/bench/ops.svg)
 
-Newton step of a circuit-like system, sparse solve as a program against a
-general sparse LU library (rslab, KLU path), and the program size per
-unknown, over the number of unknowns and the pattern family:
+The sparse solve of a Newton step, factorization and substitution on fresh
+values, as an `LuProgram` in native code against a sparse LU library
+(rslab, KLU path), over pattern family and number of unknowns: the time
+per step, the program size per unknown, and the build (analysis and
+compile against KLU's symbolic analysis and first factorization). Squares
+mark systems where `Panels` chose the supernodal program:
 
 ![Sparse solve against a sparse LU library](docs/bench/solve.svg)
 
@@ -276,5 +277,6 @@ with `gt`, `lt`, ... expresses elementwise conditions.
 cargo test --workspace
 scripts/ci.sh                                            # the CI gate, locally
 scripts/diagrams.sh                                      # the README diagrams (needs Graphviz)
+scripts/bench.sh                                         # the README benchmarks, measured afresh (needs matplotlib)
 maturin build --release -m crates/rsdag-py/Cargo.toml   # the Python wheel
 ```
