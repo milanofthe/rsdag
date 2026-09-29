@@ -191,6 +191,15 @@ The dense kernels' throughput over the matrix size:
 
 ![Dense kernels](docs/bench/dense.svg)
 
+Against CasADi (its SX virtual machine) and JAX from Python, on one core
+(`docs/bench/compare.py`): the 1D Brusselator in each tool's idiom, the
+right-hand side and its Jacobian per call, and the setup of both from the
+Python function to a first result. rsdag and CasADi build the sparse
+Jacobian, JAX the dense one (`jacfwd`, up to 2000 states). On the largest
+grids JAX's fused vector code evaluates the right-hand side faster.
+
+![Against CasADi and JAX](docs/bench/compare.svg)
+
 ## Rust
 
 ```rust
@@ -218,6 +227,7 @@ def lorenz(x, t):
 f = jit(lorenz, native=True)              # traces on first call, then native
 y = f(np.array([1.0, 2.0, 3.0]), 0.0)
 J = jacobian(lorenz)(np.array([1.0, 2.0, 3.0]), 0.0)   # (3, 3), symbolic
+Js = jacobian(lorenz, sparse=True)       # the nonzeros; Js.pattern(x, t): rows, cols
 g = jit(lambda A, x: solve(A, matmul(A, x)))            # one Gemv, one Solve
 ```
 
@@ -231,5 +241,6 @@ cargo test --workspace
 scripts/ci.sh                                            # the full gate, locally
 scripts/diagrams.sh                                      # the README diagrams (needs Graphviz)
 scripts/bench.sh                                         # the README benchmarks, measured afresh (needs matplotlib)
+scripts/social.sh                                        # the cards in docs/social (needs Graphviz, matplotlib)
 maturin build --release -m crates/rsdag-py/Cargo.toml   # the Python wheel
 ```

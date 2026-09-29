@@ -96,7 +96,43 @@ def dense():
     save(fig, "dense.svg")
 
 
+def compare():
+    """rsdag against CasADi and JAX (compare.csv): calls of the right-hand
+    side and its Jacobian, and the setup of both."""
+    r = rows("compare.csv")
+    tools = (("rsdag native", BLUE, "-"), ("rsdag interpreter", BLUE, "--"),
+             ("CasADi", ORANGE, "-"), ("JAX", GREEN, "-"))
+
+    def series(tool, value):
+        sel = [x for x in r if x["tool"] == tool and value(x) is not None]
+        return [int(x["states"]) for x in sel], [value(x) for x in sel]
+
+    cols = (
+        ("Right-hand side, per call", "microseconds",
+         lambda x: float(x["call_f_us"])),
+        ("Jacobian, per call", "microseconds",
+         lambda x: float(x["call_j_us"]) if x["call_j_us"] else None),
+        ("Setup of both", "milliseconds",
+         lambda x: (float(x["setup_f_s"]) + float(x["setup_j_s"])) * 1e3 if x["setup_j_s"] else None),
+    )
+    fig, axes = plt.subplots(1, 3, figsize=(10.5, 3.0))
+    for a, (title, unit, value) in zip(axes, cols):
+        for tool, color, ls in tools:
+            n, v = series(tool, value)
+            a.plot(n, v, "o" + ls, color=color, ms=4)
+        a.set_xscale("log"); a.set_yscale("log")
+        a.set_xlabel("states"); a.set_ylabel(unit)
+        a.set_title(title)
+    key(fig, (("rsdag", BLUE), ("CasADi", ORANGE), ("JAX", GREEN)),
+        (("native", "-", "o"), ("interpreter", "--", "o")))
+    save(fig, "compare.svg")
+
+
 if __name__ == "__main__":
     ops()
     dense()
-    print("wrote", ", ".join(f"docs/bench/{n}" for n in ("ops.svg", "dense.svg")))
+    names = ["ops.svg", "dense.svg"]
+    if os.path.exists(os.path.join(DATA, "compare.csv")):
+        compare()
+        names.append("compare.svg")
+    print("wrote", ", ".join(f"docs/bench/{n}" for n in names))
