@@ -68,7 +68,7 @@ pub use semantics::{
 pub use simplify::rebuild;
 #[cfg(feature = "egraph")]
 pub use symbolic::simplify_egraph;
-pub use symbolic::{collect, determinant, newton_step, rational_form};
+pub use symbolic::{collect, determinant, rational_form};
 pub use tape::{NoTrace, Program, SpecializedTape, Tape, TraceSink};
 
 pub use transform::substitute;

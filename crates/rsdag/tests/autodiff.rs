@@ -382,3 +382,37 @@ fn derivatives_skip_what_does_not_move() {
     assert!(g.is_zero(rev[1]));
     assert_eq!(g.func(h).outputs().len(), 2, "d/dp only");
 }
+
+/// The sparse Jacobian of a ring of nonlinear cells (each residual touching
+/// its two neighbours) holds exactly the nonzero derivatives.
+#[test]
+fn the_sparse_jacobian_holds_every_nonzero_derivative() {
+    let mut g: Graph<F64> = Graph::new();
+    let n = 40;
+    let xs: Vec<ExprId> = (0..n).map(|i| g.sym(&format!("x{i}"))).collect();
+    let syms: Vec<SymbolId> = (0..n).map(|i| sid(&mut g, &format!("x{i}"))).collect();
+    let f: Vec<ExprId> = (0..n)
+        .map(|i| {
+            let (l, c, r) = (xs[(i + n - 1) % n], xs[i], xs[(i + 1) % n]);
+            let d1 = g.sub(c, l);
+            let d2 = g.sub(r, c);
+            let e1 = g.exp(d1);
+            let e2 = g.exp(d2);
+            let s = g.sub(e1, e2);
+            let two = g.konst_f64(2.0);
+            let t = g.mul(two, c);
+            g.add(s, t)
+        })
+        .collect();
+    let sparse = sparse_jacobian(&mut g, &f, &syms);
+    for (i, row) in sparse.iter().enumerate() {
+        assert_eq!(row.len(), 3, "row {i} touches three unknowns");
+        for (j, &s) in syms.iter().enumerate() {
+            let d = differentiate(&mut g, f[i], s);
+            match row.iter().find(|&&(c, _)| c == j) {
+                Some(&(_, e)) => assert_eq!(e, d, "entry ({i}, {j})"),
+                None => assert!(g.is_zero(d), "entry ({i}, {j}) is missing"),
+            }
+        }
+    }
+}

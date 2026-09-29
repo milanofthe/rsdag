@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::fmt::Write;
 
 use rsdag::dot::{reachable, Blocks, GraphView, Kind, TapeView, Theme};
-use rsdag::symbolic::solve::{plan, LuProgram, Pattern};
 use rsdag::{differentiate, CmpOp, ExprId, Graph, Node, ParamRole, SymbolId, Tape, F64};
 
 fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
@@ -44,7 +43,6 @@ fn pipeline() -> String {
             &[
                 "differentiate, gradient",
                 "sparse_jacobian, hessian",
-                "sparse solve, Newton step",
                 "substitute, simplify",
             ],
         )
@@ -109,8 +107,7 @@ fn solver_path() -> String {
         )
         .block("f", "F(x, x', p, t)", &["residuals"])
         .block("j", "Jacobian", &["sparse_jacobian", "dF/dx, dF/dx'"])
-        .block("step", "Newton step", &["x - J^-1 F", "static LU, guarded"])
-        .row(&["sig", "f", "j", "step"])
+        .row(&["sig", "f", "j"])
         .block(
             "pro",
             "prolog",
@@ -119,11 +116,7 @@ fn solver_path() -> String {
         .block(
             "main",
             "main",
-            &[
-                "F, J, factor, substitute,",
-                "guard values,",
-                "per iteration",
-            ],
+            &["F and J values,", "guard values,", "per iteration"],
         )
         .group("one program", &["pro", "main"])
         .block(
@@ -131,6 +124,7 @@ fn solver_path() -> String {
             "Solver loop",
             &[
                 "iterates the main phase,",
+                "factors J (sparse LU library),",
                 "steps in time,",
                 "rebinds on a parameter change",
             ],
@@ -149,9 +143,8 @@ fn solver_path() -> String {
         .edge("model", "sig", "")
         .edge("model", "f", "")
         .edge("f", "j", "")
-        .edge("j", "step", "")
         .edge("sig", "pro", "inputs")
-        .edge("step", "main", "compile_split")
+        .edge("j", "main", "compile_split")
         .accent_edge("pro", "main", "state")
         .edge("main", "loop", "")
         .accent_edge("loop", "ev", "")
@@ -243,73 +236,6 @@ fn legend() -> String {
     );
     s.push_str("}\n");
     s
-}
-
-/// Planning a sparse solve, and the program it builds.
-fn solve() -> String {
-    Blocks::new(Theme::default(), "TB")
-        .pattern(
-            "pat",
-            &["x..x..", ".x..xx", "x.x...", ".x.x..", "..x.x.", "...x.x"],
-            "pattern fixed at build time",
-        )
-        .block(
-            "plan",
-            "Plan",
-            &[
-                "block triangular form,",
-                "minimum degree per block,",
-                "fill and flops predicted",
-                "from the elimination tree",
-            ],
-        )
-        .block(
-            "lu",
-            "static LU",
-            &[
-                "Crout form, pivot rows",
-                "fixed, guarded;",
-                "real or complex (Cx)",
-            ],
-        )
-        .row(&["pat", "plan", "lu"])
-        .block("scalar", "scalar", &["one dot per entry"])
-        .block(
-            "panels",
-            "supernodal",
-            &["wide panels as dense", "kernels (Gemm, Solve)"],
-        )
-        .group("LuProgram", &["scalar", "panels"])
-        .block("prolog", "prolog", &["factorization", "over the entries"])
-        .block(
-            "main",
-            "main",
-            &["substitution", "over the right-hand side"],
-        )
-        .group("tape", &["prolog", "main"])
-        .note(
-            "guard",
-            "pivot guard",
-            &[
-                "|pivot| >= 1e-3 max|column|,",
-                "read from the state (factored)",
-            ],
-        )
-        .row(&["scalar", "panels", "guard"])
-        .row(&["prolog", "main"])
-        .edge("pat", "plan", "")
-        .edge("plan", "lu", "")
-        .edge("lu", "scalar", "")
-        .edge("lu", "panels", "")
-        .edge("scalar", "prolog", "")
-        .edge("panels", "prolog", "")
-        .accent_edge("prolog", "main", "state")
-        .raw(&format!(
-            "prolog -> guard [style=dashed, color=\"{}\", constraint=false];",
-            Theme::default().accent
-        ))
-        .back("guard", "lu", "fails: Plan::repivot, rebuild")
-        .render()
 }
 
 /// A function body over many instances.
@@ -531,39 +457,6 @@ fn specialize_graph() -> String {
         .render()
 }
 
-/// The LU of a 3 by 3 arrow pattern as a program: the factorization over
-/// the entries is the prolog, the substitution the main phase, the pivot
-/// guard an output.
-fn lu() -> String {
-    let n = 3;
-    let mut entries = Vec::new();
-    for i in 0..n {
-        for j in 0..n {
-            if i == j || i == n - 1 || j == n - 1 {
-                entries.push((i, j));
-            }
-        }
-    }
-    let mut pattern: Pattern = vec![Vec::new(); n];
-    for &(i, j) in &entries {
-        pattern[i].push(j);
-    }
-    let names: Vec<String> = entries
-        .iter()
-        .map(|(i, j)| format!("a{i}{j}"))
-        .chain((0..n).map(|i| format!("b{i}")))
-        .collect();
-    let lu = LuProgram::build(n, entries, plan(&pattern).expect("a plan"), None);
-    let names: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-    let mut pure = vec![true; lu.entries().len()];
-    pure.resize(lu.input_len(), false);
-    TapeView::new(lu.tape())
-        .inputs(&names)
-        .params(&pure)
-        .outputs(&["x0", "x1", "x2", "pivots ok"])
-        .render()
-}
-
 fn main() {
     let dir = std::env::args()
         .nth(1)
@@ -580,8 +473,6 @@ fn main() {
         ("bodies_tape", bodies_tape()),
         ("specialize", specialize_concept()),
         ("specialize_graph", specialize_graph()),
-        ("solve", solve()),
-        ("lu", lu()),
     ] {
         let path = format!("{dir}/{name}.dot");
         std::fs::write(&path, dot).expect("write a diagram");
