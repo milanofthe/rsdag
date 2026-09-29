@@ -321,7 +321,20 @@ impl NativeTape {
         let n_work = tape.n_slots();
         // When each value dies; the outputs are read after the program.
         let liveness = Liveness::new(&ops, n_work, tape.outputs().iter().chain(live).copied());
-        let scratch_len = bundles.iter().map(|b| b.work_len()).max().unwrap_or(0);
+        // The scratch lent to a called bundle, or to a dense solve.
+        let solves = ops.iter().map(|op| match op {
+            ROp::Kernel(Kernel {
+                kind: KernelKind::Solve { n, k },
+                ..
+            }) => rsdag::semantics::solve_scratch_len(*n as usize, *k as usize),
+            _ => 0,
+        });
+        let scratch_len = bundles
+            .iter()
+            .map(|b| b.work_len())
+            .chain(solves)
+            .max()
+            .unwrap_or(0);
         let layout = Layout {
             gather: n_work,
             scratch: n_work + gather_len,
@@ -953,6 +966,8 @@ impl<'a, I: Isa> Emitter<'a, I> {
                     operands,
                     codes: kn.codes.as_ref().map_or(0, |c| c.1 as u64),
                     out: kn.dst as u64 * 8,
+                    scratch: self.layout.scratch as u64 * 8,
+                    scratch_len: self.layout.scratch_len as u64,
                 };
                 let d = self.kernels.len();
                 assert!(

@@ -226,9 +226,10 @@ pub struct Tape {
     n_work: usize,
     /// Widest gather any variadic op or kernel needs.
     max_args: usize,
-    /// The widest scratch a called bundle asks for ([`ExternBundle::work_len`]),
-    /// lent to it from the tail of the work buffer.
-    bundle_work: usize,
+    /// The widest scratch a called bundle ([`ExternBundle::work_len`]) or a
+    /// dense solve ([`crate::semantics::solve_scratch_len`]) works in, lent
+    /// from the tail of the work buffer, after the gather.
+    lent: usize,
     bundles: Vec<Arc<dyn ExternBundle>>,
     /// Instruction count of the parameter-pure prolog prefix (0 = no split;
     /// see [`compile_split`](Self::compile_split)).
@@ -509,9 +510,9 @@ impl Tape {
         self.collect(inputs, work, out);
     }
 
-    /// The work buffer: the slots, then the gather scratch.
+    /// The work buffer: the slots, the gather, then what is lent.
     fn buffer_len(&self) -> usize {
-        self.n_work + self.max_args + self.bundle_work
+        self.n_work + self.max_args + self.lent
     }
 
     fn collect<T: Scalar>(&self, inputs: &[T], work: &[T], out: &mut Vec<T>) {
@@ -589,7 +590,7 @@ impl Tape {
         hi: usize,
         sink: &mut S,
     ) {
-        use crate::semantics::{reduce_slice_t, solve_many_t};
+        use crate::semantics::{reduce_slice_t, solve_many_into};
         // The gather scratch at the tail of `work`, so nothing is allocated
         // per call.
         let (work, scratch) = work.split_at_mut(self.n_work);
@@ -760,6 +761,9 @@ impl Tape {
                 }
                 Op::Solve { a, b, n, k } => {
                     let (n, k) = (n as usize, k as usize);
+                    // The operands gathered at the front of the scratch, the
+                    // solve working behind them.
+                    let (scratch, lent) = scratch.split_at_mut(self.max_args);
                     let (ra, rb) =
                         dense_operands(inputs, work, scratch, &self.arg_pool, a, n * n, b, n * k);
                     let base = work.as_mut_ptr();
@@ -767,7 +771,7 @@ impl Tape {
                     let bv: &[T] = dense_slice(inputs, base, scratch, rb, n * k);
                     let reads = [Some((ra, n * n)), Some((rb, n * k)), None];
                     let out = unsafe { out_block(base, work.len(), d, n * k, &reads) };
-                    solve_many_t(av, bv, n, k, out);
+                    solve_many_into(av, bv, n, k, out, lent);
                     continue;
                 }
             };

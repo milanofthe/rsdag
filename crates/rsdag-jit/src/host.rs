@@ -186,7 +186,8 @@ impl Place {
 /// A dense kernel as the code hands it over: its kind (0 `Gemv`, 1 `Gemm`,
 /// 2 the solve of `k` right-hand sides), its dimensions, where its
 /// operands are (`a`, then `x` or `b`, then the accumulator), the address
-/// of its fold codes (0 without), and the byte offset of its outputs.
+/// of its fold codes (0 without), the byte offset of its outputs, and
+/// the scratch a solve works in (the layout's, apart from slots and gather).
 #[repr(C)]
 pub(crate) struct KernelDesc {
     pub(crate) kind: u64,
@@ -196,6 +197,9 @@ pub(crate) struct KernelDesc {
     pub(crate) operands: [Place; 3],
     pub(crate) codes: u64,
     pub(crate) out: u64,
+    /// The byte offset and the length of the scratch a solve works in.
+    pub(crate) scratch: u64,
+    pub(crate) scratch_len: u64,
 }
 
 /// Run a dense kernel through the reference kernels of `rsdag::semantics`.
@@ -234,6 +238,14 @@ pub(crate) extern "C" fn h_kernel(work: *mut f64, inputs: *const f64, d: *const 
         (0, Some(codes)) => s::gemv_fold(a, b, m, n, operand(2, m), codes, out),
         (1, None) => s::gemm(a, b, m, k, n, out),
         (1, Some(codes)) => s::gemm_fold(a, b, m, k, n, operand(2, m * n), codes, out),
-        _ => s::solve_many(a, b, n, k, out),
+        _ => {
+            let scratch = unsafe {
+                std::slice::from_raw_parts_mut(
+                    work.byte_add(d.scratch as usize),
+                    d.scratch_len as usize,
+                )
+            };
+            s::solve_many_into(a, b, n, k, out, scratch)
+        }
     }
 }

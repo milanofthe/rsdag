@@ -223,8 +223,8 @@ fn avx() -> bool {
 /// `$imp::<Pair>` otherwise. `$imp` and everything it calls inline into
 /// it, so the whole kernel is one AVX function. A closure does not inherit
 /// the feature: one holding a [`Quad`] operation would call every AVX
-/// intrinsic out of line, so none does (the scratch is taken out of its
-/// thread local, not borrowed in `with`).
+/// intrinsic out of line, so none does (the solve's scratch is the
+/// caller's, not borrowed from a thread local in `with`).
 macro_rules! entry {
     ($(#[$m:meta])* fn $name:ident<$($g:ident: $b:path),*>($($a:ident: $t:ty),*) $(-> $r:ty)? = $imp:ident) => {
         $(#[$m])*
@@ -261,8 +261,8 @@ entry!(
     /// elimination step for step (pivot search, swaps, panel updates, the
     /// panel's rows against the trailing columns, the trailing update
     /// through [`gemm`], the back-substitution), the row updates four
-    /// lanes wide, and the augmented matrix in a scratch kept per thread.
-    fn solve_many<>(a: &[f64], b: &[f64], n: usize, k: usize, out: &mut [f64]) = solve_q
+    /// lanes wide, the augmented matrix in the caller's scratch.
+    fn solve_many<>(a: &[f64], b: &[f64], n: usize, k: usize, out: &mut [f64], scratch: &mut [f64]) = solve_q
 );
 
 /// The merge of the four accumulators and the tail past the last chunk
@@ -452,29 +452,37 @@ fn axpy_sub<Q: Quad>(row_i: &mut [f64], row_k: &[f64], l: f64) {
 }
 
 #[inline(always)]
-fn solve_q<Q: Quad>(a: &[f64], b: &[f64], n: usize, k: usize, out: &mut [f64]) {
-    use crate::semantics::{LU_PANEL_LARGE, LU_PANEL_SMALL, LU_PANEL_SWITCH, LU_UNBLOCKED_MAX};
-    if n <= LU_UNBLOCKED_MAX {
-        solve_unblocked::<Q>(a, b, n, k, out)
-    } else if n < LU_PANEL_SWITCH {
-        solve_blocked::<Q, LU_PANEL_SMALL>(a, b, n, k, out)
-    } else {
-        solve_blocked::<Q, LU_PANEL_LARGE>(a, b, n, k, out)
+fn solve_q<Q: Quad>(
+    a: &[f64],
+    b: &[f64],
+    n: usize,
+    k: usize,
+    out: &mut [f64],
+    scratch: &mut [f64],
+) {
+    use crate::semantics::{lu_panel, LU_PANEL_LARGE, LU_PANEL_SMALL};
+    match lu_panel(n) {
+        0 => solve_unblocked::<Q>(a, b, n, k, out, scratch),
+        LU_PANEL_SMALL => solve_blocked::<Q, LU_PANEL_SMALL>(a, b, n, k, out, scratch),
+        _ => solve_blocked::<Q, LU_PANEL_LARGE>(a, b, n, k, out, scratch),
     }
 }
 
-/// The right-looking elimination of [`crate::semantics::solve_unblocked`],
-/// the augmented matrix in a scratch kept per thread.
+/// The right-looking elimination of [`crate::semantics::solve_many_generic`]
+/// without panels.
 #[inline(always)]
-fn solve_unblocked<Q: Quad>(a: &[f64], b: &[f64], n: usize, k: usize, out: &mut [f64]) {
-    thread_local! {
-        static SCRATCH: std::cell::Cell<Vec<f64>> = const { std::cell::Cell::new(Vec::new()) };
-    }
-    let mut m = SCRATCH.take();
+fn solve_unblocked<Q: Quad>(
+    a: &[f64],
+    b: &[f64],
+    n: usize,
+    k: usize,
+    out: &mut [f64],
+    scratch: &mut [f64],
+) {
+    let [m, ..] = crate::semantics::solve_parts(scratch, a, b, n, k);
     let w = n + k;
-    augment(&mut m, a, b, n, k);
     for kk in 0..n {
-        let piv = pivot(&mut m, n, w, kk);
+        let piv = pivot(m, n, w, kk);
         let (top, rest) = m.split_at_mut((kk + 1) * w);
         let row_k = &top[kk * w..(kk + 1) * w];
         for row_i in rest.chunks_exact_mut(w) {
@@ -483,19 +491,7 @@ fn solve_unblocked<Q: Quad>(a: &[f64], b: &[f64], n: usize, k: usize, out: &mut 
             axpy_sub::<Q>(&mut row_i[kk + 1..w], &row_k[kk + 1..w], l);
         }
     }
-    back_substitute::<Q>(&m, n, k, w, out);
-    SCRATCH.set(m);
-}
-
-/// The augmented matrix `[a | b]` into `m`, rows of `n + k`.
-#[inline(always)]
-fn augment(m: &mut Vec<f64>, a: &[f64], b: &[f64], n: usize, k: usize) {
-    m.clear();
-    m.reserve(n * (n + k));
-    for i in 0..n {
-        m.extend_from_slice(&a[i * n..(i + 1) * n]);
-        m.extend((0..k).map(|c| b[c * n + i]));
-    }
+    back_substitute::<Q>(m, n, k, w, out);
 }
 
 /// The partial pivot of column `kk`: the first row at or below `kk` of the
@@ -560,15 +556,10 @@ fn solve_blocked<Q: Quad, const NB: usize>(
     n: usize,
     k: usize,
     out: &mut [f64],
+    scratch: &mut [f64],
 ) {
-    thread_local! {
-        static SCRATCH: std::cell::Cell<[Vec<f64>; 4]> =
-            const { std::cell::Cell::new([Vec::new(), Vec::new(), Vec::new(), Vec::new()]) };
-    }
-    let mut scratch = SCRATCH.take();
-    let [m, ut, lrows, prod] = &mut scratch;
+    let [m, ut, lrows, prod] = crate::semantics::solve_parts(scratch, a, b, n, k);
     let w = n + k;
-    augment(m, a, b, n, k);
     let mut k0 = 0;
     while k0 < n {
         let k1 = (k0 + NB).min(n);
@@ -594,17 +585,12 @@ fn solve_blocked<Q: Quad, const NB: usize>(
         if k1 < n {
             let nb = k1 - k0;
             let cols = w - k1;
-            ut.clear();
-            ut.resize(cols * nb, 0.0);
+            let ut = &mut ut[..cols * nb];
             for (jj, j) in (k1..w).enumerate() {
                 for (q, kk) in (k0..k1).enumerate() {
                     ut[jj * nb + q] = m[kk * w + j];
                 }
             }
-            lrows.clear();
-            lrows.resize(4 * nb, 0.0);
-            prod.clear();
-            prod.resize(4 * cols, 0.0);
             let mut i = k1;
             while i < n {
                 let rows = (n - i).min(4);
@@ -626,5 +612,4 @@ fn solve_blocked<Q: Quad, const NB: usize>(
         k0 = k1;
     }
     back_substitute::<Q>(m, n, k, w, out);
-    SCRATCH.set(scratch);
 }
