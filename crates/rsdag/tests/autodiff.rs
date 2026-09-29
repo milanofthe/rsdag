@@ -212,6 +212,7 @@ fn hessian_is_symmetric_and_correct() {
     let f = ctx.add(e, x3y);
     let (xs, ys) = (sid(&mut ctx, "x"), sid(&mut ctx, "y"));
     let h = hessian(&mut ctx, f, &[xs, ys]);
+    assert_eq!(h[0][1], h[1][0], "one expression for both orders");
 
     let mut env: HashMap<SymbolId, Complex64> = HashMap::new();
     env.insert(xs, Complex64::new(0.6, 0.0));
@@ -315,4 +316,69 @@ fn sparse_jacobian_modes_agree_with_forward_derivatives() {
             }
         }
     }
+}
+
+/// Both modes walk the graph with an explicit stack: a chain far deeper
+/// than a small thread stack could recurse through is fine.
+#[test]
+fn deep_chains_differentiate_on_a_small_stack() {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            let mut g: Graph = Graph::new();
+            let x = g.sym("x");
+            let xs = sid(&mut g, "x");
+            let (mut sines, mut sum) = (x, x);
+            for _ in 0..100_000 {
+                sines = g.sin(sines);
+                sum = g.add(sum, x);
+            }
+            // d/dx of x + x + ... + x folds to the count.
+            let n = g.konst_int(100_001);
+            assert_eq!(differentiate(&mut g, sum, xs), n);
+            assert_eq!(gradient(&mut g, sum, &[xs])[0], n);
+            let d = differentiate(&mut g, sines, xs);
+            assert!(!g.is_zero(d));
+            let r = gradient(&mut g, sines, &[xs])[0];
+            assert!(!g.is_zero(r));
+            let jac = sparse_jacobian(&mut g, &[sum, sines], &[xs]);
+            assert_eq!(jac[0], vec![(0, n)]);
+            assert_eq!(jac[1], vec![(0, d)]);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// A subgraph that does not depend on the symbols asked for builds
+/// nothing in either mode, and a call's constant arguments get no
+/// derivative output.
+#[test]
+fn derivatives_skip_what_does_not_move() {
+    let mut g: Graph = Graph::new();
+    let x = g.sym("x");
+    let z = g.sym("z");
+    let (xs, zs) = (sid(&mut g, "x"), sid(&mut g, "z"));
+    let mut deep = z;
+    for _ in 0..1000 {
+        deep = g.tanh(deep);
+    }
+    let f = g.mul(x, deep);
+    let before = g.len();
+    assert_eq!(differentiate(&mut g, f, xs), deep);
+    assert_eq!(gradient(&mut g, f, &[xs])[0], deep);
+    assert_eq!(g.len(), before, "nothing built below the constant factor");
+
+    let p = g.sym("p");
+    let q = g.sym("q");
+    let (ps, qs) = (sid(&mut g, "p"), sid(&mut g, "q"));
+    let pq = g.mul(p, q);
+    let body = g.sin(pq);
+    let h = g.define_func("h", vec![ps, qs], vec![body]);
+    let three = g.konst_int(3);
+    let call = g.call(h, 0, &[x, three]);
+    let rev = gradient(&mut g, call, &[xs, zs]);
+    assert_eq!(differentiate(&mut g, call, xs), rev[0]);
+    assert!(g.is_zero(rev[1]));
+    assert_eq!(g.func(h).outputs().len(), 2, "d/dp only");
 }
