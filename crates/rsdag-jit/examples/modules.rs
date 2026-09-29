@@ -1,7 +1,9 @@
 //! rsdag on DAE modules: a module JSON as SANE's `export_module` writes it
 //! (the rsdag module, the index of the system function, the parameter
-//! values by name and a point `x0`). The system function's states are the
-//! inputs; its other parameters are bound once, so the parameter work runs
+//! values by name and a point `x0`). The residual is the DC one, as the
+//! other tools get it: the derivatives and time bound to the constant zero
+//! and every call specialized to that (`Graph::specialize_calls`). The
+//! states are the inputs; the parameters are bound once, so their work runs
 //! in the prolog. Per module: the setup and the time per call of the
 //! residual and of its sparse Jacobian in the states, interpreted and
 //! native; then natively with the parameters folded (the calls inlined and
@@ -70,10 +72,22 @@ fn measure(
     let (mut wn, mut on) = (Vec::new(), Vec::new());
     native.eval_prolog(vals, &mut wn);
     let c_native = per_call(|| native.eval_main(vals, &mut wn, &mut on));
-    assert!(
-        o.iter().zip(&on).all(|(a, b)| a.to_bits() == b.to_bits()),
-        "native differs"
-    );
+    if let Some((k, (a, b))) = o
+        .iter()
+        .zip(&on)
+        .enumerate()
+        .find(|(_, (a, b))| a.to_bits() != b.to_bits())
+    {
+        let n = o
+            .iter()
+            .zip(&on)
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
+        panic!(
+            "native differs at output {k} of {}: {a:e} vs {b:e} ({n} outputs differ)",
+            o.len()
+        );
+    }
     native.eval_main(check, &mut wn, &mut on);
     ([s_tape, s_tape + s_native, c_tape, c_native], on)
 }
@@ -147,6 +161,15 @@ fn main() {
                 _ => zero,
             })
             .collect();
+        // x' and t as the constant zero, every call specialized to it.
+        let at_rest = syms
+            .iter()
+            .zip(&roles)
+            .filter(|(_, r)| matches!(r, ParamRole::StateDot { .. } | ParamRole::Time))
+            .map(|(&s, _)| (s, zero))
+            .collect();
+        let rest = substitute(&mut g, &residuals, &at_rest);
+        let residuals = g.specialize_calls(&rest);
         let check: Vec<f64> = vals
             .iter()
             .zip(&pure)
