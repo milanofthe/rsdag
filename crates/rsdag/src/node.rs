@@ -180,9 +180,10 @@ pub struct UnarySpec {
     /// The callee in generated C: a `libm` name where the semantics agree,
     /// an `rsdag_` helper where rsdag guards or defines the op itself.
     pub c_fn: &'static str,
-    /// Differentiable everywhere it is defined. The rough ones (`floor`,
-    /// `sign`, the roundings, the noise source) have a zero or undefined
-    /// derivative and are excluded from smooth generated programs.
+    /// Differentiable where it is defined, and differentiated by rsdag.
+    /// The rough ones (`floor`, `sign`, the roundings, the noise source)
+    /// have a zero or undefined derivative, `trigamma` one rsdag does not
+    /// carry; they are excluded from smooth generated programs.
     pub smooth: bool,
 }
 
@@ -379,7 +380,8 @@ pub const UNARY_OPS: &[UnarySpec] = &[
         op: UnaryOp::Trigamma,
         name: "trigamma",
         c_fn: "rsdag_trigamma",
-        smooth: true,
+        // Its derivative (polygamma of order 2) is not implemented.
+        smooth: false,
     },
     UnarySpec {
         op: UnaryOp::RandUniform,

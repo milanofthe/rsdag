@@ -20,7 +20,8 @@ fn program(seed: u64) -> (Tape, Vec<f64>, Vec<bool>) {
         .params(10)
         .outputs(5)
         .vocab(Vocabulary::Full)
-        .width(14);
+        .width(14)
+        .selects(2);
 
     let (roots, syms) = build(&mut g, &mut spec);
     let pure: Vec<bool> = (0..syms.len()).map(|k| k % 3 == 0).collect();

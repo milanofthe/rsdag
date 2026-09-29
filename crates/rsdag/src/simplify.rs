@@ -1,9 +1,10 @@
 //! Graph simplification.
 //!
-//! The smart constructors already apply every bit-preserving rule at
-//! construction time (identities, constant folding in the field, canonical
-//! operand order, fused reductions), so a graph never holds `x + 0` or
-//! `1 * x`. What construction cannot see is the shape a graph has *after*
+//! The smart constructors already apply their rules at construction time
+//! (identities, constant folding in the field, canonical operand order,
+//! fused reductions), so a graph never holds `x + 0` or `1 * x`. All of
+//! them keep the value bit for bit except two a graph is defined by: `0 * x`
+//! is `0` for any `x`, and `(a^m)^n` is `a^(m n)`. What construction cannot see is the shape a graph has *after*
 //! transformations: substitution, differentiation and inlining leave dead
 //! nodes behind, and a symbol that became a constant can make identities
 //! visible far above it. [`rebuild`] re-runs the constructors over the

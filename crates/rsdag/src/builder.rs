@@ -5,7 +5,13 @@
 //! plain `f64`, through [`Numeric`], the hot path when nothing symbolic is
 //! wanted -- or *records* it into a [`Graph`], where it can be
 //! differentiated, specialized and compiled. One body, no drift between the
-//! numeric model and its symbolic twin.
+//! numeric model and its symbolic twin beyond two orders: the graph folds
+//! the terms of a sum or a product in a canonical order (so equal
+//! expressions compile alike however they were built) where [`Numeric`]
+//! folds them as given, and [`solve`](Builder::solve) pivots differently on
+//! the two sides; and two identities the graph applies as it builds, `0 * x`
+//! as `0` (whatever `x`, an infinity included) and `(a^m)^n` as `a^(m n)`.
+//! Everything else is the same IEEE operation sequence, bit for bit.
 //!
 //! The trait is the op vocabulary: the required methods are one per node
 //! kind, and the named functions (`sin`, `atan2`, `min`, ...) are provided

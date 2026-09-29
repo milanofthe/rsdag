@@ -2357,9 +2357,21 @@ impl Program {
             dst.push(d);
         }
         let outputs: Vec<u32> = self.roots.iter().map(|&r| slot_of(r, &base)).collect();
-        let bundle_work = self.bundles.iter().map(|b| b.work_len()).max().unwrap_or(0);
+        // What the tail of the work buffer lends: a bundle's scratch, or a
+        // solve's, never both at once.
+        let solves = ops.iter().map(|op| match *op {
+            Op::Solve { n, k, .. } => crate::semantics::solve_scratch_len(n as usize, k as usize),
+            _ => 0,
+        });
+        let lent = self
+            .bundles
+            .iter()
+            .map(|b| b.work_len())
+            .chain(solves)
+            .max()
+            .unwrap_or(0);
         Tape {
-            bundle_work,
+            lent,
             ops,
             dst,
             n_selects,

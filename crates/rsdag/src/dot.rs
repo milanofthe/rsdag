@@ -18,7 +18,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::field::Field;
 use crate::graph::Graph;
 use crate::node::{ExprId, Node, ReduceOp, SymbolId};
-use crate::tape::{input_index, Tape};
+use crate::tape::{input_index, Op, Tape};
 
 /// What a node is, which decides its hue and shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -754,7 +754,7 @@ impl<'t> TapeView<'t> {
         let t = &self.theme;
         let n_ops = tape.n_ops();
         let prolog = tape.prolog_len();
-        let views: Vec<_> = (0..n_ops).map(|i| tape.op_view(i)).collect();
+        let views: Vec<_> = (0..n_ops).map(|i| op_view(tape, i)).collect();
         let mut s = t.header(self.rankdir);
         let input_name = |k: u32| {
             self.inputs
@@ -879,5 +879,55 @@ impl<'t> TapeView<'t> {
         let _ = writeln!(s, "  {{ rank=sink; {}; }}", results.join("; "));
         s.push_str("}\n");
         s
+    }
+}
+
+/// One op of a tape as a diagram draws it: its label and kind, the
+/// operands it reads (slots, or inputs tagged), how many slots it writes
+/// from its destination, and the bundle a call calls.
+struct OpView {
+    label: String,
+    kind: Kind,
+    reads: Vec<u32>,
+    width: u32,
+    bundle: Option<u32>,
+}
+
+/// Op `i` of `tape` as a diagram draws it.
+fn op_view(tape: &Tape, i: usize) -> OpView {
+    let mut reads = Vec::new();
+    tape.for_each_operand(i, |k| reads.push(k));
+    let (label, kind) = match tape.ops()[i] {
+        Op::Const(c) => (number(c), Kind::Const),
+        Op::Add(..) => ("+".into(), Kind::Op),
+        Op::Mul(..) => ("*".into(), Kind::Op),
+        Op::MulAdd(..) => ("*+".into(), Kind::Op),
+        Op::Sub(..) => ("-".into(), Kind::Op),
+        Op::Neg(_) => ("neg".into(), Kind::Op),
+        Op::Powi(_, n) => (format!("^{n}"), Kind::Op),
+        Op::Unary(op, _) => (op.name().into(), Kind::Op),
+        Op::Binary(op, ..) => (op.name().into(), Kind::Op),
+        Op::Cmp(op, ..) => (op.symbol().into(), Kind::Choice),
+        Op::Select(..) => ("select".into(), Kind::Choice),
+        Op::Reduce(op, ..) => (op.name().into(), Kind::Kernel),
+        Op::Dot(_, l) => (format!("dot {l}"), Kind::Kernel),
+        Op::Call { n_groups: 1, .. } => ("call".into(), Kind::Call),
+        Op::Call { n_groups, .. } => (format!("call x{n_groups}"), Kind::Call),
+        Op::CallProlog { n_groups, .. } => (format!("prolog x{n_groups}"), Kind::Call),
+        Op::Gemv { m, n, .. } => (format!("gemv {m}x{n}"), Kind::Kernel),
+        Op::Gemm { m, k, n, .. } => (format!("gemm {m}x{k}x{n}"), Kind::Kernel),
+        Op::Solve { n, k: 1, .. } => (format!("solve {n}"), Kind::Kernel),
+        Op::Solve { n, k, .. } => (format!("solve {n}, {k} rhs"), Kind::Kernel),
+    };
+    let bundle = match tape.ops()[i] {
+        Op::Call { bundle, .. } | Op::CallProlog { bundle, .. } => Some(bundle),
+        _ => None,
+    };
+    OpView {
+        label,
+        kind,
+        reads,
+        width: tape.width(i),
+        bundle,
     }
 }

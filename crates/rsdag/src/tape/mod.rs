@@ -198,17 +198,6 @@ pub enum Src {
     Slots(u32),
 }
 
-/// One op as a diagram draws it: its label and kind, the operands it
-/// reads (slots, or inputs tagged with [`INPUT`]), how many slots it writes
-/// from its destination, and the bundle a call calls.
-pub(crate) struct OpView {
-    pub label: String,
-    pub kind: crate::dot::Kind,
-    pub reads: Vec<u32>,
-    pub width: u32,
-    pub bundle: Option<u32>,
-}
-
 /// A dense operand as a backend sees it.
 #[derive(Clone, Copy, Debug)]
 pub enum Operand<'a> {
@@ -237,9 +226,10 @@ pub struct Tape {
     n_work: usize,
     /// Widest gather any variadic op or kernel needs.
     max_args: usize,
-    /// The widest scratch a called bundle asks for ([`ExternBundle::work_len`]),
-    /// lent to it from the tail of the work buffer.
-    bundle_work: usize,
+    /// The widest scratch a called bundle ([`ExternBundle::work_len`]) or a
+    /// dense solve ([`crate::semantics::solve_scratch_len`]) works in, lent
+    /// from the tail of the work buffer, after the gather.
+    lent: usize,
     bundles: Vec<Arc<dyn ExternBundle>>,
     /// Instruction count of the parameter-pure prolog prefix (0 = no split;
     /// see [`compile_split`](Self::compile_split)).
@@ -342,46 +332,6 @@ impl Tape {
     /// Number of outputs (= number of roots).
     pub fn n_outputs(&self) -> usize {
         self.outputs.len()
-    }
-
-    /// Op `i` as a diagram draws it (see [`crate::dot`]).
-    pub(crate) fn op_view(&self, i: usize) -> OpView {
-        use crate::dot::Kind;
-        let mut reads = Vec::new();
-        self.for_each_operand(i, |k| reads.push(k));
-        let (label, kind) = match self.ops[i] {
-            Op::Const(c) => (crate::dot::number(c), Kind::Const),
-            Op::Add(..) => ("+".into(), Kind::Op),
-            Op::Mul(..) => ("*".into(), Kind::Op),
-            Op::MulAdd(..) => ("*+".into(), Kind::Op),
-            Op::Sub(..) => ("-".into(), Kind::Op),
-            Op::Neg(_) => ("neg".into(), Kind::Op),
-            Op::Powi(_, n) => (format!("^{n}"), Kind::Op),
-            Op::Unary(op, _) => (op.name().into(), Kind::Op),
-            Op::Binary(op, ..) => (op.name().into(), Kind::Op),
-            Op::Cmp(op, ..) => (op.symbol().into(), Kind::Choice),
-            Op::Select(..) => ("select".into(), Kind::Choice),
-            Op::Reduce(op, ..) => (op.name().into(), Kind::Kernel),
-            Op::Dot(_, l) => (format!("dot {l}"), Kind::Kernel),
-            Op::Call { n_groups: 1, .. } => ("call".into(), Kind::Call),
-            Op::Call { n_groups, .. } => (format!("call x{n_groups}"), Kind::Call),
-            Op::CallProlog { n_groups, .. } => (format!("prolog x{n_groups}"), Kind::Call),
-            Op::Gemv { m, n, .. } => (format!("gemv {m}x{n}"), Kind::Kernel),
-            Op::Gemm { m, k, n, .. } => (format!("gemm {m}x{k}x{n}"), Kind::Kernel),
-            Op::Solve { n, k: 1, .. } => (format!("solve {n}"), Kind::Kernel),
-            Op::Solve { n, k, .. } => (format!("solve {n}, {k} rhs"), Kind::Kernel),
-        };
-        let bundle = match self.ops[i] {
-            Op::Call { bundle, .. } | Op::CallProlog { bundle, .. } => Some(bundle),
-            _ => None,
-        };
-        OpView {
-            label,
-            kind,
-            reads,
-            width: self.width(i),
-            bundle,
-        }
     }
 
     /// Human-readable instruction listing (diagnostics): one line per op
@@ -560,9 +510,9 @@ impl Tape {
         self.collect(inputs, work, out);
     }
 
-    /// The work buffer: the slots, then the gather scratch.
+    /// The work buffer: the slots, the gather, then what is lent.
     fn buffer_len(&self) -> usize {
-        self.n_work + self.max_args + self.bundle_work
+        self.n_work + self.max_args + self.lent
     }
 
     fn collect<T: Scalar>(&self, inputs: &[T], work: &[T], out: &mut Vec<T>) {
@@ -640,7 +590,7 @@ impl Tape {
         hi: usize,
         sink: &mut S,
     ) {
-        use crate::semantics::{reduce_slice_t, solve_many_t};
+        use crate::semantics::{reduce_slice_t, solve_many_into};
         // The gather scratch at the tail of `work`, so nothing is allocated
         // per call.
         let (work, scratch) = work.split_at_mut(self.n_work);
@@ -811,6 +761,9 @@ impl Tape {
                 }
                 Op::Solve { a, b, n, k } => {
                     let (n, k) = (n as usize, k as usize);
+                    // The operands gathered at the front of the scratch, the
+                    // solve working behind them.
+                    let (scratch, lent) = scratch.split_at_mut(self.max_args);
                     let (ra, rb) =
                         dense_operands(inputs, work, scratch, &self.arg_pool, a, n * n, b, n * k);
                     let base = work.as_mut_ptr();
@@ -818,7 +771,7 @@ impl Tape {
                     let bv: &[T] = dense_slice(inputs, base, scratch, rb, n * k);
                     let reads = [Some((ra, n * n)), Some((rb, n * k)), None];
                     let out = unsafe { out_block(base, work.len(), d, n * k, &reads) };
-                    solve_many_t(av, bv, n, k, out);
+                    solve_many_into(av, bv, n, k, out, lent);
                     continue;
                 }
             };
