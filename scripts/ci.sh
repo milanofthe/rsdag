@@ -15,6 +15,8 @@ run() { echo "== $*"; "$@"; }
 run $CARGO fmt --all -- --check
 run $CARGO clippy --workspace --exclude rsdag-py --all-targets --features "$FEATURES" -- -D warnings
 run $CARGO test --workspace --exclude rsdag-py --features "$FEATURES"
+# The x86 baseline encodings, which a CPU with SSE4.1 and AVX never runs.
+RSDAG_JIT_SSE2=1 run $CARGO test -p rsdag-jit --features rsdag/synth
 run $CARGO clippy -p rsdag --all-targets -- -D warnings
 RUSTDOCFLAGS='-D warnings' run $CARGO doc --no-deps --workspace --exclude rsdag-py --features "$FEATURES rsdag/exact rsdag/egraph rsdag/complex"
 for f in "" exact complex serde egraph exact,serde; do
