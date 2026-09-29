@@ -177,7 +177,7 @@ fn a_block_with_an_implicit_update_records_and_computes_the_same() {
     let (u, k) = (s.param("u"), s.param("k"));
     let out = implicit(&mut *s, u, k);
     let f = s.close(out.clone());
-    let params = g.func(f).params.clone();
+    let params = g.func(f).params().to_vec();
     let tape = Tape::compile(&g, &out, &params);
     let (mut w, mut o) = (Vec::new(), Vec::new());
     tape.eval(&[3.0f64, 0.5], &mut w, &mut o);

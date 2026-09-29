@@ -129,11 +129,11 @@ fn calls_and_nested_functions_round_trip() {
     let out = s.call(gain, 0, &[mid, b]);
     let e = s.exp(out);
     let chain = s.close(vec![e]);
-    let root = match g.func(chain).outputs[0] {
+    let root = match g.func(chain).outputs()[0] {
         rsdag::Output::Expr(e) => e,
         _ => unreachable!(),
     };
-    let params = g.func(chain).params.clone();
+    let params = g.func(chain).params().to_vec();
 
     let module = g.to_module();
     let (loaded, map) = Graph::from_module(&module).unwrap();
@@ -214,6 +214,76 @@ fn an_extern_function_round_trips_with_its_body_resolved_by_name() {
     Tape::compile(&loaded, &[root2], &syms2).eval(&[2.0f64, 5.0], &mut w, &mut o);
     assert_eq!(o[0], 7.0 + 10.0 + 0.0);
     assert_eq!(loaded.to_module(), module);
+}
+
+/// Differentiating through a call appends a derivative output to the callee
+/// after the call was made; the module keeps that order, reloads, and the
+/// reloaded function knows its derivative instead of deriving it again.
+#[test]
+fn derivatives_demanded_after_a_call_round_trip() {
+    let mut g: Graph<F64> = Graph::new();
+    let x = g.sym("x");
+    let y = g.sym("y");
+    let body = {
+        let s = g.sin(x);
+        g.mul(s, y)
+    };
+    let f = g.close("f", vec![body]);
+    let (a, b) = (g.sym("a"), g.sym("b"));
+    let c = g.call(f, 0, &[a, b]);
+    let syms = [SymbolId(2), SymbolId(3)];
+    let da = differentiate(&mut g, c, syms[0]);
+    let db = differentiate(&mut g, c, syms[1]);
+    let n_out = g.func(f).outputs().len();
+    assert_eq!(n_out, 3, "f and its two partials");
+
+    let module = g.to_module();
+    let (mut loaded, map) = Graph::from_module(&module).unwrap();
+    assert_eq!(loaded.to_module(), module);
+    let f2 = map.funcs[f.0 as usize];
+    let d0 = g.derivative_output(f, 0, 0);
+    assert_eq!(loaded.derivative_output(f2, 0, 0), d0);
+    assert_eq!(
+        loaded.func(f2).outputs().len(),
+        n_out,
+        "no output derived twice"
+    );
+
+    let roots2: Vec<ExprId> = [da, db].iter().map(|e| map.exprs[e.0 as usize]).collect();
+    let (mut w, mut o) = (Vec::new(), Vec::new());
+    Tape::compile(&g, &[da, db], &syms).eval(&[0.3f64, 1.7], &mut w, &mut o);
+    let (mut w2, mut o2) = (Vec::new(), Vec::new());
+    Tape::compile(&loaded, &roots2, &syms).eval(&[0.3f64, 1.7], &mut w2, &mut o2);
+    assert_eq!(o, o2);
+}
+
+/// The derivative an extern function declares is found again after a
+/// reload: the Jacobian through its calls is the declared slot, not zero.
+#[test]
+fn a_declared_extern_derivative_survives_a_reload() {
+    use std::sync::Arc;
+    let mut g: Graph<F64> = Graph::new();
+    let x = g.sym("x");
+    let y = g.sym("y");
+    let f = g.define_extern_func("pair", 2, Arc::new(Pair), vec![rsdag::Output::Slot(0)]);
+    // Declared as the slot `a * b` (a stand-in: the test reads the index).
+    let k = g.declare_derivative(f, 0, 0, rsdag::Output::Slot(1));
+    let sum = g.call(f, 0, &[x, y]);
+
+    let module = g.to_module();
+    let mut loaded: Graph<F64> = Graph::new();
+    let map = loaded
+        .load_module_with(&module, |_| {
+            Some(Arc::new(Pair) as Arc<dyn rsdag::ExternBundle>)
+        })
+        .unwrap();
+    let f2 = map.funcs[f.0 as usize];
+    assert_eq!(loaded.derivative_output(f2, 0, 0), k);
+    let syms = [SymbolId(0), SymbolId(1)];
+    let d = differentiate(&mut loaded, map.exprs[sum.0 as usize], syms[0]);
+    let (mut w, mut o) = (Vec::new(), Vec::new());
+    Tape::compile(&loaded, &[d], &syms).eval(&[2.0f64, 5.0], &mut w, &mut o);
+    assert_eq!(o[0], 10.0);
 }
 
 #[test]

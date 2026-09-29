@@ -82,7 +82,7 @@ fn write_expr<K: Field>(ctx: &Graph<K>, id: ExprId, out: &mut String) {
         }
         Node::Call(o, l) => {
             let (f, k) = ctx.output(*o);
-            out.push_str(&format!("{}#{k}", ctx.func(f).name));
+            out.push_str(&format!("{}#{k}", ctx.func(f).name()));
             out.push('(');
             for (i, &a) in ctx.args(*l).iter().enumerate() {
                 if i > 0 {

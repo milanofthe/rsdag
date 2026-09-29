@@ -33,8 +33,8 @@ pub mod symbolic;
 #[cfg(any(test, feature = "synth"))]
 pub mod synth;
 pub mod tape;
-// Expression substitution is exposed only through the curated `substitute*`
-// re-exports below, not as a module path.
+// The rewrite machinery stays internal; substitution is exposed through the
+// `substitute` re-export below, not as a module path.
 pub(crate) mod transform;
 
 pub use adaptive::{Adaptive, Compiler, Episode, Policy, Stats};
@@ -48,7 +48,7 @@ pub use extern_fn::ExternBundle;
 #[cfg(feature = "exact")]
 pub use field::ratio_powi;
 pub use field::{Field, F64};
-pub use func::{Body, FuncId, Function, FunctionBody, Output, OutputId};
+pub use func::{Body, FuncId, Function, Output, OutputId};
 pub use graph::Graph;
 pub use mathfn::lower_call;
 pub use module::{IdMap, Module, ModuleError, MODULE_VERSION};

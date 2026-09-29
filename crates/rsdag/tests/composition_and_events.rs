@@ -67,13 +67,13 @@ fn separate_blocks_compose_into_one_graph() {
 
     let (lag_dx, lag_u) = {
         let f = sys.func(lag_map.funcs[0]);
-        let dx = match f.outputs[0] {
+        let dx = match f.outputs()[0] {
             rsdag::Output::Expr(e) => e,
             _ => panic!("the lag's state derivative is an expression"),
         };
-        (dx, f.params[1])
+        (dx, f.params()[1])
     };
-    let sat_y = match sys.func(sat_map.funcs[0]).outputs[0] {
+    let sat_y = match sys.func(sat_map.funcs[0]).outputs()[0] {
         rsdag::Output::Expr(e) => e,
         _ => panic!("the saturation's output is an expression"),
     };
@@ -141,7 +141,7 @@ fn an_event_is_a_guard_output_and_a_state_write() {
         (OutputRole::StateDeriv { id: 0 }, dh),
         (OutputRole::StateDeriv { id: 1 }, gravity),
     ]);
-    let params = g.func(f).params.clone();
+    let params = g.func(f).params().to_vec();
 
     // The roles select the event's parts without any lookup by name.
     let guards = g
@@ -172,7 +172,7 @@ fn an_event_is_a_guard_output_and_a_state_write() {
 
     // Everything evaluates in one tape: guard, its rate, the derivatives and
     // the effect.
-    let v_new_expr = match g.func(eff).outputs[0] {
+    let v_new_expr = match g.func(eff).outputs()[0] {
         rsdag::Output::Expr(x) => x,
         _ => unreachable!(),
     };
@@ -192,11 +192,11 @@ fn an_event_is_a_guard_output_and_a_state_write() {
 fn a_region_flip_is_reported_by_the_specialization() {
     let (g, _) = saturation("sat");
     let f = rsdag::FuncId(0);
-    let y = match g.func(f).outputs[0] {
+    let y = match g.func(f).outputs()[0] {
         rsdag::Output::Expr(e) => e,
         _ => unreachable!(),
     };
-    let params = g.func(f).params.clone();
+    let params = g.func(f).params().to_vec();
     let tape = Tape::compile(&g, &[y], &params);
 
     // Trace inside the linear region and specialize there.

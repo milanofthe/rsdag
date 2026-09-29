@@ -185,7 +185,7 @@ impl<T: Scalar> FuncEval<T> {
         args: &[T],
     ) -> T {
         let func = ctx.func(f);
-        if matches!(func.outputs[out as usize], Output::Zero) {
+        if matches!(func.outputs()[out as usize], Output::Zero) {
             return T::zero();
         }
         let needed = self.needed.get(&f).cloned().unwrap_or_else(|| vec![out]);
