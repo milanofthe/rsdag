@@ -275,7 +275,7 @@ with `gt`, `lt`, ... expresses elementwise conditions.
 
 ```
 cargo test --workspace
-scripts/ci.sh                                            # the CI gate, locally
+scripts/ci.sh                                            # the full gate, locally
 scripts/diagrams.sh                                      # the README diagrams (needs Graphviz)
 scripts/bench.sh                                         # the README benchmarks, measured afresh (needs matplotlib)
 maturin build --release -m crates/rsdag-py/Cargo.toml   # the Python wheel
