@@ -195,8 +195,10 @@ Against CasADi and JAX on circuits: the twelve AnalogGym amplifiers
 (BSIM4), a nine-stage PSP103 ring oscillator and the uA741, as SANE exports
 them (rsdag modules; `rsdag-jit/examples/modules.rs`,
 `docs/bench/modules.py`). The residual and its Jacobian per call on one
-core, with the parameters as inputs (rsdag keeps them in the prolog) and as
-constants (every instance's parameter branches decided at build time).
+core: the DC residual (the derivatives and time the constant zero, rsdag's
+calls specialized to them), with the parameters as inputs (rsdag keeps them
+in the prolog) and as constants (every instance's parameter branches decided
+at build time).
 CasADi builds SX functions and runs through its buffer interface, JAX maps
 each device body over its instances with `vmap` and builds the Jacobian
 dense; it does not compile the Jacobian of the PSP103 and BSIM4 circuits
