@@ -50,8 +50,12 @@ type ChunkFn = extern "C" fn(*mut f64, *const f64, *const Bundles);
 /// caller-owned work buffer, inputs padded with NaN, and the prolog/main
 /// split of a specialized tape.
 pub struct NativeTape {
-    chunks: Vec<Code>,
+    /// Every chunk's code in one mapping, and each chunk's entry in it.
+    code: Mapping,
+    chunks: Vec<ChunkFn>,
     prolog_chunks: usize,
+    /// The call descriptors the code holds the addresses of.
+    _descs: Vec<Vec<host::CallDesc>>,
     bundles: Bundles,
     /// The fold code tables of the accumulating kernels; the code holds
     /// their addresses.
@@ -220,18 +224,17 @@ struct Layout {
     total: usize,
 }
 
-/// One executable chunk.
-struct Code {
-    /// Kept alive for the code it holds; `func` points into it.
-    _map: Mapping,
-    func: ChunkFn,
-    /// The call descriptors the code holds the addresses of.
-    _descs: Vec<host::CallDesc>,
+/// One chunk as emitted: its machine code and the call descriptors the
+/// code holds the addresses of.
+struct Emitted {
+    bytes: Vec<u8>,
+    descs: Vec<host::CallDesc>,
 }
+
 // The mapping is immutable after `Mapping::new`, so calling the code from
-// any thread is sound and the chunks can be built on a rayon pool.
-unsafe impl Send for Code {}
-unsafe impl Sync for Code {}
+// any thread is sound.
+unsafe impl Send for Mapping {}
+unsafe impl Sync for Mapping {}
 
 impl NativeTape {
     pub fn compile(tape: &Tape) -> Result<NativeTape, JitError> {
@@ -364,13 +367,35 @@ impl NativeTape {
                 Some(s)
             })
             .collect();
-        let chunks: Result<Vec<Code>, JitError> = jobs
+        let emitted: Vec<Emitted> = jobs
             .par_iter()
             .zip(&starts)
             .map(|(ops, &start)| emit_chunk(ops, start, layout, &liveness))
             .collect();
+        // One mapping for all of them: a chunk is position independent (it
+        // reaches host routines, descriptors and tables by absolute
+        // address), so it runs from wherever it lands, 16-byte aligned.
+        let size = emitted.iter().map(|e| e.bytes.len() + 15).sum();
+        let mut bytes: Vec<u8> = Vec::with_capacity(size);
+        let mut offsets = Vec::with_capacity(emitted.len());
+        let mut descs = Vec::with_capacity(emitted.len());
+        for e in emitted {
+            bytes.resize(bytes.len().next_multiple_of(16), 0);
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(&e.bytes);
+            descs.push(e.descs);
+        }
+        let code = Mapping::new(&bytes)?;
+        let chunks = offsets
+            .iter()
+            // SAFETY: each offset is the entry of a function emitted for the
+            // `ChunkFn` convention, inside the mapping, which the tape keeps.
+            .map(|&o| unsafe { std::mem::transmute::<*mut u8, ChunkFn>(code.ptr.add(o)) })
+            .collect();
         Ok(NativeTape {
-            chunks: chunks?,
+            code,
+            chunks,
+            _descs: descs,
             prolog_chunks,
             bundles,
             _tables: tables,
@@ -389,7 +414,7 @@ impl NativeTape {
 
     /// Bytes of machine code (diagnostics).
     pub fn code_len(&self) -> usize {
-        self.chunks.iter().map(|c| c._map.len).sum()
+        self.code.len
     }
 
     fn padded<'a>(&self, inputs: &'a [f64], buf: &'a mut Vec<f64>) -> &'a [f64] {
@@ -416,7 +441,7 @@ impl NativeTape {
             &self.bundles as *const Bundles,
         );
         for c in &self.chunks[range] {
-            (c.func)(wp, ip, bp);
+            c(wp, ip, bp);
             host::resume_panic();
         }
     }
@@ -1164,12 +1189,7 @@ fn hot_routines(ops: &[ROp]) -> Vec<*const ()> {
     count.into_iter().map(|(a, _)| a).collect()
 }
 
-fn emit_chunk(
-    ops: &[ROp],
-    start: usize,
-    layout: Layout,
-    live: &Liveness,
-) -> Result<Code, JitError> {
+fn emit_chunk(ops: &[ROp], start: usize, layout: Layout, live: &Liveness) -> Emitted {
     let hot = hot_routines(ops);
     // For each op, the next op at or after it that calls out.
     let mut next_call = vec![u32::MAX; ops.len() + 1];
@@ -1195,13 +1215,10 @@ fn emit_chunk(
     e.flush();
     e.isa.epilogue();
     let descs = std::mem::take(&mut e.descs);
-    let map = Mapping::new(&e.isa.finish())?;
-    let func: ChunkFn = unsafe { std::mem::transmute(map.ptr) };
-    Ok(Code {
-        _map: map,
-        func,
-        _descs: descs,
-    })
+    Emitted {
+        bytes: e.isa.finish(),
+        descs,
+    }
 }
 
 // --- executable memory -----------------------------------------------------------
