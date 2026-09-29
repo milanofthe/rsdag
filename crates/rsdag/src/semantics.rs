@@ -181,6 +181,41 @@ pub const EXP_LIMIT: f64 = 80.0;
 /// conditioning. In-range arguments are untouched. See [`unary_f64`].
 pub const LN_FLOOR: f64 = 1e-30;
 
+/// `x^n` for an integer `n`, the reference every evaluator takes: square
+/// and multiply over `|n|` from the low bit, then one division for a
+/// negative exponent. `n = 2` is exactly `x * x` and `n = -1` exactly
+/// `1 / x`, the forms native code emits inline. Not the platform's `powi`,
+/// whose rounding is unspecified and differs between targets (a runtime
+/// `x.powi(-1)` is not `1 / x` on every one).
+pub fn powi_t<T: Scalar>(x: T, n: i32) -> T {
+    let mut e = n.unsigned_abs();
+    let mut base = x;
+    let mut acc: Option<T> = None;
+    while e > 0 {
+        if e & 1 == 1 {
+            acc = Some(match acc {
+                None => base,
+                Some(a) => a.mul(base),
+            });
+        }
+        e >>= 1;
+        if e > 0 {
+            base = base.mul(base);
+        }
+    }
+    let r = acc.unwrap_or_else(T::one);
+    if n < 0 {
+        T::one().div(r)
+    } else {
+        r
+    }
+}
+
+/// [`powi_t`] on `f64`.
+pub fn powi_f64(x: f64, n: i32) -> f64 {
+    powi_t(x, n)
+}
+
 /// Evaluate a unary op on a real argument. Single source of truth shared by the
 /// arena evaluator ([`crate::eval`](mod@crate::eval)) and the compiled tape ([`crate::tape`]).
 ///
