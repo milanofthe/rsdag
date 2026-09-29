@@ -174,6 +174,30 @@ impl ROp {
             }
         });
     }
+    /// The slots the op writes: its destination, a kernel's block from it.
+    pub(crate) fn writes(&self) -> std::ops::Range<u32> {
+        let (dst, n) = match *self {
+            ROp::Const(d, _)
+            | ROp::Add(d, ..)
+            | ROp::Mul(d, ..)
+            | ROp::MulAdd(d, ..)
+            | ROp::Sub(d, ..)
+            | ROp::Neg(d, _)
+            | ROp::Powi(d, ..)
+            | ROp::Unary(d, ..)
+            | ROp::Binary(d, ..)
+            | ROp::Cmp(d, ..)
+            | ROp::Select(d, ..)
+            | ROp::Reduce(d, ..)
+            | ROp::Dot(d, ..) => (d, 1),
+            ROp::Call(ref c) => (c.dst, c.n_groups * c.n_out),
+            ROp::Gemv { dst, m, .. } => (dst, m),
+            ROp::Gemm { dst, m, n, .. } => (dst, m * n),
+            ROp::Solve { dst, n, .. } => (dst, n),
+            ROp::SolveMany { dst, n, k, .. } => (dst, n * k),
+        };
+        dst..dst + n
+    }
     /// The host routine the op calls, if any.
     pub(crate) fn host(&self) -> Option<*const ()> {
         Some(match self {
@@ -324,4 +348,83 @@ pub(crate) fn record(tape: &Tape) -> Vec<ROp> {
             }
         })
         .collect()
+}
+
+/// When each value dies: per slot, the ops that read it and the ops that
+/// write it, in stream order, the outputs read after the program. Slots
+/// are reused, so a slot holds many values in turn; the one it holds at an
+/// op dies at its last read before the slot's next write (an op reads its
+/// operands before it writes). The register cache asks this when it takes
+/// a value, so a value is written back only if a later op reads it and
+/// counts as dead as soon as nothing will.
+pub(crate) struct Liveness {
+    reads: Vec<u32>,
+    read_start: Vec<u32>,
+    writes: Vec<u32>,
+    write_start: Vec<u32>,
+}
+
+impl Liveness {
+    /// Over `ops` with `n_work` slots, the slots `outputs` read at the end.
+    pub(crate) fn new(ops: &[ROp], n_work: usize, outputs: impl Iterator<Item = u32>) -> Liveness {
+        let outputs: Vec<u32> = outputs.filter(|&s| input_index(s).is_none()).collect();
+        // Two passes each, counting then filling, in stream order so the
+        // positions of a slot come out sorted.
+        let csr = |each: &dyn Fn(&mut dyn FnMut(u32, u32))| -> (Vec<u32>, Vec<u32>) {
+            let mut start = vec![0u32; n_work + 1];
+            each(&mut |s, _| start[s as usize + 1] += 1);
+            for s in 0..n_work {
+                start[s + 1] += start[s];
+            }
+            let mut fill = start.clone();
+            let mut at = vec![0u32; start[n_work] as usize];
+            each(&mut |s, pos| {
+                at[fill[s as usize] as usize] = pos;
+                fill[s as usize] += 1;
+            });
+            (at, start)
+        };
+        let (reads, read_start) = csr(&|f| {
+            for (i, op) in ops.iter().enumerate() {
+                op.for_each_read(|s| f(s, i as u32));
+            }
+            for &s in &outputs {
+                f(s, u32::MAX);
+            }
+        });
+        let (writes, write_start) = csr(&|f| {
+            for (i, op) in ops.iter().enumerate() {
+                op.writes().for_each(|s| f(s, i as u32));
+            }
+        });
+        Liveness {
+            reads,
+            read_start,
+            writes,
+            write_start,
+        }
+    }
+
+    /// The last op reading the value slot `s` holds when op `pos` writes it
+    /// (`def`) or reads it; `pos` when nothing reads it after, `u32::MAX`
+    /// when the program's outputs do.
+    pub(crate) fn death(&self, s: u32, pos: u32, def: bool) -> u32 {
+        let s = s as usize;
+        let reads = &self.reads[self.read_start[s] as usize..self.read_start[s + 1] as usize];
+        let writes = &self.writes[self.write_start[s] as usize..self.write_start[s + 1] as usize];
+        // The value lives from `lo` to the next write, whose op still reads
+        // it.
+        let lo = if def { pos + 1 } else { pos };
+        let end = writes
+            .get(writes.partition_point(|&w| w < lo))
+            .copied()
+            .unwrap_or(u32::MAX);
+        let from = reads.partition_point(|&r| r < lo);
+        let to = reads.partition_point(|&r| r <= end);
+        if to > from {
+            reads[to - 1]
+        } else {
+            pos
+        }
+    }
 }

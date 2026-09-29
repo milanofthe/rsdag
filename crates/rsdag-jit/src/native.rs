@@ -35,7 +35,7 @@ use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 use crate::host::{self, Bundles};
-use crate::ir::{Dense, ROp};
+use crate::ir::{Dense, Liveness, ROp};
 use crate::isa::{Arg, Arith, Base, IArg, Isa, Round};
 use crate::{Batch, JitError, Options};
 
@@ -337,16 +337,8 @@ impl NativeTape {
         }
         let gather_len = ops.iter().map(ROp::gather_len).max().unwrap_or(0);
         let n_work = tape.n_slots();
-        // The last op reading each slot; outputs are read after the program.
-        let mut last_use = vec![0u32; n_work.max(1)];
-        for (i, op) in ops.iter().enumerate() {
-            op.for_each_read(|s| last_use[s as usize] = i as u32);
-        }
-        for &o in tape.outputs().iter().chain(live) {
-            if input_index(o).is_none() {
-                last_use[o as usize] = u32::MAX;
-            }
-        }
+        // When each value dies; the outputs are read after the program.
+        let liveness = Liveness::new(&ops, n_work, tape.outputs().iter().chain(live).copied());
         let scratch_len = bundles.iter().map(|b| b.work_len()).max().unwrap_or(0);
         let layout = Layout {
             gather: n_work,
@@ -375,7 +367,7 @@ impl NativeTape {
         let chunks: Result<Vec<Code>, JitError> = jobs
             .par_iter()
             .zip(&starts)
-            .map(|(ops, &start)| emit_chunk(ops, start, layout, &last_use))
+            .map(|(ops, &start)| emit_chunk(ops, start, layout, &liveness))
             .collect();
         Ok(NativeTape {
             chunks: chunks?,
@@ -393,6 +385,11 @@ impl NativeTape {
     /// Number of emitted functions (diagnostics).
     pub fn n_chunks(&self) -> usize {
         self.chunks.len()
+    }
+
+    /// Bytes of machine code (diagnostics).
+    pub fn code_len(&self) -> usize {
+        self.chunks.iter().map(|c| c._map.len).sum()
     }
 
     fn padded<'a>(&self, inputs: &'a [f64], buf: &'a mut Vec<f64>) -> &'a [f64] {
@@ -528,8 +525,8 @@ impl NativeTape {
 struct Emitter<'a, I: Isa> {
     isa: I,
     layout: Layout,
-    /// Global index of the last op reading each slot.
-    last_use: &'a [u32],
+    /// When each value dies.
+    live: &'a Liveness,
     /// Global index of the op being emitted.
     pos: u32,
     /// Global index of the next op that calls a host routine (`u32::MAX`
@@ -539,6 +536,8 @@ struct Emitter<'a, I: Isa> {
     held: Vec<Option<u32>>,
     /// Whether the register's value is newer than the slot in memory.
     dirty: Vec<bool>,
+    /// The last op reading the register's value (see [`Liveness::death`]).
+    death: Vec<u32>,
     /// Cache index holding each slot.
     at: FxHashMap<u32, usize>,
     /// Cache index of each register number.
@@ -553,7 +552,7 @@ struct Emitter<'a, I: Isa> {
 }
 
 impl<'a, I: Isa> Emitter<'a, I> {
-    fn new(layout: Layout, last_use: &'a [u32], hot: &[*const ()]) -> Emitter<'a, I> {
+    fn new(layout: Layout, live: &'a Liveness, hot: &[*const ()]) -> Emitter<'a, I> {
         let mut index = [0u8; 32];
         for (i, &r) in I::CACHE.iter().enumerate() {
             index[r as usize] = i as u8;
@@ -561,11 +560,12 @@ impl<'a, I: Isa> Emitter<'a, I> {
         Emitter {
             isa: I::new(hot),
             layout,
-            last_use,
+            live,
             pos: 0,
             next_call: u32::MAX,
             held: vec![None; I::CACHE.len()],
             dirty: vec![false; I::CACHE.len()],
+            death: vec![0; I::CACHE.len()],
             at: Default::default(),
             index,
             next: [0, 0],
@@ -581,7 +581,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
     /// to make room for another.
     fn drop_index(&mut self, i: usize) {
         if let Some(s) = self.held[i].take() {
-            if self.dirty[i] && self.last_use[s as usize] >= self.pos {
+            if self.dirty[i] && self.death[i] >= self.pos {
                 self.isa.store(I::CACHE[i], Base::Work, s as usize * 8);
             }
             self.dirty[i] = false;
@@ -599,11 +599,15 @@ impl<'a, I: Isa> Emitter<'a, I> {
     fn fresh(&mut self) -> u8 {
         self.fresh_in(I::SAVED..I::CACHE.len())
     }
-    /// A register for the value of `slot`: preferably callee-saved when a
-    /// host call comes before the value's last use, so the call does not
-    /// cost it a store and a reload; preferably caller-saved otherwise.
+    /// A register for the value op `pos` writes to `slot`.
     fn fresh_for(&mut self, slot: u32) -> u8 {
-        let keep = I::SAVED > 0 && self.next_call <= self.last_use[slot as usize];
+        self.fresh_until(self.live.death(slot, self.pos, true))
+    }
+    /// A register for a value that dies at `death`: preferably callee-saved
+    /// when a host call comes before, so the call does not cost it a store
+    /// and a reload; preferably caller-saved otherwise.
+    fn fresh_until(&mut self, death: u32) -> u8 {
+        let keep = I::SAVED > 0 && self.next_call <= death;
         if keep {
             self.fresh_in(0..I::SAVED)
         } else {
@@ -627,7 +631,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 None => true,
                 Some(s) => match input_index(s) {
                     Some(_) => true, // an input reloads from the inputs
-                    None => self.last_use[s as usize] < self.pos,
+                    None => self.death[i] < self.pos,
                 },
             };
             if !self.pinned[i] && dead {
@@ -668,13 +672,14 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 // An input: read in place, cached, never written back.
                 let r = self.fresh();
                 self.isa.load(r, Base::Inputs, k as usize * 8);
-                self.bind(r, slot);
+                self.bind(r, slot, 0);
                 r
             }
             None => {
-                let r = self.fresh_for(slot);
+                let death = self.live.death(slot, self.pos, false);
+                let r = self.fresh_until(death);
                 self.isa.load(r, Base::Work, slot as usize * 8);
-                self.bind(r, slot);
+                self.bind(r, slot, death);
                 r
             }
         }
@@ -689,7 +694,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
             }
         }
     }
-    fn bind(&mut self, r: u8, slot: u32) {
+    fn bind(&mut self, r: u8, slot: u32, death: u32) {
         // A slot rebound to a new value: the old one is dead by the tape's
         // construction, so it is dropped without a write-back.
         if let Some(i) = self.at.remove(&slot) {
@@ -699,11 +704,13 @@ impl<'a, I: Isa> Emitter<'a, I> {
         let i = self.index[r as usize] as usize;
         self.drop_index(i);
         self.held[i] = Some(slot);
+        self.death[i] = death;
         self.at.insert(slot, i);
     }
     /// `r` is the value of `slot` now; memory will get it when it must.
     fn put(&mut self, slot: u32, r: u8) {
-        self.bind(r, slot);
+        let death = self.live.death(slot, self.pos, true);
+        self.bind(r, slot, death);
         self.dirty[self.index[r as usize] as usize] = true;
     }
     fn fconst(&mut self, v: f64) -> u8 {
@@ -1161,7 +1168,7 @@ fn emit_chunk(
     ops: &[ROp],
     start: usize,
     layout: Layout,
-    last_use: &[u32],
+    live: &Liveness,
 ) -> Result<Code, JitError> {
     let hot = hot_routines(ops);
     // For each op, the next op at or after it that calls out.
@@ -1173,7 +1180,7 @@ fn emit_chunk(
             next_call[k + 1]
         };
     }
-    let mut e: Emitter<Arch> = Emitter::new(layout, last_use, &hot);
+    let mut e: Emitter<Arch> = Emitter::new(layout, live, &hot);
     let n_calls = ops.iter().filter(|op| matches!(op, ROp::Call(_))).count();
     e.descs = Vec::with_capacity(n_calls);
     e.descs_cap = n_calls;
@@ -1183,6 +1190,8 @@ fn emit_chunk(
         e.next_call = next_call[k];
         e.op(op);
     }
+    // Past the chunk: what a later chunk reads is written back.
+    e.pos = (start + ops.len()) as u32;
     e.flush();
     e.isa.epilogue();
     let descs = std::mem::take(&mut e.descs);
