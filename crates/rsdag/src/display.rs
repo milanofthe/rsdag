@@ -1,6 +1,6 @@
 use crate::field::Field;
 use crate::graph::Graph;
-use crate::node::{BinOp, CmpOp, ExprId, Node, ReduceOp, UnaryOp};
+use crate::node::{BinOp, ExprId, Node, UnaryOp};
 
 /// Render an expression to an infix string (raw, unsimplified).
 ///
@@ -60,14 +60,7 @@ fn write_expr<K: Field>(ctx: &Graph<K>, id: ExprId, out: &mut String) {
         Node::Cmp(op, a, b) => {
             out.push('(');
             write_expr(ctx, *a, out);
-            out.push_str(match op {
-                CmpOp::Gt => " > ",
-                CmpOp::Ge => " >= ",
-                CmpOp::Lt => " < ",
-                CmpOp::Le => " <= ",
-                CmpOp::Eq => " == ",
-                CmpOp::Ne => " != ",
-            });
+            out.push_str(&format!(" {} ", op.symbol()));
             write_expr(ctx, *b, out);
             out.push(')');
         }
@@ -94,12 +87,7 @@ fn write_expr<K: Field>(ctx: &Graph<K>, id: ExprId, out: &mut String) {
         }
         Node::Reduce(op, l) => {
             let args = ctx.args(*l);
-            out.push_str(match op {
-                ReduceOp::Sum => "sum",
-                ReduceOp::Product => "prod",
-                ReduceOp::Min => "min",
-                ReduceOp::Max => "max",
-            });
+            out.push_str(op.name());
             out.push('(');
             for (i, &a) in args.iter().enumerate() {
                 if i > 0 {

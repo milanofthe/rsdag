@@ -52,6 +52,20 @@ pub enum CmpOp {
     Ne,
 }
 
+impl CmpOp {
+    /// The operator as written, `>`, `>=`, ...
+    pub fn symbol(self) -> &'static str {
+        match self {
+            CmpOp::Gt => ">",
+            CmpOp::Ge => ">=",
+            CmpOp::Lt => "<",
+            CmpOp::Le => "<=",
+            CmpOp::Eq => "==",
+            CmpOp::Ne => "!=",
+        }
+    }
+}
+
 /// Associative reduction over a variadic operand list. Folds a flat list of
 /// terms in one node, shrinking the tape (KCL current sums become one `Reduce`
 /// instead of an Add-tree) and exposing a vectorizable loop.
@@ -65,6 +79,16 @@ pub enum ReduceOp {
 }
 
 impl ReduceOp {
+    /// Name in printed expressions.
+    pub fn name(self) -> &'static str {
+        match self {
+            ReduceOp::Sum => "sum",
+            ReduceOp::Product => "prod",
+            ReduceOp::Min => "min",
+            ReduceOp::Max => "max",
+        }
+    }
+
     /// The identity element (value of an empty reduction).
     pub fn identity(self) -> f64 {
         match self {

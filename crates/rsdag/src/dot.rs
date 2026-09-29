@@ -17,7 +17,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::field::Field;
 use crate::graph::Graph;
-use crate::node::{CmpOp, ExprId, Node, ReduceOp, SymbolId};
+use crate::node::{ExprId, Node, ReduceOp, SymbolId};
 use crate::tape::{input_index, Tape};
 
 /// What a node is, which decides its hue and shape.
@@ -576,14 +576,7 @@ impl<'g, K: Field> GraphView<'g, K> {
             Node::Unary(op, _) => (op.name().into(), Kind::Op),
             Node::Binary(op, ..) => (op.name().into(), Kind::Op),
             Node::Cmp(op, ..) => {
-                let c = match op {
-                    CmpOp::Gt => ">",
-                    CmpOp::Ge => ">=",
-                    CmpOp::Lt => "<",
-                    CmpOp::Le => "<=",
-                    CmpOp::Eq => "==",
-                    CmpOp::Ne => "!=",
-                };
+                let c = op.symbol();
                 let label = if math {
                     format!("(\u{00b7}) {c} (\u{00b7})")
                 } else {
@@ -599,10 +592,7 @@ impl<'g, K: Field> GraphView<'g, K> {
                 match (op, math) {
                     (ReduceOp::Sum, true) => "\u{03a3}",
                     (ReduceOp::Product, true) => "\u{03a0}",
-                    (ReduceOp::Sum, false) => "sum",
-                    (ReduceOp::Product, false) => "prod",
-                    (ReduceOp::Min, _) => "min",
-                    (ReduceOp::Max, _) => "max",
+                    (op, _) => op.name(),
                 }
                 .into(),
                 Kind::Kernel,
@@ -869,7 +859,7 @@ impl<'t> TapeView<'t> {
                 };
                 let _ = writeln!(s, "  {from} -> o{i}{attrs};");
             }
-            let dst = tape.op_dst(i);
+            let dst = tape.dst(i);
             for slot in dst..dst + v.width {
                 writer.insert(slot, i);
             }

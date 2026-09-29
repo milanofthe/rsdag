@@ -35,7 +35,7 @@ use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 use crate::host::{self, Bundles};
-use crate::ir::{Dense, ROp, Recorder};
+use crate::ir::{Dense, ROp};
 use crate::isa::{Arg, Arith, Base, IArg, Isa, Round};
 use crate::{Batch, JitError, Options};
 
@@ -257,11 +257,10 @@ impl NativeTape {
         if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
             return Err(JitError::Unsupported);
         }
-        let mut rec = Recorder::default();
-        tape.lower(&mut rec);
+        let mut ops = crate::ir::record(tape);
         // Function bodies that are tapes become native bodies of their own.
-        let bundles: Result<Bundles, JitError> = rec
-            .bundles
+        let bundles: Result<Bundles, JitError> = tape
+            .bundles()
             .iter()
             .map(|b| match b.body() {
                 Some(body) => Ok(Arc::new(NativeBody {
@@ -273,11 +272,11 @@ impl NativeTape {
                 None => Ok(b.clone()),
             })
             .collect();
-        rec.bundles = bundles?;
+        let bundles = bundles?;
         // The fold code tables, boxed so their addresses hold for the
         // tape's life; the ops carry the addresses.
         let mut tables: Vec<Box<[u32]>> = Vec::new();
-        for op in rec.ops.iter_mut() {
+        for op in ops.iter_mut() {
             if let ROp::Gemv {
                 acc: Some((_, codes, table)),
                 ..
@@ -294,7 +293,7 @@ impl NativeTape {
         }
         // Inputs the code reads: tagged operands, dense runs, outputs.
         let mut n_inputs = 0usize;
-        for op in &rec.ops {
+        for op in &ops {
             let mut top = 0usize;
             op.for_each_operand(|k| {
                 if let Some(i) = input_index(k) {
@@ -336,11 +335,11 @@ impl NativeTape {
                 n_inputs = n_inputs.max(i as usize + 1);
             }
         }
-        let gather_len = rec.ops.iter().map(ROp::gather_len).max().unwrap_or(0);
+        let gather_len = ops.iter().map(ROp::gather_len).max().unwrap_or(0);
         let n_work = tape.n_slots();
         // The last op reading each slot; outputs are read after the program.
         let mut last_use = vec![0u32; n_work.max(1)];
-        for (i, op) in rec.ops.iter().enumerate() {
+        for (i, op) in ops.iter().enumerate() {
             op.for_each_read(|s| last_use[s as usize] = i as u32);
         }
         for &o in tape.outputs().iter().chain(live) {
@@ -348,7 +347,7 @@ impl NativeTape {
                 last_use[o as usize] = u32::MAX;
             }
         }
-        let scratch_len = rec.bundles.iter().map(|b| b.work_len()).max().unwrap_or(0);
+        let scratch_len = bundles.iter().map(|b| b.work_len()).max().unwrap_or(0);
         let layout = Layout {
             gather: n_work,
             scratch: n_work + gather_len,
@@ -358,8 +357,8 @@ impl NativeTape {
         // Chunk the prolog and main phases separately so no chunk straddles
         // the split; the recorded stream is 1:1 with the tape's ops.
         let chunk_ops = chunk_ops.max(1);
-        let split = tape.prolog_len().min(rec.ops.len());
-        let (pro, main) = rec.ops.split_at(split);
+        let split = tape.prolog_len().min(ops.len());
+        let (pro, main) = ops.split_at(split);
         let jobs: Vec<&[ROp]> = pro
             .chunks(chunk_ops)
             .chain(main.chunks(chunk_ops))
@@ -381,7 +380,7 @@ impl NativeTape {
         Ok(NativeTape {
             chunks: chunks?,
             prolog_chunks,
-            bundles: rec.bundles,
+            bundles,
             _tables: tables,
             outputs: tape.outputs().to_vec(),
             layout,

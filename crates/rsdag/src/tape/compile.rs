@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap as HashMap;
 
-use super::{Fold, Op, Src, Tape, INPUT};
+use super::{input_index, Accum, Fold, Op, Src, Tape, INPUT};
 use crate::extern_fn::ExternBundle;
 use crate::field::Field;
 use crate::func::{Body, FuncId};
@@ -191,20 +191,20 @@ struct Forest {
 /// references, or tagged inputs, see [`INPUT`]); `n_out` is the number of
 /// values it produces, one for anything but a kernel. Value `(inst, k)` is
 /// the `k`th output of instruction `inst`.
-pub struct Inst {
-    pub kind: Kind,
+pub(super) struct Inst {
+    pub(super) kind: Kind,
     /// The operands: `pool[start .. start + len]` of the program's pool,
     /// one flat vector for every instruction, so a million instructions
     /// are one allocation and not a million.
-    pub ins: (u32, u32),
-    pub n_out: u32,
+    pub(super) ins: (u32, u32),
+    pub(super) n_out: u32,
     /// Parameter-pure: schedulable into the prolog.
-    pub pure: bool,
+    pub(super) pure: bool,
 }
 
 /// An operand of an instruction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Ref {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum Ref {
     /// Output `k` of instruction `inst`.
     Value(u32, u32),
     /// Input `k`, read in place.
@@ -213,7 +213,7 @@ pub enum Ref {
 
 /// What an instruction computes; the operand lists live in `Inst::ins`.
 #[derive(Clone, Debug)]
-pub enum Kind {
+pub(super) enum Kind {
     Const(f64),
     Add,
     Mul,
@@ -228,13 +228,10 @@ pub enum Kind {
     Reduce(crate::node::ReduceOp),
     /// `n` pairs.
     Dot(u32),
-    /// With `stateful`, the last operand is the instance state block (the
-    /// value of a [`Kind::CallProlog`]).
+    /// `n_groups` argument lists of `n_args`, group-major; with `stateful`,
+    /// the last operand is the instances' state block (the value of a
+    /// [`Kind::CallProlog`]).
     Call {
-        bundle: u32,
-        stateful: bool,
-    },
-    CallBatch {
         bundle: u32,
         n_groups: u32,
         n_args: u32,
@@ -260,10 +257,8 @@ pub enum Kind {
         n: u32,
         acc: Option<Vec<u32>>,
     },
+    /// `k` right-hand sides against one matrix.
     Solve {
-        n: u32,
-    },
-    SolveMany {
         n: u32,
         k: u32,
     },
@@ -271,19 +266,19 @@ pub enum Kind {
 
 /// The lowered program: instructions in a dependency order, the bundle
 /// table, and which value each root is.
-struct Program {
-    insts: Vec<Inst>,
+pub(super) struct Program {
+    pub(super) insts: Vec<Inst>,
     /// The operand pool of every instruction (see [`Inst::ins`]).
-    pool: Vec<Ref>,
-    bundles: Vec<Arc<dyn ExternBundle>>,
-    roots: Vec<Ref>,
+    pub(super) pool: Vec<Ref>,
+    pub(super) bundles: Vec<Arc<dyn ExternBundle>>,
+    pub(super) roots: Vec<Ref>,
     /// The accumulator operand of the kernels' plain folds (see
     /// [`Program::fuse_accumulators`]): never read, so never part of the state.
-    placeholder: Option<u32>,
+    pub(super) placeholder: Option<u32>,
 }
 
 impl Program {
-    fn ins(&self, i: usize) -> &[Ref] {
+    pub(super) fn ins(&self, i: usize) -> &[Ref] {
         let (s, l) = self.insts[i].ins;
         &self.pool[s as usize..(s + l) as usize]
     }
@@ -483,7 +478,7 @@ impl Program {
             return;
         }
         // Redirect the consumers' values, then drop them.
-        let resolve = |r: Ref| -> Ref {
+        self.compact(&dead, |r| {
             let mut r = r;
             while let Ref::Value(i, _) = r {
                 match alias.get(&i) {
@@ -492,7 +487,13 @@ impl Program {
                 }
             }
             r
-        };
+        });
+    }
+
+    /// Drop the instructions `dead` marks, every operand and root first
+    /// redirected by `resolve` (to a value that stays), the rest renumbered
+    /// in order.
+    pub(super) fn compact(&mut self, dead: &[bool], resolve: impl Fn(Ref) -> Ref) {
         let mut renumber = vec![u32::MAX; self.insts.len()];
         let mut next = 0u32;
         for (i, &d) in dead.iter().enumerate() {
@@ -507,20 +508,170 @@ impl Program {
                 r => r,
             }
         };
-        for r in self.pool.iter_mut() {
+        for r in self.pool.iter_mut().chain(self.roots.iter_mut()) {
             *r = map(*r);
         }
-        for r in self.roots.iter_mut() {
-            *r = map(*r);
-        }
-        self.placeholder = self.placeholder.map(|i| renumber[i as usize]);
+        self.placeholder = self
+            .placeholder
+            .filter(|&i| !dead[i as usize])
+            .map(|i| renumber[i as usize]);
         let old = std::mem::take(&mut self.insts);
         self.insts = old
             .into_iter()
-            .zip(&dead)
+            .zip(dead)
             .filter(|(_, &d)| !d)
             .map(|(inst, _)| inst)
             .collect();
+    }
+
+    /// Drop what the roots do not reach.
+    pub(super) fn retain_reachable(&mut self) {
+        let m = self.insts.len();
+        let mut dead = vec![true; m];
+        let mut stack: Vec<u32> = self
+            .roots
+            .iter()
+            .filter_map(|r| match *r {
+                Ref::Value(i, _) => Some(i),
+                Ref::Input(_) => None,
+            })
+            .collect();
+        while let Some(i) = stack.pop() {
+            if !std::mem::replace(&mut dead[i as usize], false) {
+                continue;
+            }
+            stack.extend(self.ins(i as usize).iter().filter_map(|r| match *r {
+                Ref::Value(j, _) if dead[j as usize] => Some(j),
+                _ => None,
+            }));
+        }
+        self.compact(&dead, |r| r);
+    }
+}
+
+impl Tape {
+    /// The tape as the program it was emitted from: an instruction per op,
+    /// each operand the value it reads (the op whose block held the slot at
+    /// that point, and the offset in the block), the prolog's ops pure.
+    /// Emitting it again gives this tape back up to slot numbering, so a
+    /// transform of a compiled tape ([`Tape::specialize`]) works on its
+    /// program and is scheduled and allocated like a fresh compilation.
+    pub(super) fn lift(&self) -> Program {
+        let m = self.ops.len();
+        // The op whose block holds each slot, as the stream runs.
+        let mut held = vec![u32::MAX; self.n_work];
+        let value = |k: u32, held: &[u32]| -> Ref {
+            match input_index(k) {
+                Some(j) => Ref::Input(j),
+                None => {
+                    let j = held[k as usize];
+                    Ref::Value(j, k - self.dst[j as usize])
+                }
+            }
+        };
+        // A fold that reads no operand reads the placeholder, appended
+        // after the stream as instruction `m`.
+        let placeholder = Ref::Value(m as u32, 0);
+        let mut uses_placeholder = false;
+        let mut insts: Vec<Inst> = Vec::with_capacity(m + 1);
+        let mut pool: Vec<Ref> = Vec::with_capacity(self.arg_pool.len() + 2 * m);
+        for i in 0..m {
+            let start = pool.len();
+            self.for_each_operand(i, |k| pool.push(value(k, &held)));
+            let width = self.width(i);
+            let codes = |acc: Option<Accum>| acc.map(|a| self.pool(a.codes, width).to_vec());
+            let kind = match self.ops[i] {
+                Op::Const(v) => Kind::Const(v),
+                Op::Add(..) => Kind::Add,
+                Op::Mul(..) => Kind::Mul,
+                Op::MulAdd(..) => Kind::MulAdd,
+                Op::Sub(..) => Kind::Sub,
+                Op::Neg(_) => Kind::Neg,
+                Op::Powi(_, n) => Kind::Powi(n),
+                Op::Unary(op, _) => Kind::Unary(op),
+                Op::Binary(op, ..) => Kind::Binary(op),
+                Op::Cmp(op, ..) => Kind::Cmp(op),
+                Op::Select(..) => Kind::Select,
+                Op::Reduce(op, ..) => Kind::Reduce(op),
+                Op::Dot(_, n) => Kind::Dot(n),
+                Op::Call {
+                    bundle,
+                    n_groups,
+                    n_args,
+                    state,
+                    ..
+                } => Kind::Call {
+                    bundle,
+                    n_groups,
+                    n_args,
+                    stateful: state != super::NO_STATE,
+                },
+                Op::CallProlog {
+                    bundle,
+                    n_groups,
+                    n_pure,
+                    ..
+                } => Kind::CallProlog {
+                    bundle,
+                    n_groups,
+                    n_pure,
+                },
+                Op::Gemv {
+                    m: rows, n, acc, ..
+                } => Kind::Gemv {
+                    m: rows,
+                    n,
+                    acc: codes(acc),
+                },
+                Op::Gemm {
+                    m: rows, k, n, acc, ..
+                } => Kind::Gemm {
+                    m: rows,
+                    k,
+                    n,
+                    acc: codes(acc),
+                },
+                Op::Solve { n, k, .. } => Kind::Solve { n, k },
+            };
+            // A kernel's accumulator entries, one per output after the
+            // factors: the operand where its fold reads it, else the
+            // placeholder.
+            if let Op::Gemv { acc: Some(a), .. } | Op::Gemm { acc: Some(a), .. } = self.ops[i] {
+                if a.c.is_none() {
+                    pool.extend(std::iter::repeat_n(placeholder, width as usize));
+                }
+                let entries = pool.len() - width as usize;
+                for (j, &code) in self.pool(a.codes, width).iter().enumerate() {
+                    if !Fold(code).reads_operand() {
+                        pool[entries + j] = placeholder;
+                        uses_placeholder = true;
+                    }
+                }
+            }
+            insts.push(Inst {
+                kind,
+                ins: (start as u32, (pool.len() - start) as u32),
+                n_out: width,
+                pure: i < self.prolog_ops,
+            });
+            let d = self.dst[i];
+            held[d as usize..(d + width) as usize].fill(i as u32);
+        }
+        if uses_placeholder {
+            insts.push(Inst {
+                kind: Kind::Const(f64::NAN),
+                ins: (pool.len() as u32, 0),
+                n_out: 1,
+                pure: true,
+            });
+        }
+        Program {
+            insts,
+            pool,
+            bundles: self.bundles.clone(),
+            roots: self.outputs.iter().map(|&k| value(k, &held)).collect(),
+            placeholder: uses_placeholder.then_some(m as u32),
+        }
     }
 }
 
@@ -1447,7 +1598,7 @@ impl Forest {
                         }
                         let inst = insts.len() as u32;
                         insts.push(Inst {
-                            kind: Kind::CallBatch {
+                            kind: Kind::Call {
                                 bundle,
                                 n_groups,
                                 n_args,
@@ -1562,7 +1713,7 @@ impl Forest {
                         let pure = members.iter().all(|&mi| self.pure[mi]);
                         let inst = insts.len() as u32;
                         insts.push(Inst {
-                            kind: Kind::SolveMany { n, k: kk },
+                            kind: Kind::Solve { n, k: kk },
                             ins: pooled(&mut pool, ins),
                             n_out: n * kk,
                             pure,
@@ -1581,7 +1732,7 @@ impl Forest {
                         let pure = members.iter().all(|&mi| self.pure[mi]);
                         let inst = insts.len() as u32;
                         insts.push(Inst {
-                            kind: Kind::Solve { n },
+                            kind: Kind::Solve { n, k: 1 },
                             ins: pooled(&mut pool, ins),
                             n_out: n,
                             pure,
@@ -1710,7 +1861,12 @@ impl Forest {
                     pool.extend(state);
                     let inst = insts.len() as u32;
                     insts.push(Inst {
-                        kind: Kind::Call { bundle, stateful },
+                        kind: Kind::Call {
+                            bundle,
+                            n_groups: 1,
+                            n_args: args.len() as u32,
+                            stateful,
+                        },
                         ins: (start, pool.len() as u32 - start),
                         n_out,
                         pure: self.pure[i],
@@ -1772,7 +1928,7 @@ impl Program {
     /// pure instruction precedes every impure one. Constants are placed
     /// right before their first consumer, so a multiply-used one is live
     /// from its first use, not from the start.
-    fn schedule(&self) -> Vec<u32> {
+    pub(super) fn schedule(&self) -> Vec<u32> {
         let m = self.insts.len();
         let is_const = |i: usize| matches!(self.insts[i].kind, Kind::Const(_));
         // Distinct value dependencies of each instruction, as instruction
@@ -1874,7 +2030,7 @@ impl Program {
     }
 
     /// Pass 4: lifetimes, slots and the instruction stream.
-    fn emit(&self, order: &[u32], split: bool) -> Tape {
+    pub(super) fn emit(&self, order: &[u32], split: bool) -> Tape {
         let m = self.insts.len();
         let mut pos = vec![0usize; m];
         for (k, &i) in order.iter().enumerate() {
@@ -1967,8 +2123,7 @@ impl Program {
                     }
                     r
                 }
-                Kind::Solve { n } => vec![(n * n) as usize, n as usize],
-                Kind::SolveMany { n, k } => vec![(n * n) as usize, (n * k) as usize],
+                Kind::Solve { n, k } => vec![(n * n) as usize, (n * k) as usize],
                 _ => continue,
             };
             let ins = self.ins(i as usize);
@@ -2109,27 +2264,16 @@ impl Program {
                     let start = gather(&mut arg_pool, &mut max_args, o);
                     Op::Dot(start, n)
                 }
-                Kind::Call { bundle, stateful } => {
-                    // A stateful call's last operand is its state block.
-                    let (args, state) = split_state(o, stateful);
-                    let start = gather(&mut arg_pool, &mut max_args, args);
-                    Op::Call {
-                        bundle,
-                        start,
-                        n_args: args.len() as u32,
-                        n_out: inst.n_out,
-                        state,
-                    }
-                }
-                Kind::CallBatch {
+                Kind::Call {
                     bundle,
                     n_groups,
                     n_args,
                     stateful,
                 } => {
+                    // A stateful call's last operand is its state block.
                     let (args, state) = split_state(o, stateful);
                     let start = gather(&mut arg_pool, &mut max_args, args);
-                    Op::CallBatch {
+                    Op::Call {
                         bundle,
                         start,
                         n_groups,
@@ -2205,19 +2349,12 @@ impl Program {
                         acc,
                     }
                 }
-                Kind::Solve { n } => {
-                    let (a, b) = o.split_at((n * n) as usize);
-                    let a = dense(&mut arg_pool, &mut max_args, a);
-                    let b = dense(&mut arg_pool, &mut max_args, b);
-                    max_args = max_args.max((n * n + n) as usize);
-                    Op::Solve { a, b, n }
-                }
-                Kind::SolveMany { n, k } => {
+                Kind::Solve { n, k } => {
                     let (a, b) = o.split_at((n * n) as usize);
                     let a = dense(&mut arg_pool, &mut max_args, a);
                     let b = dense(&mut arg_pool, &mut max_args, b);
                     max_args = max_args.max((n * n + n * k) as usize);
-                    Op::SolveMany { a, b, n, k }
+                    Op::Solve { a, b, n, k }
                 }
             };
             ops.push(op);
