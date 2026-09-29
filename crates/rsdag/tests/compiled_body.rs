@@ -199,3 +199,51 @@ fn an_interpreted_body_computes_only_the_outputs_called() {
     tape.eval(&[0.5], &mut w, &mut o);
     assert!((o[0] - 6.0 * 0.5f64.exp()).abs() < 1e-12);
 }
+
+#[test]
+fn calls_with_constant_arguments_run_a_specialized_copy() {
+    // f(x, c) = [c exp(x) + sin(c), c x]; calls pass c = 0 twice and c = 2
+    // once. The two calls with c = 0 share one copy over x alone, the
+    // values and the derivatives stay.
+    let mut g: Graph<F64> = Graph::new();
+    let sym = |g: &mut Graph<F64>, n: &str| {
+        let e = g.sym(n);
+        match *g.node(e) {
+            Node::Symbol(s) => (e, s),
+            _ => unreachable!(),
+        }
+    };
+    let ((x, xs), (c, cs)) = (sym(&mut g, "x"), sym(&mut g, "c"));
+    let ex = g.exp(x);
+    let cex = g.mul(c, ex);
+    let sc = g.sin(c);
+    let o0 = g.add(cex, sc);
+    let o1 = g.mul(c, x);
+    let f = g.define_func("f", vec![xs, cs], vec![o0, o1]);
+    let ((y, ys), (z, zs)) = (sym(&mut g, "y"), sym(&mut g, "z"));
+    let (zero, two) = (g.zero(), g.konst_f64(2.0));
+    let a = g.call(f, 0, &[y, zero]);
+    let b = g.call(f, 0, &[z, zero]);
+    let d = g.call(f, 1, &[y, two]);
+    let s = g.add(a, b);
+    let root = g.add(s, d);
+    let n_funcs = g.n_funcs();
+    let spec = g.specialize_calls(&[root])[0];
+    assert_eq!(g.n_funcs(), n_funcs + 2, "one copy per constant pattern");
+    for (callee, _) in g.free_calls_in(&[spec]).iter().map(|&o| g.output(o)) {
+        assert_eq!(g.func(callee).params().len(), 1);
+    }
+    let vars = [ys, zs];
+    let eval = |g: &Graph<F64>, e: ExprId| -> f64 {
+        let tape = Tape::compile(g, &[e], &vars);
+        let (mut w, mut o) = (Vec::new(), Vec::new());
+        tape.eval(&[0.3, -0.7], &mut w, &mut o);
+        o[0]
+    };
+    assert_eq!(eval(&g, root).to_bits(), eval(&g, spec).to_bits());
+    let jr = rsdag::sparse_jacobian(&mut g, &[root], &vars);
+    let js = rsdag::sparse_jacobian(&mut g, &[spec], &vars);
+    for ((_, a), (_, b)) in jr[0].iter().zip(&js[0]) {
+        assert!((eval(&g, *a) - eval(&g, *b)).abs() < 1e-15);
+    }
+}
