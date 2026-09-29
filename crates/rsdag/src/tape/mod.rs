@@ -211,6 +211,7 @@ pub enum Operand<'a> {
 
 mod compile;
 mod specialize;
+mod topo;
 
 pub use specialize::SpecializedTape;
 
