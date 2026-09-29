@@ -136,6 +136,36 @@ def test_tracer_defers_to_arrays_on_the_left():
         k * "no"
 
 
+def test_numpy_ufuncs_by_name_and_reflected_operators():
+    unary = [np.sin, np.cos, np.tan, np.arcsin, np.arccos, np.arctan, np.sinh, np.cosh,
+             np.tanh, np.arcsinh, np.arctanh, np.exp, np.expm1, np.log, np.log10, np.log2,
+             np.log1p, np.sqrt, np.cbrt, np.fabs, np.absolute, np.floor, np.ceil, np.rint,
+             np.trunc]
+    x = np.array([0.3, 0.45])  # inside every domain: rsdag guards log and sqrt
+    f = jit(lambda x: [u(x) for u in unary])
+    assert np.allclose(f(x), [u(x) for u in unary], rtol=1e-14)
+    y = np.array([1.7, 0.6])
+    g = jit(lambda x, y: [np.arctan2(x, y), np.hypot(x, y), np.fmod(x, y), np.power(y, x),
+                          np.power(x, 3), 2.0 // y, 2.0 % y, x // 0.2, x % 0.2, 2.0 ** x])
+    want = [np.arctan2(x, y), np.hypot(x, y), np.fmod(x, y), np.power(y, x), np.power(x, 3),
+            2.0 // y, 2.0 % y, x // 0.2, x % 0.2, 2.0 ** x]
+    assert np.allclose(g(x, y), want, rtol=1e-14)
+    t = rsdag.Scope().input()
+    with pytest.raises(AttributeError):
+        t.no_such_function
+    assert t.arccosh().expr() == t.acosh().expr()
+
+
+def test_matmul_shapes():
+    from rsdag import matmul
+    A0 = np.arange(6.0).reshape(2, 3)
+    v0 = np.array([1.0, -2.0])
+    for f, args in [(lambda v, A: matmul(v, A), (v0, A0)),
+                    (lambda A, x: matmul(A, x), (A0, v0[[0, 1, 0]])),
+                    (lambda a, b: matmul(a, b), (A0[0], A0[1]))]:
+        assert np.allclose(jit(f)(*args), np.matmul(*args), rtol=1e-15)
+
+
 def test_repr_of_a_deep_shared_expression_is_bounded():
     s = rsdag.Scope()
     x = y = s.input("x")

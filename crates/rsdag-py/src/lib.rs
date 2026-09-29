@@ -17,9 +17,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use pyo3::basic::CompareOp;
-use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::exceptions::{PyAttributeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyList;
+use pyo3::types::{PyList, PyTuple};
 
 use rsdag::{BinOp, CmpOp, ExprId, Graph, Node, ReduceOp, SymbolId, Tape, UnaryOp, F64};
 
@@ -87,24 +87,60 @@ impl Tracer {
         Ok(None)
     }
     /// As [`Self::operand_opt`], raising for an operand that cannot be
-    /// traced. For the named ufunc methods, which numpy calls elementwise
-    /// with scalar operands, so there is nothing to defer to.
+    /// traced.
     fn operand(&self, other: &Bound<'_, PyAny>) -> PyResult<ExprId> {
-        self.operand_opt(other)?.ok_or_else(|| {
-            PyTypeError::new_err(format!(
-                "unsupported operand for a traced value: {}",
-                other
-                    .get_type()
-                    .name()
-                    .map(|n| n.to_string())
-                    .unwrap_or_default()
-            ))
-        })
+        self.operand_opt(other)?.ok_or_else(|| unsupported(other))
     }
     fn unary(&self, op: UnaryOp) -> Tracer {
         let id = self.g.borrow_mut().unary(op, self.id);
         self.wrap(id)
     }
+    /// `f(self, other)`, or `f(other, self)` when `reflected`.
+    fn binary(
+        &self,
+        other: &Bound<'_, PyAny>,
+        reflected: bool,
+        f: impl FnOnce(&mut Graph<F64>, ExprId, ExprId) -> ExprId,
+    ) -> PyResult<BinOut> {
+        let Some(o) = self.operand_opt(other)? else {
+            return Ok(BinOut::NotImplemented);
+        };
+        let (a, b) = if reflected {
+            (o, self.id)
+        } else {
+            (self.id, o)
+        };
+        let id = f(&mut self.g.borrow_mut(), a, b);
+        Ok(BinOut::Value(self.wrap(id)))
+    }
+}
+
+fn unsupported(other: &Bound<'_, PyAny>) -> PyErr {
+    PyTypeError::new_err(format!(
+        "unsupported operand for a traced value: {}",
+        other
+            .get_type()
+            .name()
+            .map(|n| n.to_string())
+            .unwrap_or_default()
+    ))
+}
+
+/// Python's `a // b`.
+fn floordiv(g: &mut Graph<F64>, a: ExprId, b: ExprId) -> ExprId {
+    let q = g.div(a, b);
+    g.unary(UnaryOp::Floor, q)
+}
+
+/// Python's floored modulo: `a - b * floor(a / b)`.
+fn floormod(g: &mut Graph<F64>, a: ExprId, b: ExprId) -> ExprId {
+    let f = floordiv(g, a, b);
+    let bf = g.mul(b, f);
+    g.sub(a, bf)
+}
+
+fn powf(g: &mut Graph<F64>, a: ExprId, b: ExprId) -> ExprId {
+    g.binary(BinOp::Powf, a, b)
 }
 
 /// Node budget of a tracer's `repr`.
@@ -120,107 +156,92 @@ fn fits(g: &Graph<F64>, id: ExprId, budget: &mut usize) -> bool {
     g.operands(id).iter().all(|&c| fits(g, c, budget))
 }
 
+/// An elementwise function a tracer answers to by name: numpy's ufuncs
+/// call it on each element of an object array (`np.sin(a)` calls
+/// `a[i].sin()`, `np.arctan2(a, b)` calls `a[i].arctan2(b[i])`).
+#[derive(Clone, Copy)]
+enum Ufunc {
+    Unary(UnaryOp),
+    Binary(BinOp),
+    Reduce(ReduceOp),
+}
+
+/// numpy's names where they differ from rsdag's; every other name of
+/// [`rsdag::node::UNARY_OPS`] and [`rsdag::node::BINARY_OPS`] resolves as
+/// it is.
+const NUMPY_NAMES: &[(&str, Ufunc)] = &[
+    ("arcsin", Ufunc::Unary(UnaryOp::Asin)),
+    ("arccos", Ufunc::Unary(UnaryOp::Acos)),
+    ("arctan", Ufunc::Unary(UnaryOp::Atan)),
+    ("arcsinh", Ufunc::Unary(UnaryOp::Asinh)),
+    ("arccosh", Ufunc::Unary(UnaryOp::Acosh)),
+    ("arctanh", Ufunc::Unary(UnaryOp::Atanh)),
+    ("log", Ufunc::Unary(UnaryOp::Ln)),
+    ("fabs", Ufunc::Unary(UnaryOp::Abs)),
+    ("absolute", Ufunc::Unary(UnaryOp::Abs)),
+    ("rint", Ufunc::Unary(UnaryOp::Round)),
+    ("gammaln", Ufunc::Unary(UnaryOp::Lgamma)),
+    ("gamma", Ufunc::Unary(UnaryOp::Tgamma)),
+    ("arctan2", Ufunc::Binary(BinOp::Atan2)),
+    ("fmod", Ufunc::Binary(BinOp::Mod)),
+    ("power", Ufunc::Binary(BinOp::Powf)),
+    ("maximum", Ufunc::Reduce(ReduceOp::Max)),
+    ("minimum", Ufunc::Reduce(ReduceOp::Min)),
+];
+
+fn ufunc(name: &str) -> Option<Ufunc> {
+    NUMPY_NAMES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|&(_, f)| f)
+        .or_else(|| UnaryOp::from_name(name).map(Ufunc::Unary))
+        .or_else(|| BinOp::from_name(name).map(Ufunc::Binary))
+}
+
+/// A tracer's elementwise function, bound to it (`t.sin`, `t.arctan2`).
+#[pyclass(unsendable)]
+struct Method {
+    t: Tracer,
+    f: Ufunc,
+}
+
+#[pymethods]
+impl Method {
+    #[pyo3(signature = (*args))]
+    fn __call__(&self, args: &Bound<'_, PyTuple>) -> PyResult<Tracer> {
+        let t = &self.t;
+        let out = match (self.f, args.len()) {
+            (Ufunc::Unary(op), 0) => return Ok(t.unary(op)),
+            (Ufunc::Binary(BinOp::Powf), 1) => t.__pow__(&args.get_item(0)?, None)?,
+            (Ufunc::Binary(op), 1) => {
+                t.binary(&args.get_item(0)?, false, |g, x, y| g.binary(op, x, y))?
+            }
+            (Ufunc::Reduce(op), 1) => {
+                let o = t.operand(&args.get_item(0)?)?;
+                let id = t.g.borrow_mut().reduce(op, vec![t.id, o]);
+                BinOut::Value(t.wrap(id))
+            }
+            (_, n) => {
+                return Err(PyTypeError::new_err(format!(
+                    "wrong number of arguments: {n}"
+                )))
+            }
+        };
+        match out {
+            BinOut::Value(v) => Ok(v),
+            BinOut::NotImplemented => Err(unsupported(&args.get_item(0)?)),
+        }
+    }
+}
+
 #[pymethods]
 impl Tracer {
-    // numpy's unary ufunc methods on object arrays, and the plain names.
-    fn sin(&self) -> Tracer {
-        self.unary(UnaryOp::Sin)
-    }
-    fn cos(&self) -> Tracer {
-        self.unary(UnaryOp::Cos)
-    }
-    fn tan(&self) -> Tracer {
-        self.unary(UnaryOp::Tan)
-    }
-    fn arcsin(&self) -> Tracer {
-        self.unary(UnaryOp::Asin)
-    }
-    fn arccos(&self) -> Tracer {
-        self.unary(UnaryOp::Acos)
-    }
-    fn arctan(&self) -> Tracer {
-        self.unary(UnaryOp::Atan)
-    }
-    fn sinh(&self) -> Tracer {
-        self.unary(UnaryOp::Sinh)
-    }
-    fn cosh(&self) -> Tracer {
-        self.unary(UnaryOp::Cosh)
-    }
-    fn tanh(&self) -> Tracer {
-        self.unary(UnaryOp::Tanh)
-    }
-    fn arcsinh(&self) -> Tracer {
-        self.unary(UnaryOp::Asinh)
-    }
-    fn arccosh(&self) -> Tracer {
-        self.unary(UnaryOp::Acosh)
-    }
-    fn arctanh(&self) -> Tracer {
-        self.unary(UnaryOp::Atanh)
-    }
-    fn exp(&self) -> Tracer {
-        self.unary(UnaryOp::Exp)
-    }
-    fn expm1(&self) -> Tracer {
-        self.unary(UnaryOp::Expm1)
-    }
-    fn log(&self) -> Tracer {
-        self.unary(UnaryOp::Ln)
-    }
-    fn log10(&self) -> Tracer {
-        self.unary(UnaryOp::Log10)
-    }
-    fn log2(&self) -> Tracer {
-        self.unary(UnaryOp::Log2)
-    }
-    fn log1p(&self) -> Tracer {
-        self.unary(UnaryOp::Log1p)
-    }
-    fn sqrt(&self) -> Tracer {
-        self.unary(UnaryOp::Sqrt)
-    }
-    fn cbrt(&self) -> Tracer {
-        self.unary(UnaryOp::Cbrt)
-    }
-    fn fabs(&self) -> Tracer {
-        self.unary(UnaryOp::Abs)
-    }
-    fn absolute(&self) -> Tracer {
-        self.unary(UnaryOp::Abs)
-    }
-    fn sign(&self) -> Tracer {
-        self.unary(UnaryOp::Sign)
-    }
-    fn floor(&self) -> Tracer {
-        self.unary(UnaryOp::Floor)
-    }
-    fn ceil(&self) -> Tracer {
-        self.unary(UnaryOp::Ceil)
-    }
-    fn rint(&self) -> Tracer {
-        self.unary(UnaryOp::Round)
-    }
-    fn trunc(&self) -> Tracer {
-        self.unary(UnaryOp::Trunc)
-    }
-    fn erf(&self) -> Tracer {
-        self.unary(UnaryOp::Erf)
-    }
-    fn erfc(&self) -> Tracer {
-        self.unary(UnaryOp::Erfc)
-    }
-    fn gammaln(&self) -> Tracer {
-        self.unary(UnaryOp::Lgamma)
-    }
-    fn gamma(&self) -> Tracer {
-        self.unary(UnaryOp::Tgamma)
-    }
-    fn digamma(&self) -> Tracer {
-        self.unary(UnaryOp::Digamma)
-    }
-    fn rand_uniform(&self) -> Tracer {
-        self.unary(UnaryOp::RandUniform)
+    /// The elementwise functions by name (see [`NUMPY_NAMES`]).
+    fn __getattr__(&self, name: &str) -> PyResult<Method> {
+        let f = ufunc(name).ok_or_else(|| {
+            PyAttributeError::new_err(format!("'Tracer' object has no attribute '{name}'"))
+        })?;
+        Ok(Method { t: self.clone(), f })
     }
     /// The expression as text, or a summary when written out as a tree it
     /// would exceed [`REPR_NODES`] nodes (a shared subexpression is written
@@ -234,115 +255,64 @@ impl Tracer {
             format!("Tracer(#{}, over {REPR_NODES} nodes)", self.id.0)
         }
     }
-    fn __add__(&self, other: &Bound<'_, PyAny>) -> PyResult<BinOut> {
-        let Some(o) = self.operand_opt(other)? else {
-            return Ok(BinOut::NotImplemented);
-        };
-        let id = self.g.borrow_mut().add(self.id, o);
-        Ok(BinOut::Value(self.wrap(id)))
+    fn __add__(&self, o: &Bound<'_, PyAny>) -> PyResult<BinOut> {
+        self.binary(o, false, Graph::add)
     }
-    fn __radd__(&self, other: &Bound<'_, PyAny>) -> PyResult<BinOut> {
-        self.__add__(other)
+    fn __radd__(&self, o: &Bound<'_, PyAny>) -> PyResult<BinOut> {
+        self.binary(o, true, Graph::add)
     }
-    fn __sub__(&self, other: &Bound<'_, PyAny>) -> PyResult<BinOut> {
-        let Some(o) = self.operand_opt(other)? else {
-            return Ok(BinOut::NotImplemented);
-        };
-        let id = self.g.borrow_mut().sub(self.id, o);
-        Ok(BinOut::Value(self.wrap(id)))
+    fn __sub__(&self, o: &Bound<'_, PyAny>) -> PyResult<BinOut> {
+        self.binary(o, false, Graph::sub)
     }
-    fn __rsub__(&self, other: &Bound<'_, PyAny>) -> PyResult<BinOut> {
-        let Some(o) = self.operand_opt(other)? else {
-            return Ok(BinOut::NotImplemented);
-        };
-        let id = self.g.borrow_mut().sub(o, self.id);
-        Ok(BinOut::Value(self.wrap(id)))
+    fn __rsub__(&self, o: &Bound<'_, PyAny>) -> PyResult<BinOut> {
+        self.binary(o, true, Graph::sub)
     }
-    fn __mul__(&self, other: &Bound<'_, PyAny>) -> PyResult<BinOut> {
-        let Some(o) = self.operand_opt(other)? else {
-            return Ok(BinOut::NotImplemented);
-        };
-        let id = self.g.borrow_mut().mul(self.id, o);
-        Ok(BinOut::Value(self.wrap(id)))
+    fn __mul__(&self, o: &Bound<'_, PyAny>) -> PyResult<BinOut> {
+        self.binary(o, false, Graph::mul)
     }
-    fn __rmul__(&self, other: &Bound<'_, PyAny>) -> PyResult<BinOut> {
-        self.__mul__(other)
+    fn __rmul__(&self, o: &Bound<'_, PyAny>) -> PyResult<BinOut> {
+        self.binary(o, true, Graph::mul)
     }
-    fn __truediv__(&self, other: &Bound<'_, PyAny>) -> PyResult<BinOut> {
-        let Some(o) = self.operand_opt(other)? else {
-            return Ok(BinOut::NotImplemented);
-        };
-        let id = self.g.borrow_mut().div(self.id, o);
-        Ok(BinOut::Value(self.wrap(id)))
+    fn __truediv__(&self, o: &Bound<'_, PyAny>) -> PyResult<BinOut> {
+        self.binary(o, false, Graph::div)
     }
-    fn __rtruediv__(&self, other: &Bound<'_, PyAny>) -> PyResult<BinOut> {
-        let Some(o) = self.operand_opt(other)? else {
-            return Ok(BinOut::NotImplemented);
-        };
-        let id = self.g.borrow_mut().div(o, self.id);
-        Ok(BinOut::Value(self.wrap(id)))
+    fn __rtruediv__(&self, o: &Bound<'_, PyAny>) -> PyResult<BinOut> {
+        self.binary(o, true, Graph::div)
     }
-    fn __floordiv__(&self, other: &Bound<'_, PyAny>) -> PyResult<BinOut> {
-        let Some(o) = self.operand_opt(other)? else {
-            return Ok(BinOut::NotImplemented);
-        };
-        let mut g = self.g.borrow_mut();
-        let q = g.div(self.id, o);
-        let id = g.unary(UnaryOp::Floor, q);
-        drop(g);
-        Ok(BinOut::Value(self.wrap(id)))
+    fn __floordiv__(&self, o: &Bound<'_, PyAny>) -> PyResult<BinOut> {
+        self.binary(o, false, floordiv)
     }
-    fn __mod__(&self, other: &Bound<'_, PyAny>) -> PyResult<BinOut> {
-        // Python's floored modulo: a - b * floor(a / b).
-        let Some(o) = self.operand_opt(other)? else {
-            return Ok(BinOut::NotImplemented);
-        };
-        let mut g = self.g.borrow_mut();
-        let q = g.div(self.id, o);
-        let f = g.unary(UnaryOp::Floor, q);
-        let bf = g.mul(o, f);
-        let id = g.sub(self.id, bf);
-        drop(g);
-        Ok(BinOut::Value(self.wrap(id)))
+    fn __rfloordiv__(&self, o: &Bound<'_, PyAny>) -> PyResult<BinOut> {
+        self.binary(o, true, floordiv)
     }
-    fn __neg__(&self) -> Tracer {
-        let id = self.g.borrow_mut().neg(self.id);
-        self.wrap(id)
+    fn __mod__(&self, o: &Bound<'_, PyAny>) -> PyResult<BinOut> {
+        self.binary(o, false, floormod)
     }
-    fn __pos__(&self) -> Tracer {
-        self.clone()
-    }
-    fn __abs__(&self) -> Tracer {
-        self.unary(UnaryOp::Abs)
+    fn __rmod__(&self, o: &Bound<'_, PyAny>) -> PyResult<BinOut> {
+        self.binary(o, true, floormod)
     }
     fn __pow__(
         &self,
-        other: &Bound<'_, PyAny>,
+        o: &Bound<'_, PyAny>,
         _modulo: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<BinOut> {
-        if let Ok(n) = other.extract::<i64>() {
-            let id = self.g.borrow_mut().pow_i(self.id, n);
-            return Ok(BinOut::Value(self.wrap(id)));
+        match o.extract::<i64>() {
+            Ok(n) => {
+                let id = self.g.borrow_mut().pow_i(self.id, n);
+                Ok(BinOut::Value(self.wrap(id)))
+            }
+            Err(_) => self.binary(o, false, powf),
         }
-        let Some(o) = self.operand_opt(other)? else {
-            return Ok(BinOut::NotImplemented);
-        };
-        let id = self.g.borrow_mut().binary(BinOp::Powf, self.id, o);
-        Ok(BinOut::Value(self.wrap(id)))
     }
     fn __rpow__(
         &self,
-        other: &Bound<'_, PyAny>,
+        o: &Bound<'_, PyAny>,
         _modulo: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<BinOut> {
-        let Some(o) = self.operand_opt(other)? else {
-            return Ok(BinOut::NotImplemented);
-        };
-        let id = self.g.borrow_mut().binary(BinOp::Powf, o, self.id);
-        Ok(BinOut::Value(self.wrap(id)))
+        self.binary(o, true, powf)
     }
-    fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: CompareOp) -> PyResult<BinOut> {
-        let Some(o) = self.operand_opt(other)? else {
+    fn __richcmp__(&self, o: &Bound<'_, PyAny>, op: CompareOp) -> PyResult<BinOut> {
+        let Some(o) = self.operand_opt(o)? else {
             return Ok(BinOut::NotImplemented);
         };
         let c = match op {
@@ -356,6 +326,26 @@ impl Tracer {
         let id = self.g.borrow_mut().cmp(c, self.id, o);
         Ok(BinOut::Value(self.wrap(id)))
     }
+    fn __neg__(&self) -> Tracer {
+        let id = self.g.borrow_mut().neg(self.id);
+        self.wrap(id)
+    }
+    fn __pos__(&self) -> Tracer {
+        self.clone()
+    }
+    fn __abs__(&self) -> Tracer {
+        self.unary(UnaryOp::Abs)
+    }
+    // `math.floor` and friends, which numpy's object loops call.
+    fn __floor__(&self) -> Tracer {
+        self.unary(UnaryOp::Floor)
+    }
+    fn __ceil__(&self) -> Tracer {
+        self.unary(UnaryOp::Ceil)
+    }
+    fn __trunc__(&self) -> Tracer {
+        self.unary(UnaryOp::Trunc)
+    }
     fn __bool__(&self) -> PyResult<bool> {
         Err(PyTypeError::new_err(
             "a traced value has no truth value: data-dependent control flow is not traceable, use rsdag.where",
@@ -365,45 +355,6 @@ impl Tracer {
         Err(PyTypeError::new_err(
             "a traced value cannot be converted to float during tracing",
         ))
-    }
-    // numpy's binary ufunc methods on object arrays.
-    fn arctan2(&self, other: &Bound<'_, PyAny>) -> PyResult<Tracer> {
-        let o = self.operand(other)?;
-        let id = self.g.borrow_mut().binary(BinOp::Atan2, self.id, o);
-        Ok(self.wrap(id))
-    }
-    fn hypot(&self, other: &Bound<'_, PyAny>) -> PyResult<Tracer> {
-        let o = self.operand(other)?;
-        let id = self.g.borrow_mut().binary(BinOp::Hypot, self.id, o);
-        Ok(self.wrap(id))
-    }
-    fn fmod(&self, other: &Bound<'_, PyAny>) -> PyResult<Tracer> {
-        let o = self.operand(other)?;
-        let id = self.g.borrow_mut().binary(BinOp::Mod, self.id, o);
-        Ok(self.wrap(id))
-    }
-    fn maximum(&self, other: &Bound<'_, PyAny>) -> PyResult<Tracer> {
-        let o = self.operand(other)?;
-        let id = self.g.borrow_mut().reduce(ReduceOp::Max, vec![self.id, o]);
-        Ok(self.wrap(id))
-    }
-    fn minimum(&self, other: &Bound<'_, PyAny>) -> PyResult<Tracer> {
-        let o = self.operand(other)?;
-        let id = self.g.borrow_mut().reduce(ReduceOp::Min, vec![self.id, o]);
-        Ok(self.wrap(id))
-    }
-    fn power(&self, other: &Bound<'_, PyAny>) -> PyResult<Tracer> {
-        match self.__pow__(other, None)? {
-            BinOut::Value(t) => Ok(t),
-            BinOut::NotImplemented => Err(PyTypeError::new_err(format!(
-                "unsupported operand for a traced value: {}",
-                other
-                    .get_type()
-                    .name()
-                    .map(|n| n.to_string())
-                    .unwrap_or_default()
-            ))),
-        }
     }
     /// `cond != 0 ? self : other` (the select node).
     fn select(&self, cond: &Bound<'_, PyAny>, other: &Bound<'_, PyAny>) -> PyResult<Tracer> {
@@ -633,65 +584,74 @@ impl Program {
     }
 }
 
+/// The items of an iterable.
+fn items<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    obj.try_iter()?.collect()
+}
+
+/// The first tracer among `items`: the scope the numbers among them join.
+fn anchor<'a, 'py: 'a>(mut items: impl Iterator<Item = &'a Bound<'py, PyAny>>) -> PyResult<Tracer> {
+    items
+        .find_map(|x| x.cast::<Tracer>().ok().map(|t| t.borrow().clone()))
+        .ok_or_else(|| PyTypeError::new_err("a traced operand is needed"))
+}
+
+fn exprs(t: &Tracer, items: &[Bound<'_, PyAny>]) -> PyResult<Vec<ExprId>> {
+    items.iter().map(|x| t.operand(x)).collect()
+}
+
 /// `where(cond, a, b)` over tracers and numbers of one scope.
 #[pyfunction]
 fn select(cond: &Bound<'_, PyAny>, a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<Tracer> {
-    let anchor = [cond, a, b]
-        .into_iter()
-        .find_map(|x| x.cast::<Tracer>().ok().map(|t| t.borrow().clone()))
-        .ok_or_else(|| PyTypeError::new_err("select needs at least one traced operand"))?;
-    let (c, x, y) = (
-        anchor.operand(cond)?,
-        anchor.operand(a)?,
-        anchor.operand(b)?,
-    );
-    let id = anchor.g.borrow_mut().select(c, x, y);
-    Ok(anchor.wrap(id))
+    let t = anchor([cond, a, b].into_iter())?;
+    let (c, x, y) = (t.operand(cond)?, t.operand(a)?, t.operand(b)?);
+    let id = t.g.borrow_mut().select(c, x, y);
+    Ok(t.wrap(id))
 }
 
-/// The tracer among a list of operands, and the operands as expressions.
-fn traced_list(items: &Bound<'_, PyAny>) -> PyResult<(Tracer, Vec<ExprId>)> {
-    let items: Vec<Bound<'_, PyAny>> = items.try_iter()?.collect::<PyResult<_>>()?;
-    let anchor = items
-        .iter()
-        .find_map(|x| x.cast::<Tracer>().ok().map(|t| t.borrow().clone()))
-        .ok_or_else(|| PyTypeError::new_err("a traced operand is needed"))?;
-    let ids = items
-        .iter()
-        .map(|x| anchor.operand(x))
-        .collect::<PyResult<Vec<_>>>()?;
-    Ok((anchor, ids))
-}
-
-/// The inner product of two equal-length lists, one `Dot` node: rows of
-/// one vector fuse into a matrix-vector kernel in the compiled program.
+/// `a @ b` for the `m * k` entries of `a` and the `k * n` of `b`, both
+/// row-major: the `m * n` entries of the product, each one `Dot` node. The
+/// rows against one column fuse into a `Gemv` kernel once compiled, against
+/// several columns into a `Gemm`.
 #[pyfunction]
-fn dot(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<Tracer> {
-    let both = a
-        .py()
-        .eval(c"lambda a, b: list(a) + list(b)", None, None)?
-        .call1((a, b))?;
-    let (anchor, ids) = traced_list(&both)?;
-    let n = ids.len() / 2;
-    let (x, y) = ids.split_at(n);
-    let id = anchor.g.borrow_mut().dot(x.to_vec(), y.to_vec());
-    Ok(anchor.wrap(id))
+fn matmul(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>, n: usize) -> PyResult<Vec<Tracer>> {
+    let (a, b) = (items(a)?, items(b)?);
+    let t = anchor(a.iter().chain(&b))?;
+    let (a, b) = (exprs(&t, &a)?, exprs(&t, &b)?);
+    let k = b.len().checked_div(n).unwrap_or(0);
+    if k == 0 || b.len() != k * n || !a.len().is_multiple_of(k) {
+        return Err(PyValueError::new_err(
+            "matmul takes the m*k entries of a and the k*n of b",
+        ));
+    }
+    let mut g = t.g.borrow_mut();
+    let mut out = Vec::with_capacity(a.len() / k * n);
+    for row in a.chunks(k) {
+        for j in 0..n {
+            let col = b[j..].iter().step_by(n).copied().collect();
+            out.push(g.dot(row.to_vec(), col));
+        }
+    }
+    drop(g);
+    Ok(out.into_iter().map(|id| t.wrap(id)).collect())
 }
 
-/// A reduction (`"sum"`, `"product"`, `"min"`, `"max"`) over a list, one
-/// `Reduce` node in the reference fold order.
+/// A reduction (`"sum"`, `"product"`, `"min"`, `"max"`) over an iterable,
+/// one `Reduce` node in the reference fold order.
 #[pyfunction]
-fn reduce(op: &str, items: &Bound<'_, PyAny>) -> PyResult<Tracer> {
+fn reduce(op: &str, xs: &Bound<'_, PyAny>) -> PyResult<Tracer> {
     let rop = match op {
-        "sum" => rsdag::ReduceOp::Sum,
-        "product" => rsdag::ReduceOp::Product,
-        "min" => rsdag::ReduceOp::Min,
-        "max" => rsdag::ReduceOp::Max,
+        "sum" => ReduceOp::Sum,
+        "product" => ReduceOp::Product,
+        "min" => ReduceOp::Min,
+        "max" => ReduceOp::Max,
         _ => return Err(PyValueError::new_err(format!("unknown reduction '{op}'"))),
     };
-    let (anchor, ids) = traced_list(items)?;
-    let id = anchor.g.borrow_mut().reduce(rop, ids);
-    Ok(anchor.wrap(id))
+    let xs = items(xs)?;
+    let t = anchor(xs.iter())?;
+    let ids = exprs(&t, &xs)?;
+    let id = t.g.borrow_mut().reduce(rop, ids);
+    Ok(t.wrap(id))
 }
 
 /// The solution of the dense system `A x = b`, `a` the `n*n` entries
@@ -699,15 +659,16 @@ fn reduce(op: &str, items: &Bound<'_, PyAny>) -> PyResult<Tracer> {
 /// compiled program, differentiable.
 #[pyfunction]
 fn solve(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<Vec<Tracer>> {
-    let both = a
-        .py()
-        .eval(c"lambda a, b: list(a) + list(b)", None, None)?
-        .call1((a, b))?;
-    let (anchor, ids) = traced_list(&both)?;
-    let n = rsdag::Graph::<rsdag::F64>::solve_n(ids.len());
-    let (m, rhs) = ids.split_at(n * n);
-    let xs = anchor.g.borrow_mut().solve_dense(m.to_vec(), rhs.to_vec());
-    Ok(xs.into_iter().map(|id| anchor.wrap(id)).collect())
+    let (a, b) = (items(a)?, items(b)?);
+    let t = anchor(a.iter().chain(&b))?;
+    let (a, b) = (exprs(&t, &a)?, exprs(&t, &b)?);
+    if a.len() != b.len() * b.len() {
+        return Err(PyValueError::new_err(
+            "solve takes the n*n entries of a and the n of b",
+        ));
+    }
+    let xs = t.g.borrow_mut().solve_dense(a, b);
+    Ok(xs.into_iter().map(|id| t.wrap(id)).collect())
 }
 
 #[pymodule]
@@ -716,7 +677,7 @@ fn _rsdag(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Tracer>()?;
     m.add_class::<Program>()?;
     m.add_function(wrap_pyfunction!(select, m)?)?;
-    m.add_function(wrap_pyfunction!(dot, m)?)?;
+    m.add_function(wrap_pyfunction!(matmul, m)?)?;
     m.add_function(wrap_pyfunction!(reduce, m)?)?;
     m.add_function(wrap_pyfunction!(solve, m)?)?;
     Ok(())

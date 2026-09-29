@@ -14,7 +14,7 @@ is not traceable; use `rsdag.where(cond, a, b)`.
 import builtins
 import numpy as np
 
-from ._rsdag import Program, Scope, Tracer, select as _select, dot as _dot, reduce as _reduce, solve as _solve
+from ._rsdag import Program, Scope, Tracer, select as _select, matmul as _matmul, reduce as _reduce, solve as _solve
 
 __all__ = [
     "Scope", "Tracer", "Program", "trace", "jit", "jacobian", "grad", "where", "clip",
@@ -23,42 +23,41 @@ __all__ = [
 ]
 
 
+def _flat(v):
+    return np.asarray(v, dtype=object).ravel()
+
+
 def dot(a, b):
     """Inner product of two vectors; traced, one `Dot` node (rows of one
     vector fuse into a matrix-vector kernel)."""
     if _is_traced(a) or _is_traced(b):
-        return _dot(list(np.ravel(np.asarray(a, dtype=object))), list(np.ravel(np.asarray(b, dtype=object))))
+        a, b = _flat(a), _flat(b)
+        if a.size != b.size:
+            raise ValueError("dot takes two vectors of one length")
+        return _matmul(a, b, 1)[0]
     return np.dot(a, b)
 
 
 def matmul(a, b):
-    """`a @ b` over tracers: a matrix against a vector is one `Dot` per row,
-    against a matrix one per entry; either fuses into one kernel (`Gemv`,
-    `Gemm`) once compiled."""
+    """`a @ b` over tracers, vectors and matrices: one `Dot` per entry of
+    the product, fused into one kernel (`Gemv`, `Gemm`) once compiled."""
     if not (_is_traced(a) or _is_traced(b)):
         return np.matmul(a, b)
     a = np.asarray(a, dtype=object)
     b = np.asarray(b, dtype=object)
-    if a.ndim == 1 and b.ndim == 1:
-        return dot(a, b)
-    if a.ndim == 2 and b.ndim == 1:
-        out = np.empty(a.shape[0], dtype=object)
-        for i in range(a.shape[0]):
-            out[i] = dot(a[i], b)
-        return out
-    if a.ndim == 2 and b.ndim == 2:
-        out = np.empty((a.shape[0], b.shape[1]), dtype=object)
-        for i in range(a.shape[0]):
-            for j in range(b.shape[1]):
-                out[i, j] = dot(a[i], b[:, j])
-        return out
-    raise ValueError("matmul over tracers takes vectors and matrices")
+    if not (a.ndim in (1, 2) and b.ndim in (1, 2) and a.shape[-1] == b.shape[0]):
+        raise ValueError("matmul over tracers takes vectors and matrices of matching sizes")
+    entries = _matmul(a.ravel(), b.ravel(), b.shape[1] if b.ndim == 2 else 1)
+    out = np.empty(len(entries), dtype=object)
+    out[:] = entries
+    out = out.reshape(a.shape[:-1] + b.shape[1:])
+    return out if out.ndim else out[()]
 
 
 def sum(x):
     """The sum of a vector, one `Reduce` node in the reference fold order."""
     if _is_traced(x):
-        return _reduce("sum", list(np.ravel(np.asarray(x, dtype=object))))
+        return _reduce("sum", _flat(x))
     return np.sum(x)
 
 
@@ -72,7 +71,7 @@ def solve(a, b):
     n = b.shape[0]
     if a.shape != (n, n):
         raise ValueError("solve takes an n by n matrix and n right-hand sides")
-    xs = _solve(list(a.ravel()), list(b))
+    xs = _solve(a.ravel(), b)
     return np.asarray(xs, dtype=object)
 
 
