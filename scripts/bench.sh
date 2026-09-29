@@ -1,8 +1,10 @@
 #!/bin/sh
 # The README's benchmark figures, measured afresh on this machine: the op
 # sweep and the dense kernels (rsdag's examples), then docs/bench/plot.py
-# over the CSVs; with casadi and jax installed, also the comparison against
-# them (docs/bench/compare.py). One core at a time, a few minutes.
+# over the CSVs. With RSDAG_MODULES naming a directory of circuit modules
+# (SANE's export_module) and casadi, jax and psutil installed, also the
+# comparison against CasADi and JAX (docs/bench/modules.py). One core at a
+# time; the comparison takes a while, JAX up to a minute per circuit.
 set -eu
 cd "$(dirname "$0")/.."
 D=docs/bench/data
@@ -13,11 +15,12 @@ nice cargo run -q --release -p rsdag-jit --example sweep --features rsdag/synth 
 echo "dense kernels"
 nice cargo run -q --release -p rsdag --example dense > "$D/dense.csv"
 PY="$(command -v python3 || command -v python)"
-# Against CasADi and JAX, from Python: needs rsdag, casadi and jax there.
-if "$PY" -c "import rsdag, casadi, jax" 2>/dev/null; then
-    echo "rsdag, CasADi, JAX"
-    nice "$PY" docs/bench/compare.py > "$D/compare.csv"
-else
-    echo "compare skipped: install rsdag, casadi and jax for it"
+if [ -n "${RSDAG_MODULES:-}" ]; then
+    M="$RSDAG_MODULES"
+    mkdir -p "$M/values"
+    echo "circuits: rsdag"
+    nice cargo run -q --release -p rsdag-jit --example modules -- --values "$M/values" "$M"/*.json > "$D/modules_rsdag.csv"
+    echo "circuits: CasADi, JAX"
+    nice "$PY" docs/bench/modules.py "$M/values" "$M"/*.json > "$D/modules_other.csv"
 fi
 "$PY" docs/bench/plot.py

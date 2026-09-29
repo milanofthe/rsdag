@@ -5,10 +5,8 @@
     python docs/social/make.py <dir of diagram PNGs>
 
 The diagrams are drawn by rsdag (`examples/diagrams.rs --social`, rendered
-by Graphviz); the benchmark cards plot docs/bench/data/compare.csv. Writes
-docs/social/*.png.
+by Graphviz). Writes docs/social/*.png.
 """
-import csv
 import os
 import sys
 import textwrap
@@ -20,17 +18,10 @@ import matplotlib.image as mpimg
 import matplotlib.pyplot as plt
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DATA = os.path.join(HERE, "..", "bench", "data")
 W, H, DPI = 16, 9, 100
 
 INK, MUTED, RULE = "#1f2937", "#6b7280", "#e5e7eb"
 ACCENT = "#3b82f6"
-TOOLS = {
-    "rsdag native": (ACCENT, "-"),
-    "rsdag interpreter": (ACCENT, "--"),
-    "CasADi": ("#f59e0b", "-"),
-    "JAX": ("#10b981", "-"),
-}
 FOOTER = "rsdag   |   pip install rsdag   |   github.com/milanofthe/rsdag"
 
 plt.rcParams.update({
@@ -107,61 +98,6 @@ def diagram_cards(src):
     save(fig, "bodies.png")
 
 
-def rows():
-    with open(os.path.join(DATA, "compare.csv"), newline="") as f:
-        return list(csv.DictReader(f))
-
-
-def series(r, tool, col):
-    pts = [(int(x["states"]), float(x[col])) for x in r if x["tool"] == tool and x[col]]
-    return [p[0] for p in pts], [p[1] for p in pts]
-
-
-def plot_panel(fig, box, r, col, ylabel, title, tools):
-    ax = fig.add_axes(box)
-    for tool in tools:
-        color, ls = TOOLS[tool]
-        n, v = series(r, tool, col)
-        ax.plot(n, v, ls, color=color, lw=3, marker="o", ms=6, label=tool)
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.set_xlabel("states", fontsize=15)
-    ax.set_ylabel(ylabel, fontsize=15)
-    ax.set_title(title, fontsize=18, loc="left", color=INK)
-    ax.tick_params(labelsize=13)
-    return ax
-
-
-def bench_cards():
-    r = rows()
-    tools = ["rsdag native", "CasADi", "JAX"]
-    fig = card("Fast calls from Python", None)
-    fig.text(0.05, 0.79, "1D Brusselator, one core, time per call from Python. rsdag and CasADi "
-             "build the sparse Jacobian, JAX the dense one (jacfwd).", fontsize=19, color=MUTED, va="top")
-    plot_panel(fig, (0.07, 0.17, 0.4, 0.52), r, "call_f_us", "microseconds per call", "Right-hand side", tools)
-    ax = plot_panel(fig, (0.56, 0.17, 0.4, 0.52), r, "call_j_us", "microseconds per call", "Jacobian", tools)
-    ax.legend(fontsize=14, frameon=False, loc="upper left")
-    save(fig, "bench_calls.png")
-
-    fig = card("Compiled in milliseconds", None)
-    fig.text(0.05, 0.79, "From the Python function to the first result of the right-hand side "
-             "and its Jacobian: tracing, differentiation and compilation.", fontsize=19, color=MUTED, va="top")
-    r_setup = [dict(x, setup_s=(float(x["setup_f_s"]) + float(x["setup_j_s"])) * 1e3 if x["setup_j_s"] else "")
-               for x in r]
-    ax = plot_panel(fig, (0.07, 0.17, 0.6, 0.52), r_setup, "setup_s", "milliseconds",
-                    "Setup of right-hand side and Jacobian",
-                    ["rsdag native", "rsdag interpreter", "CasADi", "JAX"])
-    ax.legend(fontsize=14, frameon=False, loc="lower right")
-    fig.text(0.71, 0.66, "\n".join(textwrap.wrap(
-        "rsdag and CasADi build the graph element by element, so their setup grows with "
-        "the model. JAX compiles vector code, near 35 ms for the right-hand side at every "
-        "size, and stops where its dense Jacobian stops being practical.", 30)),
-        fontsize=15, color=MUTED, va="top", linespacing=1.5)
-    save(fig, "bench_setup.png")
-
-
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        diagram_cards(sys.argv[1])
-    bench_cards()
+    diagram_cards(sys.argv[1])
     print("wrote docs/social/*.png")
