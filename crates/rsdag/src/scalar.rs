@@ -308,7 +308,7 @@ impl Scalar for f64 {
         -self
     }
     fn powi(self, n: i32) -> Self {
-        f64::powi(self, n)
+        crate::semantics::powi_t(self, n)
     }
     fn unary(op: UnaryOp, x: Self) -> Self {
         unary_f64(op, x)
@@ -369,7 +369,7 @@ impl Scalar for f32 {
         -self
     }
     fn powi(self, n: i32) -> Self {
-        f32::powi(self, n)
+        crate::semantics::powi_t(self, n)
     }
     /// Single precision goes through the double reference and rounds once:
     /// the same guards, one rounding, no second set of algorithms.
@@ -434,7 +434,7 @@ impl Scalar for Complex64 {
         -self
     }
     fn powi(self, n: i32) -> Self {
-        Complex64::powi(&self, n)
+        crate::semantics::powi_t(self, n)
     }
     fn unary(op: UnaryOp, x: Self) -> Self {
         match op {

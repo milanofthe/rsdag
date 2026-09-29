@@ -256,7 +256,7 @@ impl Builder for Numeric {
         -a
     }
     fn powi(&mut self, a: f64, n: i64) -> f64 {
-        a.powi(n as i32)
+        crate::semantics::powi_f64(a, n as i32)
     }
     fn unary(&mut self, op: UnaryOp, a: f64) -> f64 {
         unary_f64(op, a)
