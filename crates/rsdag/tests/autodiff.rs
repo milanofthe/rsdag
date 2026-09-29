@@ -416,3 +416,45 @@ fn the_sparse_jacobian_holds_every_nonzero_derivative() {
         }
     }
 }
+
+#[test]
+fn many_moving_call_arguments_derive_the_body_in_one_reverse_sweep() {
+    // A body over 20 parameters, called with 20 symbols: the gradient derives
+    // the body's derivative outputs in one reverse sweep; the values match one
+    // forward sweep per argument on a twin graph.
+    fn build(g: &mut Graph) -> (ExprId, Vec<SymbolId>, FuncId) {
+        let n = 20;
+        let ps: Vec<ExprId> = (0..n).map(|k| g.sym(&format!("p{k}"))).collect();
+        let pids: Vec<SymbolId> = (0..n).map(|k| sid(g, &format!("p{k}"))).collect();
+        let mut acc = g.zero();
+        for k in 0..n {
+            let e = g.exp(ps[(k + 1) % n]);
+            let t = g.mul(ps[k], e);
+            acc = g.add(acc, t);
+        }
+        let body = g.sin(acc);
+        let f = g.define_func("dev", pids, vec![body]);
+        let args: Vec<ExprId> = (0..n).map(|k| g.sym(&format!("a{k}"))).collect();
+        let call = g.call(f, 0, &args);
+        let aids = (0..n).map(|k| sid(g, &format!("a{k}"))).collect();
+        (call, aids, f)
+    }
+    let (mut rg, mut fg): (Graph, Graph) = (Graph::new(), Graph::new());
+    let (rc, rs, rf) = build(&mut rg);
+    let (fc, fs, ff) = build(&mut fg);
+    let rev = gradient(&mut rg, rc, &rs);
+    let fwd: Vec<ExprId> = fs.iter().map(|&s| differentiate(&mut fg, fc, s)).collect();
+    assert_eq!(rg.func(rf).outputs().len(), 21);
+    assert_eq!(fg.func(ff).outputs().len(), 21);
+    let env = |ids: &[SymbolId]| -> HashMap<SymbolId, f64> {
+        ids.iter()
+            .enumerate()
+            .map(|(k, &s)| (s, 0.05 * (k as f64 + 1.0)))
+            .collect()
+    };
+    let vr: Vec<f64> = eval(&rg, &rev, &env(&rs));
+    let vf: Vec<f64> = eval(&fg, &fwd, &env(&fs));
+    for (a, b) in vr.iter().zip(&vf) {
+        assert!((a - b).abs() <= 1e-13 * b.abs().max(1.0), "{a} vs {b}");
+    }
+}

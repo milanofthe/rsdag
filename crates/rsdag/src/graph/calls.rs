@@ -162,8 +162,7 @@ impl<K: Field> Graph<K> {
         let pars = self.funcs[f.0 as usize].params_with_role(param_role);
         let mut entries = Vec::new();
         for &o in &outs {
-            for &p in &pars {
-                let k = self.derivative_output(f, o, p);
+            for (&p, k) in pars.iter().zip(self.derivative_outputs(f, o, &pars)) {
                 if !matches!(self.funcs[f.0 as usize].outputs()[k as usize], Output::Zero) {
                     entries.push((o, p, k));
                 }
@@ -330,6 +329,39 @@ impl<K: Field> Graph<K> {
                 wrt: param,
             },
         )
+    }
+
+    /// [`derivative_output`](Self::derivative_output) for several parameters
+    /// of one output. The missing derivatives of a symbolic function are
+    /// derived in one reverse sweep over the body when they are
+    /// [`REVERSE_MIN_TOUCHED`](crate::autodiff::REVERSE_MIN_TOUCHED) or more
+    /// (a device's parameters), in one forward sweep each otherwise.
+    pub fn derivative_outputs(&mut self, f: FuncId, out: u32, params: &[u32]) -> Vec<u32> {
+        let func = &self.funcs[f.0 as usize];
+        if let Output::Expr(e) = func.outputs()[out as usize] {
+            let missing: Vec<u32> = params
+                .iter()
+                .copied()
+                .filter(|&p| func.derivative(out, p).is_none())
+                .collect();
+            if missing.len() >= crate::autodiff::REVERSE_MIN_TOUCHED {
+                let wrt: Vec<SymbolId> =
+                    missing.iter().map(|&p| func.params()[p as usize]).collect();
+                let grad = crate::autodiff::gradient(self, e, &wrt);
+                for (&p, d) in missing.iter().zip(grad) {
+                    let d = if self.is_zero(d) {
+                        Output::Zero
+                    } else {
+                        Output::Expr(d)
+                    };
+                    self.push_output(f, d, OutputRole::Derivative { of: out, wrt: p });
+                }
+            }
+        }
+        params
+            .iter()
+            .map(|&p| self.derivative_output(f, out, p))
+            .collect()
     }
 
     /// Inline a call: the output expression with the parameters replaced by
