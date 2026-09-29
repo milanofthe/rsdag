@@ -758,19 +758,17 @@ impl<'a, I: Isa> Emitter<'a, I> {
     fn dense_arg(&mut self, d: &Dense, at: &mut usize) -> IArg {
         let mut arg = |this: &mut Self, d: &Dense| match d {
             Dense::Inputs(k) => IArg::InputAddr(*k as usize * 8),
-            Dense::Slots(s) => {
-                let consecutive =
-                    !s.is_empty() && s.iter().enumerate().all(|(j, &x)| x == s[0] + j as u32);
-                if consecutive {
-                    // Read in place: whatever of the run the register cache
-                    // still owes to memory is written back first.
-                    for &slot in s {
-                        if let Some(&i) = this.at.get(&slot) {
-                            this.drop_index(i);
-                        }
+            Dense::Run(s, len) => {
+                // Read in place: whatever of the run the register cache
+                // still owes to memory is written back first.
+                for slot in *s..s + len {
+                    if let Some(&i) = this.at.get(&slot) {
+                        this.drop_index(i);
                     }
-                    return IArg::WorkAddr(s[0] as usize * 8);
                 }
+                IArg::WorkAddr(*s as usize * 8)
+            }
+            Dense::Slots(s) => {
                 let p = IArg::WorkAddr(this.gather_at(s, *at));
                 *at += s.len();
                 p

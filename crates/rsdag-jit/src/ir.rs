@@ -92,29 +92,57 @@ pub(crate) struct CallSite {
     pub(crate) batch: bool,
 }
 
-/// A dense operand: a run of inputs read in place, or slots gathered.
+/// A dense operand: a run of inputs or of work slots read in place, or
+/// slots gathered.
 pub(crate) enum Dense {
     Inputs(u32),
+    /// `len` work slots from `s`.
+    Run(u32, u32),
     Slots(Vec<u32>),
 }
 
 impl Dense {
-    pub(crate) fn slots(&self) -> &[u32] {
-        match self {
-            Dense::Inputs(_) => &[],
-            Dense::Slots(v) => v,
+    /// Every work slot the operand reads.
+    pub(crate) fn for_each_slot(&self, mut f: impl FnMut(u32)) {
+        match *self {
+            Dense::Inputs(_) => {}
+            Dense::Run(s, len) => (s..s + len).for_each(f),
+            Dense::Slots(ref v) => v.iter().for_each(|&k| f(k)),
         }
     }
-    fn of(o: Operand<'_>) -> Dense {
+    /// How many values it gathers.
+    fn gathered(&self) -> usize {
+        match self {
+            Dense::Slots(v) => v.len(),
+            _ => 0,
+        }
+    }
+    fn of(o: Operand<'_>, len: u32) -> Dense {
         match o {
             Operand::Inputs(k) => Dense::Inputs(k),
+            Operand::Run(s) => Dense::Run(s, len),
             Operand::Slots(s) => Dense::Slots(s.to_vec()),
         }
     }
 }
 
 impl ROp {
-    /// Every operand the op reads, slots and tagged inputs alike.
+    /// The dense operands of a kernel, the accumulator last.
+    fn dense(&self) -> impl Iterator<Item = &Dense> {
+        let (a, b, c): (Option<&Dense>, Option<&Dense>, Option<&Dense>) = match self {
+            ROp::Gemv { a, x, acc, .. } => {
+                (Some(a), Some(x), acc.as_ref().and_then(|c| c.0.as_ref()))
+            }
+            ROp::Gemm { a, b, acc, .. } => {
+                (Some(a), Some(b), acc.as_ref().and_then(|c| c.0.as_ref()))
+            }
+            ROp::Solve { a, b, .. } | ROp::SolveMany { a, b, .. } => (Some(a), Some(b), None),
+            _ => (None, None, None),
+        };
+        a.into_iter().chain(b).chain(c)
+    }
+    /// Every operand the op reads: slots, and the tagged inputs a scalar
+    /// op or a list names (a kernel's input run is read by address).
     pub(crate) fn for_each_operand(&self, mut f: impl FnMut(u32)) {
         match self {
             ROp::Const(..) => {}
@@ -135,29 +163,7 @@ impl ROp {
             ROp::Reduce(_, _, args) => args.iter().copied().for_each(f),
             ROp::Call(c) => c.args.iter().copied().for_each(f),
             ROp::Dot(_, a, b) => a.iter().chain(b).copied().for_each(f),
-            ROp::Gemv { a, x, acc, .. } => a
-                .slots()
-                .iter()
-                .chain(x.slots())
-                .chain(
-                    acc.iter()
-                        .flat_map(|(c, _, _)| c.as_ref().map_or(&[][..], |c| c.slots())),
-                )
-                .copied()
-                .for_each(f),
-            ROp::Gemm { a, b, acc, .. } => a
-                .slots()
-                .iter()
-                .chain(b.slots())
-                .chain(
-                    acc.iter()
-                        .flat_map(|(c, _, _)| c.as_ref().map_or(&[][..], |c| c.slots())),
-                )
-                .copied()
-                .for_each(f),
-            ROp::Solve { a, b, .. } | ROp::SolveMany { a, b, .. } => {
-                a.slots().iter().chain(b.slots()).copied().for_each(f)
-            }
+            _ => self.dense().for_each(|d| d.for_each_slot(&mut f)),
         }
     }
     /// Every work slot the op reads.
@@ -199,31 +205,14 @@ impl ROp {
         match self {
             ROp::Reduce(_, ReduceOp::Min | ReduceOp::Max, args) => args.len(),
             ROp::Call(c) => c.args.len(),
-            ROp::Gemv { a, x, acc, .. } => {
-                a.slots().len()
-                    + x.slots().len()
-                    + acc
-                        .as_ref()
-                        .map_or(0, |(c, _, _)| c.as_ref().map_or(0, |c| c.slots().len()))
-            }
-            ROp::Gemm { a, b, acc, .. } => {
-                a.slots().len()
-                    + b.slots().len()
-                    + acc
-                        .as_ref()
-                        .map_or(0, |(c, _, _)| c.as_ref().map_or(0, |c| c.slots().len()))
-            }
-            ROp::Solve { a, b, .. } | ROp::SolveMany { a, b, .. } => {
-                a.slots().len() + b.slots().len()
-            }
-            _ => 0,
+            _ => self.dense().map(Dense::gathered).sum(),
         }
     }
 }
 
 /// The op stream of a tape, its bundles indexed as the tape indexes them.
 pub(crate) fn record(tape: &Tape) -> Vec<ROp> {
-    let dense = |s: Src, len: u32| Dense::of(tape.operand(s, len));
+    let dense = |s: Src, len: u32| Dense::of(tape.operand(s, len), len);
     let acc = |a: Option<Accum>, len: u32| {
         a.map(|a| {
             (

@@ -194,6 +194,8 @@ pub enum Src {
     Inputs(u32),
     /// Operands listed in the arg pool from `start`, gathered.
     Pool(u32),
+    /// Consecutive work slots from `s`, read in place.
+    Slots(u32),
 }
 
 /// One op as a diagram draws it: its label and kind, the operands it
@@ -210,7 +212,11 @@ pub(crate) struct OpView {
 /// A dense operand as a backend sees it.
 #[derive(Clone, Copy, Debug)]
 pub enum Operand<'a> {
+    /// Consecutive inputs from `k`.
     Inputs(u32),
+    /// Consecutive work slots from `s`.
+    Run(u32),
+    /// Slots to gather.
     Slots(&'a [u32]),
 }
 
@@ -393,6 +399,7 @@ impl Tape {
         let src = |s: Src, len: u32| match s {
             Src::Inputs(k) => format!("i{k}..i{}", k + len),
             Src::Pool(start) => format!("[{}]", list(start, len)),
+            Src::Slots(s) => format!("s{s}..s{}", s + len),
         };
         let mut out = String::new();
         for (i, op) in self.ops.iter().enumerate() {
@@ -855,6 +862,7 @@ impl Tape {
         match src {
             Src::Inputs(k) => Operand::Inputs(k),
             Src::Pool(start) => Operand::Slots(self.pool(start, len)),
+            Src::Slots(s) => Operand::Run(s),
         }
     }
 
@@ -866,6 +874,7 @@ impl Tape {
         let dense = |src: Src, len: u32, f: &mut dyn FnMut(u32)| match src {
             Src::Inputs(k) => (k..k + len).for_each(|j| f(j | INPUT)),
             Src::Pool(start) => self.pool(start, len).iter().for_each(|&k| f(k)),
+            Src::Slots(s) => (s..s + len).for_each(f),
         };
         let acc = |acc: Option<Accum>, len: u32, f: &mut dyn FnMut(u32)| {
             if let Some(Accum { c: Some(c), .. }) = acc {
@@ -1065,13 +1074,9 @@ unsafe fn out_block<'a, T>(
     std::slice::from_raw_parts_mut(work.add(d), len)
 }
 
-/// Resolve a kernel's two dense operands: an input run that the inputs
-/// reach and a run of consecutive work slots are read in place; anything
-/// else is gathered into the scratch, `a` first, then `b`.
-#[allow(clippy::too_many_arguments)]
-/// Where a dense operand is read from: in place (inputs, or a consecutive
-/// run of work slots), or gathered into `scratch` from `*at` on, which
-/// advances past it.
+/// Where a dense operand is read from: in place (a run of inputs the inputs
+/// reach, a run of work slots), or gathered into `scratch` from `*at` on,
+/// which advances past it.
 fn place_operand<T: Scalar>(
     inputs: &[T],
     work: &[T],
@@ -1090,14 +1095,9 @@ fn place_operand<T: Scalar>(
             *at += len;
             Dense::Scratch(*at - len)
         }
+        Src::Slots(s) => Dense::Work(s as usize),
         Src::Pool(start) => {
             let run = &pool[start as usize..start as usize + len];
-            let consecutive = len > 0
-                && input_index(run[0]).is_none()
-                && run.iter().enumerate().all(|(j, &s)| s == run[0] + j as u32);
-            if consecutive {
-                return Dense::Work(run[0] as usize);
-            }
             for j in 0..len {
                 scratch[*at + j] = read(inputs, work, run[j]);
             }
@@ -1107,6 +1107,8 @@ fn place_operand<T: Scalar>(
     }
 }
 
+/// Resolve a kernel's two dense operands, `a` first, then `b` (see
+/// [`place_operand`]).
 #[allow(clippy::too_many_arguments)]
 fn dense_operands<T: Scalar>(
     inputs: &[T],
@@ -1174,6 +1176,7 @@ fn acc_text(pool: &[u32], acc: Option<Accum>, len: u32) -> String {
                 match c {
                     Some(Src::Inputs(k)) => format!("i{k}..i{}", k + len),
                     Some(Src::Pool(start)) => format!("pool{start}[{len}]"),
+                    Some(Src::Slots(s)) => format!("s{s}..s{}", s + len),
                     None => "-".to_string(),
                 },
                 text.join(",")

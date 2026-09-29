@@ -2226,18 +2226,14 @@ impl Program {
                 *max_args = (*max_args).max(ops.len());
                 start
             };
-            // A dense operand: a run of consecutive inputs is read in place.
+            // A dense operand: a run of consecutive inputs or of consecutive
+            // work slots is read in place, anything else gathered.
             let dense = |arg_pool: &mut Vec<u32>, max_args: &mut usize, ops: &[u32]| -> Src {
-                let run = ops.first().and_then(|&k0| {
-                    let k0 = super::input_index(k0)?;
-                    ops.iter()
-                        .enumerate()
-                        .all(|(j, &k)| super::input_index(k) == Some(k0 + j as u32))
-                        .then_some(k0)
-                });
-                match run {
-                    Some(k0) => Src::Inputs(k0),
-                    None => Src::Pool(gather(arg_pool, max_args, ops)),
+                let run = |k0: u32| ops.iter().enumerate().all(|(j, &k)| k == k0 + j as u32);
+                match ops.first() {
+                    Some(&k0) if run(k0) && input_index(k0).is_some() => Src::Inputs(k0 & !INPUT),
+                    Some(&k0) if run(k0) => Src::Slots(k0),
+                    _ => Src::Pool(gather(arg_pool, max_args, ops)),
                 }
             };
             let o = &operands;
