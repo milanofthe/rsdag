@@ -35,7 +35,7 @@ use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 use crate::host::{self, Bundles};
-use crate::ir::{Dense, Liveness, ROp};
+use crate::ir::{Dense, Kernel, KernelKind, Liveness, ROp};
 use crate::isa::{Arg, Arith, Base, IArg, Isa, Round};
 use crate::{Batch, JitError, Options};
 
@@ -54,8 +54,8 @@ pub struct NativeTape {
     code: Mapping,
     chunks: Vec<ChunkFn>,
     prolog_chunks: usize,
-    /// The call descriptors the code holds the addresses of.
-    _descs: Vec<Vec<host::CallDesc>>,
+    /// The call and kernel descriptors the code holds the addresses of.
+    _descs: Vec<(Vec<host::CallDesc>, Vec<host::KernelDesc>)>,
     bundles: Bundles,
     /// The fold code tables of the accumulating kernels; the code holds
     /// their addresses.
@@ -228,7 +228,8 @@ struct Layout {
 /// code holds the addresses of.
 struct Emitted {
     bytes: Vec<u8>,
-    descs: Vec<host::CallDesc>,
+    calls: Vec<host::CallDesc>,
+    kernels: Vec<host::KernelDesc>,
 }
 
 // The mapping is immutable after `Mapping::new`, so calling the code from
@@ -280,14 +281,10 @@ impl NativeTape {
         // tape's life; the ops carry the addresses.
         let mut tables: Vec<Box<[u32]>> = Vec::new();
         for op in ops.iter_mut() {
-            if let ROp::Gemv {
-                acc: Some((_, codes, table)),
+            if let ROp::Kernel(Kernel {
+                codes: Some((codes, table)),
                 ..
-            }
-            | ROp::Gemm {
-                acc: Some((_, codes, table)),
-                ..
-            } = op
+            }) = op
             {
                 let b: Box<[u32]> = codes.clone().into_boxed_slice();
                 *table = b.as_ptr() as usize;
@@ -304,32 +301,11 @@ impl NativeTape {
                 }
             });
             n_inputs = n_inputs.max(top);
-            let runs: Vec<(&Dense, u32)> = match op {
-                ROp::Gemv {
-                    a, x, m, n, acc, ..
-                } => {
-                    let mut v = vec![(a, m * n), (x, *n)];
-                    if let Some((Some(c), _, _)) = acc {
-                        v.push((c, *m));
+            if let ROp::Kernel(k) = op {
+                for (d, len) in &k.operands {
+                    if let Dense::Inputs(i) = d {
+                        n_inputs = n_inputs.max((i + len) as usize);
                     }
-                    v
-                }
-                ROp::Gemm {
-                    a, b, m, k, n, acc, ..
-                } => {
-                    let mut v = vec![(a, m * k), (b, n * k)];
-                    if let Some((Some(c), _, _)) = acc {
-                        v.push((c, m * n));
-                    }
-                    v
-                }
-                ROp::Solve { a, b, n, .. } => vec![(a, n * n), (b, *n)],
-                ROp::SolveMany { a, b, n, k, .. } => vec![(a, n * n), (b, n * k)],
-                _ => Vec::new(),
-            };
-            for (d, len) in runs {
-                if let Dense::Inputs(k) = d {
-                    n_inputs = n_inputs.max(*k as usize + len as usize);
                 }
             }
         }
@@ -383,7 +359,7 @@ impl NativeTape {
             bytes.resize(bytes.len().next_multiple_of(16), 0);
             offsets.push(bytes.len());
             bytes.extend_from_slice(&e.bytes);
-            descs.push(e.descs);
+            descs.push((e.calls, e.kernels));
         }
         let code = Mapping::new(&bytes)?;
         let chunks = offsets
@@ -570,10 +546,10 @@ struct Emitter<'a, I: Isa> {
     /// Round-robin victim pointers of the callee-saved and caller-saved pools.
     next: [usize; 2],
     pinned: Vec<bool>,
-    /// The chunk's call descriptors, allocated for all of them before the
+    /// The chunk's call and kernel descriptors, allocated for all of them before the
     /// first is emitted (their addresses go into the code).
     descs: Vec<host::CallDesc>,
-    descs_cap: usize,
+    kernels: Vec<host::KernelDesc>,
 }
 
 impl<'a, I: Isa> Emitter<'a, I> {
@@ -596,7 +572,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
             next: [0, 0],
             pinned: vec![false; I::CACHE.len()],
             descs: Vec::new(),
-            descs_cap: 0,
+            kernels: Vec::new(),
         }
     }
 
@@ -774,19 +750,10 @@ impl<'a, I: Isa> Emitter<'a, I> {
         base
     }
 
-    /// A kernel's two dense operands as host arguments: an input run is
-    /// its address, gathered slots are packed into the gather area in
-    /// order, so the area holds exactly the slots the ops gather
-    /// ([`ROp::gather_len`]).
-    fn dense_args(&mut self, a: &Dense, b: &Dense) -> (IArg, IArg) {
-        let mut at = 0usize;
-        let a = self.dense_arg(a, &mut at);
-        let b = self.dense_arg(b, &mut at);
-        (a, b)
-    }
-
     /// A dense operand's address: in place (inputs, a consecutive run of
-    /// work slots), or gathered into the gather area from `*at`.
+    /// work slots), or gathered into the gather area from `*at`, so the
+    /// area holds exactly the slots a kernel gathers
+    /// ([`ROp::gather_len`]).
     fn dense_arg(&mut self, d: &Dense, at: &mut usize) -> IArg {
         let mut arg = |this: &mut Self, d: &Dense| match d {
             Dense::Inputs(k) => IArg::InputAddr(*k as usize * 8),
@@ -923,7 +890,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 let at = self.gather(&c.args);
                 let d = self.descs.len();
                 assert!(
-                    d < self.descs_cap,
+                    d < self.descs.capacity(),
                     "call descriptors counted before emission"
                 );
                 let desc = host::CallDesc {
@@ -952,124 +919,52 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 self.call(host::h_call as *const (), &args);
                 self.invalidate(c.dst, c.n_groups * c.n_out);
             }
-            ROp::Gemv {
-                dst,
-                ref a,
-                ref x,
-                m,
-                n,
-                ref acc,
-            } => {
+            ROp::Kernel(ref kn) => {
                 let mut at = 0usize;
-                let a_arg = self.dense_arg(a, &mut at);
-                let x_arg = self.dense_arg(x, &mut at);
-                match acc {
-                    None => {
-                        let args = [
-                            Arg::I(a_arg),
-                            Arg::I(x_arg),
-                            Arg::I(IArg::Imm(m as u64)),
-                            Arg::I(IArg::Imm(n as u64)),
-                            Arg::I(IArg::WorkAddr(dst as usize * 8)),
-                        ];
-                        self.call(host::h_gemv as *const (), &args);
-                    }
-                    Some((c, _, table)) => {
-                        let c_arg = match c {
-                            Some(c) => self.dense_arg(c, &mut at),
-                            None => IArg::Imm(0),
-                        };
-                        let args = [
-                            Arg::I(a_arg),
-                            Arg::I(x_arg),
-                            Arg::I(c_arg),
-                            Arg::I(IArg::Imm(*table as u64)),
-                            Arg::I(IArg::Imm(m as u64)),
-                            Arg::I(IArg::Imm(n as u64)),
-                            Arg::I(IArg::WorkAddr(dst as usize * 8)),
-                        ];
-                        self.call(host::h_gemv_acc as *const (), &args);
-                    }
+                let mut operands = [host::Place::NONE; 3];
+                for (p, (d, _)) in operands.iter_mut().zip(&kn.operands) {
+                    *p = match self.dense_arg(d, &mut at) {
+                        IArg::InputAddr(off) => host::Place {
+                            base: host::Place::INPUTS,
+                            off: off as u64,
+                        },
+                        IArg::WorkAddr(off) => host::Place {
+                            base: host::Place::WORK,
+                            off: off as u64,
+                        },
+                        _ => unreachable!("a dense operand is in the work array or the inputs"),
+                    };
                 }
-                self.invalidate(dst, m);
-            }
-            ROp::Gemm {
-                dst,
-                ref a,
-                ref b,
-                m,
-                k,
-                n,
-                ref acc,
-            } => {
-                let mut at = 0usize;
-                let a_arg = self.dense_arg(a, &mut at);
-                let b_arg = self.dense_arg(b, &mut at);
-                match acc {
-                    None => {
-                        let args = [
-                            Arg::I(a_arg),
-                            Arg::I(b_arg),
-                            Arg::I(IArg::Imm(m as u64)),
-                            Arg::I(IArg::Imm(k as u64)),
-                            Arg::I(IArg::Imm(n as u64)),
-                            Arg::I(IArg::WorkAddr(dst as usize * 8)),
-                        ];
-                        self.call(host::h_gemm as *const (), &args);
-                    }
-                    Some((c, _, table)) => {
-                        let c_arg = match c {
-                            Some(c) => self.dense_arg(c, &mut at),
-                            None => IArg::Imm(0),
-                        };
-                        let args = [
-                            Arg::I(a_arg),
-                            Arg::I(b_arg),
-                            Arg::I(c_arg),
-                            Arg::I(IArg::Imm(*table as u64)),
-                            Arg::I(IArg::Imm(m as u64)),
-                            Arg::I(IArg::Imm(k as u64)),
-                            Arg::I(IArg::Imm(n as u64)),
-                            Arg::I(IArg::WorkAddr(dst as usize * 8)),
-                        ];
-                        self.call(host::h_gemm_acc as *const (), &args);
-                    }
-                }
-                self.invalidate(dst, m * n);
-            }
-            ROp::SolveMany {
-                dst,
-                ref a,
-                ref b,
-                n,
-                k,
-            } => {
-                let (a_arg, b_arg) = self.dense_args(a, b);
+                let (kind, m, k, n) = match kn.kind {
+                    KernelKind::Gemv { m, n } => (0, m, 0, n),
+                    KernelKind::Gemm { m, k, n } => (1, m, k, n),
+                    KernelKind::Solve { n, k } => (2, 0, k, n),
+                };
+                let desc = host::KernelDesc {
+                    kind,
+                    m: m as u64,
+                    k: k as u64,
+                    n: n as u64,
+                    operands,
+                    codes: kn.codes.as_ref().map_or(0, |c| c.1 as u64),
+                    out: kn.dst as u64 * 8,
+                };
+                let d = self.kernels.len();
+                assert!(
+                    d < self.kernels.capacity(),
+                    "kernel descriptors counted before emission"
+                );
+                // Sized up front: pushing never moves the table, so the
+                // address baked into the code stays valid.
+                self.kernels.push(desc);
+                let ptr = &self.kernels[d] as *const host::KernelDesc as u64;
                 let args = [
-                    Arg::I(a_arg),
-                    Arg::I(b_arg),
-                    Arg::I(IArg::Imm(n as u64)),
-                    Arg::I(IArg::Imm(k as u64)),
-                    Arg::I(IArg::WorkAddr(dst as usize * 8)),
+                    Arg::I(IArg::WorkAddr(0)),
+                    Arg::I(IArg::InputAddr(0)),
+                    Arg::I(IArg::Imm(ptr)),
                 ];
-                self.call(host::h_solve_many as *const (), &args);
-                self.invalidate(dst, n * k);
-            }
-            ROp::Solve {
-                dst,
-                ref a,
-                ref b,
-                n,
-            } => {
-                let (a_arg, b_arg) = self.dense_args(a, b);
-                let args = [
-                    Arg::I(a_arg),
-                    Arg::I(b_arg),
-                    Arg::I(IArg::Imm(n as u64)),
-                    Arg::I(IArg::WorkAddr(dst as usize * 8)),
-                ];
-                self.call(host::h_solve as *const (), &args);
-                self.invalidate(dst, n);
+                self.call(host::h_kernel as *const (), &args);
+                self.invalidate(kn.dst, kn.width());
             }
         }
     }
@@ -1216,9 +1111,9 @@ fn emit_chunk(ops: &[ROp], start: usize, layout: Layout, live: &Liveness) -> Emi
         };
     }
     let mut e: Emitter<Arch> = Emitter::new(layout, live, &hot);
-    let n_calls = ops.iter().filter(|op| matches!(op, ROp::Call(_))).count();
-    e.descs = Vec::with_capacity(n_calls);
-    e.descs_cap = n_calls;
+    let count = |f: fn(&ROp) -> bool| ops.iter().filter(|op| f(op)).count();
+    e.descs = Vec::with_capacity(count(|op| matches!(op, ROp::Call(_))));
+    e.kernels = Vec::with_capacity(count(|op| matches!(op, ROp::Kernel(_))));
     e.isa.prologue();
     for (k, op) in ops.iter().enumerate() {
         e.pos = (start + k) as u32;
@@ -1229,10 +1124,11 @@ fn emit_chunk(ops: &[ROp], start: usize, layout: Layout, live: &Liveness) -> Emi
     e.pos = (start + ops.len()) as u32;
     e.flush();
     e.isa.epilogue();
-    let descs = std::mem::take(&mut e.descs);
+    let (calls, kernels) = (std::mem::take(&mut e.descs), std::mem::take(&mut e.kernels));
     Emitted {
         bytes: e.isa.finish(),
-        descs,
+        calls,
+        kernels,
     }
 }
 
