@@ -166,6 +166,36 @@ def test_matmul_shapes():
         assert np.allclose(jit(f)(*args), np.matmul(*args), rtol=1e-15)
 
 
+def test_arguments_by_buffer_sequence_or_conversion():
+    x = np.array([1.0, 2.0, 3.0])
+    want = np.asarray(lorenz(x, 0.5))
+    for native in (False, True):
+        f = jit(lorenz, native=native)
+        assert np.array_equal(f(x, 0.5), want)
+        assert np.array_equal(f([1.0, 2.0, 3.0], 0.5), want)
+        assert np.array_equal(f(np.array([1, 2, 3]), np.float64(0.5)), want)
+        assert np.array_equal(f(np.arange(1.0, 7.0)[::2] - [0.0, 1.0, 2.0], 0.5), want)
+        assert np.array_equal(f(np.array(x, dtype=">f8"), np.array(0.5)), want)
+        assert f.program(x, 0.5) is f.program([4.0, 5.0, 6.0], 1.0)
+    p = f.program(x, 0.5)
+    assert p.eval(x, 0.5) == want.tolist()
+    assert p.eval([1.0, 2.0, 3.0, 0.5]) == want.tolist()
+    out = np.empty(3)
+    assert p.eval(x, 0.5, out=out) is out and np.array_equal(out, want)
+    with pytest.raises(ValueError):
+        p.eval(x)
+    ro = np.empty(3)
+    ro.flags.writeable = False
+    with pytest.raises(BufferError):
+        p.eval(x, 0.5, out=ro)
+    with pytest.raises(TypeError):
+        p.eval(x, 0.5, out=np.empty(3, dtype=">f8"))
+    # Shapes of one size trace apart: the function sees the shape.
+    g = jit(lambda a: a[0] * 2.0)
+    assert g(np.array([1.0, 2.0])) == 2.0
+    assert np.array_equal(g(np.array([[1.0, 2.0]])), [2.0, 4.0])
+
+
 def test_repr_of_a_deep_shared_expression_is_bounded():
     s = rsdag.Scope()
     x = y = s.input("x")
@@ -220,3 +250,10 @@ def test_a_program_runs_many_inputs_and_from_many_threads():
         with ThreadPoolExecutor(4) as pool:
             got = list(pool.map(lambda x: f(x, 0.0), xs))
         assert np.array_equal(np.array(got), many)
+        # Large enough to release the GIL while it runs.
+        big = jit(lambda v: np.sin(v) * v, native=native)
+        vs = np.random.default_rng(1).standard_normal((16, 400))
+        with ThreadPoolExecutor(4) as pool:
+            got = list(pool.map(big, vs))
+        assert np.array_equal(np.array(got), np.array([big(v) for v in vs]))
+        assert big.program(vs[0]).n_ops >= 256

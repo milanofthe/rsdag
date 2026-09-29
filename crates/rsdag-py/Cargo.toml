@@ -16,8 +16,10 @@ crate-type = ["cdylib"]
 rsdag.workspace = true
 rsdag-jit = { path = "../rsdag-jit" }
 # `extension-module` is added by maturin (pyproject.toml); a plain cargo build
-# links libpython so the workspace builds and tests as a whole.
-pyo3 = { version = "0.29", features = ["abi3-py39"] }
+# links libpython so the workspace builds and tests as a whole. The buffer
+# protocol, which evaluation reads arrays through, is in the limited API
+# from Python 3.11.
+pyo3 = { version = "0.29", features = ["abi3-py311"] }
 
 [lints]
 workspace = true

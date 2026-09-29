@@ -12,9 +12,14 @@ is not traceable; use `rsdag.where(cond, a, b)`.
 """
 
 import builtins
+import math
+
 import numpy as np
 
-from ._rsdag import Program, Scope, Tracer, select as _select, matmul as _matmul, reduce as _reduce, solve as _solve
+from ._rsdag import (
+    Dispatch, Program, Scope, Tracer,
+    select as _select, matmul as _matmul, reduce as _reduce, solve as _solve,
+)
 
 __all__ = [
     "Scope", "Tracer", "Program", "trace", "jit", "jacobian", "grad", "where", "clip",
@@ -139,47 +144,18 @@ def _is_traced(v):
     return False
 
 
-class _Spec:
-    """Shapes of the example arguments: scalars stay scalars, everything
-    else is an array of that shape."""
-
-    def __init__(self, args):
-        self.shapes = []
-        for a in args:
-            if np.isscalar(a) or (isinstance(a, np.ndarray) and a.ndim == 0):
-                self.shapes.append(None)
-            else:
-                self.shapes.append(np.shape(np.asarray(a, dtype=float)))
-
-    def key(self):
-        return tuple(self.shapes)
-
-    def n_inputs(self):
-        return builtins.sum(1 if s is None else int(np.prod(s)) for s in self.shapes)
-
-    def input_range(self, arg):
-        """Flat input indices of argument `arg`."""
-        start = self.n_inputs_before(arg)
-        s = self.shapes[arg]
-        n = 1 if s is None else int(np.prod(s))
-        return list(range(start, start + n))
-
-    def n_inputs_before(self, arg):
-        return builtins.sum(1 if s is None else int(np.prod(s)) for s in self.shapes[:arg])
+def _size(shape):
+    return 1 if shape is None else math.prod(shape)
 
 
-def _make_inputs(scope, spec):
-    args = []
-    for s in spec.shapes:
-        if s is None:
-            args.append(scope.input())
-        else:
-            n = int(np.prod(s))
-            arr = np.empty(n, dtype=object)
-            for k in range(n):
-                arr[k] = scope.input()
-            args.append(arr.reshape(s))
-    return args
+def _inputs(scope, shape):
+    """Fresh inputs for an argument of `shape`: a tracer or an array of them."""
+    if shape is None:
+        return scope.input()
+    arr = np.empty(_size(shape), dtype=object)
+    for k in range(arr.size):
+        arr[k] = scope.input()
+    return arr.reshape(shape)
 
 
 def _flatten_outputs(result):
@@ -191,76 +167,47 @@ def _flatten_outputs(result):
     return list(arr.reshape(-1)), arr.shape
 
 
-def _flatten_inputs(args):
-    flat = []
-    for a in args:
-        if np.isscalar(a) or (isinstance(a, np.ndarray) and a.ndim == 0):
-            flat.append(float(a))
-        else:
-            flat.extend(np.asarray(a, dtype=float).reshape(-1).tolist())
-    return flat
-
-
-class Compiled:
+class Compiled(Dispatch):
     """A traced function: shape-specialized programs per argument shapes,
-    traced on first use for each."""
+    traced on first use for each. Calls and `program(*args)` run in
+    `Dispatch`, which asks `_trace` for the program of a new shape."""
 
     def __init__(self, func, mode="value", native=False, wrt=0):
         self.func = func
         self.mode = mode
         self.native = native
         self.wrt = wrt
-        self._programs = {}
 
-    def _program(self, args):
-        spec = _Spec(args)
-        key = spec.key()
-        hit = self._programs.get(key)
-        if hit is not None:
-            return hit
+    def _trace(self, key):
+        """The program for argument shapes `key` (None for a scalar) and
+        the shape of its result."""
         scope = Scope()
-        inputs = _make_inputs(scope, spec)
-        result = self.func(*inputs)
-        outputs, out_shape = _flatten_outputs(result)
+        outputs, shape = _flatten_outputs(self.func(*(_inputs(scope, s) for s in key)))
         if self.mode == "value":
             program = scope.compile(outputs)
-            shape = out_shape
-        elif self.mode == "jacobian":
-            wrt = spec.input_range(self.wrt)
-            program = scope.jacobian(outputs, wrt)
-            shape = (len(outputs), len(wrt))
-        elif self.mode == "grad":
-            if len(outputs) != 1:
-                raise ValueError("grad needs a scalar-valued function")
-            wrt = spec.input_range(self.wrt)
-            program = scope.gradient(outputs[0], wrt)
-            shape = (len(wrt),)
         else:
-            raise ValueError(self.mode)
+            start = builtins.sum(map(_size, key[:self.wrt]))
+            wrt = list(range(start, start + _size(key[self.wrt])))
+            if self.mode == "jacobian":
+                program = scope.jacobian(outputs, wrt)
+                shape = (len(outputs), len(wrt))
+            elif self.mode == "grad":
+                if len(outputs) != 1:
+                    raise ValueError("grad needs a scalar-valued function")
+                program = scope.gradient(outputs[0], wrt)
+                shape = (len(wrt),)
+            else:
+                raise ValueError(self.mode)
         if self.native:
             program.compile_native()
-        entry = (program, shape)
-        self._programs[key] = entry
-        return entry
-
-    def __call__(self, *args):
-        program, shape = self._program(args)
-        out = program.eval(_flatten_inputs(args))
-        if shape is None:
-            return out[0]
-        return np.asarray(out).reshape(shape)
-
-    def program(self, *args):
-        """The program traced for these argument shapes."""
-        return self._program(args)[0]
-
+        return program, shape
 
 
 def trace(func, *example_args, native=False):
     """Trace `func` on the shapes of `example_args` and return the compiled
     callable (eager form of `jit`)."""
     c = Compiled(func, "value", native)
-    c._program(example_args)
+    c.program(*example_args)
     return c
 
 

@@ -7,19 +7,25 @@
 //! element's `sin`), so plain numpy code traces without changes. A closed
 //! trace is a `Program`: a tape run by the interpreter or, once compiled,
 //! by native code. Derivatives are programs of their own
-//! (`Scope::jacobian`, `Scope::gradient`).
+//! (`Scope::jacobian`, `Scope::gradient`). `Dispatch` keeps a traced
+//! function's programs by argument shapes; a call reads numpy arrays
+//! through the buffer protocol and evaluates on per-thread buffers without
+//! leaving Rust.
 
 // pyo3's method expansion trips clippy's `useless_conversion` on every
 // `PyResult` method; the conversions are the macro's, not ours.
 #![allow(clippy::useless_conversion)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Mutex;
 
 use pyo3::basic::CompareOp;
+use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyAttributeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyTuple};
+use pyo3::types::{PyFloat, PyList, PyTuple};
 
 use rsdag::{BinOp, CmpOp, ExprId, Graph, Node, ReduceOp, SymbolId, Tape, UnaryOp, F64};
 
@@ -493,6 +499,122 @@ pub struct Program {
     n_out: usize,
 }
 
+/// Evaluation buffers of one thread, shared by all programs: an evaluation
+/// takes them and puts them back, so once grown a call allocates nothing,
+/// and a reentrant call (an input whose conversion runs Python) gets its
+/// own.
+#[derive(Default)]
+struct Scratch {
+    ins: Vec<f64>,
+    /// The shapes of the gathered arguments (see [`gather`]).
+    key: Vec<usize>,
+    work: Vec<f64>,
+    out: Vec<f64>,
+}
+
+thread_local! {
+    static SCRATCH: Cell<Scratch> = Cell::default();
+}
+
+/// Run `f` on this thread's [`Scratch`].
+fn with_scratch<R>(f: impl FnOnce(&mut Scratch) -> R) -> R {
+    let mut s = SCRATCH.take();
+    let r = f(&mut s);
+    SCRATCH.set(s);
+    r
+}
+
+/// Programs from this many ops on release the GIL while they run; below,
+/// releasing and retaking it costs more than the evaluation.
+const DETACH_OPS: usize = 256;
+
+/// Append the values of `arg` to `s.ins` and its shape to `s.key` (the
+/// number of dimensions, then the extents; a number has none): a number,
+/// a flat list or tuple of numbers, an object exporting a buffer of doubles
+/// (a float64 numpy array, in any layout, flattened in C order), or
+/// anything numpy converts to one.
+fn gather(arg: &Bound<'_, PyAny>, s: &mut Scratch) -> PyResult<()> {
+    let py = arg.py();
+    if let Ok(x) = arg.cast::<PyFloat>() {
+        s.ins.push(x.value());
+        s.key.push(0);
+        return Ok(());
+    }
+    if arg.is_instance_of::<PyList>() || arg.is_instance_of::<PyTuple>() {
+        if let Ok(xs) = arg.extract::<Vec<f64>>() {
+            s.key.extend([1, xs.len()]);
+            s.ins.extend(xs);
+            return Ok(());
+        }
+    } else if let Some(buf) = doubles(arg) {
+        s.key.push(buf.dimensions());
+        s.key.extend(buf.shape());
+        let n = s.ins.len();
+        s.ins.resize(n + buf.item_count(), 0.0);
+        return buf.copy_to_slice(py, &mut s.ins[n..]);
+    } else if let Ok(x) = arg.extract::<f64>() {
+        s.ins.push(x);
+        s.key.push(0);
+        return Ok(());
+    }
+    // A float64 array now, which the buffer branch takes.
+    let arr = py
+        .import("numpy")?
+        .call_method1("asarray", (arg, "float64"))?;
+    gather(&arr, s)
+}
+
+/// The buffer of `arg` if it holds doubles in the host's byte order.
+/// pyo3 0.29 also takes a big-endian `>d` for `f64` on a little-endian
+/// host, so the order is checked here.
+fn doubles(arg: &Bound<'_, PyAny>) -> Option<PyBuffer<f64>> {
+    let buf = PyBuffer::<f64>::get(arg).ok()?;
+    let host = if cfg!(target_endian = "little") {
+        b'<'
+    } else {
+        b'>'
+    };
+    match buf.format().to_bytes() {
+        [b'd'] | [b'@' | b'=', b'd'] => Some(buf),
+        [c, b'd'] if *c == host => Some(buf),
+        _ => None,
+    }
+}
+
+/// The shapes in a [`Scratch::key`] as Python sees them: `None` for a
+/// scalar, else a tuple of extents.
+fn shapes<'py>(py: Python<'py>, key: &[usize]) -> PyResult<Bound<'py, PyTuple>> {
+    let mut out = Vec::new();
+    let mut rest = key;
+    while let Some((&nd, tail)) = rest.split_first() {
+        let (dims, tail) = tail.split_at(nd);
+        out.push(match nd {
+            0 => py.None().into_bound(py),
+            _ => PyTuple::new(py, dims)?.into_any(),
+        });
+        rest = tail;
+    }
+    PyTuple::new(py, out)
+}
+
+/// `vals` into `out` (any writable float64 buffer of their length), which
+/// is returned, or as a new list.
+fn emit<'py>(
+    py: Python<'py>,
+    vals: &[f64],
+    out: Option<Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    match out {
+        Some(o) => {
+            doubles(&o)
+                .ok_or_else(|| PyTypeError::new_err("out takes a buffer of float64"))?
+                .copy_from_slice(py, vals)?;
+            Ok(o)
+        }
+        None => Ok(PyList::new(py, vals)?.into_any()),
+    }
+}
+
 impl Program {
     fn new(tape: Tape, n_in: usize, n_out: usize) -> Self {
         Program {
@@ -502,54 +624,190 @@ impl Program {
             n_out,
         }
     }
+    fn backend(&self) -> &dyn rsdag::Program {
+        match self.native.get() {
+            Some(n) => n,
+            None => &self.tape,
+        }
+    }
+    /// Evaluate on `s.ins` into `s.out`.
+    fn run(&self, py: Python<'_>, s: &mut Scratch) -> PyResult<()> {
+        if s.ins.len() != self.n_in {
+            return Err(PyValueError::new_err(format!(
+                "expected {} inputs, got {}",
+                self.n_in,
+                s.ins.len()
+            )));
+        }
+        let p = self.backend();
+        if s.work.len() < p.work_len() {
+            s.work.resize(p.work_len(), 0.0);
+        }
+        s.out.resize(self.n_out, 0.0);
+        let Scratch {
+            ins,
+            work,
+            out: vals,
+            ..
+        } = s;
+        let mut run = || p.eval_into(ins, work, vals);
+        if self.tape.n_ops() >= DETACH_OPS {
+            py.detach(run);
+        } else {
+            run();
+        }
+        Ok(())
+    }
+}
+
+/// Clear `s` and gather `args` into it.
+fn gather_all(args: &Bound<'_, PyTuple>, s: &mut Scratch) -> PyResult<()> {
+    s.ins.clear();
+    s.key.clear();
+    args.iter().try_for_each(|a| gather(&a, s))
+}
+
+/// A traced function's programs by argument shapes, the base of the Python
+/// `Compiled`. A call gathers the arguments, looks the program up by their
+/// shapes and evaluates it, all here; a new shape asks the subclass's
+/// `_trace(shapes)` for the program and the shape of its result (`None`
+/// for a scalar).
+#[pyclass(subclass, frozen)]
+struct Dispatch {
+    programs: Mutex<HashMap<Box<[usize]>, Entry>>,
+    /// `numpy.empty`, for the results.
+    empty: Py<PyAny>,
+}
+
+struct Entry {
+    program: Py<Program>,
+    shape: Option<Py<PyTuple>>,
+}
+
+impl Dispatch {
+    /// The entry for the shapes of the arguments gathered into `s`.
+    fn entry(slf: &Bound<'_, Self>, s: &Scratch) -> PyResult<(Py<Program>, Option<Py<PyTuple>>)> {
+        let py = slf.py();
+        let copy = |e: &Entry| {
+            (
+                e.program.clone_ref(py),
+                e.shape.as_ref().map(|t| t.clone_ref(py)),
+            )
+        };
+        let this = slf.get();
+        if let Some(e) = this.programs.lock().unwrap().get(&s.key[..]) {
+            return Ok(copy(e));
+        }
+        let (program, shape) = slf
+            .call_method1("_trace", (shapes(py, &s.key)?,))?
+            .extract::<(Py<Program>, Option<Py<PyTuple>>)>()?;
+        let e = Entry { program, shape };
+        let out = copy(&e);
+        this.programs
+            .lock()
+            .unwrap()
+            .insert(s.key.as_slice().into(), e);
+        Ok(out)
+    }
+}
+
+#[pymethods]
+impl Dispatch {
+    #[new]
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn new(
+        py: Python<'_>,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        Ok(Dispatch {
+            programs: Mutex::default(),
+            empty: py.import("numpy")?.getattr("empty")?.unbind(),
+        })
+    }
+    #[pyo3(signature = (*args))]
+    fn __call__<'py>(
+        slf: &Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        with_scratch(|s| {
+            gather_all(args, s)?;
+            let (program, shape) = Self::entry(slf, s)?;
+            program.get().run(py, s)?;
+            match shape {
+                None => Ok(PyFloat::new(py, s.out[0]).into_any()),
+                Some(shape) => {
+                    let o = slf.get().empty.bind(py).call1((shape,))?;
+                    emit(py, &s.out, Some(o))
+                }
+            }
+        })
+    }
+    /// The program traced for the shapes of `args`.
+    #[pyo3(signature = (*args))]
+    fn program(slf: &Bound<'_, Self>, args: &Bound<'_, PyTuple>) -> PyResult<Py<Program>> {
+        let mut s = Scratch::default();
+        gather_all(args, &mut s)?;
+        Ok(Self::entry(slf, &s)?.0)
+    }
 }
 
 #[pymethods]
 impl Program {
-    /// Evaluate on a flat list of inputs; returns the flat outputs. The
-    /// GIL is released while the program runs, and a program is shared,
-    /// not borrowed: threads evaluate it at once, each on its own buffers.
-    fn eval(&self, py: Python<'_>, inputs: Vec<f64>) -> PyResult<Vec<f64>> {
-        if inputs.len() != self.n_in {
-            return Err(PyValueError::new_err(format!(
-                "expected {} inputs, got {}",
-                self.n_in,
-                inputs.len()
-            )));
-        }
-        let (mut work, mut out) = (Vec::new(), Vec::new());
-        py.detach(|| match self.native.get() {
-            Some(n) => n.eval(&inputs, &mut work, &mut out),
-            None => self.tape.eval(&inputs, &mut work, &mut out),
-        });
-        Ok(out)
+    /// Evaluate on the inputs `args` hold back to back (numbers, float64
+    /// arrays, anything numpy converts). The outputs go into `out` when
+    /// given, a writable float64 buffer of `n_outputs` values that is
+    /// returned, else into a new list. A program is shared, not borrowed:
+    /// threads evaluate it at once, each on its own buffers, and a large one
+    /// releases the GIL while it runs.
+    #[pyo3(signature = (*args, out = None))]
+    fn eval<'py>(
+        &self,
+        py: Python<'py>,
+        args: &Bound<'py, PyTuple>,
+        out: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_scratch(|s| {
+            gather_all(args, s)?;
+            self.run(py, s)?;
+            emit(py, &s.out, out)
+        })
     }
     /// Evaluate `len(inputs) / n_inputs` input vectors laid back to back;
-    /// returns their outputs back to back. Natively the instances run in
-    /// parallel; the GIL is released throughout.
-    fn eval_many(&self, py: Python<'_>, inputs: Vec<f64>) -> PyResult<Vec<f64>> {
+    /// their outputs back to back go into `out` or a new list, as in
+    /// [`Self::eval`]. Natively the instances run in parallel; the GIL is
+    /// released throughout.
+    #[pyo3(signature = (inputs, out = None))]
+    fn eval_many<'py>(
+        &self,
+        py: Python<'py>,
+        inputs: &Bound<'py, PyAny>,
+        out: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let mut s = Scratch::default();
+        gather(inputs, &mut s)?;
+        let ins = s.ins;
         let n_in = self.n_in.max(1);
-        if !inputs.len().is_multiple_of(n_in) {
+        if !ins.len().is_multiple_of(n_in) {
             return Err(PyValueError::new_err(format!(
                 "{} inputs are not a whole number of vectors of {}",
-                inputs.len(),
+                ins.len(),
                 self.n_in
             )));
         }
-        Ok(py.detach(|| {
-            let mut all = Vec::with_capacity(inputs.len() / n_in * self.n_out);
+        let all = py.detach(|| {
+            let mut all = vec![0.0; ins.len() / n_in * self.n_out];
             match self.native.get() {
-                Some(n) => n.eval_many(&inputs, n_in, &mut all),
+                Some(n) => n.eval_many(&ins, n_in, &mut all),
                 None => {
-                    let (mut work, mut out) = (Vec::new(), Vec::new());
-                    for ins in inputs.chunks(n_in) {
-                        self.tape.eval(ins, &mut work, &mut out);
-                        all.extend_from_slice(&out);
-                    }
+                    let mut work = vec![0.0; self.tape.work_len()];
+                    rsdag::Program::eval_many_into(&self.tape, &ins, n_in, &mut work, &mut all);
                 }
             }
             all
-        }))
+        });
+        emit(py, &all, out)
     }
     /// Compile the tape to native code; evaluation switches over. A large
     /// batch of function-body calls runs on the thread pool.
@@ -676,6 +934,7 @@ fn _rsdag(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Scope>()?;
     m.add_class::<Tracer>()?;
     m.add_class::<Program>()?;
+    m.add_class::<Dispatch>()?;
     m.add_function(wrap_pyfunction!(select, m)?)?;
     m.add_function(wrap_pyfunction!(matmul, m)?)?;
     m.add_function(wrap_pyfunction!(reduce, m)?)?;
