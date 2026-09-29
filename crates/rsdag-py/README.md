@@ -25,6 +25,7 @@ def lorenz(x, t):
 f = jit(lorenz, native=True)              # traces on first call, then native
 y = f(np.array([1.0, 2.0, 3.0]), 0.0)
 J = jacobian(lorenz)(np.array([1.0, 2.0, 3.0]), 0.0)   # (3, 3), symbolic
+Js = jacobian(lorenz, sparse=True)       # the nonzeros; Js.pattern(x, t): rows, cols
 g = jit(lambda A, x: solve(A, matmul(A, x)))            # one Gemv, one Solve
 ```
 

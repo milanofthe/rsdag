@@ -191,6 +191,9 @@ class Compiled(Dispatch):
             if self.mode == "jacobian":
                 program = scope.jacobian(outputs, wrt)
                 shape = (len(outputs), len(wrt))
+            elif self.mode == "sparse_jacobian":
+                program = scope.sparse_jacobian(outputs, wrt)
+                shape = (program.n_outputs,)
             elif self.mode == "grad":
                 if len(outputs) != 1:
                     raise ValueError("grad needs a scalar-valued function")
@@ -201,6 +204,12 @@ class Compiled(Dispatch):
         if self.native:
             program.compile_native()
         return program, shape
+
+    def pattern(self, *args):
+        """`(rows, cols)` of a sparse Jacobian's values for arguments of the
+        shapes of `args`, as numpy index arrays."""
+        rows, cols = self.program(*args).pattern
+        return np.asarray(rows, dtype=np.intp), np.asarray(cols, dtype=np.intp)
 
 
 def trace(func, *example_args, native=False):
@@ -216,10 +225,12 @@ def jit(func, native=False):
     return Compiled(func, "value", native)
 
 
-def jacobian(func, wrt=0, native=False):
-    """The dense Jacobian `(n_out, n_in)` of `func` with respect to its
-    argument `wrt` (the first by default) by symbolic differentiation."""
-    return Compiled(func, "jacobian", native, wrt)
+def jacobian(func, wrt=0, native=False, sparse=False):
+    """The Jacobian of `func` with respect to its argument `wrt` (the first
+    by default) by symbolic differentiation: a dense `(n_out, n_in)` array,
+    or with `sparse` the structurally nonzero values, row by row in
+    ascending columns, whose indices `pattern(*args)` returns."""
+    return Compiled(func, "sparse_jacobian" if sparse else "jacobian", native, wrt)
 
 
 def grad(func, wrt=0, native=False):

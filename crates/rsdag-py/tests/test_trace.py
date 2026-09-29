@@ -257,3 +257,19 @@ def test_a_program_runs_many_inputs_and_from_many_threads():
             got = list(pool.map(big, vs))
         assert np.array_equal(np.array(got), np.array([big(v) for v in vs]))
         assert big.program(vs[0]).n_ops >= 256
+
+
+def test_sparse_jacobian_matches_the_dense_one():
+    def chain(x):
+        return x[:-1] * x[1:] + np.sin(x[:-1])
+
+    x = np.linspace(0.1, 0.9, 6)
+    dense = jacobian(chain)(x)
+    for native in (False, True):
+        J = jacobian(chain, sparse=True, native=native)
+        vals = J(x)
+        rows, cols = J.pattern(x)
+        assert len(vals) == 10  # two nonzeros per row
+        got = np.zeros_like(dense)
+        got[rows, cols] = vals
+        assert np.array_equal(got, dense)
