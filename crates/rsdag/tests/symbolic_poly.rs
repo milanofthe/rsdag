@@ -46,3 +46,59 @@ fn prunes_small_terms() {
     assert_eq!((total, kept), (2, 1));
     assert_eq!(pruned[0], a);
 }
+
+/// Over small random ring programs (a large one expands to polynomials of
+/// high degree, which cancel in floating point): where a rational form
+/// exists, `N(s) / D(s)`
+/// is the expression, and where a polynomial exists, its coefficients are.
+#[test]
+fn rational_forms_evaluate_like_the_expression() {
+    use rsdag::symbolic::poly::{collect, poly_to_expr, rational_form};
+    use rsdag::synth::{build, inputs, Spec, Vocabulary};
+    use rsdag::{eval, Graph, F64};
+    let (mut forms, mut polys) = (0, 0);
+    for seed in 0..60u64 {
+        let mut g: Graph<F64> = Graph::new();
+        let mut spec = Spec::new(seed)
+            .steps(15)
+            .params(3)
+            .vocab(Vocabulary::Ring)
+            .smooth();
+        let (roots, syms) = build(&mut g, &mut spec);
+        let (e, s) = (roots[0], syms[0]);
+        let s_e = g.symbol_expr(s);
+        let row = inputs(&mut spec.rng(), syms.len());
+        let env: std::collections::HashMap<_, _> = syms.iter().copied().zip(row).collect();
+        let close = |x: f64, y: f64| {
+            (x.is_nan() && y.is_nan()) || (x - y).abs() <= 1e-8 * (1.0 + x.abs().max(y.abs()))
+        };
+        let want = eval(&g, &[e], &env)[0];
+        if let Some((num, den)) = rational_form(&mut g, e, s) {
+            let (n, d) = (
+                poly_to_expr(&mut g, &num, s_e),
+                poly_to_expr(&mut g, &den, s_e),
+            );
+            let got = eval(&g, &[n, d], &env);
+            if got[1].abs() > 1e-9 && want.is_finite() {
+                assert!(
+                    close(got[0] / got[1], want),
+                    "seed {seed}: {} vs {want}",
+                    got[0] / got[1]
+                );
+                forms += 1;
+            }
+        }
+        if let Some(coeffs) = collect(&mut g, e, s) {
+            let p = poly_to_expr(&mut g, &coeffs, s_e);
+            let got = eval(&g, &[p], &env)[0];
+            if want.is_finite() {
+                assert!(close(got, want), "seed {seed}: {got} vs {want}");
+                polys += 1;
+            }
+        }
+    }
+    assert!(
+        forms > 30 && polys > 5,
+        "{forms} forms, {polys} polynomials checked"
+    );
+}
