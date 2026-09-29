@@ -70,6 +70,22 @@ impl<K: Field> Graph<K> {
         self.inline_with(roots, &mut HashMap::default())
     }
 
+    /// Every call under `roots` that passes constants, redirected to a copy
+    /// of its function specialized to them: the copy's outputs are the
+    /// function's with those parameters replaced by the constants (and
+    /// folded), it takes the other arguments only. The calls that pass the
+    /// same constants in the same places share one copy, so their instances
+    /// still run as one batch, and calls in a copy's body are specialized
+    /// too. A ground terminal, or the derivatives of a DC analysis set to
+    /// zero, take their share of a device body away before it is compiled.
+    ///
+    /// The copy keeps the roles of the parameters it keeps; its outputs are
+    /// `Plain` apart from their non-derivative roles, a derivative of it is
+    /// derived anew. Calls into an extern body are left as they are.
+    pub fn specialize_calls(&mut self, roots: &[ExprId]) -> Vec<ExprId> {
+        specialize_calls_in(self, roots, &mut HashMap::default())
+    }
+
     /// [`inline_all`](Self::inline_all) with `bodies` holding each output
     /// already inlined over its function's parameters, so a function is
     /// inlined once however many calls it has, and the recursion is only as
@@ -440,4 +456,106 @@ impl<K: Field> Graph<K> {
         }
         set
     }
+}
+
+/// The specialized copies made so far: `(function, constant arguments by
+/// position)` to the copy.
+type Specialized = HashMap<(FuncId, Vec<(u32, ExprId)>), FuncId>;
+
+fn specialize_calls_in<K: Field>(
+    g: &mut Graph<K>,
+    roots: &[ExprId],
+    made: &mut Specialized,
+) -> Vec<ExprId> {
+    crate::transform::rewrite(g, roots, |g, _e, node, ops| {
+        let Node::Call(o, _) = node else {
+            return g.build(node, ops);
+        };
+        let (f, out) = g.output(o);
+        let consts: Vec<(u32, ExprId)> = ops
+            .iter()
+            .enumerate()
+            .filter(|(_, &a)| g.const_of(a).is_some())
+            .map(|(k, &a)| (k as u32, a))
+            .collect();
+        if consts.is_empty() || g.func(f).is_extern() {
+            return g.build(node, ops);
+        }
+        let key = (f, consts);
+        let copy = match made.get(&key) {
+            Some(&c) => c,
+            None => {
+                let c = specialize_function(g, f, &key.1, made);
+                made.insert(key.clone(), c);
+                c
+            }
+        };
+        let rest: Vec<ExprId> = ops
+            .iter()
+            .enumerate()
+            .filter(|(k, _)| !key.1.iter().any(|&(p, _)| p as usize == *k))
+            .map(|(_, &a)| a)
+            .collect();
+        g.call(copy, out, &rest)
+    })
+}
+
+/// The copy of `f` with the parameters `consts` names bound to their
+/// constants.
+fn specialize_function<K: Field>(
+    g: &mut Graph<K>,
+    f: FuncId,
+    consts: &[(u32, ExprId)],
+    made: &mut Specialized,
+) -> FuncId {
+    let func = g.func(f);
+    let name = func.name().to_string();
+    let params = func.params().to_vec();
+    let roles = func.param_roles().to_vec();
+    let outputs = func.outputs().to_vec();
+    let out_roles = func.output_roles().to_vec();
+    let bound: HashMap<SymbolId, ExprId> = consts
+        .iter()
+        .map(|&(k, c)| (params[k as usize], c))
+        .collect();
+    let exprs: Vec<ExprId> = outputs
+        .iter()
+        .filter_map(|o| match *o {
+            Output::Expr(e) => Some(e),
+            _ => None,
+        })
+        .collect();
+    let folded = crate::transform::substitute(g, &exprs, &bound);
+    let folded = specialize_calls_in(g, &folded, made);
+    let kept: Vec<usize> = (0..params.len())
+        .filter(|&k| !bound.contains_key(&params[k]))
+        .collect();
+    let copy = g.push_function(Function::new(
+        &name,
+        kept.iter().map(|&k| params[k]).collect(),
+        None,
+    ));
+    for (j, &k) in kept.iter().enumerate() {
+        g.set_param_role(copy, j as u32, roles[k]);
+    }
+    let mut next = folded.into_iter();
+    for (o, role) in outputs.iter().zip(out_roles) {
+        let out = match *o {
+            Output::Expr(_) => {
+                let e = next.next().expect("one folded output per expression");
+                if g.is_zero(e) {
+                    Output::Zero
+                } else {
+                    Output::Expr(e)
+                }
+            }
+            _ => Output::Zero,
+        };
+        let role = match role {
+            OutputRole::Derivative { .. } => OutputRole::Plain,
+            r => r,
+        };
+        g.push_output(copy, out, role);
+    }
+    copy
 }

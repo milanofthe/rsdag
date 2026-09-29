@@ -253,8 +253,8 @@ impl Function {
 
     /// [`body`](Self::body) for a program that calls the outputs `needed`:
     /// among the registered bodies that carry each of them that is an
-    /// expression, the one computing the fewest outputs; the interpreted
-    /// body when none covers them.
+    /// expression, the one computing the fewest outputs; else the body of
+    /// exactly those outputs, interpreted.
     pub fn body_for<K: crate::field::Field>(
         &self,
         ctx: &crate::graph::Graph<K>,
@@ -283,14 +283,11 @@ impl Function {
             };
         }
         let mut roots = Vec::new();
-        let mut slot_of = Vec::with_capacity(self.outputs.len());
-        for o in &self.outputs {
-            match o {
-                Output::Expr(e) => {
-                    slot_of.push(Some(roots.len() as u32));
-                    roots.push(*e);
-                }
-                _ => slot_of.push(None),
+        let mut slot_of = vec![None; self.outputs.len()];
+        for &k in needed {
+            if let (Output::Expr(e), None) = (self.outputs[k as usize], slot_of[k as usize]) {
+                slot_of[k as usize] = Some(roots.len() as u32);
+                roots.push(e);
             }
         }
         // Split over the parameters the roles call pure, when there are any.
