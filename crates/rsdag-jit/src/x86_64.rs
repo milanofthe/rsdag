@@ -7,8 +7,9 @@
 //! `xmm15` are callee-saved, so the chunk preserves them and they come
 //! first in the cache. Baseline SSE2, with `roundsd` where there is SSE4.1
 //! and three-operand VEX forms and `vblendvpd` where there is AVX (the same
-//! IEEE operations, fewer bytes); `RSDAG_JIT_SSE2` set in the environment
-//! keeps to the baseline, so both paths can be tested on one machine.
+//! IEEE operations, fewer bytes); `RSDAG_SSE2` set in the environment
+//! keeps to the baseline (as it keeps rsdag's dense kernels to SSE2), so
+//! both paths can be tested on one machine.
 //! Constants are read rip-relative from a pool at the end of the chunk.
 
 use crate::isa::*;
@@ -255,7 +256,7 @@ impl Isa for X64 {
 
     fn new(hot: &[*const ()]) -> X64 {
         static BASELINE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let baseline = *BASELINE.get_or_init(|| std::env::var_os("RSDAG_JIT_SSE2").is_some());
+        let baseline = *BASELINE.get_or_init(|| std::env::var_os("RSDAG_SSE2").is_some());
         #[cfg(target_arch = "x86_64")]
         let (sse41, avx) = (
             !baseline && is_x86_feature_detected!("sse4.1"),
