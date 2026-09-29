@@ -825,12 +825,11 @@ impl<'a, I: Isa> Emitter<'a, I> {
             ROp::Mul(dst, a, b) => self.bin2(Arith::Mul, dst, a, b),
             ROp::MulAdd(dst, a, b, c) => {
                 // Two roundings, like the interpreter.
-                let (x, y) = (self.get(a), self.get(b));
+                let x = self.get(a);
                 let m = self.fresh();
-                self.isa.arith(Arith::Mul, m, x, y);
-                let z = self.get(c);
+                self.arith_rm(Arith::Mul, m, x, b);
                 let r = self.fresh_for(dst);
-                self.isa.arith(Arith::Add, r, m, z);
+                self.arith_rm(Arith::Add, r, m, c);
                 self.put(dst, r);
             }
             ROp::Neg(dst, a) => {
@@ -1076,10 +1075,27 @@ impl<'a, I: Isa> Emitter<'a, I> {
     }
 
     fn bin2(&mut self, op: Arith, dst: u32, a: u32, b: u32) {
-        let (x, y) = (self.get(a), self.get(b));
+        let x = self.get(a);
         let r = self.fresh_for(dst);
-        self.isa.arith(op, r, x, y);
+        self.arith_rm(op, r, x, b);
         self.put(dst, r);
+    }
+
+    /// `d = a op slot`: the second operand from memory when the ISA reads
+    /// memory operands and the cache does not hold a value this op reads
+    /// last (a load would take a register and an instruction for nothing),
+    /// else from its register.
+    fn arith_rm(&mut self, op: Arith, d: u8, a: u8, slot: u32) {
+        if I::MEM_OPERANDS
+            && input_index(slot).is_none()
+            && !self.at.contains_key(&slot)
+            && self.live.death(slot, self.pos, false) == self.pos
+        {
+            self.isa.arith_mem(op, d, a, Base::Work, slot as usize * 8);
+            return;
+        }
+        let b = self.get(slot);
+        self.isa.arith(op, d, a, b);
     }
 
     fn unary(&mut self, dst: u32, uop: UnaryOp, a: u32) {
@@ -1137,8 +1153,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
         let ch = n / 4;
         for c in 0..ch {
             for (k, &ak) in acc.iter().enumerate() {
-                let t = self.term(a, b, 4 * c + k);
-                self.isa.arith(op, ak, ak, t);
+                self.term(op, ak, ak, a, b, 4 * c + k);
                 self.release_except(&acc);
             }
         }
@@ -1149,24 +1164,24 @@ impl<'a, I: Isa> Emitter<'a, I> {
         let mut s = self.fresh();
         self.isa.arith(op, s, l, r);
         for k in ch * 4..n {
-            let t = self.term(a, b, k);
             let s2 = self.fresh();
-            self.isa.arith(op, s2, s, t);
+            self.term(op, s2, s, a, b, k);
             s = s2;
             self.release_except(&[s]);
         }
         s
     }
 
-    /// Term `k` of a fold: the operand, or the product for a dot.
-    fn term(&mut self, a: &[u32], b: Option<&[u32]>, k: usize) -> u8 {
+    /// `d = acc op term k` of a fold: the term is the operand, or for a dot
+    /// the product.
+    fn term(&mut self, op: Arith, d: u8, acc: u8, a: &[u32], b: Option<&[u32]>, k: usize) {
         match b {
-            None => self.get(a[k]),
+            None => self.arith_rm(op, d, acc, a[k]),
             Some(bb) => {
-                let (x, y) = (self.get(a[k]), self.get(bb[k]));
+                let x = self.get(a[k]);
                 let p = self.fresh();
-                self.isa.arith(Arith::Mul, p, x, y);
-                p
+                self.arith_rm(Arith::Mul, p, x, bb[k]);
+                self.isa.arith(op, d, acc, p);
             }
         }
     }

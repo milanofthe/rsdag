@@ -227,6 +227,15 @@ impl X64 {
         }
         self.b(pred);
     }
+    /// The scalar opcode (`F2 0F op`) of an arithmetic op.
+    fn arith_op(op: Arith) -> u8 {
+        match op {
+            Arith::Add => 0x58,
+            Arith::Mul => 0x59,
+            Arith::Sub => 0x5C,
+            Arith::Div => 0x5E,
+        }
+    }
     fn base(b: Base) -> u8 {
         match b {
             Base::Work => WORK,
@@ -346,12 +355,7 @@ impl Isa for X64 {
     }
 
     fn arith(&mut self, op: Arith, d: u8, a: u8, b: u8) {
-        let opc = match op {
-            Arith::Add => 0x58,
-            Arith::Mul => 0x59,
-            Arith::Sub => 0x5C,
-            Arith::Div => 0x5E,
-        };
+        let opc = Self::arith_op(op);
         if self.avx {
             self.vex_rr(3, opc, d, a, b);
         } else if d == b && d != a {
@@ -366,6 +370,20 @@ impl Isa for X64 {
             self.mov(d, a);
             self.sse(0xF2, opc, d, b);
         }
+    }
+    const MEM_OPERANDS: bool = true;
+    fn arith_mem(&mut self, op: Arith, d: u8, a: u8, base: Base, off: usize) {
+        let base = Self::base(base);
+        if self.avx {
+            self.vex(3, 1, d, a, base);
+        } else {
+            self.mov(d, a);
+            self.b(0xF2);
+            self.rex(false, d, base);
+            self.b(0x0F);
+        }
+        self.b(Self::arith_op(op));
+        self.modrm_mem(d, base, off);
     }
     const MINMAX: bool = false;
     fn minmax(&mut self, _op: ReduceOp, _d: u8, _a: u8, _b: u8) {
