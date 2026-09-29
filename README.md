@@ -191,14 +191,18 @@ The dense kernels' throughput over the matrix size:
 
 ![Dense kernels](docs/bench/dense.svg)
 
-Against CasADi (its SX virtual machine) and JAX from Python, on one core
-(`docs/bench/compare.py`): the 1D Brusselator in each tool's idiom, the
-right-hand side and its Jacobian per call, and the setup of both from the
-Python function to a first result. rsdag and CasADi build the sparse
-Jacobian, JAX the dense one (`jacfwd`, up to 2000 states). On the largest
-grids JAX's fused vector code evaluates the right-hand side faster.
+Against CasADi and JAX on circuits: the twelve AnalogGym amplifiers
+(BSIM4), a nine-stage PSP103 ring oscillator and the uA741, as SANE exports
+them (rsdag modules; `rsdag-jit/examples/modules.rs`,
+`docs/bench/modules.py`). The residual and its Jacobian per call on one
+core, with the parameters as inputs (rsdag keeps them in the prolog) and as
+constants (every instance's parameter branches decided at build time).
+CasADi builds SX functions and runs through its buffer interface, JAX maps
+each device body over its instances with `vmap` and builds the Jacobian
+dense; it does not compile the Jacobian of the PSP103 and BSIM4 circuits
+within a minute.
 
-![Against CasADi and JAX](docs/bench/compare.svg)
+![Against CasADi and JAX](docs/bench/modules.svg)
 
 ## Rust
 

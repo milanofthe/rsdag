@@ -354,6 +354,7 @@ dependencies = [
  "rayon",
  "rsdag",
  "rustc-hash",
+ "serde_json",
 ]
 
 [[package]]

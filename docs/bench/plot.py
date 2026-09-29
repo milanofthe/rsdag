@@ -13,6 +13,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "data")
@@ -96,43 +98,68 @@ def dense():
     save(fig, "dense.svg")
 
 
-def compare():
-    """rsdag against CasADi and JAX (compare.csv): calls of the right-hand
-    side and its Jacobian, and the setup of both."""
-    r = rows("compare.csv")
-    tools = (("rsdag native", BLUE, "-"), ("rsdag interpreter", BLUE, "--"),
-             ("CasADi", ORANGE, "-"), ("JAX", GREEN, "-"))
+def modules():
+    """rsdag against CasADi and JAX on SANE's circuits (modules_rsdag.csv,
+    modules_other.csv): the residual and its Jacobian per call, with the
+    parameters as inputs and as constants; the twelve BSIM4 amplifiers as
+    their median and range."""
+    ours = rows("modules_rsdag.csv")
+    other = rows("modules_other.csv")
+    groups = (("uA741, BJT", lambda m: m == "ua741"),
+              ("PSP103 ring", lambda m: m == "ring_psp103"),
+              ("BSIM4 amplifiers (12)", lambda m: m not in ("ua741", "ring_psp103")))
 
-    def series(tool, value):
-        sel = [x for x in r if x["tool"] == tool and value(x) is not None]
-        return [int(x["states"]) for x in sel], [value(x) for x in sel]
+    def ours_col(col):
+        return lambda m: [float(x[col]) for x in ours if x["module"] == m]
 
-    cols = (
-        ("Right-hand side, per call", "microseconds",
-         lambda x: float(x["call_f_us"])),
-        ("Jacobian, per call", "microseconds",
-         lambda x: float(x["call_j_us"]) if x["call_j_us"] else None),
-        ("Setup of both", "milliseconds",
-         lambda x: (float(x["setup_f_s"]) + float(x["setup_j_s"])) * 1e3 if x["setup_j_s"] else None),
+    def other_col(tool, col):
+        return lambda m: [float(x[col]) for x in other if x["module"] == m and x["tool"] == tool and x[col]]
+
+    bars = (  # label, color, solid (parameters constant), value per module for F and J
+        ("rsdag", BLUE, False, ours_col("call_f_native_us"), ours_col("call_j_native_us")),
+        ("CasADi", ORANGE, False, other_col("CasADi (parameter inputs)", "call_f_us"),
+         other_col("CasADi (parameter inputs)", "call_j_us")),
+        ("rsdag", BLUE, True, ours_col("call_f_folded_us"), ours_col("call_j_folded_us")),
+        ("CasADi", ORANGE, True, other_col("CasADi", "call_f_us"), other_col("CasADi", "call_j_us")),
+        ("JAX", GREEN, True, other_col("JAX", "call_f_us"), other_col("JAX", "call_j_us")),
     )
-    fig, axes = plt.subplots(1, 3, figsize=(10.5, 3.0))
-    for a, (title, unit, value) in zip(axes, cols):
-        for tool, color, ls in tools:
-            n, v = series(tool, value)
-            a.plot(n, v, "o" + ls, color=color, ms=4)
-        a.set_xscale("log"); a.set_yscale("log")
-        a.set_xlabel("states"); a.set_ylabel(unit)
+    modules_ = sorted({x["module"] for x in ours})
+    fig, axes = plt.subplots(1, 2, figsize=(9.6, 3.4), sharey=True)
+    width = 0.15
+    for a, (title, k) in zip(axes, (("Residual, per call", 3), ("Jacobian, per call", 4))):
+        for gi, (gname, member) in enumerate(groups):
+            mods = [m for m in modules_ if member(m)]
+            for bi, bar in enumerate(bars):
+                vals = [v for m in mods for v in bar[k](m)]
+                x = gi + (bi - 2) * width
+                if not vals:
+                    a.text(x, 1.2, "x", color=bar[1], ha="center", va="bottom", fontsize=9)
+                    continue
+                med = float(np.median(vals))
+                a.bar(x, med, width * 0.9, color=bar[1], alpha=1.0 if bar[2] else 0.35,
+                      edgecolor=bar[1], linewidth=0.8)
+                if len(vals) > 1:
+                    a.errorbar(x, med, yerr=[[med - min(vals)], [max(vals) - med]], color=GREY,
+                               lw=0.8, capsize=2)
+        a.set_yscale("log")
+        a.set_xticks(range(len(groups)))
+        a.set_xticklabels([g[0] for g in groups], fontsize=8)
         a.set_title(title)
-    key(fig, (("rsdag", BLUE), ("CasADi", ORANGE), ("JAX", GREEN)),
-        (("native", "-", "o"), ("interpreter", "--", "o")))
-    save(fig, "compare.svg")
+        a.grid(axis="x", visible=False)
+    axes[0].set_ylabel("microseconds")
+    key(fig, (("rsdag", BLUE), ("CasADi", ORANGE), ("JAX", GREEN)), ())
+    fig.legend(handles=[Patch(fc=GREY, alpha=0.35, label="parameters as inputs"),
+                        Patch(fc=GREY, label="parameters as constants"),
+                        Line2D([], [], color=GREY, marker="$x$", ls="", label="no compile in 1 min")],
+               loc="lower center", ncol=3, frameon=False, fontsize=8, bbox_to_anchor=(0.5, -0.13))
+    save(fig, "modules.svg")
 
 
 if __name__ == "__main__":
     ops()
     dense()
     names = ["ops.svg", "dense.svg"]
-    if os.path.exists(os.path.join(DATA, "compare.csv")):
-        compare()
-        names.append("compare.svg")
+    if os.path.exists(os.path.join(DATA, "modules_other.csv")):
+        modules()
+        names.append("modules.svg")
     print("wrote", ", ".join(f"docs/bench/{n}" for n in names))
