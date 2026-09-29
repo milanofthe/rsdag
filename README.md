@@ -180,7 +180,7 @@ code and the typed evaluation on them bit for bit.
 
 ## Benchmarks
 
-Measured on one core of an Apple M3 by `scripts/bench.sh`.
+Measured on one core of an AMD Ryzen 9 9900X (Windows 11) by `scripts/bench.sh`.
 
 Evaluation cost per op, interpreter and native, and compile cost per op,
 tape and native, over program size and op vocabulary:
