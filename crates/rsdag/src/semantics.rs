@@ -86,7 +86,7 @@ pub fn reduce_slice(op: ReduceOp, xs: &[f64]) -> f64 {
     reduce_slice_t(op, xs)
 }
 
-/// [`dot_slice_t`] in `f64`: the two-lane vector twin, bit-identical.
+/// [`dot_slice_t`] in `f64`: the vector twin (AVX or two-lane), bit-identical.
 pub fn dot_slice(a: &[f64], b: &[f64]) -> f64 {
     <f64 as Scalar>::dot_slice(a, b)
 }
@@ -449,7 +449,7 @@ pub fn fold_in_place<T: Scalar>(codes: &[u32], c: Option<&[T]>, out: &mut [T]) {
     }
 }
 
-/// [`gemm_t`] in `f64`: the two-lane vector twin, bit-identical.
+/// [`gemm_t`] in `f64`: the vector twin (AVX or two-lane), bit-identical.
 pub fn gemm(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, out: &mut [f64]) {
     <f64 as Scalar>::gemm(a, b, m, k, n, out)
 }
@@ -482,7 +482,7 @@ pub fn gemv_fold(
     <f64 as Scalar>::gemv_fold(a, x, m, n, c, codes, out)
 }
 
-/// [`gemv_t`] in `f64`: the two-lane vector twin, bit-identical.
+/// [`gemv_t`] in `f64`: the vector twin (AVX or two-lane), bit-identical.
 pub fn gemv(a: &[f64], x: &[f64], m: usize, n: usize, out: &mut [f64]) {
     <f64 as Scalar>::gemv(a, x, m, n, out)
 }
