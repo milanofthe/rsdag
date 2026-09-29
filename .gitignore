@@ -10,3 +10,4 @@ dist/
 # built extension modules
 *.so
 *.pyd
+*.pdb
