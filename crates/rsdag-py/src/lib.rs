@@ -5,10 +5,11 @@
 //! into it and overload Python arithmetic, comparisons and the numpy ufunc
 //! method protocol (an object array of tracers under `np.sin` calls each
 //! element's `sin`), so plain numpy code traces without changes. A closed
-//! trace is a `Program`: a tape with an interpreter, an optional native
-//! native form, symbolic derivatives, and C source.
+//! trace is a `Program`: a tape run by the interpreter or, once compiled,
+//! by native code. Derivatives are programs of their own
+//! (`Scope::jacobian`, `Scope::gradient`).
 
-// pyo3 0.22's method expansion trips clippy's `useless_conversion` on every
+// pyo3's method expansion trips clippy's `useless_conversion` on every
 // `PyResult` method; the conversions are the macro's, not ours.
 #![allow(clippy::useless_conversion)]
 
@@ -18,7 +19,7 @@ use std::rc::Rc;
 use pyo3::basic::CompareOp;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyTuple};
+use pyo3::types::PyList;
 
 use rsdag::{BinOp, CmpOp, ExprId, Graph, Node, ReduceOp, SymbolId, Tape, UnaryOp, F64};
 
@@ -104,6 +105,19 @@ impl Tracer {
         let id = self.g.borrow_mut().unary(op, self.id);
         self.wrap(id)
     }
+}
+
+/// Node budget of a tracer's `repr`.
+const REPR_NODES: usize = 200;
+
+/// Whether the expression under `id` written out as a tree has at most
+/// `budget` nodes; stops counting once over, so the cost is the budget.
+fn fits(g: &Graph<F64>, id: ExprId, budget: &mut usize) -> bool {
+    if *budget == 0 {
+        return false;
+    }
+    *budget -= 1;
+    g.operands(id).iter().all(|&c| fits(g, c, budget))
 }
 
 #[pymethods]
@@ -208,8 +222,17 @@ impl Tracer {
     fn rand_uniform(&self) -> Tracer {
         self.unary(UnaryOp::RandUniform)
     }
+    /// The expression as text, or a summary when written out as a tree it
+    /// would exceed [`REPR_NODES`] nodes (a shared subexpression is written
+    /// once per use, so the text of a DAG can be exponential in its size).
     fn __repr__(&self) -> String {
-        format!("Tracer({})", rsdag::to_string(&self.g.borrow(), self.id))
+        let g = self.g.borrow();
+        let mut budget = REPR_NODES;
+        if fits(&g, self.id, &mut budget) {
+            format!("Tracer({})", rsdag::to_string(&g, self.id))
+        } else {
+            format!("Tracer(#{}, over {REPR_NODES} nodes)", self.id.0)
+        }
     }
     fn __add__(&self, other: &Bound<'_, PyAny>) -> PyResult<BinOut> {
         let Some(o) = self.operand_opt(other)? else {
@@ -696,6 +719,5 @@ fn _rsdag(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(dot, m)?)?;
     m.add_function(wrap_pyfunction!(reduce, m)?)?;
     m.add_function(wrap_pyfunction!(solve, m)?)?;
-    let _ = PyTuple::empty(m.py());
     Ok(())
 }

@@ -136,6 +136,15 @@ def test_tracer_defers_to_arrays_on_the_left():
         k * "no"
 
 
+def test_repr_of_a_deep_shared_expression_is_bounded():
+    s = rsdag.Scope()
+    x = y = s.input("x")
+    for _ in range(64):
+        y = y * y + y
+    assert "over" in repr(y)
+    assert repr(x * 2.0).startswith("Tracer(")
+
+
 def test_matvec_and_solve_trace_to_kernels():
     from rsdag import matmul, solve, dot
     n = 10
