@@ -1,13 +1,47 @@
 //! The README's diagrams, drawn by rsdag itself: DOT files for
 //! `scripts/diagrams.sh`, which renders them to `docs/diagrams/*.svg`.
+//! With `--social` the same diagrams in the theme of the social cards
+//! (`docs/social`): dark lines on a white page, a fill per node kind.
 //!
-//!   cargo run -p rsdag --example diagrams -- <out dir>
+//!   cargo run -p rsdag --example diagrams -- <out dir> [--social]
 
 use std::collections::HashMap;
 use std::fmt::Write;
+use std::sync::OnceLock;
 
-use rsdag::dot::{reachable, Blocks, GraphView, Kind, TapeView, Theme};
+use rsdag::dot::{reachable, Blocks, GraphView, Kind, Style, TapeView, Theme};
 use rsdag::{differentiate, CmpOp, ExprId, Graph, Node, ParamRole, SymbolId, Tape, F64};
+
+static THEME: OnceLock<Theme> = OnceLock::new();
+
+/// The theme of this run.
+fn theme() -> Theme {
+    THEME.get().cloned().unwrap_or_default()
+}
+
+/// The social cards' theme: dark lines and text for a white page, a light
+/// fill per node kind, larger type.
+fn social() -> Theme {
+    const INK: &str = "#374151";
+    Theme {
+        style: Style::Filled,
+        font_size: 14.0,
+        title_size: 16.0,
+        text: INK,
+        line: Some(INK),
+        fill_alpha: "38",
+        fade_fill_alpha: "12",
+        input: "#3b82f6",
+        param: "#f59e0b",
+        constant: "#9ca3af",
+        op: "#9ca3af",
+        choice: "#ef4444",
+        kernel: "#10b981",
+        call: "#8b5cf6",
+        output: "#1f2937",
+        ..Theme::default()
+    }
+}
 
 fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
     match g.node(e) {
@@ -19,7 +53,7 @@ fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
 /// Front ends, graph, transforms, tape, the backends under `Adaptive`, the
 /// solver driving them.
 fn pipeline() -> String {
-    Blocks::new(Theme::default(), "TB")
+    Blocks::new(theme(), "TB")
         .block("rust", "Rust", &["Graph constructors,", "Scope, Builder"])
         .block(
             "py",
@@ -89,7 +123,7 @@ fn pipeline() -> String {
 
 /// A simulator's model through rsdag to the solver loop.
 fn solver_path() -> String {
-    Blocks::new(Theme::default(), "TB")
+    Blocks::new(theme(), "TB")
         .block(
             "model",
             "Model",
@@ -153,7 +187,7 @@ fn solver_path() -> String {
 
 /// How `Adaptive` serves one tape.
 fn adaptive() -> String {
-    Blocks::new(Theme::default(), "TB")
+    Blocks::new(theme(), "TB")
         .block("tape", "tape", &["prolog / main"])
         .block(
             "interp",
@@ -200,7 +234,7 @@ fn adaptive() -> String {
         .raw(&format!(
             "flip -> spec [dir=back, style=dashed, color=\"{0}\"];\n  \
              interp -> flip [dir=back, style=dashed, color=\"{0}\"];",
-            Theme::default().accent
+            theme().accent
         ))
         .edge("native", "ep", "")
         .render()
@@ -208,7 +242,7 @@ fn adaptive() -> String {
 
 /// How the graph and tape diagrams draw a node, and the state edge.
 fn legend() -> String {
-    let t = Theme::default();
+    let t = theme();
     let mut s = t.header("LR");
     let kinds = [
         (Kind::Input, "input"),
@@ -240,7 +274,7 @@ fn legend() -> String {
 
 /// A function body over many instances.
 fn bodies_concept() -> String {
-    Blocks::new(Theme::default(), "LR")
+    Blocks::new(theme(), "LR")
         .block("i1", "instance 1", &["args x1, p1"])
         .block("i2", "instance 2", &["args x2, p2"])
         .text("dots", &["..."])
@@ -290,7 +324,7 @@ fn bodies_concept() -> String {
 
 /// Specializing a tape on the arms its selects took.
 fn specialize_concept() -> String {
-    Blocks::new(Theme::default(), "LR")
+    Blocks::new(theme(), "LR")
         .block(
             "tape",
             "tape",
@@ -343,6 +377,7 @@ fn derivative() -> String {
     let wrt = sym(&g, x);
     let df = differentiate(&mut g, f, wrt);
     GraphView::new(&g)
+        .theme(theme())
         .root(f, "f")
         .root(df, "df/dx")
         .focus(reachable(&g, &[df]))
@@ -367,6 +402,7 @@ fn split() -> String {
     let pure = [false, true, true, true];
     let tape = Tape::compile_split(&g, &[i, di], &syms, &pure);
     TapeView::new(&tape)
+        .theme(theme())
         .inputs(&["v", "is", "n", "vt"])
         .params(&pure)
         .outputs(&["i", "di/dv"])
@@ -405,6 +441,7 @@ fn bodies_tape() -> String {
     let pure = [false, false, false, true, true, true, true];
     let tape = Tape::compile_split(&g, &kcl, &syms, &pure);
     TapeView::new(&tape)
+        .theme(theme())
         .inputs(&["v0", "v1", "v2", "is0", "is1", "is2", "n"])
         .params(&pure)
         .outputs(&["kcl0", "kcl1", "kcl2"])
@@ -451,6 +488,7 @@ fn specialize_graph() -> String {
         }
     }
     GraphView::new(&g)
+        .theme(theme())
         .params(&[sym(&g, vth), sym(&g, vsat), sym(&g, k)])
         .root(i, "i")
         .focus(keep)
@@ -458,8 +496,14 @@ fn specialize_graph() -> String {
 }
 
 fn main() {
-    let dir = std::env::args()
-        .nth(1)
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--social") {
+        let _ = THEME.set(social());
+    }
+    let dir = args
+        .iter()
+        .find(|a| !a.starts_with("--"))
+        .cloned()
         .unwrap_or_else(|| "target/diagrams".into());
     std::fs::create_dir_all(&dir).expect("create the output directory");
     for (name, dot) in [

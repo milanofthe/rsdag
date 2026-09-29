@@ -444,6 +444,30 @@ impl Scope {
         let tape = Tape::compile(&g, &flat, &self.inputs);
         Ok(Program::new(tape, self.inputs.len(), flat.len()))
     }
+    /// The Jacobian `d outputs / d inputs[wrt]` in its nonzeros: a program
+    /// whose outputs are the structurally nonzero entries, row by row in
+    /// ascending columns, with that pattern (`Program.pattern`).
+    #[pyo3(signature = (outputs, wrt = vec![]))]
+    fn sparse_jacobian(&self, outputs: &Bound<'_, PyList>, wrt: Vec<usize>) -> PyResult<Program> {
+        let ids = self.output_ids(outputs)?;
+        let wrt = self.wrt_symbols(&wrt)?;
+        let mut g = self.g.borrow_mut();
+        let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for (i, row) in rsdag::sparse_jacobian(&mut g, &ids, &wrt)
+            .into_iter()
+            .enumerate()
+        {
+            for (j, e) in row {
+                rows.push(i);
+                cols.push(j);
+                vals.push(e);
+            }
+        }
+        let tape = Tape::compile(&g, &vals, &self.inputs);
+        let mut p = Program::new(tape, self.inputs.len(), vals.len());
+        p.pattern = Some((rows, cols));
+        Ok(p)
+    }
     /// The gradient of one scalar output with respect to `inputs[wrt]`
     /// (reverse mode; all inputs when empty).
     #[pyo3(signature = (output, wrt = vec![]))]
@@ -497,6 +521,8 @@ pub struct Program {
     native: std::sync::OnceLock<rsdag_jit::NativeTape>,
     n_in: usize,
     n_out: usize,
+    /// `(rows, cols)` of the outputs of a sparse Jacobian.
+    pattern: Option<(Vec<usize>, Vec<usize>)>,
 }
 
 /// Evaluation buffers of one thread, shared by all programs: an evaluation
@@ -622,6 +648,7 @@ impl Program {
             native: std::sync::OnceLock::new(),
             n_in,
             n_out,
+            pattern: None,
         }
     }
     fn backend(&self) -> &dyn rsdag::Program {
@@ -832,6 +859,12 @@ impl Program {
     #[getter]
     fn n_outputs(&self) -> usize {
         self.n_out
+    }
+    /// `(rows, cols)` of a sparse Jacobian's outputs, `None` for any other
+    /// program.
+    #[getter]
+    fn pattern(&self) -> Option<(Vec<usize>, Vec<usize>)> {
+        self.pattern.clone()
     }
     #[getter]
     fn n_ops(&self) -> usize {

@@ -670,11 +670,17 @@ impl<'g, K: Field> GraphView<'g, K> {
             if name.is_empty() {
                 continue;
             }
+            let faded = self.faded(*e);
             let _ = writeln!(
                 s,
-                "  out{i} [{}];\n  n{} -> out{i};",
-                t.node(Kind::Output, name, self.faded(*e)),
-                e.0
+                "  out{i} [{}];\n  n{} -> out{i}{};",
+                t.node(Kind::Output, name, faded),
+                e.0,
+                if faded {
+                    format!(" [{}]", t.faded_edge())
+                } else {
+                    String::new()
+                }
             );
         }
         for (a, b, label) in &self.links {
