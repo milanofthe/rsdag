@@ -475,13 +475,14 @@ fn tangent<K: Field>(ctx: &mut Graph<K>, e: ExprId, wrt: SymbolId, memo: &mut Me
         Node::Call(o, l) => {
             let args = ctx.args(l).to_vec();
             let (f, out) = ctx.output(o);
+            let moving: Vec<(u32, ExprId)> = (0..args.len() as u32)
+                .map(|i| (i, d(args[i as usize])))
+                .filter(|&(_, da)| da != zero)
+                .collect();
+            let params: Vec<u32> = moving.iter().map(|&(i, _)| i).collect();
+            let ks = ctx.derivative_outputs(f, out, &params);
             let mut acc = zero;
-            for (i, &arg) in args.iter().enumerate() {
-                let dai = d(arg);
-                if dai == zero {
-                    continue;
-                }
-                let k = ctx.derivative_output(f, out, i as u32);
+            for (&(_, dai), k) in moving.iter().zip(ks) {
                 let partial = ctx.call(f, k, &args);
                 let term = ctx.mul(partial, dai);
                 acc = ctx.add(acc, term);
@@ -791,13 +792,14 @@ pub fn gradient<K: Field>(ctx: &mut Graph<K>, f: ExprId, wrt: &[SymbolId]) -> Ve
             Node::Call(o, l) => {
                 let args = ctx.args(l).to_vec();
                 let (func, out) = ctx.output(o);
-                for (i, &arg) in args.iter().enumerate() {
-                    if act(arg) {
-                        let k = ctx.derivative_output(func, out, i as u32);
-                        let partial = ctx.call(func, k, &args);
-                        let t = ctx.mul(a_bar, partial);
-                        push(&mut adj, arg, t);
-                    }
+                let moving: Vec<u32> = (0..args.len() as u32)
+                    .filter(|&i| act(args[i as usize]))
+                    .collect();
+                let ks = ctx.derivative_outputs(func, out, &moving);
+                for (&i, k) in moving.iter().zip(ks) {
+                    let partial = ctx.call(func, k, &args);
+                    let t = ctx.mul(a_bar, partial);
+                    push(&mut adj, args[i as usize], t);
                 }
             }
         }
