@@ -12,9 +12,14 @@ is not traceable; use `rsdag.where(cond, a, b)`.
 """
 
 import builtins
+import math
+
 import numpy as np
 
-from ._rsdag import Program, Scope, Tracer, select as _select, dot as _dot, reduce as _reduce, solve as _solve
+from ._rsdag import (
+    Dispatch, Program, Scope, Tracer,
+    select as _select, matmul as _matmul, reduce as _reduce, solve as _solve,
+)
 
 __all__ = [
     "Scope", "Tracer", "Program", "trace", "jit", "jacobian", "grad", "where", "clip",
@@ -23,42 +28,41 @@ __all__ = [
 ]
 
 
+def _flat(v):
+    return np.asarray(v, dtype=object).ravel()
+
+
 def dot(a, b):
     """Inner product of two vectors; traced, one `Dot` node (rows of one
     vector fuse into a matrix-vector kernel)."""
     if _is_traced(a) or _is_traced(b):
-        return _dot(list(np.ravel(np.asarray(a, dtype=object))), list(np.ravel(np.asarray(b, dtype=object))))
+        a, b = _flat(a), _flat(b)
+        if a.size != b.size:
+            raise ValueError("dot takes two vectors of one length")
+        return _matmul(a, b, 1)[0]
     return np.dot(a, b)
 
 
 def matmul(a, b):
-    """`a @ b` over tracers: a matrix against a vector is one `Dot` per row,
-    against a matrix one per entry; either fuses into one kernel (`Gemv`,
-    `Gemm`) once compiled."""
+    """`a @ b` over tracers, vectors and matrices: one `Dot` per entry of
+    the product, fused into one kernel (`Gemv`, `Gemm`) once compiled."""
     if not (_is_traced(a) or _is_traced(b)):
         return np.matmul(a, b)
     a = np.asarray(a, dtype=object)
     b = np.asarray(b, dtype=object)
-    if a.ndim == 1 and b.ndim == 1:
-        return dot(a, b)
-    if a.ndim == 2 and b.ndim == 1:
-        out = np.empty(a.shape[0], dtype=object)
-        for i in range(a.shape[0]):
-            out[i] = dot(a[i], b)
-        return out
-    if a.ndim == 2 and b.ndim == 2:
-        out = np.empty((a.shape[0], b.shape[1]), dtype=object)
-        for i in range(a.shape[0]):
-            for j in range(b.shape[1]):
-                out[i, j] = dot(a[i], b[:, j])
-        return out
-    raise ValueError("matmul over tracers takes vectors and matrices")
+    if not (a.ndim in (1, 2) and b.ndim in (1, 2) and a.shape[-1] == b.shape[0]):
+        raise ValueError("matmul over tracers takes vectors and matrices of matching sizes")
+    entries = _matmul(a.ravel(), b.ravel(), b.shape[1] if b.ndim == 2 else 1)
+    out = np.empty(len(entries), dtype=object)
+    out[:] = entries
+    out = out.reshape(a.shape[:-1] + b.shape[1:])
+    return out if out.ndim else out[()]
 
 
 def sum(x):
     """The sum of a vector, one `Reduce` node in the reference fold order."""
     if _is_traced(x):
-        return _reduce("sum", list(np.ravel(np.asarray(x, dtype=object))))
+        return _reduce("sum", _flat(x))
     return np.sum(x)
 
 
@@ -72,7 +76,7 @@ def solve(a, b):
     n = b.shape[0]
     if a.shape != (n, n):
         raise ValueError("solve takes an n by n matrix and n right-hand sides")
-    xs = _solve(list(a.ravel()), list(b))
+    xs = _solve(a.ravel(), b)
     return np.asarray(xs, dtype=object)
 
 
@@ -140,47 +144,18 @@ def _is_traced(v):
     return False
 
 
-class _Spec:
-    """Shapes of the example arguments: scalars stay scalars, everything
-    else is an array of that shape."""
-
-    def __init__(self, args):
-        self.shapes = []
-        for a in args:
-            if np.isscalar(a) or (isinstance(a, np.ndarray) and a.ndim == 0):
-                self.shapes.append(None)
-            else:
-                self.shapes.append(np.shape(np.asarray(a, dtype=float)))
-
-    def key(self):
-        return tuple(self.shapes)
-
-    def n_inputs(self):
-        return builtins.sum(1 if s is None else int(np.prod(s)) for s in self.shapes)
-
-    def input_range(self, arg):
-        """Flat input indices of argument `arg`."""
-        start = self.n_inputs_before(arg)
-        s = self.shapes[arg]
-        n = 1 if s is None else int(np.prod(s))
-        return list(range(start, start + n))
-
-    def n_inputs_before(self, arg):
-        return builtins.sum(1 if s is None else int(np.prod(s)) for s in self.shapes[:arg])
+def _size(shape):
+    return 1 if shape is None else math.prod(shape)
 
 
-def _make_inputs(scope, spec):
-    args = []
-    for s in spec.shapes:
-        if s is None:
-            args.append(scope.input())
-        else:
-            n = int(np.prod(s))
-            arr = np.empty(n, dtype=object)
-            for k in range(n):
-                arr[k] = scope.input()
-            args.append(arr.reshape(s))
-    return args
+def _inputs(scope, shape):
+    """Fresh inputs for an argument of `shape`: a tracer or an array of them."""
+    if shape is None:
+        return scope.input()
+    arr = np.empty(_size(shape), dtype=object)
+    for k in range(arr.size):
+        arr[k] = scope.input()
+    return arr.reshape(shape)
 
 
 def _flatten_outputs(result):
@@ -192,76 +167,47 @@ def _flatten_outputs(result):
     return list(arr.reshape(-1)), arr.shape
 
 
-def _flatten_inputs(args):
-    flat = []
-    for a in args:
-        if np.isscalar(a) or (isinstance(a, np.ndarray) and a.ndim == 0):
-            flat.append(float(a))
-        else:
-            flat.extend(np.asarray(a, dtype=float).reshape(-1).tolist())
-    return flat
-
-
-class Compiled:
+class Compiled(Dispatch):
     """A traced function: shape-specialized programs per argument shapes,
-    traced on first use for each."""
+    traced on first use for each. Calls and `program(*args)` run in
+    `Dispatch`, which asks `_trace` for the program of a new shape."""
 
     def __init__(self, func, mode="value", native=False, wrt=0):
         self.func = func
         self.mode = mode
         self.native = native
         self.wrt = wrt
-        self._programs = {}
 
-    def _program(self, args):
-        spec = _Spec(args)
-        key = spec.key()
-        hit = self._programs.get(key)
-        if hit is not None:
-            return hit
+    def _trace(self, key):
+        """The program for argument shapes `key` (None for a scalar) and
+        the shape of its result."""
         scope = Scope()
-        inputs = _make_inputs(scope, spec)
-        result = self.func(*inputs)
-        outputs, out_shape = _flatten_outputs(result)
+        outputs, shape = _flatten_outputs(self.func(*(_inputs(scope, s) for s in key)))
         if self.mode == "value":
             program = scope.compile(outputs)
-            shape = out_shape
-        elif self.mode == "jacobian":
-            wrt = spec.input_range(self.wrt)
-            program = scope.jacobian(outputs, wrt)
-            shape = (len(outputs), len(wrt))
-        elif self.mode == "grad":
-            if len(outputs) != 1:
-                raise ValueError("grad needs a scalar-valued function")
-            wrt = spec.input_range(self.wrt)
-            program = scope.gradient(outputs[0], wrt)
-            shape = (len(wrt),)
         else:
-            raise ValueError(self.mode)
+            start = builtins.sum(map(_size, key[:self.wrt]))
+            wrt = list(range(start, start + _size(key[self.wrt])))
+            if self.mode == "jacobian":
+                program = scope.jacobian(outputs, wrt)
+                shape = (len(outputs), len(wrt))
+            elif self.mode == "grad":
+                if len(outputs) != 1:
+                    raise ValueError("grad needs a scalar-valued function")
+                program = scope.gradient(outputs[0], wrt)
+                shape = (len(wrt),)
+            else:
+                raise ValueError(self.mode)
         if self.native:
             program.compile_native()
-        entry = (program, shape)
-        self._programs[key] = entry
-        return entry
-
-    def __call__(self, *args):
-        program, shape = self._program(args)
-        out = program.eval(_flatten_inputs(args))
-        if shape is None:
-            return out[0]
-        return np.asarray(out).reshape(shape)
-
-    def program(self, *args):
-        """The program traced for these argument shapes."""
-        return self._program(args)[0]
-
+        return program, shape
 
 
 def trace(func, *example_args, native=False):
     """Trace `func` on the shapes of `example_args` and return the compiled
     callable (eager form of `jit`)."""
     c = Compiled(func, "value", native)
-    c._program(example_args)
+    c.program(*example_args)
     return c
 
 

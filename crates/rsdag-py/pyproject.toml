@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "rsdag"
 version = "0.1.0"
 description = "Rust symbolic graph backend: trace Python functions into a graph, differentiate, compile"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = ["numpy>=1.22"]
 license-files = ["LICENSE"]
 
