@@ -615,10 +615,10 @@ impl<'g, K: Field> GraphView<'g, K> {
             Node::Call(o, _) => {
                 let (f, k) = g.output(o);
                 let func = g.func(f);
-                let name = if func.outputs.len() > 1 {
-                    format!("{}#{k}", func.name)
+                let name = if func.outputs().len() > 1 {
+                    format!("{}#{k}", func.name())
                 } else {
-                    func.name.clone()
+                    func.name().to_string()
                 };
                 (name, Kind::Call)
             }

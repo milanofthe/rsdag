@@ -79,7 +79,7 @@ fn a_registered_body_serves_the_tape_and_the_symbolic_outputs_stay() {
     only.eval(&[1.5], &mut w, &mut o);
     assert_eq!(o, vec![15.0]);
     assert!(
-        !g.func(f).compiled.is_empty(),
+        !g.func(f).compiled().is_empty(),
         "the registration stays for the consumer to refresh"
     );
 }
@@ -149,7 +149,7 @@ fn each_call_site_takes_the_smallest_body_covering_its_outputs() {
             slot_of: vec![Some(0), None],
         },
     );
-    assert_eq!(g.func(f).compiled.len(), 2);
+    assert_eq!(g.func(f).compiled().len(), 2);
     let (y, z) = (g.sym("y"), g.sym("z"));
     let syms: Vec<SymbolId> = [y, z]
         .iter()

@@ -537,6 +537,64 @@ pub enum Node {
 
 const _: () = assert!(std::mem::size_of::<Node>() == 16);
 
+impl Node {
+    /// The operands this node reads, its list resolved in `pool` (the
+    /// argument pool of the graph or module it belongs to).
+    #[inline]
+    pub fn operands<'a>(&self, pool: &'a [ExprId]) -> Operands<'a> {
+        let z = ExprId(0);
+        match *self {
+            Node::Const(_) | Node::Symbol(_) => Operands::Inline { buf: [z; 3], n: 0 },
+            Node::Add(a, b) | Node::Mul(a, b) | Node::Cmp(_, a, b) | Node::Binary(_, a, b) => {
+                Operands::Inline {
+                    buf: [a, b, z],
+                    n: 2,
+                }
+            }
+            Node::Neg(a) | Node::Pow(a, _) | Node::Unary(_, a) => Operands::Inline {
+                buf: [a, z, z],
+                n: 1,
+            },
+            Node::Select(c, t, e) => Operands::Inline {
+                buf: [c, t, e],
+                n: 3,
+            },
+            Node::Reduce(_, l) | Node::Dot(l) | Node::Call(_, l) | Node::Solve(l, _) => {
+                Operands::Slice(&pool[l.start as usize..(l.start + l.len) as usize])
+            }
+        }
+    }
+
+    /// This node over other operands: `ops` in [`operands`](Self::operands)
+    /// order, a variadic node taking `list` (their interned window) instead.
+    pub(crate) fn with_operands(self, ops: &[ExprId], list: ArgList) -> Node {
+        match self {
+            Node::Const(_) | Node::Symbol(_) => self,
+            Node::Add(..) => Node::Add(ops[0], ops[1]),
+            Node::Mul(..) => Node::Mul(ops[0], ops[1]),
+            Node::Neg(_) => Node::Neg(ops[0]),
+            Node::Pow(_, n) => Node::Pow(ops[0], n),
+            Node::Unary(op, _) => Node::Unary(op, ops[0]),
+            Node::Binary(op, ..) => Node::Binary(op, ops[0], ops[1]),
+            Node::Cmp(op, ..) => Node::Cmp(op, ops[0], ops[1]),
+            Node::Select(..) => Node::Select(ops[0], ops[1], ops[2]),
+            Node::Reduce(op, _) => Node::Reduce(op, list),
+            Node::Dot(_) => Node::Dot(list),
+            Node::Solve(_, i) => Node::Solve(list, i),
+            Node::Call(o, _) => Node::Call(o, list),
+        }
+    }
+
+    /// Whether the operands are an interned list rather than inline.
+    #[inline]
+    pub(crate) fn is_variadic(&self) -> bool {
+        matches!(
+            self,
+            Node::Reduce(..) | Node::Dot(_) | Node::Solve(..) | Node::Call(..)
+        )
+    }
+}
+
 /// The operands of a node, borrowed without allocation: inline for the
 /// fixed-arity variants, a pool slice for the variadic ones. Derefs to
 /// `&[ExprId]`.

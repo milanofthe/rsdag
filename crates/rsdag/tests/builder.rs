@@ -45,7 +45,7 @@ fn record(x: [f64; 4], k: f64) -> Vec<f64> {
     let kk = s.param("k");
     let outs = model(&mut *s, xs, kk);
     let f = s.close(outs.to_vec());
-    let params = g.func(f).params.clone();
+    let params = g.func(f).params().to_vec();
     let tape = Tape::compile(&g, &outs, &params);
     let (mut w, mut o) = (Vec::new(), Vec::new());
     tape.eval(&[x[0], x[1], x[2], x[3], k], &mut w, &mut o);
@@ -79,7 +79,7 @@ fn the_recorded_model_differentiates() {
     let kk = s.param("k");
     let outs = model(&mut *s, xs, kk);
     let f = s.close(outs.to_vec());
-    let params = g.func(f).params.clone();
+    let params = g.func(f).params().to_vec();
     // d(diode)/dx0 = is/vt * exp(x0/vt), checked against a finite difference
     // of the numeric twin.
     let d = rsdag::differentiate(&mut g, outs[0], params[0]);

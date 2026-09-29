@@ -11,7 +11,7 @@ fn roles_select_jacobian_blocks() {
     let two = g.konst_int(2);
     let y = g.mul(two, x);
     let f = g.close("sys", vec![r, y]);
-    let params = g.func(f).params.clone();
+    let params = g.func(f).params().to_vec();
     assert_eq!(params.len(), 4);
     for (i, s) in params.iter().enumerate() {
         let role = match g.symbol_name(*s) {
@@ -38,10 +38,10 @@ fn roles_select_jacobian_blocks() {
     assert_eq!(jy.len(), 1);
     let (of, wrt, k) = jy[0];
     assert_eq!(
-        g.func(f).output_roles[k as usize],
+        g.func(f).output_roles()[k as usize],
         OutputRole::Derivative { of, wrt }
     );
-    match g.func(f).outputs[k as usize] {
+    match g.func(f).outputs()[k as usize] {
         Output::Expr(e) => assert_eq!(g.const_f64(e), Some(2.0)),
         _ => panic!("expected an expression"),
     }

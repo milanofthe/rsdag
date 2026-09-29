@@ -9,7 +9,7 @@ use rsdag::{
 };
 
 fn expr_of(g: &Graph<F64>, f: FuncId, out: usize) -> ExprId {
-    match g.func(f).outputs[out] {
+    match g.func(f).outputs()[out] {
         Output::Expr(e) => e,
         _ => panic!("output {out} of function {f:?} is not an expression"),
     }
@@ -77,7 +77,7 @@ fn subsystems_nest_and_instances_keep_their_parameters() {
     // The hierarchy is intact in the graph: the system's output is a call.
     assert!(matches!(g.node(expr_of(&g, sys, 0)), Node::Call(..)));
 
-    let params = g.func(sys).params.clone();
+    let params = g.func(sys).params().to_vec();
     let tape = Tape::compile(&g, &[expr_of(&g, sys, 0)], &params);
     let (mut w, mut o) = (Vec::new(), Vec::new());
     tape.eval(&[5.0f64], &mut w, &mut o);
@@ -202,8 +202,9 @@ fn feedthrough_shows_where_an_algebraic_loop_is() {
     // every hop has feedthrough, which is a walk over these rows.
     let feeds = |f: FuncId, out: usize| -> bool {
         // Does output `out` read the block's *input* parameter?
-        g.func(f).params.iter().enumerate().any(|(k, _)| {
-            matches!(g.func(f).param_roles[k], ParamRole::Input { .. }) && g.feedthrough(f)[out][k]
+        g.func(f).params().iter().enumerate().any(|(k, _)| {
+            matches!(g.func(f).param_roles()[k], ParamRole::Input { .. })
+                && g.feedthrough(f)[out][k]
         })
     };
     assert!(feeds(direct, 0), "gain -> gain is an algebraic loop");

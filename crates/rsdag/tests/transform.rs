@@ -26,3 +26,30 @@ fn substitution_is_simultaneous() {
     let want = ctx.sub(y, x);
     assert_eq!(g, want);
 }
+
+/// Substituting and inlining walk the graph with an explicit stack: a chain
+/// far deeper than a small thread stack could recurse through is fine.
+#[test]
+fn deep_chains_substitute_and_inline_on_a_small_stack() {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            let mut g: Graph = Graph::new();
+            let x = g.sym("x");
+            let mut acc = x;
+            for _ in 0..100_000 {
+                acc = g.sin(acc);
+            }
+            let f = g.close("f", vec![acc]);
+            let y = g.sym("y");
+            let xs = sid(&mut g, "x");
+            let map: HashMap<SymbolId, ExprId> = [(xs, y)].into_iter().collect();
+            let sub = substitute(&mut g, &[acc], &map)[0];
+            let call = g.call(f, 0, &[y]);
+            let inlined = g.inline_all(&[call])[0];
+            assert_eq!(inlined, sub, "inlining is substituting the arguments");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
