@@ -152,3 +152,32 @@ fn unary_folding_and_eval() {
     let want = (0.5_f64 / 0.025).exp();
     assert!((got.re - want).abs() <= want * 1e-12);
 }
+
+/// Printing is linear in the graph: a small expression is infix, a large
+/// or deeply shared one a listing of its nodes, however deep.
+#[test]
+fn printing_a_shared_or_deep_dag_stays_linear() {
+    let mut g: Graph<F64> = Graph::new();
+    let x = g.sym("x");
+    let mut e = x;
+    for _ in 0..40 {
+        e = g.mul(e, e);
+    }
+    let text = rsdag::to_string(&g, e);
+    assert!(text.lines().count() == 41, "{text}");
+    let y = g.sym("y");
+    let small = g.add(x, y);
+    assert_eq!(rsdag::to_string(&g, small), "(x + y)");
+    std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            let mut acc = x;
+            for _ in 0..100_000 {
+                acc = g.sin(acc);
+            }
+            assert!(rsdag::to_string(&g, acc).lines().count() > 100_000);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
