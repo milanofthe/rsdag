@@ -1,8 +1,8 @@
-//! The accumulating kernels natively: the same bits as the interpreter on
-//! a block solve (subtractions folded into the products) and on the
-//! complex product pattern (self folds).
+//! The accumulating kernels natively: a running block from which products
+//! are subtracted one after another (each product one kernel whose
+//! accumulator is the previous result, read in place) evaluates to the same
+//! bits as the interpreter, whole and split into prolog and main.
 
-use rsdag::symbolic::solve::{block_pattern, plan, solve_block_planned, Block, BlockRows, Cx};
 use rsdag::{ExprId, Graph, Node, SymbolId, Tape, F64};
 use rsdag_jit::NativeTape;
 
@@ -15,49 +15,56 @@ fn sym(g: &mut Graph<F64>, name: &str, syms: &mut Vec<SymbolId>) -> ExprId {
 }
 
 #[test]
-fn a_complex_block_solve_runs_natively_with_folded_kernels() {
-    let (nb, b) = (4usize, 6usize);
+fn chained_block_updates_run_natively_with_folded_kernels() {
+    // At least eight rows share each vector, so the dots group into kernels.
+    let (b, updates) = (8usize, 3usize);
     let mut g: Graph<F64> = Graph::new();
     let mut syms = Vec::new();
-    let mut vals = Vec::new();
-    let mut rows: BlockRows<Cx> = vec![Vec::new(); nb];
-    for i in 0..nb {
-        for j in [i, (i + 1) % nb] {
-            let mut blk = Vec::new();
-            for r in 0..b {
-                for c in 0..b {
-                    let re = sym(&mut g, &format!("a{i}_{j}_{r}_{c}r"), &mut syms);
-                    let im = sym(&mut g, &format!("a{i}_{j}_{r}_{c}i"), &mut syms);
-                    vals.push(
-                        ((i * 3 + j + r * 7 + c) % 5) as f64 * 0.2 - 0.4
-                            + if i == j && r == c { 5.0 } else { 0.0 },
-                    );
-                    vals.push(
-                        ((i + j * 2 + r + c * 3) % 7) as f64 * 0.1 - 0.3
-                            + if i == j && r == c { 2.0 } else { 0.0 },
-                    );
-                    blk.push(Cx::new(re, im));
-                }
-            }
-            rows[i].push((j, Block::Dense(blk)));
-        }
-    }
-    let n_entries = vals.len();
-    let rhs: Vec<Cx> = (0..nb * b)
-        .map(|k| {
-            let re = sym(&mut g, &format!("b{k}r"), &mut syms);
-            let im = sym(&mut g, &format!("b{k}i"), &mut syms);
-            vals.push(1.0 + 0.1 * k as f64);
-            vals.push(-0.5);
-            Cx::new(re, im)
+    let matrix = |g: &mut Graph<F64>, name: &str, syms: &mut Vec<SymbolId>| -> Vec<ExprId> {
+        (0..b * b)
+            .map(|k| sym(g, &format!("{name}{k}"), syms))
+            .collect()
+    };
+    // Parameter-pure: the running block and the factors, `L` row-major and
+    // `U` column-major so both operands of a product are runs; main: a
+    // vector.
+    let mut acc = matrix(&mut g, "c", &mut syms);
+    let factors: Vec<(Vec<ExprId>, Vec<ExprId>)> = (0..updates)
+        .map(|u| {
+            let l = matrix(&mut g, &format!("l{u}_"), &mut syms);
+            let r = matrix(&mut g, &format!("u{u}_"), &mut syms);
+            (l, r)
         })
         .collect();
-    let plan = plan(&block_pattern(&rows)).expect("plan");
-    let solved = solve_block_planned(&mut g, &rows, b, &plan, &rhs);
-    let mut roots: Vec<ExprId> = solved.x.iter().flat_map(|c| [c.re, c.im]).collect();
-    roots.push(solved.pivots_ok);
-    let mut pure = vec![true; n_entries];
-    pure.resize(vals.len(), false);
+    let n_pure = syms.len();
+    let v: Vec<ExprId> = (0..b)
+        .map(|k| sym(&mut g, &format!("v{k}"), &mut syms))
+        .collect();
+    // acc -= L_u U_u, entry by entry, one product after the other.
+    for (l, r) in &factors {
+        acc = (0..b * b)
+            .map(|q| {
+                let (i, j) = (q / b, q % b);
+                let row: Vec<ExprId> = (0..b).map(|k| l[i * b + k]).collect();
+                let col: Vec<ExprId> = (0..b).map(|k| r[j * b + k]).collect();
+                let d = g.dot(row, col);
+                g.sub(acc[q], d)
+            })
+            .collect();
+    }
+    // y = v - acc v, the main part.
+    let roots: Vec<ExprId> = (0..b)
+        .map(|i| {
+            let row: Vec<ExprId> = (0..b).map(|k| acc[i * b + k]).collect();
+            let d = g.dot(row, v.clone());
+            g.sub(v[i], d)
+        })
+        .collect();
+    let vals: Vec<f64> = (0..syms.len())
+        .map(|k| ((k * 7 + 3) % 11) as f64 * 0.125 - 0.6)
+        .collect();
+    let mut pure = vec![true; n_pure];
+    pure.resize(syms.len(), false);
     let tape = Tape::compile_split(&g, &roots, &syms, &pure);
     let d = tape.dump();
     assert!(d.contains(" acc "), "{d}");

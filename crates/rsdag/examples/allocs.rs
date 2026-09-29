@@ -2,8 +2,8 @@
 //! already owns its buffers still hits the allocator per evaluation.
 //!
 //! A solver drives these in its inner loop (residual and Jacobian per Newton
-//! iteration, a factorization and two triangular solves per system), so every
-//! allocation there is one the caller cannot avoid from outside.
+//! iteration, small dense solves inside a model), so every allocation there
+//! is one the caller cannot avoid from outside.
 //!
 //!   cargo run -q --release --example allocs
 
@@ -138,29 +138,12 @@ fn main() {
         Complex64::call_bundle(body, &cx_in, &mut cx_out)
     });
 
-    // The solve program: a static LU of a fixed pattern, factored and
-    // substituted as one tape over the entry values and the right-hand side.
+    // A dense solve node: a small implicit system inside a model, one
+    // pivoting kernel over the entries and the right-hand side.
     let n = 8;
-    let mut rows: Vec<Vec<(usize, rsdag::ExprId)>> = Vec::new();
-    let mut val_syms = Vec::new();
-    for r in 0..n {
-        let mut row = Vec::new();
-        for c in [(r + n - 1) % n, r, (r + 1) % n] {
-            let e = g.sym(&format!("a{r}_{c}"));
-            val_syms.push(e);
-            row.push((c, e));
-        }
-        row.sort_by_key(|&(c, _)| c);
-        rows.push(row);
-    }
-    let rhs: Vec<_> = (0..n).map(|i| g.sym(&format!("b{i}"))).collect();
-    let pattern: Vec<Vec<usize>> = rows
-        .iter()
-        .map(|r| r.iter().map(|&(c, _)| c).collect())
-        .collect();
-    let plan = rsdag::symbolic::solve::plan(&pattern).expect("plan");
-    let solved = rsdag::symbolic::solve::solve_planned(&mut g, &rows, &plan, &rhs);
-    let solve_syms: Vec<_> = val_syms
+    let a: Vec<rsdag::ExprId> = (0..n * n).map(|k| g.sym(&format!("a{k}"))).collect();
+    let rhs: Vec<rsdag::ExprId> = (0..n).map(|i| g.sym(&format!("b{i}"))).collect();
+    let solve_syms: Vec<_> = a
         .iter()
         .chain(rhs.iter())
         .map(|&e| match g.node(e) {
@@ -168,14 +151,19 @@ fn main() {
             _ => unreachable!(),
         })
         .collect();
-    let mut solve_roots = solved.x.clone();
-    solve_roots.push(solved.pivots_ok);
-    let tape_solve = Tape::compile(&g, &solve_roots, &solve_syms);
+    let x = g.solve_dense(a, rhs);
+    let tape_solve = Tape::compile(&g, &x, &solve_syms);
 
-    let sv: Vec<f64> = (0..val_syms.len() + n)
-        .map(|k| if k % 3 == 1 { 4.0 } else { 0.5 })
+    let sv: Vec<f64> = (0..n * n + n)
+        .map(|k| {
+            if k < n * n && k % (n + 1) == 0 {
+                4.0
+            } else {
+                0.5
+            }
+        })
         .collect();
-    audit("solve program, 8x8 tridiagonal", 4, 200, || {
+    audit("dense solve node, 8x8", 4, 200, || {
         tape_solve.eval(&sv, &mut work, &mut out)
     });
 

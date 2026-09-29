@@ -16,7 +16,7 @@ from matplotlib.lines import Line2D
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "data")
-BLUE, ORANGE, GREY, GREEN, PURPLE = "#4f86c6", "#d9822b", "#8b8b8b", "#4f9d5f", "#8e6bb8"
+BLUE, ORANGE, GREY, GREEN = "#4f86c6", "#d9822b", "#8b8b8b", "#4f9d5f"
 
 # Transparent, grey axes and text: legible on a light and on a dark page.
 plt.rcParams.update({
@@ -83,37 +83,6 @@ def ops():
     save(fig, "ops.svg")
 
 
-FAMILIES = (("ring", BLUE), ("band", ORANGE), ("grid", GREEN), ("random", PURPLE))
-
-
-def solve():
-    r = rows("solve.csv")
-    fig, (a, b, c) = plt.subplots(1, 3, figsize=(10.4, 3.1))
-    for fam, color in FAMILIES:
-        sel = [x for x in r if x["family"] == fam]
-        n = [int(x["n"]) for x in sel]
-        a.plot(n, [float(x["rsdag_us"]) for x in sel], "-", color=color, label=f"{fam}, rsdag")
-        a.plot(n, [float(x["klu_us"]) for x in sel], "--", color=color, label=f"{fam}, KLU")
-        c.plot(n, [float(x["build_ms"]) for x in sel], "-", color=color, label=f"{fam}, rsdag")
-        c.plot(n, [float(x["klu_build_ms"]) for x in sel], "--", color=color, label=f"{fam}, KLU")
-        b.plot(n, [float(x["ops_per_unknown"]) for x in sel], "-", color=color, label=fam)
-        # Squares where the default chose the supernodal program.
-        for x in sel:
-            m = "s" if x["program"] == "supernodal" else "o"
-            a.plot([int(x["n"])], [float(x["rsdag_us"])], m, color=color, ms=4)
-            b.plot([int(x["n"])], [float(x["ops_per_unknown"])], m, color=color, ms=4)
-            c.plot([int(x["n"])], [float(x["build_ms"])], m, color=color, ms=4)
-    for ax in (a, b, c):
-        ax.set_xscale("log"); ax.set_yscale("log")
-        ax.set_xlabel("unknowns")
-    a.set_ylabel("us per Newton step"); a.set_title("Factor and solve")
-    b.set_ylabel("ops per unknown"); b.set_title("Program size")
-    c.set_ylabel("ms"); c.set_title("Build (analysis, compile)")
-    key(fig, [(f, c) for f, c in FAMILIES],
-        (("rsdag", "-", None), ("KLU", "--", None), ("scalar", "", "o"), ("supernodal", "", "s")))
-    save(fig, "solve.svg")
-
-
 def dense():
     r = rows("dense.csv")
     fig, a = plt.subplots(1, 1, figsize=(4.6, 3.2))
@@ -129,6 +98,5 @@ def dense():
 
 if __name__ == "__main__":
     ops()
-    solve()
     dense()
-    print("wrote", ", ".join(f"docs/bench/{n}" for n in ("ops.svg", "solve.svg", "dense.svg")))
+    print("wrote", ", ".join(f"docs/bench/{n}" for n in ("ops.svg", "dense.svg")))

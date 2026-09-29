@@ -4,16 +4,15 @@ Expression graph backend for hybrid event and continuous ODE and DAE
 simulators: a hash-consed expression graph with functions and calls,
 forward and reverse differentiation, a flat instruction tape split into a
 per-parameter prolog and a per-iteration main phase, an interpreter over
-any scalar type, a native code backend for AArch64 and x86-64, and sparse
-linear solves and Newton steps compiled into the same tape.
+any scalar type, and a native code backend for AArch64 and x86-64.
 
 ![Pipeline](docs/diagrams/pipeline.svg)
 
 A simulator's model through rsdag: roles order the inputs, the residuals
-and their Jacobian become a guarded Newton step, compiled into one program
-whose prolog runs once per parameter binding and whose main phase runs per
-iteration; the consumer's loop drives it and handles the events its
-guards report.
+and their Jacobian compile into one program whose prolog runs once per
+parameter binding and whose main phase runs per iteration; the consumer's
+loop factors the Jacobian with a sparse LU library, drives the program and
+handles the events its guards report.
 
 ![Solver path](docs/diagrams/solver_path.svg)
 
@@ -36,8 +35,8 @@ NOTICE); for a commercial license contact info@milanrother.com.
   `Tape` (interpreter over any `Scalar`, choice specialization, instance
   batching, `Gemv`, `Gemm` and dense `Solve` kernels, prolog/main split),
   `semantics` (the reference arithmetic), `symbolic` (`determinant`,
-  `collect`, `rational_form`, `simplify_egraph`, the sparse solve,
-  `LuProgram`, `newton_step`), `dot` (Graphviz of graphs and tapes).
+  `collect`, `rational_form`, `simplify_egraph`), `dot` (Graphviz of
+  graphs and tapes).
 - `rsdag-jit`: `NativeTape`, machine code for AArch64 and x86-64 on Linux,
   macOS and Windows; function bodies compiled once and batched over
   instances; `eval_many` over many input sets in parallel
@@ -116,43 +115,6 @@ and `call_into` take a caller-owned buffer; a calling tape lends its own.
 `NativeTape::compile` emits the same instruction sequence as machine code
 in chunked functions with a write-back register cache.
 
-## Sparse solve
-
-![Sparse solve](docs/diagrams/solve.svg)
-
-`symbolic::solve` lowers the solve of a system with a known sparsity
-pattern into graph ops: block triangular form, minimum-degree ordering per
-block, a fill and flop predictor over the elimination tree, and a static LU
-in Crout form with the right-hand side as the last column. Pivot rows are
-fixed at build time. A step with more than one structural candidate emits a
-guard, `|pivot| >= 1e-3 max|column|`; on a failed guard `Plan::repivot`
-takes the rows of a numeric elimination on the current values and the
-program is rebuilt. With the matrix entries as parameter-pure inputs and
-the right-hand side as main inputs, the prolog is the factorization and
-the main part the substitution. `LuProgram` builds this program for a
-pattern and a `Plan`, scalar or supernodal (`Panels`), writes values and
-right-hand sides into its input layout, reads the guard and the factors'
-finiteness from the state after a prolog (`factored`) and rebuilds on the
-values (`repivot`).
-
-![LU program](docs/diagrams/lu.svg)
-
-The `LuProgram` of a 3 by 3 arrow pattern: the prolog takes the
-reciprocal pivots, the Schur update and the pivot guard (`pivots ok`), the
-main phase the forward and back substitution.
-
-The eliminations are generic over the scalar (`Num`): a real expression,
-or a complex one as a pair of real expressions (`Cx`), which lowers a
-complex system to real ops at build time, the guard comparing moduli.
-`solve_block_planned` eliminates a pattern of dense or diagonal blocks
-(`Block`, of one size or of `sizes` per block row): pivot blocks through
-the dense solve kernel, block updates as dot products that fuse into
-`Gemm` kernels, a guard per pivot block against the rows below it.
-`solve_supernodal_planned` runs the scalar plan's elimination over panels
-(`supernodes`: steps along the postordered elimination forest merged
-while their explicit zeros stay within an allowance), the fill of the
-scalar ordering with the flops in the kernels.
-
 ## Function bodies
 
 ![Function bodies](docs/diagrams/bodies.svg)
@@ -224,15 +186,6 @@ Evaluation cost per op, interpreter and native, and compile cost per op,
 tape and native, over program size and op vocabulary:
 
 ![Evaluation and compile cost per op](docs/bench/ops.svg)
-
-The sparse solve of a Newton step, factorization and substitution on fresh
-values, as an `LuProgram` in native code against a sparse LU library
-(rslab, KLU path), over pattern family and number of unknowns: the time
-per step, the program size per unknown, and the build (analysis and
-compile against KLU's symbolic analysis and first factorization). Squares
-mark systems where `Panels` chose the supernodal program:
-
-![Sparse solve against a sparse LU library](docs/bench/solve.svg)
 
 The dense kernels' throughput over the matrix size:
 

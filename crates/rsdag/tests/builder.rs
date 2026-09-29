@@ -97,3 +97,43 @@ fn the_recorded_model_differentiates() {
         o[0]
     );
 }
+
+/// A model with an implicit update computes it numerically and records it
+/// as a solve node: the same pivoted dense LU on both sides, to the bit,
+/// and the recorded one differentiates through the solve.
+#[test]
+fn an_implicit_update_records_and_computes_the_same() {
+    fn implicit<B: Builder>(b: &mut B, u: B::N, k: B::N) -> Vec<B::N> {
+        // (I + k*A) x = [u, 0] for a 2x2 coupling A = [[1, -1], [-1, 1]].
+        let one = b.cst(1.0);
+        let zero = b.cst(0.0);
+        let d = b.add(one, k);
+        let nk = b.neg(k);
+        let a = vec![vec![d, nk], vec![nk, d]];
+        b.solve(&a, &[u, zero])
+    }
+    let mut g: Graph<F64> = Graph::new();
+    let mut s = Scope::new(&mut g, "implicit");
+    let (u, k) = (s.param("u"), s.param("k"));
+    let out = implicit(&mut *s, u, k);
+    let f = s.close(out.clone());
+    let params = g.func(f).params().to_vec();
+    let tape = Tape::compile(&g, &out, &params);
+    let (mut w, mut o) = (Vec::new(), Vec::new());
+    tape.eval(&[3.0f64, 0.5], &mut w, &mut o);
+    let want = implicit(&mut Numeric, 3.0, 0.5);
+    for (p, q) in want.iter().zip(&o) {
+        assert_eq!(p.to_bits(), q.to_bits(), "{p} vs {q}");
+    }
+    let d = rsdag::differentiate(&mut g, out[0], params[1]);
+    let dt = Tape::compile(&g, &[d], &params);
+    dt.eval(&[3.0f64, 0.5], &mut w, &mut o);
+    let h = 1e-6;
+    let fd = (implicit(&mut Numeric, 3.0, 0.5 + h)[0] - implicit(&mut Numeric, 3.0, 0.5 - h)[0])
+        / (2.0 * h);
+    assert!(
+        (o[0] - fd).abs() <= 1e-6 * fd.abs().max(1.0),
+        "d/dk: {} vs fd {fd}",
+        o[0]
+    );
+}
