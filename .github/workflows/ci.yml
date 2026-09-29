@@ -1,8 +1,11 @@
 name: ci
+# rsdag is infrastructure for its consumers, never used on its own: no
+# builds and no platform matrix here, one Linux job that lints and tests.
+# The full gate (the x86 baseline path, the feature matrix, rustdoc, wasm,
+# the Python bindings) runs locally with scripts/ci.sh.
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_dispatch:
 jobs:
   rust:
     runs-on: ubuntu-latest
@@ -11,60 +14,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      # rsdag-py links libpython; it is built and tested by the python job.
       - run: cargo clippy --workspace --exclude rsdag-py --all-targets --features 'rsdag/synth rsdag/serde' -- -D warnings
       - run: cargo test --workspace --exclude rsdag-py --features 'rsdag/synth rsdag/serde'
-      # The optional features must also build and lint on their own, so a
-      # consumer that takes none or one of them still compiles.
-      - run: cargo clippy -p rsdag --all-targets -- -D warnings
-      - run: |
-          for f in "" exact complex serde egraph exact,serde; do
-            cargo clippy -p rsdag --lib --no-default-features --features "$f" -- -D warnings
-          done
-      # A dangling doc link is a stale doc: fail on it.
-      - run: cargo doc --no-deps --workspace --exclude rsdag-py --features 'rsdag/synth rsdag/serde rsdag/exact rsdag/egraph rsdag/complex'
-        env:
-          RUSTDOCFLAGS: -D warnings
-      # The graph crate in the browser: a consumer's web build interprets
-      # there. Linked, not only checked, and the module must import nothing,
-      # since a plain browser module gets no host functions.
-      - run: cargo build --release -p rsdag --example wasm_probe --target wasm32-unknown-unknown --features exact,complex,serde
-      - run: python3 scripts/wasm_imports.py target/wasm32-unknown-unknown/release/examples/wasm_probe.wasm
-  # The native backend on the conventions and platforms the first runner
-  # does not cover: Windows x64, AArch64 on macOS (MAP_JIT) and on Linux
-  # (mprotect, cache flush).
-  native:
-    strategy:
-      matrix:
-        os: [windows-latest, macos-latest, ubuntu-24.04-arm]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy -p rsdag-jit --all-targets --features rsdag/synth -- -D warnings
-      - run: cargo test -p rsdag-jit --features rsdag/synth
-  python:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install maturin numpy pytest
-      - run: maturin build --release -m crates/rsdag-py/Cargo.toml -o dist
-      - run: pip install dist/*.whl
-      - run: python -m pytest -q crates/rsdag-py/tests
-  # Known advisories in the locked dependency tree.
-  audit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: taiki-e/install-action@cargo-audit
-      - run: cargo audit

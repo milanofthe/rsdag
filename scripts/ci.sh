@@ -1,6 +1,6 @@
 #!/bin/sh
-# The CI gate, locally and with the toolchain CI uses (rustup stable), so a
-# push is green before it happens. Mirrors .github/workflows/ci.yml.
+# The full gate, locally and with the toolchain CI uses (rustup stable): the
+# minimal Linux CI (.github/workflows/ci.yml) and everything it leaves out.
 set -eu
 cd "$(dirname "$0")/.."
 export CARGO_TERM_COLOR=always
