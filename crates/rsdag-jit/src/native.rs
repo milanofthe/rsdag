@@ -8,10 +8,10 @@
 //! to its slot in the work array only when it has to be: on eviction, at a
 //! host call (which clobbers the caller-saved part of the cache) and at the
 //! chunk's end, and then only if some later op still reads it, which the
-//! last-use table knows. A value that dies inside the chunk never touches
+//! liveness knows. A value that dies inside the chunk never touches
 //! memory; nothing is ever spilled anywhere but where the interpreter keeps
-//! it anyway. Compile time is linear in the op count, around 40 ns per op;
-//! chunks are emitted in parallel.
+//! it anyway. Compile time is linear in the op count, and the chunks are
+//! emitted in parallel into one executable mapping.
 //!
 //! A large program is executed once per evaluation, straight through, so
 //! its cost is instruction fetch: the bytes per op. That is why nothing is
@@ -44,7 +44,10 @@ type Arch = crate::aarch64::A64;
 #[cfg(target_arch = "x86_64")]
 type Arch = crate::x86_64::X64;
 
-type ChunkFn = extern "C" fn(*mut f64, *const f64, *const Bundles);
+/// An emitted chunk: `(work, inputs, bundles)`. Unsafe to call: the code
+/// trusts the work array to have the layout's length and the inputs the
+/// ones it reads, which [`NativeTape::run`] checks.
+type ChunkFn = unsafe extern "C" fn(*mut f64, *const f64, *const Bundles);
 
 /// A tape compiled to native code. Evaluation mirrors [`Tape`]: a
 /// caller-owned work buffer, inputs padded with NaN, and the prolog/main
@@ -417,7 +420,9 @@ impl NativeTape {
             &self.bundles as *const Bundles,
         );
         for c in &self.chunks[range] {
-            c(wp, ip, bp);
+            // SAFETY: the buffers were checked above, the code and the
+            // tables it addresses live as long as `self`.
+            unsafe { c(wp, ip, bp) };
             host::resume_panic();
         }
     }
@@ -995,45 +1000,56 @@ impl<'a, I: Isa> Emitter<'a, I> {
 
     fn unary(&mut self, dst: u32, uop: UnaryOp, a: u32) {
         let x = self.get(a);
-        let r = self.fresh_for(dst);
+        // The result register only for an op done inline: a host call
+        // returns its result in its own.
         let inline = match uop {
             UnaryOp::Sqrt => {
                 // x <= 0 ? 0 : sqrt(x), the reference's guard (NaN stays NaN).
+                let r = self.fresh_for(dst);
                 let zero = self.fconst(0.0);
                 let s = self.fresh();
                 self.isa.sqrt(s, x);
                 self.isa.cmp_select(CmpOp::Le, x, zero, zero, s, r);
-                true
+                Some(r)
             }
-            UnaryOp::Floor => self.isa.round(Round::Floor, r, x),
-            UnaryOp::Ceil => self.isa.round(Round::Ceil, r, x),
-            UnaryOp::Trunc => self.isa.round(Round::Trunc, r, x),
+            UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Trunc => {
+                let mode = match uop {
+                    UnaryOp::Floor => Round::Floor,
+                    UnaryOp::Ceil => Round::Ceil,
+                    _ => Round::Trunc,
+                };
+                let r = self.fresh_for(dst);
+                self.isa.round(mode, r, x).then_some(r)
+            }
             UnaryOp::Abs => {
+                let r = self.fresh_for(dst);
                 self.isa.abs(r, x);
-                true
+                Some(r)
             }
             UnaryOp::Sign => {
+                let r = self.fresh_for(dst);
                 let zero = self.fconst(0.0);
                 let one = self.fconst(1.0);
                 let minus = self.fconst(-1.0);
                 let t = self.fresh();
                 self.isa.cmp_select(CmpOp::Lt, x, zero, minus, x, t);
                 self.isa.cmp_select(CmpOp::Gt, x, zero, one, t, r);
-                true
+                Some(r)
             }
-            _ => false,
+            _ => None,
         };
-        if inline {
-            self.put(dst, r);
-        } else {
-            let (addr, code) = host::unary_addr(uop);
-            // The coded routine takes the op first: `h_unary_ext(op, x)`.
-            let args: Vec<Arg> = code
-                .into_iter()
-                .map(|c| Arg::I(IArg::Imm(c as u64)))
-                .chain([Arg::F(x)])
-                .collect();
-            self.call_into(dst, addr, &args);
+        match inline {
+            Some(r) => self.put(dst, r),
+            None => {
+                let (addr, code) = host::unary_addr(uop);
+                // The coded routine takes the op first: `h_unary_ext(op, x)`.
+                let args: Vec<Arg> = code
+                    .into_iter()
+                    .map(|c| Arg::I(IArg::Imm(c as u64)))
+                    .chain([Arg::F(x)])
+                    .collect();
+                self.call_into(dst, addr, &args);
+            }
         }
     }
 
@@ -1041,23 +1057,29 @@ impl<'a, I: Isa> Emitter<'a, I> {
     /// accumulators, merged as `(a0 + a1) + (a2 + a3)`, then the tail.
     /// Accumulators stay pinned across the terms; a term's registers are
     /// released once it is folded in, so a long list needs seven registers,
-    /// not one per operand.
+    /// not one per operand. Under four terms the merged accumulators are
+    /// the identity itself (`+0` or `1`, exactly), so the fold starts there.
     fn fold(&mut self, op: Arith, ident: f64, a: &[u32], b: Option<&[u32]>) -> u8 {
         let n = a.len();
-        let acc: [u8; 4] = std::array::from_fn(|_| self.fconst(ident));
         let ch = n / 4;
-        for c in 0..ch {
-            for (k, &ak) in acc.iter().enumerate() {
-                self.term(op, ak, ak, a, b, 4 * c + k);
-                self.release_except(&acc);
+        let mut s = if ch == 0 {
+            self.fconst(ident)
+        } else {
+            let acc: [u8; 4] = std::array::from_fn(|_| self.fconst(ident));
+            for c in 0..ch {
+                for (k, &ak) in acc.iter().enumerate() {
+                    self.term(op, ak, ak, a, b, 4 * c + k);
+                    self.release_except(&acc);
+                }
             }
-        }
-        let l = self.fresh();
-        self.isa.arith(op, l, acc[0], acc[1]);
-        let r = self.fresh();
-        self.isa.arith(op, r, acc[2], acc[3]);
-        let mut s = self.fresh();
-        self.isa.arith(op, s, l, r);
+            let l = self.fresh();
+            self.isa.arith(op, l, acc[0], acc[1]);
+            let r = self.fresh();
+            self.isa.arith(op, r, acc[2], acc[3]);
+            let s = self.fresh();
+            self.isa.arith(op, s, l, r);
+            s
+        };
         for k in ch * 4..n {
             let s2 = self.fresh();
             self.term(op, s2, s, a, b, k);
