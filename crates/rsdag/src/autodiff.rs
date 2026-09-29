@@ -268,6 +268,30 @@ fn binary_partials<K: Field>(
     }
 }
 
+/// For each factor of a product `args` that `want` asks for, the product of
+/// the others, from prefix and suffix products: linear in the factors.
+fn cofactors<K: Field>(
+    ctx: &mut Graph<K>,
+    args: &[ExprId],
+    want: impl Fn(usize) -> bool,
+) -> Vec<Option<ExprId>> {
+    let mut prefix = Vec::with_capacity(args.len());
+    let mut acc = ctx.one();
+    for &x in args {
+        prefix.push(acc);
+        acc = ctx.mul(acc, x);
+    }
+    let mut out = vec![None; args.len()];
+    let mut suffix = ctx.one();
+    for i in (0..args.len()).rev() {
+        if want(i) {
+            out[i] = Some(ctx.mul(prefix[i], suffix));
+        }
+        suffix = ctx.mul(suffix, args[i]);
+    }
+    out
+}
+
 /// How many leading operands of `node` carry no derivative: both of a
 /// comparison's (piecewise constant), a select's condition.
 fn inert(node: &Node) -> usize {
@@ -388,20 +412,12 @@ fn tangent<K: Field>(ctx: &mut Graph<K>, e: ExprId, wrt: SymbolId, memo: &mut Me
             // d(Π aᵢ) = Σᵢ daᵢ · Πⱼ≠ᵢ aⱼ  (generalized product rule)
             ReduceOp::Product => {
                 let args = ctx.args(l).to_vec();
+                let others = cofactors(ctx, &args, |i| d(args[i]) != zero);
                 let mut terms = Vec::with_capacity(args.len());
-                for i in 0..args.len() {
-                    let dai = d(args[i]);
-                    if dai == zero {
-                        continue;
+                for (&a, other) in args.iter().zip(others) {
+                    if let Some(other) = other {
+                        terms.push(ctx.mul(d(a), other));
                     }
-                    let others: Vec<ExprId> = args
-                        .iter()
-                        .enumerate()
-                        .filter(|&(j, _)| j != i)
-                        .map(|(_, &a)| a)
-                        .collect();
-                    let prod = ctx.reduce(ReduceOp::Product, others);
-                    terms.push(ctx.mul(dai, prod));
                 }
                 ctx.reduce(ReduceOp::Sum, terms)
             }
@@ -675,21 +691,12 @@ pub fn gradient<K: Field>(ctx: &mut Graph<K>, f: ExprId, wrt: &[SymbolId]) -> Ve
                 // d(Π aᵢ)/daᵢ = Πⱼ≠ᵢ aⱼ, via prefix/suffix products (O(k) nodes).
                 ReduceOp::Product => {
                     let args = ctx.args(l).to_vec();
-                    let k = args.len();
-                    let mut prefix = Vec::with_capacity(k);
-                    let mut acc = ctx.one();
-                    for &x in &args {
-                        prefix.push(acc);
-                        acc = ctx.mul(acc, x);
-                    }
-                    let mut suffix = ctx.one();
-                    for i in (0..k).rev() {
-                        if act(args[i]) {
-                            let others = ctx.mul(prefix[i], suffix);
-                            let t = ctx.mul(a_bar, others);
-                            push(&mut adj, args[i], t);
+                    let others = cofactors(ctx, &args, |i| act(args[i]));
+                    for (&a, other) in args.iter().zip(others) {
+                        if let Some(other) = other {
+                            let t = ctx.mul(a_bar, other);
+                            push(&mut adj, a, t);
                         }
-                        suffix = ctx.mul(suffix, args[i]);
                     }
                 }
                 // Subgradient of the (first) extremal argument, exactly the
