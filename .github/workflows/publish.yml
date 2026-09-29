@@ -1,0 +1,85 @@
+name: publish
+
+# The Python package `rsdag` on PyPI through trusted publishing (OIDC, the
+# `pypi` environment; no token). A published GitHub release builds the abi3
+# wheels on their own architecture, runs the Python tests against each
+# installed wheel (the native code on x86-64 and AArch64, Linux and macOS
+# included) and publishes them with the sdist. A manual run builds and tests
+# the Linux x86-64 wheel only and publishes nothing.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheels:
+    name: wheel ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include: ${{ fromJSON(github.event_name == 'release' && '[{"os":"ubuntu-latest","target":"x86_64"},{"os":"ubuntu-24.04-arm","target":"aarch64"},{"os":"windows-latest","target":"x64"},{"os":"macos-latest","target":"universal2-apple-darwin"}]' || '[{"os":"ubuntu-latest","target":"x86_64"}]') }}
+    steps:
+      - uses: actions/checkout@v7
+      # The wheel version is the workspace version (pyproject: dynamic).
+      - name: Release tag matches the workspace version
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          v=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          if [ "${GITHUB_REF_NAME#v}" != "$v" ]; then
+            echo "::error::tag $GITHUB_REF_NAME != workspace version $v"; exit 1
+          fi
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist -m crates/rsdag-py/Cargo.toml
+          manylinux: auto
+          sccache: true
+      - name: Test the installed wheel
+        shell: bash
+        run: |
+          python -m pip install dist/*.whl pytest
+          cd "$RUNNER_TEMP"
+          python -m pytest -q "$GITHUB_WORKSPACE/crates/rsdag-py/tests"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist
+
+  sdist:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist -m crates/rsdag-py/Cargo.toml
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-sdist
+          path: dist
+
+  publish:
+    if: github.event_name == 'release'
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/rsdag/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
