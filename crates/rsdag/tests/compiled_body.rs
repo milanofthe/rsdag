@@ -166,3 +166,36 @@ fn each_call_site_takes_the_smallest_body_covering_its_outputs() {
     tape.eval(&[1.0, 2.0], &mut w, &mut o);
     assert_eq!(o, vec![100.0, 2000.0, 4000.0]);
 }
+
+#[test]
+fn an_interpreted_body_computes_only_the_outputs_called() {
+    // A function of five outputs, a program calling two of them: the body
+    // the tape builds carries those two, the others are not computed.
+    let mut g: Graph<F64> = Graph::new();
+    let x = g.sym("x");
+    let outs: Vec<ExprId> = (1..=5)
+        .map(|k| {
+            let c = g.konst_f64(k as f64);
+            let e = g.exp(x);
+            g.mul(c, e)
+        })
+        .collect();
+    let xs = match *g.node(x) {
+        Node::Symbol(s) => s,
+        _ => unreachable!(),
+    };
+    let f = g.define_func("f", vec![xs], outs);
+    let y = g.sym("y");
+    let (c1, c3) = (g.call(f, 1, &[y]), g.call(f, 3, &[y]));
+    let r = g.add(c1, c3);
+    let ys = match *g.node(y) {
+        Node::Symbol(s) => s,
+        _ => unreachable!(),
+    };
+    let tape = Tape::compile(&g, &[r], &[ys]);
+    let body = tape.bundles()[0].clone();
+    assert_eq!(body.n_outputs(), 2);
+    let (mut w, mut o) = (Vec::new(), Vec::new());
+    tape.eval(&[0.5], &mut w, &mut o);
+    assert!((o[0] - 6.0 * 0.5f64.exp()).abs() < 1e-12);
+}
