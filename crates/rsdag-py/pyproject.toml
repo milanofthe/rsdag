@@ -4,13 +4,27 @@ build-backend = "maturin"
 
 [project]
 name = "rsdag"
-version = "0.1.0"
+# The workspace version (Cargo.toml), the one source of truth.
+dynamic = ["version"]
 description = "Rust symbolic graph backend: trace Python functions into a graph, differentiate, compile"
+readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["numpy>=1.22"]
+license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
+authors = [{ name = "Milan Rother" }]
+dependencies = ["numpy>=1.22"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+
+[project.urls]
+Repository = "https://github.com/milanofthe/rsdag"
 
 [tool.maturin]
 python-source = "python"
 module-name = "rsdag._rsdag"
 features = ["pyo3/extension-module"]
+strip = true
