@@ -1,27 +1,36 @@
 //! A solver drives the evaluation paths from its inner loop, so they must not
-//! allocate once the caller's buffers exist. The counting allocator below is
-//! process-wide, which is why this file holds exactly one test.
+//! allocate once the caller's buffers exist. The count is the calling
+//! thread's: the idle workers of a thread pool tidy their queues on their own
+//! threads now and then, which a process-wide count would pick up.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 
 use num_complex::Complex64;
 use rsdag::{Graph, Node, Scalar, Tape, F64};
 
-static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+thread_local!(static ALLOCS: Cell<usize> = const { Cell::new(0) });
+
+fn count() {
+    let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
+}
+
+fn counted() -> usize {
+    ALLOCS.with(Cell::get)
+}
 
 struct Counting;
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        count();
         unsafe { System.alloc(l) }
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
         unsafe { System.dealloc(p, l) }
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        count();
         unsafe { System.realloc(p, l, new) }
     }
 }
@@ -32,11 +41,11 @@ static A: Counting = Counting;
 /// Allocations of `runs` runs of `f`, after one warm-up run.
 fn allocs(runs: usize, mut f: impl FnMut()) -> usize {
     f();
-    let before = ALLOCS.load(Ordering::Relaxed);
+    let before = counted();
     for _ in 0..runs {
         f();
     }
-    ALLOCS.load(Ordering::Relaxed) - before
+    counted() - before
 }
 
 #[test]
