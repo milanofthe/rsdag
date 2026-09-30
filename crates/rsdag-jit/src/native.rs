@@ -264,7 +264,7 @@ impl NativeTape {
         if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
             return Err(JitError::Unsupported);
         }
-        let mut ops = crate::ir::record(tape);
+        let (mut ops, split) = crate::ir::record(tape);
         // Function bodies that are tapes become native bodies of their own.
         let bundles: Result<Bundles, JitError> = tape
             .bundles()
@@ -342,9 +342,8 @@ impl NativeTape {
             total: (n_work + gather_len + scratch_len).max(1),
         };
         // Chunk the prolog and main phases separately so no chunk straddles
-        // the split; the recorded stream is 1:1 with the tape's ops.
+        // the split.
         let chunk_ops = chunk_ops.max(1);
-        let split = tape.prolog_len().min(ops.len());
         let (pro, main) = ops.split_at(split);
         let jobs: Vec<&[ROp]> = pro
             .chunks(chunk_ops)

@@ -191,6 +191,14 @@ The dense kernels' throughput over the matrix size:
 
 ![Dense kernels](docs/bench/dense.svg)
 
+Small matrices as models have them (controllers, filters, state space,
+macromodels): `A x`, `A B` and `A \ b` of n by n inputs through a tape,
+per call. The products fuse into one kernel from two rows on; native code
+writes a product of fewer than eight rows out as its entries' dots, and a
+solve of up to sixteen unknowns runs with its size a constant.
+
+![Small matrices](docs/bench/matrices.svg)
+
 Against CasADi and JAX on circuits: the twelve AnalogGym amplifiers
 (BSIM4), a nine-stage PSP103 ring oscillator and the uA741, as SANE exports
 them (rsdag modules; `rsdag-jit/examples/modules.rs`,

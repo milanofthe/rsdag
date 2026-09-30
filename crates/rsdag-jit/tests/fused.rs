@@ -16,8 +16,15 @@ fn sym(g: &mut Graph<F64>, name: &str, syms: &mut Vec<SymbolId>) -> ExprId {
 
 #[test]
 fn chained_block_updates_run_natively_with_folded_kernels() {
-    // At least eight rows share each vector, so the dots group into kernels.
-    let (b, updates) = (8usize, 3usize);
+    // Small blocks run as inline dots, the eight-block's products on the
+    // host.
+    for b in [3usize, 4, 8] {
+        chained_block_updates(b);
+    }
+}
+
+fn chained_block_updates(b: usize) {
+    let updates = 3usize;
     let mut g: Graph<F64> = Graph::new();
     let mut syms = Vec::new();
     let matrix = |g: &mut Graph<F64>, name: &str, syms: &mut Vec<SymbolId>| -> Vec<ExprId> {
@@ -82,5 +89,44 @@ fn chained_block_updates_run_natively_with_folded_kernels() {
     native.eval_main(&vals, &mut wn, &mut on);
     for (a, b) in o.iter().zip(&on) {
         assert_eq!(a.to_bits(), b.to_bits());
+    }
+}
+
+/// The complex product pattern, small enough to run as inline dots:
+/// `re = rr - ii` and `im = ri + ir` folded from the kernel's own outputs,
+/// a negated product beside them.
+#[test]
+fn a_small_kernel_folding_its_own_outputs_runs_natively() {
+    let (m, n) = (6usize, 4usize);
+    let mut g: Graph<F64> = Graph::new();
+    let mut syms = Vec::new();
+    let es: Vec<ExprId> = (0..2 * m * n + 2 * n)
+        .map(|k| sym(&mut g, &format!("s{k}"), &mut syms))
+        .collect();
+    let br: Vec<_> = es[2 * m * n..2 * m * n + n].to_vec();
+    let bi: Vec<_> = es[2 * m * n + n..].to_vec();
+    let mut roots = Vec::new();
+    for i in 0..m {
+        let ar = es[i * n..(i + 1) * n].to_vec();
+        let ai = es[(m + i) * n..(m + i + 1) * n].to_vec();
+        let rr = g.dot(ar.clone(), br.clone());
+        let ii = g.dot(ai.clone(), bi.clone());
+        let ri = g.dot(ar, bi.clone());
+        let ir = g.dot(ai, br.clone());
+        roots.push(g.sub(rr, ii));
+        roots.push(g.add(ri, ir));
+        roots.push(g.neg(rr));
+    }
+    let tape = Tape::compile(&g, &roots, &syms);
+    let d = tape.dump();
+    assert!(d.contains("-#") && d.contains("+#"), "{d}");
+    let native = NativeTape::compile(&tape).expect("compile");
+    let vals: Vec<f64> = (0..syms.len()).map(|k| (k as f64 * 0.61).cos()).collect();
+    let (mut w, mut o) = (Vec::new(), Vec::new());
+    tape.eval(&vals, &mut w, &mut o);
+    let (mut wn, mut on) = (Vec::new(), Vec::new());
+    native.eval(&vals, &mut wn, &mut on);
+    for (k, (a, b)) in o.iter().zip(&on).enumerate() {
+        assert_eq!(a.to_bits(), b.to_bits(), "output {k}: {a} vs {b}");
     }
 }

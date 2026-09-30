@@ -55,8 +55,14 @@ fn gemv_matches_the_reference_on_every_shape() {
 fn gemm_matches_the_reference_on_every_shape() {
     let mut rng = Spec::new(5).rng();
     let shapes = (0..7)
-        .flat_map(|m| (0..7).flat_map(move |k| (0..5).map(move |n| (m, k, n))))
-        .chain([(9, 33, 7), (16, 64, 16), (33, 17, 6)]);
+        .flat_map(|m| (0..18).flat_map(move |k| (0..10).map(move |n| (m, k, n))))
+        .chain([
+            (9, 33, 7),
+            (16, 64, 16),
+            (33, 17, 6),
+            (5, 16, 64),
+            (3, 8, 128),
+        ]);
     for (m, k, n) in shapes {
         let a = values(&mut rng, m * k);
         let b = values(&mut rng, n * k);
@@ -73,9 +79,11 @@ fn solve_many_matches_the_generic_reference_on_every_shape() {
     let shapes = (1..30usize)
         .flat_map(|n| [1usize, 2, 5].into_iter().map(move |k| (n, k)))
         .chain([(37, 4), (100, 7), (520, 2)]);
-    for (n, k) in shapes {
+    // Dominant diagonals and plain random matrices, whose elimination swaps
+    // rows.
+    for ((n, k), dominant) in shapes.flat_map(|s| [(s, true), (s, false)]) {
         let mut a = values(&mut rng, n * n);
-        for i in 0..n {
+        for i in (0..n).filter(|_| dominant) {
             a[i * n + i] += 4.0 * n as f64;
         }
         let b = values(&mut rng, n * k);
