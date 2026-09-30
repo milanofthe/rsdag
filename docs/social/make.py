@@ -13,7 +13,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Circle, Rectangle
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "..", "bench", "data")
@@ -46,10 +46,10 @@ def box(ax, x, y, w, h, label="", filled=False, size=20):
                 fontsize=size, ha="center", va="center")
 
 
-def arrow(ax, a, b):
+def arrow(ax, a, b, ls="-"):
     ax.annotate("", xy=b, xytext=a,
                 arrowprops=dict(arrowstyle="-|>", color=INK, lw=LW, mutation_scale=20,
-                                shrinkA=0, shrinkB=0))
+                                shrinkA=0, shrinkB=0, linestyle=ls))
 
 
 def save(fig, name):
@@ -94,28 +94,35 @@ def pipeline():
 
 
 def derivative():
+    """f = sin(xy) and df/dx = y cos(xy) in one graph: the derivative's own
+    nodes dashed, the node both read in the accent."""
     fig, ax = card("Derivatives share the graph")
-    s = 1.0
+    r = 0.55
     nodes = {
-        "x": (2.6, 3.4), "y": (7.8, 3.4),
-        "xy": (5.2, 5.6),
-        "sin": (2.6, 7.8), "cos": (6.2, 7.8),
-        "mul": (7.8, 10.0),
+        "x": (2.2, 3.4), "y": (7.4, 3.4),
+        "xy": (4.8, 5.6),
+        "sin": (2.2, 7.8), "cos": (5.8, 7.8),
+        "mul": (7.4, 10.0),
     }
     labels = {"x": "x", "y": "y", "xy": "x y", "sin": "sin", "cos": "cos", "mul": "*"}
+    derived = {"cos", "mul"}
     for k, (cx, cy) in nodes.items():
-        box(ax, cx - s / 2, cy - s / 2, s, s, labels[k], filled=k == "xy", size=22)
+        shared = k == "xy"
+        ax.add_patch(Circle((cx, cy), r, fc=ACCENT if shared else PAPER,
+                            ec="none" if shared else INK, lw=LW,
+                            ls="--" if k in derived else "-"))
+        ax.text(cx, cy, labels[k], color=PAPER if shared else INK, fontsize=22,
+                ha="center", va="center")
     for a, b in [("x", "xy"), ("y", "xy"), ("xy", "sin"), ("xy", "cos"), ("cos", "mul"),
                  ("y", "mul")]:
         (ax_, ay), (bx, by) = nodes[a], nodes[b]
         d = np.array([bx - ax_, by - ay])
         d /= np.linalg.norm(d)
-        # from the edge of one box to the edge of the other
-        t = s / 2 / max(abs(d[0]), abs(d[1]))
-        arrow(ax, (ax_ + d[0] * t, ay + d[1] * t), (bx - d[0] * t, by - d[1] * t))
-    for k, name in [("sin", "f"), ("mul", "df/dx")]:
+        arrow(ax, (ax_ + d[0] * r, ay + d[1] * r), (bx - d[0] * r, by - d[1] * r),
+              ls="--" if b in derived else "-")
+    for k, name in [("sin", "f = sin(x y)"), ("mul", "df/dx = y cos(x y)")]:
         cx, cy = nodes[k]
-        ax.text(cx, cy + s / 2 + 0.3, name, color=INK, fontsize=24, ha="center", va="bottom")
+        ax.text(cx, cy + r + 0.3, name, color=INK, fontsize=24, ha="center", va="bottom")
     save(fig, "derivative.png")
 
 
