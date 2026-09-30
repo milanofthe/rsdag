@@ -324,7 +324,7 @@ impl NativeTape {
         // The scratch lent to a called bundle, or to a dense solve.
         let solves = ops.iter().map(|op| match op {
             ROp::Kernel(Kernel {
-                kind: KernelKind::Solve { n, k },
+                kind: KernelKind::Solve { n, k, .. },
                 ..
             }) => rsdag::semantics::solve_scratch_len(*n as usize, *k as usize),
             _ => 0,
@@ -955,7 +955,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 let (kind, m, k, n) = match kn.kind {
                     KernelKind::Gemv { m, n } => (0, m, 0, n),
                     KernelKind::Gemm { m, k, n } => (1, m, k, n),
-                    KernelKind::Solve { n, k } => (2, 0, k, n),
+                    KernelKind::Solve { n, k, count } => (2, count, k, n),
                 };
                 let desc = host::KernelDesc {
                     kind,

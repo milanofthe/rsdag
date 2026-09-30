@@ -93,3 +93,46 @@ fn solve_many_matches_the_generic_reference_on_every_shape() {
         assert!(same(&x1, &x2), "n {n} k {k}");
     }
 }
+
+#[test]
+fn a_batch_of_solves_matches_each_solve_alone() {
+    use rsdag::semantics::{solve_batch_into, solve_scratch_len};
+    let mut rng = Spec::new(10).rng();
+    for n in 1..=18usize {
+        for k in [1usize, 2, 5] {
+            for count in [1usize, 3, 4, 7, 9] {
+                let mut a = values(&mut rng, count * n * n);
+                // Instance by instance: dominant, plain random (rows swap),
+                // singular (a zero column), one NaN entry.
+                for c in 0..count {
+                    let m = &mut a[c * n * n..(c + 1) * n * n];
+                    match c % 4 {
+                        0 => (0..n).for_each(|i| m[i * n + i] += 4.0 * n as f64),
+                        2 => (0..n).for_each(|i| m[i * n + n / 2] = 0.0),
+                        3 => m[(n * n) / 3] = f64::NAN,
+                        _ => {}
+                    }
+                }
+                let b = values(&mut rng, count * n * k);
+                let mut x1 = vec![0.0; count * n * k];
+                let mut scratch = vec![0.0; solve_scratch_len(n, k)];
+                solve_batch_into(&a, &b, n, k, count, &mut x1, &mut scratch);
+                for c in 0..count {
+                    let (sa, sb) = (n * n, n * k);
+                    let mut x2 = vec![0.0; sb];
+                    solve_many_generic(
+                        &a[c * sa..(c + 1) * sa],
+                        &b[c * sb..(c + 1) * sb],
+                        n,
+                        k,
+                        &mut x2,
+                    );
+                    assert!(
+                        same(&x1[c * sb..(c + 1) * sb], &x2),
+                        "n {n} k {k} count {count} instance {c}"
+                    );
+                }
+            }
+        }
+    }
+}
