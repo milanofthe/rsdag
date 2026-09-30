@@ -7,6 +7,7 @@ The benchmark card reads docs/bench/data. Writes docs/social/*.png.
 """
 import csv
 import os
+import sys
 
 import matplotlib
 
@@ -17,12 +18,16 @@ from matplotlib.patches import Circle, Rectangle
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "..", "bench", "data")
+sys.path.insert(0, os.path.join(HERE, ".."))
+from style import BLACK as INK, BLUE as ACCENT, FONT, WHITE as PAPER  # noqa: E402
+
 W, H, DPI = 10.8, 13.5, 100
 L, R = 0.9, W - 0.9
-INK, GREY, RULE, ACCENT, PAPER = "#000000", "#6b6b6b", "#d4d4d4", "#4f86c6", "#ffffff"
+# The card's own greys, on white: secondary text and rules.
+GREY, RULE = "#6b6b6b", "#d4d4d4"
 LW = 1.4
 
-plt.rcParams["font.family"] = ["Arial", "DejaVu Sans"]
+plt.rcParams["font.family"] = FONT
 
 
 def card(title):

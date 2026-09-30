@@ -2,11 +2,13 @@
 
     python3 docs/bench/plot.py
 
-Writes docs/bench/*.svg. scripts/bench.sh measures the CSVs afresh and runs
-this; the plots alone redraw from the committed ones.
+Writes docs/bench/*.svg and *.png, both on a transparent background.
+scripts/bench.sh measures the CSVs afresh and runs this; the plots alone
+redraw from the committed ones.
 """
 import csv
 import os
+import sys
 
 import matplotlib
 
@@ -18,11 +20,12 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "data")
-BLUE, ORANGE, GREY, GREEN = "#4f86c6", "#d9822b", "#8b8b8b", "#4f9d5f"
+sys.path.insert(0, os.path.join(HERE, ".."))
+from style import BLUE, FONT, GREEN, GREY, ORANGE  # noqa: E402
 
 # Transparent, grey axes and text: legible on a light and on a dark page.
 plt.rcParams.update({
-    "font.family": ["Helvetica", "Arial", "DejaVu Sans"],
+    "font.family": FONT,
     "font.size": 10,
     "axes.spines.top": False,
     "axes.spines.right": False,
@@ -41,6 +44,7 @@ plt.rcParams.update({
     "xtick.color": GREY,
     "ytick.color": GREY,
     "legend.labelcolor": GREY,
+    "hatch.linewidth": 1.0,
 })
 
 
@@ -59,8 +63,10 @@ def key(fig, colors, styles):
 
 
 def save(fig, name):
+    """`name`.svg and `name`.png, both on a transparent background."""
     fig.tight_layout()
-    fig.savefig(os.path.join(HERE, name), format="svg", bbox_inches="tight")
+    for ext, opts in (("svg", {}), ("png", {"dpi": 200})):
+        fig.savefig(os.path.join(HERE, f"{name}.{ext}"), bbox_inches="tight", **opts)
     plt.close(fig)
 
 
@@ -82,7 +88,7 @@ def ops():
     b.set_title("Compile")
     key(fig, (("ring", BLUE), ("elementary", ORANGE), ("full", GREEN)),
         (("native", "-", "o"), ("interpreter, tape", "--", "o")))
-    save(fig, "ops.svg")
+    save(fig, "ops")
 
 
 def dense():
@@ -95,7 +101,7 @@ def dense():
     a.set_xlabel("n (n by n)"); a.set_ylabel("GF/s, one core")
     a.set_title("Dense kernels")
     a.legend(fontsize=8, frameon=False)
-    save(fig, "dense.svg")
+    save(fig, "dense")
 
 
 def matrices():
@@ -118,7 +124,7 @@ def matrices():
     axes[0].set_ylabel("ns per instance")
     key(fig, [(label, color) for _, label, color in kinds],
         (("native", "-", "o"), ("interpreter", "--", "o")))
-    save(fig, "matrices.svg")
+    save(fig, "matrices")
 
 
 def modules():
@@ -161,8 +167,10 @@ def modules():
                     a.text(x, 1.2, "x", color=bar[1], ha="center", va="bottom", fontsize=9)
                     continue
                 med = float(np.median(vals))
-                a.bar(x, med, width * 0.9, color=bar[1], alpha=1.0 if bar[2] else 0.35,
-                      edgecolor=bar[1], linewidth=0.8, hatch=bar[3])
+                # Constants filled, inputs outlined, the interpreter hatched:
+                # no transparency, legible on a light and a dark page.
+                a.bar(x, med, width * 0.9, facecolor=bar[1] if bar[2] else "none",
+                      edgecolor=bar[1], linewidth=1.2, hatch=bar[3])
                 if len(vals) > 1:
                     a.errorbar(x, med, yerr=[[med - min(vals)], [max(vals) - med]], color=GREY,
                                lw=0.8, capsize=2)
@@ -173,20 +181,20 @@ def modules():
         a.grid(axis="x", visible=False)
     axes[0].set_ylabel("microseconds")
     key(fig, (("rsdag", BLUE), ("CasADi", ORANGE), ("JAX", GREEN)), ())
-    fig.legend(handles=[Patch(fc=GREY, alpha=0.35, label="parameters as inputs"),
-                        Patch(fc=GREY, label="parameters as constants"),
-                        Patch(fc="none", ec=GREY, hatch="////", label="rsdag interpreter"),
+    fig.legend(handles=[Patch(fc="none", ec=GREY, lw=1.2, label="parameters as inputs"),
+                        Patch(fc=GREY, ec=GREY, label="parameters as constants"),
+                        Patch(fc="none", ec=GREY, lw=1.2, hatch="////", label="rsdag interpreter"),
                         Line2D([], [], color=GREY, marker="$x$", ls="", label="no compile in 1 min")],
                loc="lower center", ncol=4, frameon=False, fontsize=8, bbox_to_anchor=(0.5, -0.13))
-    save(fig, "modules.svg")
+    save(fig, "modules")
 
 
 if __name__ == "__main__":
     ops()
     dense()
     matrices()
-    names = ["ops.svg", "dense.svg", "matrices.svg"]
+    names = ["ops", "dense", "matrices"]
     if os.path.exists(os.path.join(DATA, "modules_other.csv")):
         modules()
-        names.append("modules.svg")
-    print("wrote", ", ".join(f"docs/bench/{n}" for n in names))
+        names.append("modules")
+    print("wrote", ", ".join(f"docs/bench/{n}.svg/.png" for n in names))

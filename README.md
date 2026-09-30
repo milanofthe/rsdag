@@ -16,11 +16,6 @@ handles the events its guards report.
 
 ![Solver path](docs/diagrams/solver_path.svg)
 
-The diagrams are drawn by rsdag (`rsdag::dot`, `scripts/diagrams.sh`), the
-graphs and programs among them from the code they show. Their nodes:
-
-![Legend](docs/diagrams/legend.svg)
-
 Licensed under the [GNU Affero General Public License v3.0](LICENSE): free to
 use, modify and distribute, including commercially, as long as the source of
 the combined work stays available under the same license, network use
@@ -73,8 +68,8 @@ derivative, guard with its crossing direction, state write).
 
 ![Derivative](docs/diagrams/derivative.svg)
 
-`f = sin(x y) + x y` and `differentiate(f, x)` in one graph: the
-derivative reuses `x y`; the nodes only `f` reads are faded.
+`f = sin(x y)` and `differentiate(f, x)` in one graph: the derivative
+reuses `x y`; its own nodes are dashed.
 
 ## Tape
 
@@ -166,8 +161,7 @@ title over lines of text, groups, notes, sparsity patterns. `dot::Theme`
 sets fonts, colors and the style: `Outline` (the default: lines only, one
 grey, the branches, guards and state in one accent, a transparent
 background) or `Filled` (a fill per node kind, the notation `Ascii` or
-`Math`). `scripts/diagrams.sh` renders the diagrams in this README with
-Graphviz.
+`Math`).
 
 ## Bit-exactness
 
@@ -257,7 +251,7 @@ with `gt`, `lt`, ... expresses elementwise conditions.
 ```
 cargo test --workspace
 scripts/ci.sh                                            # the full gate, locally
-scripts/diagrams.sh                                      # the README diagrams (needs Graphviz)
+scripts/diagrams.sh                                      # the README diagrams (needs matplotlib)
 scripts/bench.sh                                         # the README benchmarks, measured afresh (needs matplotlib)
 scripts/social.sh                                        # the cards in docs/social (needs matplotlib)
 maturin build --release -m crates/rsdag-py/Cargo.toml   # the Python wheel
