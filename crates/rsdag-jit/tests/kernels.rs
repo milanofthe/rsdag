@@ -155,3 +155,70 @@ fn the_multi_solve_kernel_matches_the_interpreter() {
     native.eval(&inputs, &mut w2, &mut o2);
     assert!(same(&o1, &o2));
 }
+
+/// Independent solves of one shape run as one batch: interpreted and
+/// natively, each solution bit-identical to its system solved alone. The
+/// systems are plain random matrices (their eliminations swap rows), two
+/// of them with a second right-hand side; a solve that reads another's
+/// solution is no part of its batch.
+#[test]
+fn a_batch_of_solves_matches_each_solve_alone() {
+    for (n, count, computed) in [(3usize, 5usize, false), (4, 8, true), (6, 3, false), (17, 2, false)] {
+        let mut g: Graph<F64> = Graph::new();
+        let mut syms = Vec::new();
+        let mut sym = |g: &mut Graph<F64>| {
+            syms.push(SymbolId(syms.len() as u32));
+            g.sym(&format!("s{}", syms.len()))
+        };
+        let mut systems = Vec::new();
+        let mut roots = Vec::new();
+        for c in 0..count {
+            let a: Vec<ExprId> = (0..n * n).map(|_| sym(&mut g)).collect();
+            let b: Vec<ExprId> = (0..n).map(|_| sym(&mut g)).collect();
+            let (a, b) = if computed {
+                (a.iter().map(|&e| g.tanh(e)).collect(), b)
+            } else {
+                (a, b)
+            };
+            roots.extend(g.solve_dense(a.clone(), b.clone()));
+            if c < 2 {
+                let b2: Vec<ExprId> = b.iter().map(|&e| g.sin(e)).collect();
+                roots.extend(g.solve_dense(a.clone(), b2));
+            }
+            systems.push(a);
+        }
+        // A solve of the first solution against the last matrix: one level up.
+        let first: Vec<ExprId> = roots[..n].to_vec();
+        roots.extend(g.solve_dense(systems[count - 1].clone(), first));
+        let tape = Tape::compile(&g, &roots, &syms);
+        let d = tape.dump();
+        // The systems with two right-hand sides are one batch, those with
+        // one another (when there are two), the dependent solve alone.
+        assert!(d.contains(&format!("SolveBatch(2 of {n}x{n}")), "{d}");
+        if count >= 4 {
+            let rest = format!("SolveBatch({} of {n}x{n}", count - 2);
+            assert!(d.contains(&rest), "{d}");
+        }
+        assert!(d.contains(&format!("Solve({n}x{n}")), "{d}");
+        let native = NativeTape::compile(&tape).expect("compile");
+        let inputs: Vec<f64> = (0..syms.len())
+            .map(|k| ((k * 37 + 11) % 23) as f64 * 0.1 - 1.1)
+            .collect();
+        let (mut w1, mut o1, mut w2, mut o2) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        tape.eval(&inputs, &mut w1, &mut o1);
+        native.eval(&inputs, &mut w2, &mut o2);
+        assert!(same(&o1, &o2), "n {n} count {count}: native differs");
+        // Each solve compiled alone.
+        let mut at = 0;
+        let mut i = 0;
+        while at < roots.len() {
+            let alone = Tape::compile(&g, &roots[at..at + n], &syms);
+            assert!(!alone.dump().contains("SolveBatch"));
+            let (mut w, mut o) = (Vec::new(), Vec::new());
+            alone.eval(&inputs, &mut w, &mut o);
+            assert!(same(&o, &o1[at..at + n]), "n {n} count {count}: solve {i} differs");
+            at += n;
+            i += 1;
+        }
+    }
+}

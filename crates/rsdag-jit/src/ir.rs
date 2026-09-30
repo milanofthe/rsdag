@@ -34,7 +34,7 @@ pub(crate) enum ROp {
 pub(crate) enum KernelKind {
     Gemv { m: u32, n: u32 },
     Gemm { m: u32, k: u32, n: u32 },
-    Solve { n: u32, k: u32 },
+    Solve { n: u32, k: u32, count: u32 },
 }
 
 /// A dense kernel: its operands in order (`a`, then `x` or `b`, then the
@@ -55,7 +55,7 @@ impl Kernel {
         match self.kind {
             KernelKind::Gemv { m, .. } => m,
             KernelKind::Gemm { m, n, .. } => m * n,
-            KernelKind::Solve { n, k } => n * k,
+            KernelKind::Solve { n, k, count } => count * n * k,
         }
     }
 }
@@ -376,10 +376,10 @@ pub(crate) fn record(tape: &Tape) -> (Vec<ROp>, usize) {
                 &[(a, m * k), (b, n * k)],
                 acc,
             ),
-            Op::Solve { a, b, n, k } => kernel(
+            Op::Solve { a, b, n, k, count } => kernel(
                 dst,
-                KernelKind::Solve { n, k },
-                &[(a, n * n), (b, n * k)],
+                KernelKind::Solve { n, k, count },
+                &[(a, count * n * n), (b, count * n * k)],
                 None,
             ),
         };
