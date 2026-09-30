@@ -247,6 +247,6 @@ cargo test --workspace
 scripts/ci.sh                                            # the full gate, locally
 scripts/diagrams.sh                                      # the README diagrams (needs Graphviz)
 scripts/bench.sh                                         # the README benchmarks, measured afresh (needs matplotlib)
-scripts/social.sh                                        # the cards in docs/social (needs Graphviz, matplotlib)
+scripts/social.sh                                        # the cards in docs/social (needs matplotlib)
 maturin build --release -m crates/rsdag-py/Cargo.toml   # the Python wheel
 ```
