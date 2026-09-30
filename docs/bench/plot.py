@@ -100,19 +100,22 @@ def dense():
 
 def matrices():
     """Small matrices through a tape (matrices.csv): `A x`, `A B` and
-    `A \\ b` of n by n inputs, per call, interpreted and native."""
+    `A \\ b` of n by n inputs, one instance and sixteen of one shape (the
+    solves batched), per instance, interpreted and native."""
     r = rows("matrices.csv")
-    fig, a = plt.subplots(1, 1, figsize=(4.6, 3.2))
+    fig, axes = plt.subplots(1, 2, figsize=(7.6, 3.2), sharey=True)
     kinds = (("gemv", "A x", BLUE), ("gemm", "A B", ORANGE), ("solve", "A \\ b", GREEN))
-    for kind, _, color in kinds:
-        sel = [x for x in r if x["kind"] == kind]
-        n = [int(x["n"]) for x in sel]
-        a.plot(n, [float(x["native_ns"]) for x in sel], "o-", color=color, ms=4)
-        a.plot(n, [float(x["interp_ns"]) for x in sel], "o--", color=color, ms=4)
-    a.set_xscale("log", base=2); a.set_yscale("log")
-    a.set_xticks([2, 4, 8, 16, 32]); a.set_xticklabels(["2", "4", "8", "16", "32"])
-    a.set_xlabel("n (n by n)"); a.set_ylabel("ns per call")
-    a.set_title("Small matrices")
+    for a, (count, title) in zip(axes, (("1", "One instance"), ("16", "Sixteen instances"))):
+        for kind, _, color in kinds:
+            sel = [x for x in r if x["kind"] == kind and x["instances"] == count]
+            n = [int(x["n"]) for x in sel]
+            a.plot(n, [float(x["native_ns"]) for x in sel], "o-", color=color, ms=4)
+            a.plot(n, [float(x["interp_ns"]) for x in sel], "o--", color=color, ms=4)
+        a.set_xscale("log", base=2); a.set_yscale("log")
+        a.set_xticks([2, 4, 8, 16, 32]); a.set_xticklabels(["2", "4", "8", "16", "32"])
+        a.set_xlabel("n (n by n)")
+        a.set_title(title)
+    axes[0].set_ylabel("ns per instance")
     key(fig, [(label, color) for _, label, color in kinds],
         (("native", "-", "o"), ("interpreter", "--", "o")))
     save(fig, "matrices.svg")

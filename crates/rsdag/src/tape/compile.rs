@@ -33,6 +33,7 @@ use crate::field::Field;
 use crate::func::{Body, FuncId};
 use crate::graph::Graph;
 use crate::node::{ArgList, ExprId, Node, SymbolId};
+use crate::semantics::{SOLVE_BATCH_MAX_K, SOLVE_BATCH_MAX_N};
 
 /// Row dots against one vector fuse into a `Gemv` from this many rows on.
 const GEMV_MIN_ROWS: usize = 2;
@@ -1100,8 +1101,10 @@ impl Forest {
 
     /// Solves of one shape (unknowns and right-hand sides) at one depth and
     /// of one purity, over different matrices, are one batch: their
-    /// systems side by side in one kernel, which runs small ones in the
-    /// lanes of a vector. At one depth none reads another's solution (a
+    /// systems side by side in one kernel, four to a vector; only shapes
+    /// up to [`SOLVE_BATCH_MAX_N`] unknowns and [`SOLVE_BATCH_MAX_K`]
+    /// right-hand sides batch (a larger system gains nothing from it and
+    /// the batch gathers its operands). At one depth none reads another's solution (a
     /// group's depth is above every group it reads). A merged-away group is
     /// left empty.
     fn merge_solve_batches<K: Field>(
@@ -1125,6 +1128,10 @@ impl Forest {
             let (Some((a, lists)), Some(&first)) = (system(key), members.first()) else {
                 continue;
             };
+            // `a` holds the n by n entries.
+            if a.len() > SOLVE_BATCH_MAX_N * SOLVE_BATCH_MAX_N || lists.len() > SOLVE_BATCH_MAX_K {
+                continue;
+            }
             by_shape
                 .entry((a.len(), lists.len(), depth[first], self.pure[first]))
                 .or_default()

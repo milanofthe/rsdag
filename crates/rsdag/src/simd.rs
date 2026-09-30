@@ -615,11 +615,6 @@ fn solve_q<Q: Quad>(
     }
 }
 
-/// Systems of at most this many unknowns, and right-hand sides, run four
-/// to a vector in [`solve_batch`].
-const LANES_MAX_N: usize = 16;
-const LANES_MAX_K: usize = 4;
-
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn solve_batch_q<Q: Quad>(
@@ -633,7 +628,8 @@ fn solve_batch_q<Q: Quad>(
 ) {
     let (sa, sb) = (n * n, n * k);
     let mut c = 0;
-    if n <= LANES_MAX_N && k <= LANES_MAX_K {
+    use crate::semantics::{SOLVE_BATCH_MAX_K, SOLVE_BATCH_MAX_N};
+    if n <= SOLVE_BATCH_MAX_N && k <= SOLVE_BATCH_MAX_K {
         macro_rules! lanes {
             ($($n:literal)*) => {
                 match n {
@@ -660,7 +656,7 @@ fn solve_batch_q<Q: Quad>(
 }
 
 /// Four systems of `N` unknowns and `k` right-hand sides (at most
-/// [`LANES_MAX_K`]) side by side, lane `q` system `q`: `a` holds their
+/// [`crate::semantics::SOLVE_BATCH_MAX_K`]) side by side, lane `q` system `q`: `a` holds their
 /// matrices back to back, `b` and `out` their right-hand sides and
 /// solutions. Each lane runs [`solve_fixed`] on its own system: its own
 /// pivot, its rows swapped where its pivot says (a lane select), its own
@@ -678,7 +674,7 @@ fn solve_lanes<Q: Quad, const N: usize>(a: &[f64], b: &[f64], k: usize, out: &mu
             cj[i] = Q::of(std::array::from_fn(|q| a[q * sa + i * N + j]));
         }
     }
-    let mut x = [[Q::zero(); N]; LANES_MAX_K];
+    let mut x = [[Q::zero(); N]; crate::semantics::SOLVE_BATCH_MAX_K];
     for (c, xc) in x.iter_mut().enumerate().take(k) {
         for (i, xi) in xc.iter_mut().enumerate() {
             *xi = Q::of(std::array::from_fn(|q| b[q * sb + c * N + i]));

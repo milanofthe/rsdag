@@ -193,9 +193,12 @@ The dense kernels' throughput over the matrix size:
 
 Small matrices as models have them (controllers, filters, state space,
 macromodels): `A x`, `A B` and `A \ b` of n by n inputs through a tape,
-per call. The products fuse into one kernel from two rows on; native code
-writes a product of fewer than eight rows out as its entries' dots, and a
-solve of up to sixteen unknowns runs with its size a constant.
+one instance and sixteen of one shape, per instance. The products fuse into
+one kernel from two rows on; native code writes a product of fewer than
+eight rows out as its entries' dots, and a solve of up to sixteen unknowns
+runs with its size a constant. Solves of one shape that do not read each
+other's solutions run as one batch, four systems side by side in a vector,
+each bit-identical to its own solve.
 
 ![Small matrices](docs/bench/matrices.svg)
 
