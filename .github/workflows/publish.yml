@@ -41,7 +41,6 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --out dist -m crates/rsdag-py/Cargo.toml
           manylinux: auto
-          sccache: true
       - name: Test the installed wheel
         shell: bash
         run: |
