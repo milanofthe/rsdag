@@ -173,7 +173,7 @@ def circuits():
                 w = max(barw * v / scale, 0.04)
                 ax.add_patch(Rectangle((x0, y - 0.22), w, 0.44, fc=ACCENT if ours_ else INK,
                                        ec="none"))
-                ax.text(x0 + w + 0.2, y, f"{v:.0f} µs" if v >= 10 else f"{v:.1f} µs",
+                ax.text(x0 + w + 0.2, y, f"{v:.0f} \u00b5s" if v >= 10 else f"{v:.1f} \u00b5s",
                         color=INK, fontsize=18, va="center")
             y -= 0.8
         top = y - 0.25
