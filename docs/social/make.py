@@ -94,24 +94,24 @@ def pipeline():
 
 
 def derivative():
-    """f = sin(xy) and df/dx = y cos(xy) in one graph: the derivative's own
-    nodes dashed, the node both read in the accent."""
+    """f = sin(xy) and df/dx = y cos(xy) in one graph, from the inputs at
+    the top to the outputs at the bottom: the derivative's own nodes dashed."""
     fig, ax = card("Derivatives share the graph")
     r = 0.55
     nodes = {
-        "x": (2.2, 3.4), "y": (7.4, 3.4),
-        "xy": (4.8, 5.6),
-        "sin": (2.2, 7.8), "cos": (5.8, 7.8),
-        "mul": (7.4, 10.0),
+        "x": (2.2, 10.2), "y": (7.4, 10.2),
+        "xy": (4.8, 8.2),
+        "cos": (5.8, 6.2),
+        "sin": (2.2, 4.2), "mul": (7.4, 4.2),
     }
     labels = {"x": "x", "y": "y", "xy": "x y", "sin": "sin", "cos": "cos", "mul": "*"}
-    derived = {"cos", "mul"}
+    inputs, derived = {"x", "y"}, {"cos", "mul"}
     for k, (cx, cy) in nodes.items():
-        shared = k == "xy"
-        ax.add_patch(Circle((cx, cy), r, fc=ACCENT if shared else PAPER,
-                            ec="none" if shared else INK, lw=LW,
+        filled = k in inputs
+        ax.add_patch(Circle((cx, cy), r, fc=ACCENT if filled else PAPER,
+                            ec="none" if filled else INK, lw=LW,
                             ls="--" if k in derived else "-"))
-        ax.text(cx, cy, labels[k], color=PAPER if shared else INK, fontsize=22,
+        ax.text(cx, cy, labels[k], color=PAPER if filled else INK, fontsize=22,
                 ha="center", va="center")
     for a, b in [("x", "xy"), ("y", "xy"), ("xy", "sin"), ("xy", "cos"), ("cos", "mul"),
                  ("y", "mul")]:
@@ -122,7 +122,8 @@ def derivative():
               ls="--" if b in derived else "-")
     for k, name in [("sin", "f = sin(x y)"), ("mul", "df/dx = y cos(x y)")]:
         cx, cy = nodes[k]
-        ax.text(cx, cy + r + 0.3, name, color=INK, fontsize=24, ha="center", va="bottom")
+        arrow(ax, (cx, cy - r), (cx, cy - r - 0.9), ls="--" if k in derived else "-")
+        ax.text(cx, cy - r - 1.2, name, color=INK, fontsize=24, ha="center", va="top")
     save(fig, "derivative.png")
 
 
