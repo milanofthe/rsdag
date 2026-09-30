@@ -102,7 +102,8 @@ def modules():
     """rsdag against CasADi and JAX on SANE's circuits (modules_rsdag.csv,
     modules_other.csv): the residual and its Jacobian per call, with the
     parameters as inputs and as constants; the twelve BSIM4 amplifiers as
-    their median and range."""
+    their median and range. rsdag's interpreter (hatched) runs the same
+    tape as its native code."""
     ours = rows("modules_rsdag.csv")
     other = rows("modules_other.csv")
     groups = (("uA741, BJT", lambda m: m == "ua741"),
@@ -115,29 +116,30 @@ def modules():
     def other_col(tool, col):
         return lambda m: [float(x[col]) for x in other if x["module"] == m and x["tool"] == tool and x[col]]
 
-    bars = (  # label, color, solid (parameters constant), value per module for F and J
-        ("rsdag", BLUE, False, ours_col("call_f_native_us"), ours_col("call_j_native_us")),
-        ("CasADi", ORANGE, False, other_col("CasADi (parameter inputs)", "call_f_us"),
+    bars = (  # label, color, solid (parameters constant), hatch, value per module for F and J
+        ("rsdag", BLUE, False, "////", ours_col("call_f_interp_us"), ours_col("call_j_interp_us")),
+        ("rsdag", BLUE, False, None, ours_col("call_f_native_us"), ours_col("call_j_native_us")),
+        ("CasADi", ORANGE, False, None, other_col("CasADi (parameter inputs)", "call_f_us"),
          other_col("CasADi (parameter inputs)", "call_j_us")),
-        ("rsdag", BLUE, True, ours_col("call_f_folded_us"), ours_col("call_j_folded_us")),
-        ("CasADi", ORANGE, True, other_col("CasADi", "call_f_us"), other_col("CasADi", "call_j_us")),
-        ("JAX", GREEN, True, other_col("JAX", "call_f_us"), other_col("JAX", "call_j_us")),
+        ("rsdag", BLUE, True, None, ours_col("call_f_folded_us"), ours_col("call_j_folded_us")),
+        ("CasADi", ORANGE, True, None, other_col("CasADi", "call_f_us"), other_col("CasADi", "call_j_us")),
+        ("JAX", GREEN, True, None, other_col("JAX", "call_f_us"), other_col("JAX", "call_j_us")),
     )
     modules_ = sorted({x["module"] for x in ours})
     fig, axes = plt.subplots(1, 2, figsize=(9.6, 3.4), sharey=True)
-    width = 0.15
-    for a, (title, k) in zip(axes, (("Residual, per call", 3), ("Jacobian, per call", 4))):
+    width = 0.13
+    for a, (title, k) in zip(axes, (("Residual, per call", 4), ("Jacobian, per call", 5))):
         for gi, (gname, member) in enumerate(groups):
             mods = [m for m in modules_ if member(m)]
             for bi, bar in enumerate(bars):
                 vals = [v for m in mods for v in bar[k](m)]
-                x = gi + (bi - 2) * width
+                x = gi + (bi - (len(bars) - 1) / 2) * width
                 if not vals:
                     a.text(x, 1.2, "x", color=bar[1], ha="center", va="bottom", fontsize=9)
                     continue
                 med = float(np.median(vals))
                 a.bar(x, med, width * 0.9, color=bar[1], alpha=1.0 if bar[2] else 0.35,
-                      edgecolor=bar[1], linewidth=0.8)
+                      edgecolor=bar[1], linewidth=0.8, hatch=bar[3])
                 if len(vals) > 1:
                     a.errorbar(x, med, yerr=[[med - min(vals)], [max(vals) - med]], color=GREY,
                                lw=0.8, capsize=2)
@@ -150,8 +152,9 @@ def modules():
     key(fig, (("rsdag", BLUE), ("CasADi", ORANGE), ("JAX", GREEN)), ())
     fig.legend(handles=[Patch(fc=GREY, alpha=0.35, label="parameters as inputs"),
                         Patch(fc=GREY, label="parameters as constants"),
+                        Patch(fc="none", ec=GREY, hatch="////", label="rsdag interpreter"),
                         Line2D([], [], color=GREY, marker="$x$", ls="", label="no compile in 1 min")],
-               loc="lower center", ncol=3, frameon=False, fontsize=8, bbox_to_anchor=(0.5, -0.13))
+               loc="lower center", ncol=4, frameon=False, fontsize=8, bbox_to_anchor=(0.5, -0.13))
     save(fig, "modules.svg")
 
 
