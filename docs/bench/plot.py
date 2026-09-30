@@ -98,6 +98,26 @@ def dense():
     save(fig, "dense.svg")
 
 
+def matrices():
+    """Small matrices through a tape (matrices.csv): `A x`, `A B` and
+    `A \\ b` of n by n inputs, per call, interpreted and native."""
+    r = rows("matrices.csv")
+    fig, a = plt.subplots(1, 1, figsize=(4.6, 3.2))
+    kinds = (("gemv", "A x", BLUE), ("gemm", "A B", ORANGE), ("solve", "A \\ b", GREEN))
+    for kind, _, color in kinds:
+        sel = [x for x in r if x["kind"] == kind]
+        n = [int(x["n"]) for x in sel]
+        a.plot(n, [float(x["native_ns"]) for x in sel], "o-", color=color, ms=4)
+        a.plot(n, [float(x["interp_ns"]) for x in sel], "o--", color=color, ms=4)
+    a.set_xscale("log", base=2); a.set_yscale("log")
+    a.set_xticks([2, 4, 8, 16, 32]); a.set_xticklabels(["2", "4", "8", "16", "32"])
+    a.set_xlabel("n (n by n)"); a.set_ylabel("ns per call")
+    a.set_title("Small matrices")
+    key(fig, [(label, color) for _, label, color in kinds],
+        (("native", "-", "o"), ("interpreter", "--", "o")))
+    save(fig, "matrices.svg")
+
+
 def modules():
     """rsdag against CasADi and JAX on SANE's circuits (modules_rsdag.csv,
     modules_other.csv): the residual and its Jacobian per call, with the
@@ -161,7 +181,8 @@ def modules():
 if __name__ == "__main__":
     ops()
     dense()
-    names = ["ops.svg", "dense.svg"]
+    matrices()
+    names = ["ops.svg", "dense.svg", "matrices.svg"]
     if os.path.exists(os.path.join(DATA, "modules_other.csv")):
         modules()
         names.append("modules.svg")

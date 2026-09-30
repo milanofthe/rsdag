@@ -461,10 +461,85 @@ fn solve_q<Q: Quad>(
     scratch: &mut [f64],
 ) {
     use crate::semantics::{lu_panel, LU_PANEL_LARGE, LU_PANEL_SMALL};
+    macro_rules! fixed {
+        ($($n:literal)*) => {
+            match n {
+                $($n => return solve_fixed::<$n>(a, b, k, out),)*
+                _ => {}
+            }
+        };
+    }
+    fixed!(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16);
     match lu_panel(n) {
         0 => solve_unblocked::<Q>(a, b, n, k, out, scratch),
         LU_PANEL_SMALL => solve_blocked::<Q, LU_PANEL_SMALL>(a, b, n, k, out, scratch),
         _ => solve_blocked::<Q, LU_PANEL_LARGE>(a, b, n, k, out, scratch),
+    }
+}
+
+/// The unblocked elimination of `N` unknowns with the size a constant, so
+/// its loops unroll, the matrix by columns on the stack: the pivot search,
+/// the multipliers and each column's update run down a column, four rows
+/// to a vector. The right-hand sides are eliminated in `out`. Every entry
+/// sees the reference's products and differences in the reference's
+/// order (a row update is entry by entry, the right-hand sides' columns
+/// included), so the result is bit-identical.
+#[inline(always)]
+fn solve_fixed<const N: usize>(a: &[f64], b: &[f64], k: usize, out: &mut [f64]) {
+    // `col[j][i]` is entry `(i, j)`.
+    let mut col = [[0.0f64; N]; N];
+    for i in 0..N {
+        for j in 0..N {
+            col[j][i] = a[i * N + j];
+        }
+    }
+    let x = &mut out[..N * k];
+    x.copy_from_slice(&b[..N * k]);
+    for kk in 0..N {
+        let mut p = kk;
+        let mut best = col[kk][kk].abs();
+        for i in kk + 1..N {
+            if col[kk][i].abs() > best {
+                best = col[kk][i].abs();
+                p = i;
+            }
+        }
+        if p != kk {
+            for c in col.iter_mut() {
+                c.swap(kk, p);
+            }
+            for c in 0..k {
+                x.swap(c * N + kk, c * N + p);
+            }
+        }
+        let piv = col[kk][kk];
+        let mut l = [0.0f64; N];
+        for i in kk + 1..N {
+            l[i] = col[kk][i] / piv;
+            col[kk][i] = l[i];
+        }
+        for c in col.iter_mut().skip(kk + 1) {
+            let u = c[kk];
+            for i in kk + 1..N {
+                c[i] -= l[i] * u;
+            }
+        }
+        for c in 0..k {
+            let u = x[c * N + kk];
+            for i in kk + 1..N {
+                x[c * N + i] -= l[i] * u;
+            }
+        }
+    }
+    for c in 0..k {
+        let x = &mut x[c * N..(c + 1) * N];
+        for i in (0..N).rev() {
+            let mut s = x[i];
+            for j in i + 1..N {
+                s -= col[j][i] * x[j];
+            }
+            x[i] = s / col[i][i];
+        }
     }
 }
 

@@ -35,7 +35,7 @@ use crate::graph::Graph;
 use crate::node::{ArgList, ExprId, Node, SymbolId};
 
 /// Row dots against one vector fuse into a `Gemv` from this many rows on.
-const GEMV_MIN_ROWS: usize = 8;
+const GEMV_MIN_ROWS: usize = 2;
 
 /// A call's operands and the slot of its state block (the last operand of
 /// a stateful call), or [`NO_STATE`](super::NO_STATE).
