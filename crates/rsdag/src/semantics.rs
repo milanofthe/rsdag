@@ -566,6 +566,14 @@ pub fn solve_many_into<T: Scalar>(
     T::solve_many(a, b, n, k, out, &mut scratch[..solve_scratch_len(n, k)])
 }
 
+/// Systems of at most this many unknowns and right-hand sides solve side
+/// by side in a batch, four to a vector ([`solve_batch_into`] in `f64`);
+/// the tape batches solves of these shapes only, larger ones gain nothing
+/// from it.
+pub const SOLVE_BATCH_MAX_N: usize = 16;
+/// See [`SOLVE_BATCH_MAX_N`].
+pub const SOLVE_BATCH_MAX_K: usize = 4;
+
 /// `count` independent systems of one shape: `a` holds their `n` by `n`
 /// matrices back to back, `b` their `k` right-hand sides each (as
 /// [`solve_many_t`] takes them), `out` their solutions the same way. Each

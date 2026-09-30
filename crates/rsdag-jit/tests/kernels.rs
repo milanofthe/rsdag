@@ -156,14 +156,20 @@ fn the_multi_solve_kernel_matches_the_interpreter() {
     assert!(same(&o1, &o2));
 }
 
-/// Independent solves of one shape run as one batch: interpreted and
-/// natively, each solution bit-identical to its system solved alone. The
+/// Independent solves of one shape run as one batch (up to sixteen
+/// unknowns): interpreted and natively, each solution bit-identical to its system solved alone. The
 /// systems are plain random matrices (their eliminations swap rows), two
 /// of them with a second right-hand side; a solve that reads another's
 /// solution is no part of its batch.
 #[test]
 fn a_batch_of_solves_matches_each_solve_alone() {
-    for (n, count, computed) in [(3usize, 5usize, false), (4, 8, true), (6, 3, false), (17, 2, false)] {
+    for (n, count, computed) in [
+        (3usize, 5usize, false),
+        (4, 8, true),
+        (6, 3, false),
+        (16, 4, false),
+        (17, 4, false),
+    ] {
         let mut g: Graph<F64> = Graph::new();
         let mut syms = Vec::new();
         let mut sym = |g: &mut Graph<F64>| {
@@ -193,11 +199,16 @@ fn a_batch_of_solves_matches_each_solve_alone() {
         let tape = Tape::compile(&g, &roots, &syms);
         let d = tape.dump();
         // The systems with two right-hand sides are one batch, those with
-        // one another (when there are two), the dependent solve alone.
-        assert!(d.contains(&format!("SolveBatch(2 of {n}x{n}")), "{d}");
-        if count >= 4 {
-            let rest = format!("SolveBatch({} of {n}x{n}", count - 2);
-            assert!(d.contains(&rest), "{d}");
+        // one another (when there are two), the dependent solve alone;
+        // past sixteen unknowns nothing batches.
+        if n <= rsdag::semantics::SOLVE_BATCH_MAX_N {
+            assert!(d.contains(&format!("SolveBatch(2 of {n}x{n}")), "{d}");
+            if count >= 4 {
+                let rest = format!("SolveBatch({} of {n}x{n}", count - 2);
+                assert!(d.contains(&rest), "{d}");
+            }
+        } else {
+            assert!(!d.contains("SolveBatch"), "{d}");
         }
         assert!(d.contains(&format!("Solve({n}x{n}")), "{d}");
         let native = NativeTape::compile(&tape).expect("compile");
@@ -216,7 +227,10 @@ fn a_batch_of_solves_matches_each_solve_alone() {
             assert!(!alone.dump().contains("SolveBatch"));
             let (mut w, mut o) = (Vec::new(), Vec::new());
             alone.eval(&inputs, &mut w, &mut o);
-            assert!(same(&o, &o1[at..at + n]), "n {n} count {count}: solve {i} differs");
+            assert!(
+                same(&o, &o1[at..at + n]),
+                "n {n} count {count}: solve {i} differs"
+            );
             at += n;
             i += 1;
         }
