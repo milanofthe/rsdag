@@ -14,8 +14,8 @@ fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
     }
 }
 
-/// body(v, p): output k is p_k v_k^2 + sin(v_{k+1}) through a callee, every
-/// output reading three of the 2 N parameters.
+/// body(v, p): output k is p_k v_k^2 + sin(v_{k+1}) through a callee
+/// + 3 v_{k+2}, every output reading four of the 2 N parameters.
 fn body(g: &mut Graph<F64>) -> FuncId {
     let mut s = Scope::new(g, "dev");
     let (a, b) = (s.param("a"), s.param("b"));
@@ -33,7 +33,10 @@ fn body(g: &mut Graph<F64>) -> FuncId {
             let sq = s.pow_i(v[k], 2);
             let q = s.mul(p[k], sq);
             let c = s.call(dev, 0, &[v[k], v[(k + 1) % N]]);
-            s.add(q, c)
+            let three = s.konst_f64(3.0);
+            let lin = s.mul(three, v[(k + 2) % N]);
+            let qc = s.add(q, c);
+            s.add(qc, lin)
         })
         .collect();
     s.close(outs)
@@ -98,8 +101,8 @@ fn two_instances_rewrite_differentiate_and_compile_as_inlined() {
     let jac = sparse_jacobian(&mut g, &rows, &wrt);
     for (i, row) in jac.iter().enumerate() {
         assert!(
-            row.len() <= 2,
-            "row {i} reads two states, not {}",
+            row.len() <= 3,
+            "row {i} reads three states, not {}",
             row.len()
         );
     }
@@ -111,6 +114,17 @@ fn two_instances_rewrite_differentiate_and_compile_as_inlined() {
     let fixed = rsdag::substitute(&mut g, &roots, &at);
     let spec = g.specialize_calls(&fixed);
     let flat = g.inline_all(&fixed);
+    // what depends on the states, through the calls and inlined alike
+    let through = g.depends_on(&fixed, &wrt);
+    let inlined: Vec<bool> = flat
+        .iter()
+        .map(|&e| g.free_symbols(e).iter().any(|s| wrt.contains(s)))
+        .collect();
+    assert_eq!(through, inlined);
+    assert!(
+        through.iter().any(|&d| !d),
+        "some Jacobian entries are constant"
+    );
     let ins: Vec<f64> = (0..wrt.len()).map(|k| 0.2 + 0.03 * k as f64).collect();
     let (mut w, mut a, mut b, mut c) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     Tape::compile(&g, &fixed, &wrt).eval(&ins, &mut w, &mut a);
