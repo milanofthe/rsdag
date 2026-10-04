@@ -503,19 +503,21 @@ fn tangent<K: Field>(ctx: &mut Graph<K>, e: ExprId, wrt: SymbolId, memo: &mut Me
         // Chain rule through a call: d/dx f_out(a) = Σ_i (∂f_out/∂p_i)(a) · da_i,
         // each partial a call into the function's derivative output.
         Node::Call(o, l) => {
-            let args = ctx.args(l).to_vec();
             let (f, out) = ctx.output(o);
-            let moving: Vec<(u32, ExprId)> = ctx
-                .output_support(f, out)
-                .iter()
-                .map(|&i| (i, d(args[i as usize])))
-                .filter(|&(_, da)| da != zero)
-                .collect();
+            let moving: Vec<(u32, ExprId)> = {
+                let args = ctx.args(l);
+                ctx.output_support(f, out)
+                    .iter()
+                    .map(|&i| (i, d(args[i as usize])))
+                    .filter(|&(_, da)| da != zero)
+                    .collect()
+            };
             let params: Vec<u32> = moving.iter().map(|&(i, _)| i).collect();
             let ks = ctx.derivative_outputs(f, out, &params);
             let mut acc = zero;
             for (&(_, dai), k) in moving.iter().zip(ks) {
-                let partial = ctx.call(f, k, &args);
+                // over the call's own list: no width to hash again
+                let partial = ctx.call_list(f, k, l);
                 let term = ctx.mul(partial, dai);
                 acc = ctx.add(acc, term);
             }
@@ -824,19 +826,21 @@ pub fn gradient<K: Field>(ctx: &mut Graph<K>, f: ExprId, wrt: &[SymbolId]) -> Ve
             // Chain rule through a call: the same derivative outputs as the
             // forward mode, for the arguments that move.
             Node::Call(o, l) => {
-                let args = ctx.args(l).to_vec();
                 let (func, out) = ctx.output(o);
-                let moving: Vec<u32> = ctx
-                    .output_support(func, out)
-                    .iter()
-                    .copied()
-                    .filter(|&i| act(args[i as usize]))
-                    .collect();
-                let ks = ctx.derivative_outputs(func, out, &moving);
-                for (&i, k) in moving.iter().zip(ks) {
-                    let partial = ctx.call(func, k, &args);
+                let moving: Vec<(u32, ExprId)> = {
+                    let args = ctx.args(l);
+                    ctx.output_support(func, out)
+                        .iter()
+                        .map(|&i| (i, args[i as usize]))
+                        .filter(|&(_, a)| act(a))
+                        .collect()
+                };
+                let params: Vec<u32> = moving.iter().map(|&(i, _)| i).collect();
+                let ks = ctx.derivative_outputs(func, out, &params);
+                for (&(_, arg), k) in moving.iter().zip(ks) {
+                    let partial = ctx.call_list(func, k, l);
                     let t = ctx.mul(a_bar, partial);
-                    push(&mut adj, args[i as usize], t);
+                    push(&mut adj, arg, t);
                 }
             }
         }

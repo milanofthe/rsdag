@@ -98,14 +98,16 @@ impl<K: Field> Graph<K> {
         roots: &[ExprId],
         bodies: &mut HashMap<OutputId, ExprId>,
     ) -> Vec<ExprId> {
-        crate::transform::rewrite(self, roots, |g, _, node, args| {
-            let Node::Call(o, _) = node else {
-                return g.build(node, args);
+        // per instance (function, argument list): its parameters bound
+        let mut binds: HashMap<(FuncId, ArgList), HashMap<SymbolId, ExprId>> = HashMap::default();
+        crate::transform::rewrite(self, roots, |g, _, node, ops| {
+            let (Node::Call(o, _), Some(l)) = (node, ops.list) else {
+                return g.rebuild(node, ops);
             };
             let (f, k) = g.output(o);
             let e = match g.funcs[f.0 as usize].outputs()[k as usize] {
                 // An extern body stays a call, over inlined arguments.
-                Output::Slot(_) => return g.call(f, k, args),
+                Output::Slot(_) => return g.rebuild(node, ops),
                 Output::Zero => return g.zero,
                 Output::Expr(e) => e,
             };
@@ -117,8 +119,8 @@ impl<K: Field> Graph<K> {
                     b
                 }
             };
-            let map = g.bind(f, args);
-            crate::transform::substitute(g, &[body], &map)[0]
+            let map = binds.entry((f, l)).or_insert_with(|| g.bind(f, ops.ops));
+            crate::transform::substitute(g, &[body], map)[0]
         })
     }
 
@@ -442,8 +444,32 @@ impl<K: Field> Graph<K> {
         if matches!(func.outputs()[out as usize], Output::Zero) {
             return self.zero;
         }
-        let o = self.output_id(f, out);
         let l = self.intern_args(args);
+        self.call_list(f, out, l)
+    }
+
+    /// Outputs `outs` of `f` called over one argument list: the calls of one
+    /// instance. The list is interned once, so an instance of a wide body
+    /// costs its width once, not once per output.
+    pub fn calls(&mut self, f: FuncId, outs: &[u32], args: &[ExprId]) -> Vec<ExprId> {
+        debug_assert_eq!(
+            args.len(),
+            self.funcs[f.0 as usize].params().len(),
+            "call arity"
+        );
+        let l = self.intern_args(args);
+        outs.iter().map(|&out| self.call_list(f, out, l)).collect()
+    }
+
+    /// [`call`](Self::call) over an argument list already interned.
+    pub(crate) fn call_list(&mut self, f: FuncId, out: u32, l: ArgList) -> ExprId {
+        if matches!(
+            self.funcs[f.0 as usize].outputs()[out as usize],
+            Output::Zero
+        ) {
+            return self.zero;
+        }
+        let o = self.output_id(f, out);
         self.intern(Node::Call(o, l))
     }
 
@@ -578,6 +604,8 @@ impl<K: Field> Graph<K> {
     pub fn free_symbols_in(&self, exprs: &[ExprId]) -> std::collections::BTreeSet<SymbolId> {
         let mut set = std::collections::BTreeSet::new();
         let mut visited = FxHashSet::default();
+        // the calls of one instance share their list: walked once
+        let mut lists: FxHashSet<ArgList> = FxHashSet::default();
         let mut stack: Vec<ExprId> = exprs.to_vec();
         while let Some(e) = stack.pop() {
             if !visited.insert(e) {
@@ -587,6 +615,11 @@ impl<K: Field> Graph<K> {
                 Node::Const(_) => {}
                 Node::Symbol(s) => {
                     set.insert(s);
+                }
+                Node::Call(_, l) => {
+                    if lists.insert(l) {
+                        stack.extend_from_slice(self.args(l));
+                    }
                 }
                 _ => stack.extend_from_slice(&self.operands(e)),
             }
@@ -604,46 +637,70 @@ fn specialize_calls_in<K: Field>(
     roots: &[ExprId],
     made: &mut Specialized,
 ) -> Vec<ExprId> {
+    // per instance (function, argument list): the copy it calls over the
+    // arguments that are not constant, or none
+    let mut instances: HashMap<(FuncId, ArgList), Option<(FuncId, ArgList)>> = HashMap::default();
     crate::transform::rewrite(g, roots, |g, _e, node, ops| {
-        let Node::Call(o, _) = node else {
-            return g.build(node, ops);
+        let (Node::Call(o, _), Some(l)) = (node, ops.list) else {
+            return g.rebuild(node, ops);
         };
         let (f, out) = g.output(o);
-        // A parameter stays an argument even when constant: its work is the
-        // body's prolog, and specializing on it would split the instances
-        // of one function into one copy per value.
-        let roles = g.func(f).param_roles();
-        let consts: Vec<(u32, ExprId)> = ops
-            .iter()
-            .enumerate()
-            .filter(|&(k, &a)| {
-                g.const_of(a).is_some() && !matches!(roles.get(k), Some(ParamRole::Param))
-            })
-            .map(|(k, &a)| (k as u32, a))
-            .collect();
-        if consts.is_empty() || g.func(f).is_extern() {
-            return g.build(node, ops);
-        }
-        let key = (f, consts);
-        let copy = match made.get(&key) {
-            Some(&c) => c,
+        let target = match instances.get(&(f, l)) {
+            Some(&t) => t,
             None => {
-                let c = specialize_function(g, f, &key.1, made);
-                made.insert(key.clone(), c);
-                c
+                let t = specialize_instance(g, f, ops.ops, made);
+                instances.insert((f, l), t);
+                t
             }
         };
-        // `key.1` is in argument order: one merge, not a search per
-        // argument (a subcircuit body passes hundreds of constants).
-        let mut bound = key.1.iter().map(|&(p, _)| p as usize).peekable();
-        let rest: Vec<ExprId> = ops
-            .iter()
-            .enumerate()
-            .filter(|&(k, _)| bound.next_if_eq(&k).is_none())
-            .map(|(_, &a)| a)
-            .collect();
-        g.call(copy, out, &rest)
+        match target {
+            Some((copy, rest)) => g.call_list(copy, out, rest),
+            None => g.rebuild(node, ops),
+        }
     })
+}
+
+/// The copy of `f` a call over `args` runs, and the arguments it keeps
+/// interned; `None` when the call passes no constant to specialize on.
+fn specialize_instance<K: Field>(
+    g: &mut Graph<K>,
+    f: FuncId,
+    args: &[ExprId],
+    made: &mut Specialized,
+) -> Option<(FuncId, ArgList)> {
+    // A parameter stays an argument even when constant: its work is the
+    // body's prolog, and specializing on it would split the instances of
+    // one function into one copy per value.
+    let roles = g.func(f).param_roles();
+    let consts: Vec<(u32, ExprId)> = args
+        .iter()
+        .enumerate()
+        .filter(|&(k, &a)| {
+            g.const_of(a).is_some() && !matches!(roles.get(k), Some(ParamRole::Param))
+        })
+        .map(|(k, &a)| (k as u32, a))
+        .collect();
+    if consts.is_empty() || g.func(f).is_extern() {
+        return None;
+    }
+    let key = (f, consts);
+    let copy = match made.get(&key) {
+        Some(&c) => c,
+        None => {
+            let c = specialize_function(g, f, &key.1, made);
+            made.insert(key.clone(), c);
+            c
+        }
+    };
+    // `key.1` is in argument order: one merge, not a search per argument.
+    let mut bound = key.1.iter().map(|&(p, _)| p as usize).peekable();
+    let rest: Vec<ExprId> = args
+        .iter()
+        .enumerate()
+        .filter(|&(k, _)| bound.next_if_eq(&k).is_none())
+        .map(|(_, &a)| a)
+        .collect();
+    Some((copy, g.intern_args(&rest)))
 }
 
 /// The copy of `f` with the parameters `consts` names bound to their
