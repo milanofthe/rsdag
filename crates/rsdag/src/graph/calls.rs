@@ -128,6 +128,62 @@ impl<K: Field> Graph<K> {
         params.iter().copied().zip(args.iter().copied()).collect()
     }
 
+    /// The parameters output `out` of `f` can have a nonzero derivative in,
+    /// by index, ascending: its [`support_in`](Self::support_in) among the
+    /// function's parameters. Structural, read off the graph; computed once
+    /// per output. An extern output is taken to read every parameter, a zero
+    /// one none.
+    pub fn output_support(&self, f: FuncId, out: u32) -> Arc<[u32]> {
+        let func = &self.funcs[f.0 as usize];
+        if let Some(s) = func.cached_support(out) {
+            return s;
+        }
+        let support: Arc<[u32]> = match func.outputs()[out as usize] {
+            Output::Zero => Arc::from([]),
+            Output::Slot(_) => (0..func.params().len() as u32).collect(),
+            Output::Expr(e) => {
+                let syms = self.support_in(&[e]);
+                func.params()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| syms.contains(s))
+                    .map(|(k, _)| k as u32)
+                    .collect()
+            }
+        };
+        func.cache_support(out, support.clone());
+        support
+    }
+
+    /// The symbols `exprs` can have a nonzero derivative in: their
+    /// [`free_symbols_in`](Self::free_symbols_in) through the operands that
+    /// carry a derivative (not a comparison's, not a selector's condition),
+    /// and through a call only the arguments its output's
+    /// [`output_support`](Self::output_support) names. The sparsity of every
+    /// derivative of `exprs`, nested calls included.
+    pub fn support_in(&self, exprs: &[ExprId]) -> std::collections::BTreeSet<SymbolId> {
+        let mut set = std::collections::BTreeSet::new();
+        let mut visited = FxHashSet::default();
+        let mut stack: Vec<ExprId> = exprs.to_vec();
+        let mut ops = Vec::new();
+        while let Some(e) = stack.pop() {
+            if !visited.insert(e) {
+                continue;
+            }
+            match *self.node(e) {
+                Node::Const(_) => {}
+                Node::Symbol(s) => {
+                    set.insert(s);
+                }
+                _ => {
+                    crate::autodiff::carrying(self, e, &mut ops);
+                    stack.extend_from_slice(&ops);
+                }
+            }
+        }
+        set
+    }
+
     /// Which outputs of `f` structurally read which of its parameters:
     /// `feedthrough(f)[out][param]`.
     ///

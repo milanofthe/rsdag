@@ -458,3 +458,108 @@ fn many_moving_call_arguments_derive_the_body_in_one_reverse_sweep() {
         assert!((a - b).abs() <= 1e-13 * b.abs().max(1.0), "{a} vs {b}");
     }
 }
+
+/// A call reads only what its output's body reads: through a nested call
+/// the arguments the inner output's support names, and not a comparison's
+/// operands (they carry no derivative).
+#[test]
+fn the_support_reads_through_nested_calls() {
+    let mut g: Graph<F64> = Graph::new();
+    // f(a, b, c) = [a b, a > 0 ? sin(c) : c]
+    let mut s = Scope::new(&mut g, "f");
+    let (a, b, c) = (s.param("a"), s.param("b"), s.param("c"));
+    let ab = s.mul(a, b);
+    let zero = s.zero();
+    let pos = s.cmp(CmpOp::Gt, a, zero);
+    let sc = s.sin(c);
+    let pick = s.select(pos, sc, c);
+    let f = s.close(vec![ab, pick]);
+    // g(x, y, z, w) = [f0(x, y, z) + w, f1(x, y, z w)]
+    let mut s = Scope::new(&mut g, "g");
+    let (x, y, z, w) = (s.param("x"), s.param("y"), s.param("z"), s.param("w"));
+    let f0 = s.call(f, 0, &[x, y, z]);
+    let g0 = s.add(f0, w);
+    let zw = s.mul(z, w);
+    let g1 = s.call(f, 1, &[x, y, zw]);
+    let gf = s.close(vec![g0, g1]);
+    assert_eq!(&*g.output_support(f, 0), &[0, 1]);
+    assert_eq!(&*g.output_support(f, 1), &[2]);
+    assert_eq!(&*g.output_support(gf, 0), &[0, 1, 3]);
+    assert_eq!(&*g.output_support(gf, 1), &[2, 3]);
+    let args: Vec<ExprId> = ["p", "q", "r", "t"].iter().map(|n| g.sym(n)).collect();
+    let call = g.call(gf, 1, &args);
+    let names: Vec<String> = g
+        .support_in(&[call])
+        .into_iter()
+        .map(|s| g.symbol_name(s).to_string())
+        .collect();
+    assert_eq!(names, ["r", "t"]);
+}
+
+/// A row that is a call of a wide function touches only the columns its
+/// output reads, two levels of calls deep: the Jacobian makes one derivative
+/// output per structural nonzero, and its entries and a gradient through the
+/// calls are the inlined graph's.
+#[test]
+fn a_jacobian_through_wide_calls_makes_only_its_entries() {
+    const N: usize = 48;
+    let mut g: Graph<F64> = Graph::new();
+    // f(x)_k = x_k exp(x_{k+1}), cyclic: each output reads two of N parameters
+    let mut s = Scope::new(&mut g, "f");
+    let xs: Vec<ExprId> = (0..N).map(|k| s.param(&format!("x{k}"))).collect();
+    let outs: Vec<ExprId> = (0..N)
+        .map(|k| {
+            let e = s.exp(xs[(k + 1) % N]);
+            s.mul(xs[k], e)
+        })
+        .collect();
+    let f = s.close(outs);
+    // h(y)_k = f(y)_k + y_k: a body that is all calls into f
+    let mut s = Scope::new(&mut g, "h");
+    let ys: Vec<ExprId> = (0..N).map(|k| s.param(&format!("y{k}"))).collect();
+    let outs: Vec<ExprId> = (0..N)
+        .map(|k| {
+            let c = s.call(f, k as u32, &ys);
+            s.add(c, ys[k])
+        })
+        .collect();
+    let h = s.close(outs);
+    let us: Vec<ExprId> = (0..N).map(|k| g.sym(&format!("u{k}"))).collect();
+    let wrt: Vec<SymbolId> = (0..N).map(|k| sid(&mut g, &format!("u{k}"))).collect();
+    let rows: Vec<ExprId> = (0..N).map(|k| g.call(h, k as u32, &us)).collect();
+
+    let jac = sparse_jacobian(&mut g, &rows, &wrt);
+    for (k, row) in jac.iter().enumerate() {
+        let cols: Vec<usize> = row.iter().map(|&(j, _)| j).collect();
+        let mut want = vec![k, (k + 1) % N];
+        want.sort_unstable();
+        assert_eq!(cols, want, "row {k}");
+    }
+    // N outputs and 2 N derivative outputs each, not N^2
+    assert_eq!(g.func(f).outputs().len(), 3 * N);
+    assert_eq!(g.func(h).outputs().len(), 3 * N);
+
+    let flat = g.inline_all(&rows);
+    let flat_jac = sparse_jacobian(&mut g, &flat, &wrt);
+    let sum = g.reduce(ReduceOp::Sum, rows.clone());
+    let flat_sum = g.reduce(ReduceOp::Sum, flat.clone());
+    let grad = gradient(&mut g, sum, &wrt);
+    let flat_grad = gradient(&mut g, flat_sum, &wrt);
+    let mut a: Vec<ExprId> = jac.iter().flatten().map(|&(_, e)| e).collect();
+    let mut b: Vec<ExprId> = flat_jac.iter().flatten().map(|&(_, e)| e).collect();
+    a.extend(grad);
+    b.extend(flat_grad);
+    assert_eq!(a.len(), b.len());
+    let ins: Vec<f64> = (0..N)
+        .map(|k| 0.1 + 0.37 * ((k * 7) % 11) as f64 / 11.0)
+        .collect();
+    let (mut work, mut va, mut vb) = (Vec::new(), Vec::new(), Vec::new());
+    Tape::compile(&g, &a, &wrt).eval(&ins, &mut work, &mut va);
+    Tape::compile(&g, &b, &wrt).eval(&ins, &mut work, &mut vb);
+    for (k, (p, q)) in va.iter().zip(&vb).enumerate() {
+        assert!(
+            (p - q).abs() <= 1e-12 * (1.0 + q.abs()),
+            "entry {k}: {p} vs {q}"
+        );
+    }
+}
