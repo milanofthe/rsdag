@@ -100,7 +100,7 @@ fn reductions_and_dots_follow_sum_and_product_rules() {
 }
 
 #[test]
-fn a_call_on_an_unknown_is_opaque() {
+fn a_call_is_classified_through_its_body() {
     let mut g: Graph<BigRational> = Graph::new();
     let p = g.sym("p");
     let ps = match g.node(p) {
@@ -112,8 +112,8 @@ fn a_call_on_an_unknown_is_opaque() {
     let x = g.sym("x");
     let call = g.call(f, 0, &[x]);
     let nl = nonlinearity(&g, call, &vars(&g, &[x]));
-    assert!(nl.opaque);
-    assert_eq!(nl.degree, Degree::Unbounded);
+    assert!(!nl.opaque);
+    assert_eq!(nl.degree, Degree::Finite(2));
 }
 
 #[test]
@@ -129,4 +129,63 @@ fn a_system_takes_the_worst_case() {
     let nl = nonlinearity_of(&g, &[lin, cubic, e], &v);
     assert_eq!(nl.degree, Degree::Unbounded);
     assert!(nl.transcendental.contains(&UnaryOp::Exp));
+}
+
+/// A call is classified through its function's body: a cubic device behind
+/// two levels of calls classifies like its inlined expression, a parameter
+/// argument does not raise the degree, and an extern body stays opaque.
+#[test]
+fn calls_classify_like_their_inlined_bodies() {
+    let mut g: Graph<BigRational> = Graph::new();
+    let mut s = rsdag::Scope::new(&mut g, "cube");
+    let v = s.param("v");
+    let k = s.param("k");
+    let v3 = s.pow_i(v, 3);
+    let i = s.mul(k, v3);
+    let cube = s.close(vec![i]);
+    let mut s = rsdag::Scope::new(&mut g, "pair");
+    let a = s.param("a");
+    let b = s.param("b");
+    let k = s.param("k");
+    let ia = s.call(cube, 0, &[a, k]);
+    let ib = s.call(cube, 0, &[b, k]);
+    let sum = s.add(ia, ib);
+    let pair = s.close(vec![sum]);
+
+    let (x, y, p) = (g.sym("x"), g.sym("y"), g.sym("p"));
+    let xy = g.mul(x, y);
+    let call = g.call(pair, 0, &[xy, y, p]);
+    let flat = g.inline_all(&[call])[0];
+    let vs = vars(&g, &[x, y]);
+    let through = nonlinearity(&g, call, &vs);
+    assert_eq!(through, nonlinearity(&g, flat, &vs));
+    assert_eq!(
+        through.degree,
+        Degree::Finite(6),
+        "(x y)^3 through two calls"
+    );
+    assert!(!through.opaque);
+
+    let only_p = vars(&g, &[p]);
+    assert_eq!(nonlinearity(&g, call, &only_p).degree, Degree::Finite(1));
+
+    let ext = g.define_extern_func(
+        "ext",
+        1,
+        std::sync::Arc::new(Square),
+        vec![rsdag::Output::Slot(0)],
+    );
+    let opaque = g.call(ext, 0, &[x]);
+    assert!(nonlinearity(&g, opaque, &vs).opaque);
+}
+
+struct Square;
+
+impl rsdag::ExternBundle for Square {
+    fn n_outputs(&self) -> usize {
+        1
+    }
+    fn call_into(&self, args: &[f64], _work: &mut [f64], out: &mut [f64]) {
+        out[0] = args[0] * args[0];
+    }
 }

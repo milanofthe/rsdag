@@ -78,6 +78,9 @@ impl<K: Field> Graph<K> {
     /// still run as one batch, and calls in a copy's body are specialized
     /// too. A ground terminal, or the derivatives of a DC analysis set to
     /// zero, take their share of a device body away before it is compiled.
+    /// A parameter with the `Param` role stays an argument when constant:
+    /// its work is the body's prolog, once per binding, and the instances
+    /// keep sharing one body whatever their parameter values.
     ///
     /// The copy keeps the roles of the parameters it keeps; its outputs are
     /// `Plain` apart from their non-derivative roles, a derivative of it is
@@ -472,10 +475,16 @@ fn specialize_calls_in<K: Field>(
             return g.build(node, ops);
         };
         let (f, out) = g.output(o);
+        // A parameter stays an argument even when constant: its work is the
+        // body's prolog, and specializing on it would split the instances
+        // of one function into one copy per value.
+        let roles = g.func(f).param_roles();
         let consts: Vec<(u32, ExprId)> = ops
             .iter()
             .enumerate()
-            .filter(|(_, &a)| g.const_of(a).is_some())
+            .filter(|&(k, &a)| {
+                g.const_of(a).is_some() && !matches!(roles.get(k), Some(ParamRole::Param))
+            })
             .map(|(k, &a)| (k as u32, a))
             .collect();
         if consts.is_empty() || g.func(f).is_extern() {
