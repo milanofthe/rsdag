@@ -1,0 +1,32 @@
+% The work array: the prolog's results first, the same layout in every
+% backend, then the main phase's slots; native code appends the gather
+% area for host calls and a called bundle's scratch.
+\documentclass[tikz,border=4pt]{standalone}
+\input{style}
+\usetikzlibrary{decorations.pathreplacing}
+\begin{document}
+\begin{tikzpicture}[cell/.style={draw, minimum height=12mm, inner sep=0pt, align=center}]
+  \node[cell, minimum width=36mm, fill=accent, draw=accent, text=white, anchor=west]
+    (state) at (0, 0) {state\\[-1pt]\footnotesize\ttfamily work[..state\_len]};
+  \node[cell, minimum width=52mm, anchor=west] (slots) at (state.east) {slots};
+  \node[cell, minimum width=22mm, anchor=west, dashed] (gather) at (slots.east) {gather};
+  \node[cell, minimum width=26mm, anchor=west, dashed] (scratch) at (gather.east)
+    {bundle scratch};
+
+  \draw[decorate, decoration={brace, amplitude=5pt}]
+    ($(state.north west) + (0, 2mm)$) -- node[lbl, above=5pt] {the tape's layout, every backend}
+    ($(slots.north east) + (0, 2mm)$);
+  \draw[decorate, decoration={brace, amplitude=5pt}]
+    ($(gather.north west) + (0, 2mm)$) -- node[lbl, above=5pt] {native code only}
+    ($(scratch.north east) + (0, 2mm)$);
+
+  \node[note, align=center, anchor=north] (pro) at ($(state.south) + (0, -1.2)$)
+    {prolog\\once per parameter binding};
+  \node[note, align=center, anchor=north] (main) at ($(slots.south) + (0, -1.2)$)
+    {main\\every iteration};
+  \draw[data] (pro) -- node[lbl, left] {writes} (state);
+  \draw[<->] (main) -- node[lbl, right] {writes, reads} (slots);
+  \draw[state] ($(state.south east) + (-3mm, 0)$) -- node[lbl, above, sloped] {reads}
+    (main.north west);
+\end{tikzpicture}
+\end{document}

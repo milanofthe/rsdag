@@ -54,6 +54,20 @@ Features:
 feature except `egraph`. It reads no clock unless `hooks::set_clock`
 installs one.
 
+## Architecture
+
+![Architecture](docs/diagrams/architecture.svg)
+
+The layers, each built on the ones below. The core does not depend on the
+native backend: `rsdag-jit` implements `Compiler`, `Adaptive` takes one.
+Every backend computes through `semantics`, the one reference arithmetic.
+
+![Lowering](docs/diagrams/lowering.svg)
+
+The representations a program passes through and the passes between them.
+`Tape::specialize` lifts a tape back to a program, pins its choices and
+schedules and emits it again.
+
 ## Graph
 
 Nodes are hash-consed; ascending ids are a topological order. Constructors
@@ -109,6 +123,12 @@ Evaluation is allocation-free once the buffers exist. `Tape::work_len` and
 and `call_into` take a caller-owned buffer; a calling tape lends its own.
 `NativeTape::compile` emits the same instruction sequence as machine code
 in chunked functions with a write-back register cache.
+
+![Work array](docs/diagrams/work.svg)
+
+The work array: the prolog's results first, then the main phase's slots,
+the same layout in every backend; native code appends a gather area for
+host calls and the scratch of called bodies.
 
 ## Function bodies
 
