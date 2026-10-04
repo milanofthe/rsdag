@@ -32,10 +32,10 @@
   \draw[state] (tape.west) ++(0, 2mm) to[out=150, in=210] node[lbl, left] {specialize}
     ($(prog.west) + (0, -2mm)$);
   \draw[decorate, decoration={brace, amplitude=5pt}]
-    ($(graph.north east) + (73mm, 0)$) -- node[lbl, right=6pt] {rsdag}
-    ($(tape.south east) + (73mm, 0)$);
+    ($(graph.north) + (90mm, 0)$) -- node[lbl, right=6pt] {rsdag}
+    ($(tape.south) + (90mm, 0)$);
   \draw[decorate, decoration={brace, amplitude=5pt}]
-    ($(rop.north east) + (73mm, 0)$) -- node[lbl, right=6pt] {rsdag-jit}
-    ($(mc.south east) + (73mm, 0)$);
+    ($(rop.north) + (90mm, 0)$) -- node[lbl, right=6pt] {rsdag-jit}
+    ($(mc.south) + (90mm, 0)$);
 \end{tikzpicture}
 \end{document}
