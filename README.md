@@ -69,7 +69,7 @@ derivative, guard with its crossing direction, state write).
 ![Derivative](docs/diagrams/derivative.svg)
 
 `f = sin(x y)` and `differentiate(f, x)` in one graph: the derivative
-reuses `x y`; its own nodes are dashed.
+reuses the product `x y`; its own nodes are dashed.
 
 ## Tape
 
@@ -251,7 +251,7 @@ with `gt`, `lt`, ... expresses elementwise conditions.
 ```
 cargo test --workspace
 scripts/ci.sh                                            # the full gate, locally
-scripts/diagrams.sh                                      # the README diagrams (needs matplotlib)
+scripts/diagrams.sh                                      # the README diagrams (needs TeX Live or MiKTeX)
 scripts/bench.sh                                         # the README benchmarks, measured afresh (needs matplotlib)
 scripts/social.sh                                        # the cards in docs/social (needs matplotlib)
 maturin build --release -m crates/rsdag-py/Cargo.toml   # the Python wheel

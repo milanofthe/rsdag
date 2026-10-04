@@ -1,0 +1,32 @@
+% A tape and its specialization to the recorded choices c1 = 0, c2 = 1,
+% c3 = 1: the selects resolve to their arms, the conditions stay as guards.
+\documentclass[tikz,border=4pt]{standalone}
+\input{style}
+\begin{document}
+\begin{tikzpicture}
+  \node[listing] (tape) at (0, 0) {%
+    v1 = x * p\\
+    \textcolor{accent}{v2 = select(c1, v1, x)}\\
+    v3 = exp(v2)\\
+    \textcolor{accent}{v4 = select(c2, v3, p)}\\
+    v5 = v4 + v1\\
+    \textcolor{accent}{v6 = select(c3, v5, v3)}\\
+    out v6};
+  \node[listing, anchor=north west] (spec) at ($(tape.north east) + (3.6, 0)$) {%
+    v1 = x * p\\
+    v3 = exp(x)\\
+    v5 = v3 + v1\\
+    out v5\\[4pt]
+    \textcolor{accent}{guard c1 == 0}\\
+    \textcolor{accent}{guard c2 == 1}\\
+    \textcolor{accent}{guard c3 == 1}};
+  \node[group, fit=(tape)] (gt) {};
+  \node[title] at (gt.north west) {tape};
+  \node[group, fit=(spec)] (gs) {};
+  \node[title] at (gs.north west) {specialized};
+  \draw[data] ([yshift=5mm]gt.east) -- node[lbl, above] {specialize}
+    ([yshift=5mm]gt.east -| gs.west);
+  \draw[state] ([yshift=-5mm]gt.east -| gs.west) -- node[lbl, below] {guard fails}
+    ([yshift=-5mm]gt.east);
+\end{tikzpicture}
+\end{document}

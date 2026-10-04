@@ -1,0 +1,37 @@
+% A model through rsdag: front ends build the graph, transforms extend it,
+% the tape lowers it, Adaptive serves the tape to the solver.
+\documentclass[tikz,border=4pt]{standalone}
+\input{style}
+\begin{document}
+\begin{tikzpicture}[box/.append style={minimum width=23mm, minimum height=11mm}]
+  \node[box, minimum width=17mm, minimum height=8mm] (py) at (0, 0) {Python};
+  \node[box, minimum width=17mm, minimum height=8mm] (rs) at (0, 1.2) {Rust};
+  \node[box, minimum width=17mm, minimum height=8mm] (mod) at (0, -1.2) {Module};
+  \node[box, fill=accent, draw=accent, text=white] (graph) at (2.9, 0)
+    {Graph\\[-2pt]\footnotesize hash-consed};
+  \node[box, right=8mm of graph] (tr)
+    {Transforms\\[-2pt]\footnotesize derivatives};
+  \node[box, right=8mm of tr] (tape)
+    {Tape\\[-2pt]\footnotesize prolog, main};
+  \node[box, minimum height=8mm, minimum width=25mm, right=14mm of tape] (sp) {Specialized};
+  \node[box, minimum height=8mm, minimum width=25mm, above=4mm of sp] (in) {Interpreter};
+  \node[box, minimum height=8mm, minimum width=25mm, below=4mm of sp] (nat) {Native code};
+  \node[group, fit=(in)(nat)] (ad) {};
+  \node[title] at (ad.north west) {Adaptive};
+  \node[box, right=8mm of ad, minimum width=17mm] (sol) {Solver};
+
+  \coordinate (j) at ($(graph.west) + (-5mm, 0)$);
+  \draw (rs.east) -| (j);
+  \draw (mod.east) -| (j);
+  \draw (py.east) -- (j);
+  \draw[data] (j) -- (graph);
+  \draw[data] (graph) -- (tr);
+  \draw[data] (tr) -- (tape);
+  \coordinate (s) at ($(tape.east) + (5mm, 0)$);
+  \draw (tape.east) -- (s);
+  \draw[data] (s) |- (in.west);
+  \draw[data] (s) -- (sp.west);
+  \draw[data] (s) |- (nat.west);
+  \draw[data] (ad) -- (sol);
+\end{tikzpicture}
+\end{document}

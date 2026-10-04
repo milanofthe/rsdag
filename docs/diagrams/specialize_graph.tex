@@ -1,0 +1,36 @@
+% A piecewise model at v = 1, on and in the linear region: the arms taken
+% and the conditions that guard them stay, the faded arms leave the
+% specialized tape.
+\documentclass[tikz,border=4pt]{standalone}
+\input{style}
+\begin{document}
+\begin{tikzpicture}[box/.append style={minimum width=16mm, minimum height=8mm}]
+  \node[input] (vth) at (0, 0) {$v_{th}$};
+  \node[input] (v) at (1.6, 0) {$v$};
+  \node[input] (vsat) at (4.0, 0) {$v_{sat}$};
+  \node[op] (d) at (0.8, -1.3) {$-$};
+  \node[op, accent] (c2) at (4.0, -1.6) {$>$};
+  \node[op, accent] (c1) at (-0.4, -2.7) {$> 0$};
+  \node[op] (kd) at (1.2, -2.7) {$k\,d$};
+  \node[op, faded] (half) at (2.6, -2.7) {$\frac{k}{2} d^2$};
+  \node[box, accent] (inner) at (2.6, -4.1) {select};
+  \node[box, accent] (outer) at (0.8, -5.5) {select};
+  \node[faded] (zero) at (-0.6, -4.1) {$0$};
+  \node[output, below=7mm of outer] (i) {$i$};
+
+  \draw[data] (vth) -- (d);
+  \draw[data] (v) -- (d);
+  \draw[data] (d) -- node[lbl, above] {$d$} (c2);
+  \draw[data] (vsat) -- (c2);
+  \draw[data] (d) -- (c1);
+  \draw[data] (d) -- (kd);
+  \draw[data, faded] (d) -- (half);
+  \draw[data, accent] (c2) -- node[lbl, right] {if} (inner);
+  \draw[data] (kd) -- node[lbl, left] {then} (inner);
+  \draw[data, faded] (half) -- node[lbl, right] {else} (inner);
+  \draw[data, accent] (c1) -- node[lbl, left] {if} (outer);
+  \draw[data] (inner) -- node[lbl, right] {then} (outer);
+  \draw[data, faded] (zero) -- node[lbl, above, sloped] {else} (outer);
+  \draw[data] (outer) -- (i);
+\end{tikzpicture}
+\end{document}

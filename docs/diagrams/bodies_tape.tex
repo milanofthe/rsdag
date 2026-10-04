@@ -1,0 +1,26 @@
+% Three instances of a diode(a, b, is, n) body in a ring, is and n
+% parameters: the prolog runs the body's parameter part for all three
+% instances, the main phase one batched call.
+\documentclass[tikz,border=4pt]{standalone}
+\input{style}
+\begin{document}
+\begin{tikzpicture}[box/.append style={minimum width=30mm, minimum height=9mm}]
+  \node[box] (pro) at (1.65, 0) {body prolog $\times 3$};
+  \node[box] (call) at (7.5, 0) {body call $\times 3$};
+  \foreach \k in {0, 1, 2} {
+    \node[input] (is\k) at (1.1 * \k, 1.6) {$i_{s\k}$};
+    \node[input] (v\k) at (6.4 + 1.1 * \k, 1.6) {$v_\k$};
+    \node[output] (r\k) at (6.4 + 1.1 * \k, -1.6) {$r_\k$};
+    \draw[data] (is\k) -- (pro);
+    \draw[data] (v\k) -- (call);
+    \draw[data] (call) -- (r\k);
+  }
+  \node[input] (n) at (3.3, 1.6) {$n$};
+  \draw[data] (n) -- (pro);
+  \draw[state] (pro) -- node[lbl, above] {state} (call);
+  \node[group, fit=(is0)(n)(pro)(pro |- r0.south), inner ysep=4mm] (gp) {};
+  \node[title] at (gp.north west) {prolog};
+  \node[group, fit=(v0)(v2)(call)(r0), inner ysep=4mm] (gm) {};
+  \node[title] at (gm.north west) {main};
+\end{tikzpicture}
+\end{document}
