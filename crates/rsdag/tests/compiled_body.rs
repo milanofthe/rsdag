@@ -247,3 +247,66 @@ fn calls_with_constant_arguments_run_a_specialized_copy() {
         assert!((eval(&g, *a) - eval(&g, *b)).abs() < 1e-15);
     }
 }
+
+#[test]
+fn constant_parameters_stay_arguments() {
+    // f(x, c) with c a `Param`: calls passing c = 1 and c = 2 keep calling
+    // f itself (one body for both), while a constant state argument is
+    // still specialized away.
+    let mut g: Graph<F64> = Graph::new();
+    let mut s = rsdag::Scope::new(&mut g, "f");
+    let x = s.param_with_role("x", rsdag::ParamRole::State { id: 0 });
+    let c = s.param_with_role("c", rsdag::ParamRole::Param);
+    let ex = s.exp(x);
+    let o = s.mul(c, ex);
+    let f = s.close(vec![o]);
+    let y = g.sym("y");
+    let (one, two, zero) = (g.one(), g.konst_f64(2.0), g.zero());
+    let a = g.call(f, 0, &[y, one]);
+    let b = g.call(f, 0, &[y, two]);
+    let root = g.add(a, b);
+    let n_funcs = g.n_funcs();
+    let spec = g.specialize_calls(&[root])[0];
+    assert_eq!(spec, root, "constant parameters are not specialized");
+    assert_eq!(g.n_funcs(), n_funcs);
+    let at_zero = g.call(f, 0, &[zero, two]);
+    let spec = g.specialize_calls(&[at_zero])[0];
+    assert_eq!(g.n_funcs(), n_funcs + 1, "a constant state still is");
+    let callee = g
+        .free_calls_in(&[spec])
+        .iter()
+        .map(|&o| g.output(o).0)
+        .next()
+        .unwrap();
+    assert_eq!(
+        g.func(callee).params().len(),
+        1,
+        "the copy keeps the parameter"
+    );
+}
+
+#[test]
+fn programs_over_one_graph_share_a_body() {
+    // Two tapes calling the same output of f take the same interpreted
+    // body: it is built once per function and output set, not per tape.
+    let mut g: Graph<F64> = Graph::new();
+    let mut s = rsdag::Scope::new(&mut g, "f");
+    let x = s.param("x");
+    let ex = s.exp(x);
+    let f = s.close(vec![ex]);
+    let y = g.sym("y");
+    let ys = match *g.node(y) {
+        Node::Symbol(s) => s,
+        _ => unreachable!(),
+    };
+    let c = g.call(f, 0, &[y]);
+    let two = g.konst_f64(2.0);
+    let c2 = g.mul(two, c);
+    let a = Tape::compile(&g, &[c], &[ys]);
+    let b = Tape::compile(&g, &[c2], &[ys]);
+    assert_eq!(a.bundles().len(), 1);
+    assert!(
+        std::sync::Arc::ptr_eq(&a.bundles()[0], &b.bundles()[0]),
+        "one body for both tapes"
+    );
+}

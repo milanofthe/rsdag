@@ -209,6 +209,16 @@ impl ExternBundle for NativeBody {
     }
 }
 
+/// The options a native body was emitted under, as a key of the body's
+/// backend cache.
+fn options_key(opts: &Options) -> u64 {
+    let batch = match opts.batch {
+        Batch::Serial => 0,
+        Batch::Parallel { min_ops } => 1 + min_ops as u64,
+    };
+    ((opts.chunk_ops as u64) << 32) ^ batch
+}
+
 /// Instances per parallel task: about four tasks per thread of the
 /// current pool.
 fn blocks(n: usize) -> usize {
@@ -270,12 +280,22 @@ impl NativeTape {
             .bundles()
             .iter()
             .map(|b| match b.body() {
-                Some(body) => Ok(Arc::new(NativeBody {
-                    tape: NativeTape::compile_opts(body, opts, &[])?,
-                    n_out: b.n_outputs(),
-                    pure: b.pure_args().to_vec(),
-                    batch: opts.batch,
-                }) as Arc<dyn ExternBundle>),
+                Some(body) => {
+                    // Emitted once per body and options, shared by every
+                    // program that calls it.
+                    let make = || -> Result<Arc<dyn ExternBundle>, JitError> {
+                        Ok(Arc::new(NativeBody {
+                            tape: NativeTape::compile_opts(body, opts, &[])?,
+                            n_out: b.n_outputs(),
+                            pure: b.pure_args().to_vec(),
+                            batch: opts.batch,
+                        }))
+                    };
+                    match b.backend_cache() {
+                        Some(cache) => cache.get_or_try_insert(options_key(opts), make),
+                        None => make(),
+                    }
+                }
                 None => Ok(b.clone()),
             })
             .collect();
