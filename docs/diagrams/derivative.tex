@@ -1,0 +1,24 @@
+% f = sin(xy) and its derivative in x in one graph: the derivative reuses
+% the product, its own nodes are dashed.
+\documentclass[tikz,border=4pt]{standalone}
+\input{style}
+\begin{document}
+\begin{tikzpicture}
+  \node[input] (x) at (0.4, 0) {$x$};
+  \node[input] (y) at (2.8, 0) {$y$};
+  \node[op] (xy) at (1.6, -1.3) {$\times$};
+  \node[op, derived] (cos) at (2.4, -2.6) {$\cos$};
+  \node[op] (sin) at (0, -3.9) {$\sin$};
+  \node[op, derived] (mul) at (3.4, -3.9) {$\times$};
+  \node[output, below=7mm of sin] (f) {$f = \sin(xy)$};
+  \node[output, below=7mm of mul] (df) {$\partial f/\partial x = y \cos(xy)$};
+  \draw[data] (x) -- (xy);
+  \draw[data] (y) -- (xy);
+  \draw[data] (xy) -- (sin);
+  \draw[data, derived] (xy) -- (cos);
+  \draw[data, derived] (cos) -- (mul);
+  \draw[data, derived] (y) to[bend left=12] (mul);
+  \draw[data] (sin) -- (f);
+  \draw[data, derived] (mul) -- (df);
+\end{tikzpicture}
+\end{document}

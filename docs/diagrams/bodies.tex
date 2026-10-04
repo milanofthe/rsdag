@@ -1,0 +1,19 @@
+% One function body, compiled once, run over all instances by one batched
+% call.
+\documentclass[tikz,border=4pt]{standalone}
+\input{style}
+\usetikzlibrary{decorations.pathreplacing}
+\begin{document}
+\begin{tikzpicture}
+  \node[box, fill=accent, draw=accent, text=white, minimum width=26mm,
+    minimum height=16mm] (body) at (0, 0) {body\\[-2pt]\footnotesize compiled once};
+  \foreach \k/\l in {0/1, 1/2, 2/3, 4/N} {
+    \node[draw, minimum size=8mm] (i\k) at (4.4 + 1.1 * \k, 0) {$\l$};
+  }
+  \node at (4.4 + 1.1 * 3, 0) {$\cdots$};
+  \draw[data] (body) -- node[lbl, above] {one call} (i0);
+  \draw[decorate, decoration={brace, mirror, amplitude=4pt}]
+    ([yshift=-2mm]i0.south west) -- node[lbl, below=4pt] {instances, serial or in parallel}
+    ([yshift=-2mm]i4.south east);
+\end{tikzpicture}
+\end{document}

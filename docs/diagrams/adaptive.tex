@@ -1,0 +1,21 @@
+% Adaptive's backends: the interpreter and native code, each over the full
+% tape or over its specialization to the current region choices.
+\documentclass[tikz,border=4pt]{standalone}
+\input{style}
+\begin{document}
+\begin{tikzpicture}[box/.append style={minimum width=27mm, minimum height=11mm}]
+  \node[box] (in) at (0, 0) {Interpreter\\[-2pt]\footnotesize full tape};
+  \node[box] (nat) at (7.0, 0) {Native code\\[-2pt]\footnotesize full tape};
+  \node[box] (sin) at (0, -2.6) {Interpreter\\[-2pt]\footnotesize specialized};
+  \node[box] (snat) at (7.0, -2.6) {Native code\\[-2pt]\footnotesize specialized};
+  \node[left=10mm of in] (tape) {Tape};
+
+  \draw[data] (tape) -- (in);
+  \draw[data] (in) -- node[lbl, above] {compiled in the background} (nat);
+  \draw[data] ([xshift=-4mm]in.south) -- node[lbl, left] {traced} ([xshift=-4mm]sin.north);
+  \draw[state] ([xshift=4mm]sin.north) -- node[lbl, right] {region flip}
+    ([xshift=4mm]in.south);
+  \draw[data] (sin) -- node[lbl, above] {holds: compiled} (snat);
+  \draw[state] (snat.north west) -- node[lbl, above, sloped] {region flip} (in.south east);
+\end{tikzpicture}
+\end{document}

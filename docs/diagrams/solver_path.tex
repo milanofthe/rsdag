@@ -1,0 +1,29 @@
+% A simulator's model through rsdag into the solver's loop: the residual and
+% its Jacobian compile into one program, its prolog per parameter binding,
+% its main phase per iteration; the solver factors, updates and handles
+% the events the guards report.
+\documentclass[tikz,border=4pt]{standalone}
+\input{style}
+\begin{document}
+\begin{tikzpicture}[box/.append style={minimum height=11mm}]
+  \node[box, minimum width=17mm] (model) at (0, 0) {Model\\[-2pt]\footnotesize roles};
+  \node[box, right=8mm of model] (res)
+    {$F(x', x, p, t)$\\[-1pt]\footnotesize and its Jacobian};
+  \node[box, right=12mm of res] (pro) {prolog\\[-2pt]\footnotesize per binding};
+  \node[box, right=12mm of pro] (main) {main\\[-2pt]\footnotesize per iteration};
+  \node[group, fit=(pro)(main)] (prog) {};
+  \node[title] at (prog.north west) {one program};
+  \node[box, right=16mm of prog] (lu) {sparse LU\\[-2pt]\footnotesize update $x$};
+  \node[box, above=7mm of lu, accent, dashed] (ev) {events};
+  \node[group, fit=(lu)(ev)] (sol) {};
+  \node[title] at (sol.north west) {solver};
+
+  \draw[data] (model) -- (res);
+  \draw[data] (res) -- (prog);
+  \draw[state] (pro) -- (main);
+  \draw[data] (main.east) -- (main.east -| prog.east)
+    -- node[lbl, above] {$F$, $J$} (main.east -| sol.west);
+  \draw[data] (lu.south) -- ++(0, -6mm) -| node[lbl, pos=0.25, below] {$x$} (main.south);
+  \draw[state] (main.north) |- node[lbl, pos=0.75, above] {guards} (ev.west);
+\end{tikzpicture}
+\end{document}

@@ -1,0 +1,31 @@
+% The diagrams' shared preamble: Latin Modern, grey ink and one blue
+% accent on a transparent page. make.py writes colors.tex from
+% docs/style.py.
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usetikzlibrary{positioning,arrows.meta,fit,calc,backgrounds}
+\input{colors}
+\tikzset{
+  every picture/.style={line width=0.7pt, color=ink, line join=round,
+    >={Stealth[length=5pt,width=4pt]}, node distance=6mm and 10mm},
+  % graph nodes: an operation, an input, an output's name
+  op/.style={circle, draw, minimum size=8.5mm, inner sep=0.5pt},
+  input/.style={op, fill=accent, draw=accent, text=white},
+  output/.style={inner sep=1.5pt},
+  % blocks: one line, or a title over a note
+  box/.style={draw, minimum height=8mm, minimum width=21mm, inner sep=3pt,
+    align=center},
+  note/.style={font=\footnotesize},
+  % a group frames its members; its title stands above it
+  group/.style={draw, inner sep=3.5mm},
+  title/.style={anchor=south west, inner sep=1.5pt, font=\small},
+  % edges: data, state handed from the prolog, a derivative's own, a
+  % branch not taken
+  data/.style={->},
+  state/.style={->, dashed, accent},
+  derived/.style={dashed},
+  faded/.style={opacity=0.35},
+  lbl/.style={font=\footnotesize, inner sep=2pt},
+  listing/.style={align=left, font=\ttfamily\small, inner sep=0pt},
+}

@@ -1,0 +1,44 @@
+% A diode current i = is (exp(v / (n vt)) - 1) and its derivative in v,
+% compiled split: 1/(n vt) is the prolog, the main phase reads it as state.
+\documentclass[tikz,border=4pt]{standalone}
+\input{style}
+\begin{document}
+\begin{tikzpicture}
+  \draw (-0.75, 1.0) rectangle (5.55, -1.0);
+  \node[title] at (-0.75, 1.0) {prolog: once per parameter binding};
+  \draw (-0.75, -1.65) rectangle (5.55, -5.65);
+  \node[title, anchor=north west] at (-0.75, -5.65) {main: every iteration};
+
+  \node[input] (n) at (0, 0.45) {$n$};
+  \node[input] (vt) at (0, -0.45) {$v_t$};
+  \node[op] (nvt) at (1.6, 0) {$\times$};
+  \node[op] (rec) at (3.2, 0) {$1/{\cdot}$};
+  \draw[data] (n) -- (nvt);
+  \draw[data] (vt) -- (nvt);
+  \draw[data] (nvt) -- (rec);
+
+  \node[input] (v) at (0, -2.5) {$v$};
+  \node[op] (va) at (1.6, -2.5) {$\times$};
+  \node[op] (exp) at (3.2, -2.5) {$\exp$};
+  \node[op] (ea) at (4.8, -2.5) {$\times$};
+  \node[op] (sub) at (2.4, -3.8) {$-1$};
+  \node[input] (is) at (4.0, -3.8) {$i_s$};
+  \node[op] (i) at (3.2, -5.05) {$\times$};
+  \node[op] (di) at (4.8, -5.05) {$\times$};
+  \draw[data] (v) -- (va);
+  \draw[data] (va) -- (exp);
+  \draw[data] (exp) -- (ea);
+  \draw[data] (exp) -- (sub);
+  \draw[data] (sub) -- (i);
+  \draw[data] (is) -- (i);
+  \draw[data] (is) -- (di);
+  \draw[data] (ea) -- (di);
+  \draw[state] (rec) -- (va);
+  \draw[state] (rec) -- (ea);
+
+  \node[output] (iout) at (3.2, -6.4) {$i$};
+  \node[output] (diout) at (4.8, -6.4) {$\partial i/\partial v$};
+  \draw[data] (i) -- (iout);
+  \draw[data] (di) -- (diout);
+\end{tikzpicture}
+\end{document}
