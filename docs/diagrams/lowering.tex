@@ -1,0 +1,41 @@
+% The representations a program passes through, and the passes between
+% them: Tape::compile in rsdag, the native code in rsdag-jit. Specialization
+% lifts a tape back to a program, pins its choices and emits it again.
+\documentclass[tikz,border=4pt]{standalone}
+\input{style}
+\usetikzlibrary{decorations.pathreplacing}
+\begin{document}
+\begin{tikzpicture}[box/.append style={minimum width=34mm, minimum height=11mm},
+    pass/.style={anchor=west, align=left, inner sep=0pt},
+    desc/.style={anchor=west, align=left, inner sep=0pt, font=\footnotesize}]
+  \foreach \k/\n/\t/\d in {
+      0/graph/Graph/{nodes of 16 bytes, hash-consed},
+      1/forest/Forest/{the reachable nodes},
+      2/prog/Program/{instructions, kernels, calls},
+      3/tape/Tape/{op stream: prolog, main},
+      4/rop/ROp/{register-level ops},
+      5/mc/machine code/{x86-64, AArch64}} {
+    \node[box] (\n) at (0, -1.9 * \k) {\t\\[-2pt]\footnotesize \d};
+  }
+  \foreach \a/\b/\p/\d in {
+      graph/forest/analyze/{reachability, purity, use counts, multiply-add},
+      forest/prog/lower/{Gemv, Gemm, Solve, solve batches, batched calls},
+      prog/tape/{fuse, schedule, emit}/{folds; register pressure; prolog first, slots by liveness},
+      tape/rop/record/{small products as dots},
+      rop/mc/{emit\_chunk}/{chunks of 1024 ops in parallel, register cache}} {
+    \draw[data] (\a) -- (\b);
+    \node[pass] at ($(\a.south)!0.5!(\b.north) + (2mm, 1.5mm)$) {\ttfamily\small \p};
+    \node[desc] at ($(\a.south)!0.5!(\b.north) + (2mm, -2mm)$) {\d};
+  }
+  \node[box, left=16mm of tape] (interp) {interpreter\\[-2pt]\footnotesize f64, f32, Complex64};
+  \draw[data] (tape) -- node[lbl, above] {run} (interp);
+  \draw[state] (tape.west) ++(0, 2mm) to[out=150, in=210] node[lbl, left] {specialize}
+    ($(prog.west) + (0, -2mm)$);
+  \draw[decorate, decoration={brace, amplitude=5pt}]
+    ($(graph.north east) + (73mm, 0)$) -- node[lbl, right=6pt] {rsdag}
+    ($(tape.south east) + (73mm, 0)$);
+  \draw[decorate, decoration={brace, amplitude=5pt}]
+    ($(rop.north east) + (73mm, 0)$) -- node[lbl, right=6pt] {rsdag-jit}
+    ($(mc.south east) + (73mm, 0)$);
+\end{tikzpicture}
+\end{document}

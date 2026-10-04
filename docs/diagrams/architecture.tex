@@ -1,0 +1,48 @@
+% rsdag's layers, each built on the ones below it. rsdag-jit reaches
+% Adaptive only through the Compiler trait: the core does not depend on it.
+\documentclass[tikz,border=4pt]{standalone}
+\input{style}
+\begin{document}
+\begin{tikzpicture}[box/.append style={text width=30mm, minimum height=11mm},
+    row/.style={group, inner xsep=3mm, inner ysep=2.5mm}]
+  \def\c#1{4.75 * #1}
+  \node[box] (rust) at (\c0, 0) {Rust API\\[-2pt]\footnotesize Graph, Scope, builder};
+  \node[box] (py) at (\c1, 0) {rsdag-py\\[-2pt]\footnotesize trace, jit, jacobian};
+  \node[box] (mod) at (\c2, 0) {Module\\[-2pt]\footnotesize serialized graphs};
+  \node[box] (dot) at (\c3, 0) {dot\\[-2pt]\footnotesize Graphviz views};
+  \node[row, fit=(rust)(dot)] (r0) {};
+  \node[title] at (r0.north west) {interfaces};
+
+  \node[box] (adap) at (\c0, -2.5) {Adaptive\\[-2pt]\footnotesize backend per call};
+  \node[box] (rec) at (\c1, -2.5) {ir::record\\[-2pt]\footnotesize register ops};
+  \node[box] (emit) at (\c2, -2.5) {emitter\\[-2pt]\footnotesize x86-64, AArch64};
+  \node[box] (host) at (\c3, -2.5) {host calls\\[-2pt]\footnotesize kernels, bodies};
+  \node[row, fit=(adap)] (r1a) {};
+  \node[title] at (r1a.north west) {rsdag};
+  \node[row, fit=(rec)(host)] (r1b) {};
+  \node[title] at (r1b.north west) {rsdag-jit};
+  \draw[state] (r1b) -- node[lbl, above, font=\scriptsize] {Compiler} (r1a);
+
+  \node[box] (comp) at (\c0, -5.0) {Tape::compile\\[-2pt]\footnotesize five passes};
+  \node[box] (interp) at (\c1, -5.0) {interpreter\\[-2pt]\footnotesize over any Scalar};
+  \node[box] (spec) at (\c2, -5.0) {specialize\\[-2pt]\footnotesize trace, pin, guard};
+  \node[box] (prog) at (\c3, -5.0) {Program\\[-2pt]\footnotesize prolog, main, many};
+  \node[row, fit=(comp)(prog)] (r2) {};
+  \node[title] at (r2.north west) {tape};
+
+  \node[box, fill=accent, draw=accent, text=white] (graph) at (\c0, -7.5)
+    {Graph\\[-2pt]\footnotesize arenas, hash-consing};
+  \node[box] (func) at (\c1, -7.5) {functions\\[-2pt]\footnotesize calls, roles, bodies};
+  \node[box] (ad) at (\c2, -7.5) {autodiff\\[-2pt]\footnotesize forward, reverse};
+  \node[box] (tr) at (\c3, -7.5) {transforms\\[-2pt]\footnotesize substitute, symbolic};
+  \node[row, fit=(graph)(tr)] (r3) {};
+  \node[title] at (r3.north west) {graph};
+
+  \node[box] (sem) at (\c0, -10.0) {semantics\\[-2pt]\footnotesize guards, folds, LU};
+  \node[box] (simd) at (\c1, -10.0) {simd\\[-2pt]\footnotesize AVX, NEON, SSE2};
+  \node[box] (sc) at (\c2, -10.0) {Scalar\\[-2pt]\footnotesize f64, f32, Complex64};
+  \node[box] (hooks) at (\c3, -10.0) {Field\\[-2pt]\footnotesize f64, exact rationals};
+  \node[row, fit=(sem)(hooks)] (r4) {};
+  \node[title] at (r4.north west) {arithmetic, one reference for every backend};
+\end{tikzpicture}
+\end{document}
