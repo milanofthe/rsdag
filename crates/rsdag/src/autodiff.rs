@@ -302,6 +302,22 @@ fn inert(node: &Node) -> usize {
     }
 }
 
+/// Whether `test` holds for every operand of `e` that carries a derivative
+/// (see [`carrying`]), without collecting them: the per-node test of a
+/// forward sweep.
+fn all_carrying<K: Field>(ctx: &Graph<K>, e: ExprId, mut test: impl FnMut(ExprId) -> bool) -> bool {
+    match *ctx.node(e) {
+        Node::Call(o, l) => {
+            let (f, k) = ctx.output(o);
+            let args = ctx.args(l);
+            ctx.output_support(f, k)
+                .iter()
+                .all(|&p| test(args[p as usize]))
+        }
+        ref node => ctx.operands(e)[inert(node)..].iter().all(|&c| test(c)),
+    }
+}
+
 /// The operands of `e` its derivative reads, in operand order, into `out`:
 /// all but a comparison's and a selector's condition, and of a call only the
 /// arguments the called output's support names (see
@@ -384,9 +400,7 @@ fn tangent<K: Field>(ctx: &mut Graph<K>, e: ExprId, wrt: SymbolId, memo: &mut Me
         return if s == wrt { ctx.one() } else { zero };
     }
     let d = |c: ExprId| memo.get(c).expect("operand differentiated");
-    let mut ops = Vec::new();
-    carrying(ctx, e, &mut ops);
-    if ops.iter().all(|&c| d(c) == zero) {
+    if all_carrying(ctx, e, |c| d(c) == zero) {
         return zero;
     }
     match node {

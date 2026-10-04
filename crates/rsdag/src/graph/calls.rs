@@ -130,29 +130,107 @@ impl<K: Field> Graph<K> {
 
     /// The parameters output `out` of `f` can have a nonzero derivative in,
     /// by index, ascending: its [`support_in`](Self::support_in) among the
-    /// function's parameters. Structural, read off the graph; computed once
-    /// per output. An extern output is taken to read every parameter, a zero
-    /// one none.
+    /// function's parameters. Structural, read off the graph. The outputs of
+    /// a function share their body, so the ones not known yet are found in
+    /// one pass over it, and each is kept. An extern output is taken to read
+    /// every parameter, a zero one none.
     pub fn output_support(&self, f: FuncId, out: u32) -> Arc<[u32]> {
         let func = &self.funcs[f.0 as usize];
         if let Some(s) = func.cached_support(out) {
             return s;
         }
-        let support: Arc<[u32]> = match func.outputs()[out as usize] {
-            Output::Zero => Arc::from([]),
-            Output::Slot(_) => (0..func.params().len() as u32).collect(),
-            Output::Expr(e) => {
-                let syms = self.support_in(&[e]);
-                func.params()
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, s)| syms.contains(s))
-                    .map(|(k, _)| k as u32)
-                    .collect()
+        let pending: Vec<u32> = (0..func.outputs().len() as u32)
+            .filter(|&k| func.cached_support(k).is_none())
+            .collect();
+        let exprs: Vec<ExprId> = pending
+            .iter()
+            .filter_map(|&k| match func.outputs()[k as usize] {
+                Output::Expr(e) => Some(e),
+                _ => None,
+            })
+            .collect();
+        let index: HashMap<SymbolId, u32> = func
+            .params()
+            .iter()
+            .enumerate()
+            .map(|(k, &s)| (s, k as u32))
+            .collect();
+        let mut found = self.param_supports(&exprs, &index).into_iter();
+        for &k in &pending {
+            let support: Arc<[u32]> = match func.outputs()[k as usize] {
+                Output::Zero => Arc::from([]),
+                Output::Slot(_) => (0..func.params().len() as u32).collect(),
+                Output::Expr(_) => found.next().expect("one per expression"),
+            };
+            func.cache_support(k, support);
+        }
+        func.cached_support(out).expect("just found")
+    }
+
+    /// Per root, the parameters (numbered by `index`) it can have a nonzero
+    /// derivative in: one bottom-up pass over the roots' shared cone, each
+    /// node's set the union of its derivative-carrying operands' (a node
+    /// with one contributing operand shares that operand's set).
+    fn param_supports(&self, roots: &[ExprId], index: &HashMap<SymbolId, u32>) -> Vec<Arc<[u32]>> {
+        let mut ops = Vec::new();
+        let mut seen: FxHashSet<ExprId> = FxHashSet::default();
+        let mut stack: Vec<ExprId> = roots.to_vec();
+        let mut cone: Vec<ExprId> = Vec::new();
+        while let Some(e) = stack.pop() {
+            if seen.insert(e) {
+                cone.push(e);
+                crate::autodiff::carrying(self, e, &mut ops);
+                stack.extend_from_slice(&ops);
             }
-        };
-        func.cache_support(out, support.clone());
-        support
+        }
+        // ascending ids: every operand before its consumers
+        cone.sort_unstable();
+        // Every node's set is a span of one arena; a node with a single
+        // contributing operand shares its span.
+        let mut arena: Vec<u32> = Vec::new();
+        let mut at: HashMap<ExprId, (u32, u32)> = HashMap::default();
+        at.reserve(cone.len());
+        let (mut merged, mut scratch): (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
+        for &e in &cone {
+            let span = match *self.node(e) {
+                Node::Const(_) => (0, 0),
+                Node::Symbol(s) => match index.get(&s) {
+                    Some(&k) => {
+                        arena.push(k);
+                        (arena.len() as u32 - 1, 1)
+                    }
+                    None => (0, 0),
+                },
+                _ => {
+                    crate::autodiff::carrying(self, e, &mut ops);
+                    let mut parts = ops.iter().map(|c| at[c]).filter(|&(_, n)| n > 0);
+                    match (parts.next(), parts.clone().next()) {
+                        (None, _) => (0, 0),
+                        (Some(one), None) => one,
+                        (Some(first), Some(_)) => {
+                            // sorted unions, one linear merge per operand
+                            let slice = |(s, n): (u32, u32)| s as usize..(s + n) as usize;
+                            merged.clear();
+                            merged.extend_from_slice(&arena[slice(first)]);
+                            for part in parts {
+                                union_into(&mut merged, &arena[slice(part)], &mut scratch);
+                            }
+                            let start = arena.len() as u32;
+                            arena.extend_from_slice(&merged);
+                            (start, merged.len() as u32)
+                        }
+                    }
+                }
+            };
+            at.insert(e, span);
+        }
+        roots
+            .iter()
+            .map(|r| {
+                let (s, n) = at[r];
+                Arc::from(&arena[s as usize..(s + n) as usize])
+            })
+            .collect()
     }
 
     /// The symbols `exprs` can have a nonzero derivative in: their
@@ -555,10 +633,13 @@ fn specialize_calls_in<K: Field>(
                 c
             }
         };
+        // `key.1` is in argument order: one merge, not a search per
+        // argument (a subcircuit body passes hundreds of constants).
+        let mut bound = key.1.iter().map(|&(p, _)| p as usize).peekable();
         let rest: Vec<ExprId> = ops
             .iter()
             .enumerate()
-            .filter(|(k, _)| !key.1.iter().any(|&(p, _)| p as usize == *k))
+            .filter(|&(k, _)| bound.next_if_eq(&k).is_none())
             .map(|(_, &a)| a)
             .collect();
         g.call(copy, out, &rest)
@@ -623,4 +704,20 @@ fn specialize_function<K: Field>(
         g.push_output(copy, out, role);
     }
     copy
+}
+
+/// `acc` becomes the sorted union of itself and `part`, both sorted.
+fn union_into(acc: &mut Vec<u32>, part: &[u32], scratch: &mut Vec<u32>) {
+    scratch.clear();
+    scratch.reserve(acc.len() + part.len());
+    let (mut i, mut j) = (0, 0);
+    while i < acc.len() && j < part.len() {
+        let (a, b) = (acc[i], part[j]);
+        scratch.push(a.min(b));
+        i += usize::from(a <= b);
+        j += usize::from(b <= a);
+    }
+    scratch.extend_from_slice(&acc[i..]);
+    scratch.extend_from_slice(&part[j..]);
+    std::mem::swap(acc, scratch);
 }
