@@ -137,12 +137,66 @@ impl<K: Field> Graph<K> {
     /// one pass over it, and each is kept. An extern output is taken to read
     /// every parameter, a zero one none.
     pub fn output_support(&self, f: FuncId, out: u32) -> Arc<[u32]> {
+        self.output_reach(Reach::Derivative, f, out)
+    }
+
+    /// The parameters output `out` of `f` reads, by index, ascending: the
+    /// ones its value structurally depends on, a comparison's operands and a
+    /// selector's condition included, and through a call only the arguments
+    /// the called output reads. Computed like
+    /// [`output_support`](Self::output_support), once per function.
+    pub fn output_reads(&self, f: FuncId, out: u32) -> Arc<[u32]> {
+        self.output_reach(Reach::Value, f, out)
+    }
+
+    /// Per root, whether its value reads any of `syms`, through calls only
+    /// what the called outputs read: one pass over the roots' shared cone.
+    /// Which entries of a Jacobian vary with the state, say, without a walk
+    /// per entry over the calls' argument lists.
+    pub fn depends_on(&self, roots: &[ExprId], syms: &[SymbolId]) -> Vec<bool> {
+        let wanted: FxHashSet<SymbolId> = syms.iter().copied().collect();
+        let mut ops = Vec::new();
+        let cone = self.cone_of(Reach::Value, roots, &mut ops);
+        let mut dep: HashMap<ExprId, bool> = HashMap::default();
+        dep.reserve(cone.len());
+        for &e in &cone {
+            let d = match *self.node(e) {
+                Node::Const(_) => false,
+                Node::Symbol(s) => wanted.contains(&s),
+                _ => {
+                    reaching(self, Reach::Value, e, &mut ops);
+                    ops.iter().any(|c| dep[c])
+                }
+            };
+            dep.insert(e, d);
+        }
+        roots.iter().map(|r| dep[r]).collect()
+    }
+
+    /// The nodes under `roots` through the operands that `reach` follows,
+    /// in ascending id order: every operand before its consumers.
+    fn cone_of(&self, reach: Reach, roots: &[ExprId], ops: &mut Vec<ExprId>) -> Vec<ExprId> {
+        let mut seen: FxHashSet<ExprId> = FxHashSet::default();
+        let mut stack: Vec<ExprId> = roots.to_vec();
+        let mut cone: Vec<ExprId> = Vec::new();
+        while let Some(e) = stack.pop() {
+            if seen.insert(e) {
+                cone.push(e);
+                reaching(self, reach, e, ops);
+                stack.extend_from_slice(ops);
+            }
+        }
+        cone.sort_unstable();
+        cone
+    }
+
+    fn output_reach(&self, reach: Reach, f: FuncId, out: u32) -> Arc<[u32]> {
         let func = &self.funcs[f.0 as usize];
-        if let Some(s) = func.cached_support(out) {
+        if let Some(s) = func.cached_support(reach, out) {
             return s;
         }
         let pending: Vec<u32> = (0..func.outputs().len() as u32)
-            .filter(|&k| func.cached_support(k).is_none())
+            .filter(|&k| func.cached_support(reach, k).is_none())
             .collect();
         let exprs: Vec<ExprId> = pending
             .iter()
@@ -157,36 +211,30 @@ impl<K: Field> Graph<K> {
             .enumerate()
             .map(|(k, &s)| (s, k as u32))
             .collect();
-        let mut found = self.param_supports(&exprs, &index).into_iter();
+        let mut found = self.param_supports(reach, &exprs, &index).into_iter();
         for &k in &pending {
             let support: Arc<[u32]> = match func.outputs()[k as usize] {
                 Output::Zero => Arc::from([]),
                 Output::Slot(_) => (0..func.params().len() as u32).collect(),
                 Output::Expr(_) => found.next().expect("one per expression"),
             };
-            func.cache_support(k, support);
+            func.cache_support(reach, k, support);
         }
-        func.cached_support(out).expect("just found")
+        func.cached_support(reach, out).expect("just found")
     }
 
-    /// Per root, the parameters (numbered by `index`) it can have a nonzero
-    /// derivative in: one bottom-up pass over the roots' shared cone, each
-    /// node's set the union of its derivative-carrying operands' (a node
-    /// with one contributing operand shares that operand's set).
-    fn param_supports(&self, roots: &[ExprId], index: &HashMap<SymbolId, u32>) -> Vec<Arc<[u32]>> {
+    /// Per root, the parameters (numbered by `index`) it reaches: one
+    /// bottom-up pass over the roots' shared cone, each node's set the union
+    /// of the sets of the operands `reach` follows (a node with one
+    /// contributing operand shares that operand's set).
+    fn param_supports(
+        &self,
+        reach: Reach,
+        roots: &[ExprId],
+        index: &HashMap<SymbolId, u32>,
+    ) -> Vec<Arc<[u32]>> {
         let mut ops = Vec::new();
-        let mut seen: FxHashSet<ExprId> = FxHashSet::default();
-        let mut stack: Vec<ExprId> = roots.to_vec();
-        let mut cone: Vec<ExprId> = Vec::new();
-        while let Some(e) = stack.pop() {
-            if seen.insert(e) {
-                cone.push(e);
-                crate::autodiff::carrying(self, e, &mut ops);
-                stack.extend_from_slice(&ops);
-            }
-        }
-        // ascending ids: every operand before its consumers
-        cone.sort_unstable();
+        let cone = self.cone_of(reach, roots, &mut ops);
         // Every node's set is a span of one arena; a node with a single
         // contributing operand shares its span.
         let mut arena: Vec<u32> = Vec::new();
@@ -204,7 +252,7 @@ impl<K: Field> Graph<K> {
                     None => (0, 0),
                 },
                 _ => {
-                    crate::autodiff::carrying(self, e, &mut ops);
+                    reaching(self, reach, e, &mut ops);
                     let mut parts = ops.iter().map(|c| at[c]).filter(|&(_, n)| n > 0);
                     match (parts.next(), parts.clone().next()) {
                         (None, _) => (0, 0),
@@ -777,4 +825,31 @@ fn union_into(acc: &mut Vec<u32>, part: &[u32], scratch: &mut Vec<u32>) {
     scratch.extend_from_slice(&acc[i..]);
     scratch.extend_from_slice(&part[j..]);
     std::mem::swap(acc, scratch);
+}
+
+/// What an analysis of what a node reaches follows: the operands its
+/// derivative reads, or the ones its value does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Reach {
+    Derivative = 0,
+    Value = 1,
+}
+
+/// The operands of `e` that `reach` follows, into `out`: for a derivative
+/// see [`crate::autodiff::carrying`]; for the value every operand, and of a
+/// call only the arguments the called output reads.
+fn reaching<K: Field>(g: &Graph<K>, reach: Reach, e: ExprId, out: &mut Vec<ExprId>) {
+    match (reach, *g.node(e)) {
+        (Reach::Derivative, _) => crate::autodiff::carrying(g, e, out),
+        (Reach::Value, Node::Call(o, l)) => {
+            out.clear();
+            let (f, k) = g.output(o);
+            let args = g.args(l);
+            out.extend(g.output_reads(f, k).iter().map(|&p| args[p as usize]));
+        }
+        (Reach::Value, _) => {
+            out.clear();
+            out.extend_from_slice(&g.operands(e));
+        }
+    }
 }

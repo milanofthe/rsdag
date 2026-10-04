@@ -109,6 +109,7 @@ impl Memo {
 }
 
 mod calls;
+pub(crate) use calls::Reach;
 
 impl<K: Field> Default for Graph<K> {
     fn default() -> Self {

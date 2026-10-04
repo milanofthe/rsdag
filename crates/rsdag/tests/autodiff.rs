@@ -494,6 +494,13 @@ fn the_support_reads_through_nested_calls() {
         .map(|s| g.symbol_name(s).to_string())
         .collect();
     assert_eq!(names, ["r", "t"]);
+    // the value reads the selector's condition too
+    assert_eq!(&*g.output_reads(f, 1), &[0, 2]);
+    assert_eq!(&*g.output_reads(gf, 1), &[0, 2, 3]);
+    let (p, q) = (sid(&mut g, "p"), sid(&mut g, "q"));
+    let g0 = g.call(gf, 0, &args);
+    assert_eq!(g.depends_on(&[call, g0], &[p]), [true, true]);
+    assert_eq!(g.depends_on(&[call, g0], &[q]), [false, true]);
 }
 
 /// A row that is a call of a wide function touches only the columns its
