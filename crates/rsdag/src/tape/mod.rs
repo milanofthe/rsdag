@@ -41,6 +41,9 @@ pub const INPUT: u32 = 1 << 31;
 /// The `state` of a call that keeps none: the bundle runs whole.
 pub const NO_STATE: u32 = u32::MAX;
 
+/// [`Op::Call::reads`] of a call whose operands are its arguments in order.
+pub const ALL_ARGS: u32 = u32::MAX;
+
 /// The input index of a tagged operand.
 #[inline]
 pub fn input_index(k: u32) -> Option<u32> {
@@ -72,16 +75,21 @@ pub enum Op {
     /// Inner product of `arg_pool[start .. start+len]` and the `len` that
     /// follow.
     Dot(u32, u32),
-    /// `bundles[b]` on `n_groups` argument groups of `n_args`, laid
-    /// group-major at `arg_pool[start ..]`, group `g`'s `n_out` outputs to
-    /// `dst + g*n_out ..`; with a `state` slot (not [`NO_STATE`]), the
-    /// bundle's main phase over group `g`'s instance state at
-    /// `state + g*state_len`.
+    /// `bundles[b]` on `n_groups` argument groups of `n_args`, group `g`'s
+    /// `n_out` outputs to `dst + g*n_out ..`; with a `state` slot (not
+    /// [`NO_STATE`]), the bundle's main phase over group `g`'s instance
+    /// state at `state + g*state_len`. The operands are `n_in` per group,
+    /// group-major at `arg_pool[start ..]`: the arguments in order, or with
+    /// `reads` (not [`ALL_ARGS`]) the ones at the positions
+    /// `arg_pool[reads .. reads+n_in]`, the only ones a main phase reads
+    /// (see [`Tape::main_reads`]); the others are left unset.
     Call {
         bundle: u32,
         start: u32,
         n_groups: u32,
         n_args: u32,
+        n_in: u32,
+        reads: u32,
         n_out: u32,
         state: u32,
     },
@@ -277,11 +285,12 @@ fn plan_stages(
                 bundle,
                 start,
                 n_groups,
-                n_args,
+                n_in,
                 n_out,
                 state,
+                ..
             } => {
-                let mut r = slots(start, n_groups * n_args);
+                let mut r = slots(start, n_groups * n_in);
                 if state != NO_STATE {
                     let sl = bundles[bundle as usize].state_len() as u32;
                     r.push((state, state + n_groups * sl));
@@ -515,24 +524,26 @@ impl Tape {
                     bundle,
                     start,
                     n_groups: 1,
-                    n_args,
+                    n_in,
                     n_out,
                     state,
+                    ..
                 } => format!(
                     "Call(b{bundle}, [{}]{}) -> {n_out}",
-                    list(start, n_args),
+                    list(start, n_in),
                     state_text(state)
                 ),
                 Op::Call {
                     bundle,
                     start,
                     n_groups,
-                    n_args,
+                    n_in,
                     n_out,
                     state,
+                    ..
                 } => format!(
                     "CallBatch(b{bundle}, {n_groups} x [{}]{}) -> {n_groups} x {n_out}",
-                    list(start, n_groups * n_args),
+                    list(start, n_groups * n_in),
                     state_text(state)
                 ),
                 Op::CallProlog {
@@ -809,11 +820,14 @@ impl Tape {
                     start,
                     n_groups,
                     n_args,
+                    n_in,
+                    reads,
                     n_out,
                     state,
                 } => {
-                    for (j, &k) in pool(start, n_groups * n_args).iter().enumerate() {
-                        scratch[j] = g(k);
+                    let at = self.call_places(reads, n_args, n_in);
+                    for (j, &k) in pool(start, n_groups * n_in).iter().enumerate() {
+                        scratch[at(j)] = g(k);
                     }
                     let b = &*self.bundles[bundle as usize];
                     let (n_groups, n_args, n_out) =
@@ -986,18 +1000,21 @@ impl Tape {
                     bundle,
                     start,
                     n_args,
+                    n_in,
+                    reads,
                     n_out,
                     state,
                     ..
                 } => {
                     let b = &*self.bundles[bundle as usize];
-                    let (na, no) = (n_args as usize, n_out as usize);
+                    let (na, ni, no) = (n_args as usize, n_in as usize, n_out as usize);
                     let args = &self.arg_pool[start as usize..];
+                    let at = self.call_places(reads, n_args, n_in);
                     crate::parallel::with_scratch(na + b.work_len(), T::zero(), |sc| {
                         let (a, bwork) = sc.split_at_mut(na);
                         for gi in g0 as usize..g1 as usize {
-                            for (j, &k) in args[gi * na..(gi + 1) * na].iter().enumerate() {
-                                a[j] = slot(k);
+                            for (j, &k) in args[gi * ni..(gi + 1) * ni].iter().enumerate() {
+                                a[at(j)] = slot(k);
                             }
                             let out = unsafe { base.slice_mut(d + gi * no, no) };
                             if state == NO_STATE {
@@ -1057,6 +1074,35 @@ impl Tape {
         self.dst[i]
     }
 
+    /// Where operand `j` of a call goes among its groups' arguments (see
+    /// [`Op::Call`]): group `j / n_in`, its argument at `j % n_in` or, with
+    /// `reads`, at the position the pool names.
+    pub fn call_places(&self, reads: u32, n_args: u32, n_in: u32) -> impl Fn(usize) -> usize + '_ {
+        let (na, ni) = (n_args as usize, n_in as usize);
+        let pos = (reads != ALL_ARGS).then(|| self.pool(reads, n_in));
+        move |j| match pos {
+            None => j,
+            Some(p) => (j / ni) * na + p[j % ni] as usize,
+        }
+    }
+
+    /// The inputs the main phase reads, ascending: what a call of this
+    /// tape as a body needs per evaluation once its prolog ran.
+    pub fn main_reads(&self) -> Vec<u32> {
+        let mut r: Vec<u32> = Vec::new();
+        for i in self.prolog_ops..self.ops.len() {
+            self.for_each_operand(i, |k| {
+                if let Some(j) = input_index(k) {
+                    r.push(j);
+                }
+            });
+        }
+        r.extend(self.outputs.iter().filter_map(|&o| input_index(o)));
+        r.sort_unstable();
+        r.dedup();
+        r
+    }
+
     /// The operand list `start .. start + len` of the pool.
     pub fn pool(&self, start: u32, len: u32) -> &[u32] {
         &self.arg_pool[start as usize..(start + len) as usize]
@@ -1112,11 +1158,11 @@ impl Tape {
             Op::Call {
                 start,
                 n_groups,
-                n_args,
+                n_in,
                 state,
                 ..
             } => {
-                dense(Src::Pool(start), n_groups * n_args, f);
+                dense(Src::Pool(start), n_groups * n_in, f);
                 if state != NO_STATE {
                     f(state);
                 }

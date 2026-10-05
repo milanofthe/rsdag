@@ -113,6 +113,11 @@ pub(crate) struct CallDesc {
     /// tagged as in the tape), for a call too wide to gather in its code;
     /// `0` when the code gathered them.
     pub(crate) table: u64,
+    /// Where each operand of `table` goes among the groups' arguments, for
+    /// a call that gathers only some (`n_in` per group); `0` for all, in
+    /// order.
+    pub(crate) places: u64,
+    pub(crate) n_in: u64,
 }
 
 /// Every bundle call: whole, main phase over its states, or prolog.
@@ -221,16 +226,28 @@ unsafe fn run_call(
     let (g0, ng) = (groups.start, groups.len());
     let at = |off: u64| unsafe { work.add(off as usize / 8) };
     if d.table != 0 {
+        let ni = d.n_in as usize;
         let from =
-            unsafe { std::slice::from_raw_parts((d.table as *const u32).add(g0 * na), ng * na) };
-        let to = unsafe { std::slice::from_raw_parts_mut(at(d.args).add(g0 * na), ng * na) };
-        for (x, &s) in to.iter_mut().zip(from) {
-            *x = unsafe {
-                match rsdag::tape::input_index(s) {
-                    Some(i) => *inputs.add(i as usize),
-                    None => *work.add(s as usize),
-                }
+            unsafe { std::slice::from_raw_parts((d.table as *const u32).add(g0 * ni), ng * ni) };
+        let value = |s: u32| unsafe {
+            match rsdag::tape::input_index(s) {
+                Some(i) => *inputs.add(i as usize),
+                None => *work.add(s as usize),
+            }
+        };
+        if d.places == 0 {
+            let to = unsafe { std::slice::from_raw_parts_mut(at(d.args).add(g0 * na), ng * na) };
+            for (x, &s) in to.iter_mut().zip(from) {
+                *x = value(s);
+            }
+        } else {
+            let places = unsafe {
+                std::slice::from_raw_parts((d.places as *const u32).add(g0 * ni), ng * ni)
             };
+            let to = at(d.args);
+            for (&p, &s) in places.iter().zip(from) {
+                unsafe { *to.add(p as usize) = value(s) };
+            }
         }
     }
     let args = unsafe { std::slice::from_raw_parts(at(d.args).add(g0 * na), ng * na) };
