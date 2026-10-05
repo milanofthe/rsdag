@@ -2,7 +2,7 @@
 //! subexpression once, faded nodes outside the focus, the prolog and main
 //! phase as clusters with the state crossing between them as dashed edges.
 
-use rsdag::dot::{number, reachable, Blocks, GraphView, Notation, Style, TapeView, Theme};
+use rsdag::dot::{number, reachable, Blocks, GraphView, Kind, Notation, Style, TapeView, Theme};
 use rsdag::{differentiate, ExprId, Graph, Node, SymbolId, Tape, F64};
 
 fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
@@ -199,4 +199,72 @@ fn bodies_draw_each_called_function_once() {
         .nodes
         .iter()
         .any(|n| n.label == "mid" && n.cluster.is_none()));
+}
+
+#[test]
+fn inline_draws_every_instance_as_its_body() {
+    // leaf(a) = sin(a); mid(x, y) = leaf(x) * y; two calls of mid at the top
+    let mut g: Graph<F64> = Graph::new();
+    let mut s = rsdag::Scope::new(&mut g, "leaf");
+    let a = s.param("a");
+    let sa = s.sin(a);
+    let leaf = s.close(vec![sa]);
+    let mut s = rsdag::Scope::new(&mut g, "mid");
+    let (x, y) = (s.param("x"), s.param("y"));
+    let l = s.call(leaf, 0, &[x]);
+    let m = s.mul(l, y);
+    let mid = s.close(vec![m]);
+    let (p, q) = (g.sym("p"), g.sym("q"));
+    let one = g.call(mid, 0, &[p, q]);
+    let two = g.call(mid, 0, &[q, p]);
+    let r = g.add(one, two);
+
+    let data = GraphView::new(&g)
+        .root(r, "r")
+        .inline()
+        .label(one, "X1")
+        .label(two, "X2")
+        .data();
+    // no call is left: each instance is its body, the leaf nested in it
+    assert!(data.nodes.iter().all(|n| n.kind != Kind::Call));
+    let frame = |name: &str| data.clusters.iter().position(|c| c == name).unwrap();
+    let (x1, x2) = (frame("X1"), frame("X2"));
+    assert_eq!(data.clusters.len(), 4);
+    assert_eq!((data.parents[x1], data.parents[x2]), (None, None));
+    // a leaf frame in each instance, one sine in each
+    let leaves: Vec<usize> = (0..4).filter(|&c| data.clusters[c] == "leaf").collect();
+    let mut owners: Vec<_> = leaves.iter().map(|&c| data.parents[c]).collect();
+    owners.sort();
+    assert_eq!(owners, [Some(x1.min(x2)), Some(x1.max(x2))]);
+    let mut sines: Vec<_> = data
+        .nodes
+        .iter()
+        .filter(|n| n.label == "sin")
+        .map(|n| n.cluster.unwrap())
+        .collect();
+    sines.sort();
+    assert_eq!(sines, leaves);
+    // the parameters are the arguments: p and q once each, at the top
+    for name in ["p", "q"] {
+        let n: Vec<_> = data.nodes.iter().filter(|n| n.label == name).collect();
+        assert_eq!(n.len(), 1, "{name}");
+        assert_eq!(n[0].cluster, None);
+    }
+    // p feeds X1's sine and X2's product
+    let p_at = data.nodes.iter().position(|n| n.label == "p").unwrap();
+    let readers: Vec<_> = data
+        .edges
+        .iter()
+        .filter(|e| e.0 == p_at)
+        .map(|e| data.nodes[e.1].cluster)
+        .collect();
+    let leaf_of = |x: usize| leaves.iter().copied().find(|&c| data.parents[c] == Some(x));
+    assert!(
+        readers.contains(&leaf_of(x1)) && readers.contains(&Some(x2)),
+        "{readers:?}"
+    );
+    // nested frames in the DOT
+    let dot = GraphView::new(&g).root(r, "r").inline().render();
+    assert_eq!(count(&dot, "subgraph cluster_"), 4, "{dot}");
+    assert!(!dot.contains("style=dashed"), "{dot}");
 }

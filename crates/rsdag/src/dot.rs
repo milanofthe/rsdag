@@ -6,7 +6,9 @@
 //! and fades the rest (the nodes a transform added, the arms a
 //! specialization keeps), clusters group nodes (a function body), links add
 //! dashed edges between nodes; `bodies` draws the bodies of the functions
-//! the drawn calls reach, each once in its frame, every call linked to it. [`TapeView`] draws a program's dataflow, one
+//! the drawn calls reach, each once in its frame, every call linked to it;
+//! `inline` draws every call as its body, once per instance, in nested
+//! frames: the complete graph. [`TapeView`] draws a program's dataflow, one
 //! node per instruction, the prolog and the main phase as two clusters and
 //! the values the prolog leaves in the state as dashed edges.
 //!
@@ -19,7 +21,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::field::Field;
 use crate::func::{FuncId, Output};
 use crate::graph::Graph;
-use crate::node::{ExprId, Node, ReduceOp, SymbolId};
+use crate::node::{ArgList, ExprId, Node, ReduceOp, SymbolId};
 use crate::tape::{input_index, Op, Tape};
 
 /// What a node is, which decides its hue and shape.
@@ -482,6 +484,7 @@ pub struct GraphView<'g, K: Field> {
     clusters: Vec<(String, Vec<ExprId>)>,
     links: Vec<(ExprId, ExprId, String)>,
     bodies: bool,
+    inline: bool,
     labels: FxHashMap<ExprId, String>,
 }
 
@@ -495,6 +498,9 @@ pub struct GraphData {
     pub edges: Vec<(usize, usize, &'static str)>,
     /// The frames' labels; a node names its frame by index.
     pub clusters: Vec<String>,
+    /// The frame each frame sits in (nested instances, see
+    /// [`GraphView::inline`]).
+    pub parents: Vec<Option<usize>>,
     /// `(from, to, label)` by node index: the dashed links (a call to the
     /// output of the body it calls).
     pub links: Vec<(usize, usize, String)>,
@@ -525,6 +531,7 @@ impl<'g, K: Field> GraphView<'g, K> {
             clusters: Vec::new(),
             links: Vec::new(),
             bodies: false,
+            inline: false,
             labels: FxHashMap::default(),
         }
     }
@@ -585,6 +592,17 @@ impl<'g, K: Field> GraphView<'g, K> {
     /// a function shared by its instances rather than repeated per call.
     pub fn bodies(mut self) -> Self {
         self.bodies = true;
+        self
+    }
+
+    /// Draw every call as what it computes: the called function's body,
+    /// its parameters bound to the call's arguments, once per instance (the
+    /// calls of one function over one argument list), in a frame inside its
+    /// caller's frame, named by the call's label or else the function. The
+    /// complete graph, its hierarchy as nested frames; instances stay apart
+    /// however equal their bodies' expressions are.
+    pub fn inline(mut self) -> Self {
+        self.inline = true;
         self
     }
 
@@ -739,6 +757,9 @@ impl<'g, K: Field> GraphView<'g, K> {
 
     /// The graph this view draws (see [`GraphData`]).
     pub fn data(&self) -> GraphData {
+        if self.inline {
+            return Inliner::new(self).data();
+        }
         let g = self.g;
         let mut seeds: Vec<ExprId> = self.roots.iter().map(|r| r.0).collect();
         for (_, ids) in &self.clusters {
@@ -763,6 +784,7 @@ impl<'g, K: Field> GraphView<'g, K> {
         }
         let mut data = GraphData {
             clusters: clusters.iter().map(|(l, _)| l.clone()).collect(),
+            parents: vec![None; clusters.len()],
             ..GraphData::default()
         };
         let mut at: FxHashMap<ExprId, usize> = FxHashMap::default();
@@ -813,13 +835,29 @@ impl<'g, K: Field> GraphView<'g, K> {
         let mut s = t.header(self.rankdir);
         let node_line =
             |n: &GraphNode| format!("{} [{}];\n", n.id, t.node(n.kind, &n.label, n.faded));
-        for (c, label) in data.clusters.iter().enumerate() {
-            let _ = writeln!(s, "  subgraph cluster_{c} {{\n    {}", t.cluster(label));
+        fn frame(
+            s: &mut String,
+            data: &GraphData,
+            t: &Theme,
+            c: usize,
+            node_line: &dyn Fn(&GraphNode) -> String,
+        ) {
+            let _ = writeln!(
+                s,
+                "  subgraph cluster_{c} {{\n    {}",
+                t.cluster(&data.clusters[c])
+            );
             for n in data.nodes.iter().filter(|n| n.cluster == Some(c)) {
                 s.push_str("    ");
                 s.push_str(&node_line(n));
             }
+            for d in (0..data.clusters.len()).filter(|&d| data.parents[d] == Some(c)) {
+                frame(s, data, t, d, node_line);
+            }
             s.push_str("  }\n");
+        }
+        for c in (0..data.clusters.len()).filter(|&c| data.parents[c].is_none()) {
+            frame(&mut s, &data, t, c, &node_line);
         }
         for n in data.nodes.iter().filter(|n| n.cluster.is_none()) {
             s.push_str("  ");
@@ -852,6 +890,151 @@ impl<'g, K: Field> GraphView<'g, K> {
         }
         s.push_str("}\n");
         s
+    }
+}
+
+/// [`GraphView::inline`]: the drawn graph with every call replaced by its
+/// body, per instance. A node is an expression in a frame (0 the top, an
+/// instance's frame the index of its cluster plus one); a body's parameter
+/// is the argument in the caller's frame, a call's output the body's output
+/// in the instance's frame.
+struct Inliner<'v, 'g, K: Field> {
+    view: &'v GraphView<'g, K>,
+    /// Per frame: the frame it sits in and its parameters' arguments there.
+    frames: Vec<(usize, FxHashMap<SymbolId, ExprId>)>,
+    instances: FxHashMap<(usize, FuncId, ArgList), usize>,
+    at: FxHashMap<(usize, ExprId), usize>,
+    data: GraphData,
+}
+
+impl<'v, 'g, K: Field> Inliner<'v, 'g, K> {
+    fn new(view: &'v GraphView<'g, K>) -> Self {
+        Inliner {
+            view,
+            frames: vec![(0, FxHashMap::default())],
+            instances: FxHashMap::default(),
+            at: FxHashMap::default(),
+            data: GraphData::default(),
+        }
+    }
+
+    /// The node `(frame, e)` stands for: a bound parameter is its argument
+    /// in the caller's frame, a free symbol the top frame's, a call of a
+    /// symbolic output that output in the instance's frame.
+    fn resolve(&mut self, mut fr: usize, mut e: ExprId) -> (usize, ExprId) {
+        let g = self.view.g;
+        loop {
+            match *g.node(e) {
+                Node::Symbol(s) if fr != 0 => match self.frames[fr].1.get(&s) {
+                    Some(&a) => (fr, e) = (self.frames[fr].0, a),
+                    None => return (0, e),
+                },
+                Node::Call(o, l) => {
+                    let (f, k) = g.output(o);
+                    let Output::Expr(b) = g.func(f).outputs()[k as usize] else {
+                        return (fr, e);
+                    };
+                    let c = match self.instances.get(&(fr, f, l)) {
+                        Some(&c) => c,
+                        None => {
+                            let func = g.func(f);
+                            let bind = func.params().iter().copied().zip(g.args(l).iter().copied());
+                            self.frames.push((fr, bind.collect()));
+                            let c = self.frames.len() - 1;
+                            self.instances.insert((fr, f, l), c);
+                            let label = match self.view.labels.get(&e) {
+                                Some(l) => l.clone(),
+                                None => func.name().to_string(),
+                            };
+                            self.data.clusters.push(label);
+                            self.data.parents.push(fr.checked_sub(1));
+                            c
+                        }
+                    };
+                    (fr, e) = (c, b);
+                }
+                _ => return (fr, e),
+            }
+        }
+    }
+
+    /// The node index of `(frame, e)`, drawing it and what it reads.
+    fn node(&mut self, fr: usize, e: ExprId) -> usize {
+        let g = self.view.g;
+        let root = self.resolve(fr, e);
+        let mut stack = vec![(root, false)];
+        while let Some((key, ready)) = stack.pop() {
+            if self.at.contains_key(&key) {
+                continue;
+            }
+            let (kf, ke) = key;
+            let ops: Vec<(usize, ExprId)> = g
+                .operands(ke)
+                .iter()
+                .map(|&a| self.resolve(kf, a))
+                .collect();
+            if !ready {
+                stack.push((key, true));
+                stack.extend(
+                    ops.into_iter()
+                        .filter(|k| !self.at.contains_key(k))
+                        .map(|k| (k, false)),
+                );
+                continue;
+            }
+            let (label, kind) = self.view.style(ke, &self.view.params);
+            let n = self.data.nodes.len();
+            self.data.nodes.push(GraphNode {
+                id: if kf == 0 {
+                    format!("n{}", ke.0)
+                } else {
+                    format!("n{}_{kf}", ke.0)
+                },
+                label,
+                kind,
+                cluster: kf.checked_sub(1),
+                faded: self.view.faded(ke),
+            });
+            self.at.insert(key, n);
+            let select = matches!(g.node(ke), Node::Select(..));
+            for (k, op) in ops.iter().enumerate() {
+                let label = if select {
+                    ["if", "then", "else"][k]
+                } else {
+                    ""
+                };
+                self.data.edges.push((self.at[op], n, label));
+            }
+        }
+        self.at[&root]
+    }
+
+    fn data(mut self) -> GraphData {
+        let view = self.view;
+        for (_, ids) in &view.clusters {
+            for &e in ids {
+                self.node(0, e);
+            }
+        }
+        for (i, (e, name)) in view.roots.iter().enumerate() {
+            let n = self.node(0, *e);
+            if name.is_empty() {
+                continue;
+            }
+            self.data.nodes.push(GraphNode {
+                id: format!("out{i}"),
+                label: name.clone(),
+                kind: Kind::Output,
+                cluster: None,
+                faded: view.faded(*e),
+            });
+            self.data.edges.push((n, self.data.nodes.len() - 1, ""));
+        }
+        for (a, b, label) in &view.links {
+            let (a, b) = (self.node(0, *a), self.node(0, *b));
+            self.data.links.push((a, b, label.clone()));
+        }
+        self.data
     }
 }
 
