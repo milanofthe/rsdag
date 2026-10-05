@@ -223,6 +223,13 @@ impl<K: Field> Graph<K> {
         out
     }
 
+    /// The nodes under `roots`, ascending (see [`cone`](Self::cone)).
+    pub(crate) fn cone_sorted(&self, roots: &[ExprId]) -> Vec<ExprId> {
+        let mut cone = self.cone_nodes(roots);
+        cone.sort_unstable();
+        cone
+    }
+
     /// The nodes under `roots`, unordered (see [`cone`](Self::cone)).
     pub(crate) fn cone_nodes(&self, roots: &[ExprId]) -> Vec<ExprId> {
         let mut at = MEMOS.with(|m| m.borrow_mut().pop()).unwrap_or_default();

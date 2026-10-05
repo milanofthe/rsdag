@@ -194,16 +194,7 @@ fn classify_cone<K: Field>(
 ) -> Vec<Nonlinearity> {
     // One sweep over the nodes the expressions reach, ascending (a node
     // after its operands), each classified from its operands'.
-    let mut cone: Vec<ExprId> = Vec::new();
-    let mut seen = rustc_hash::FxHashSet::default();
-    let mut stack = exprs.to_vec();
-    while let Some(e) = stack.pop() {
-        if seen.insert(e) {
-            cone.push(e);
-            stack.extend_from_slice(&g.operands(e));
-        }
-    }
-    cone.sort_unstable();
+    let cone = g.cone_sorted(exprs);
     let mut memo: HashMap<ExprId, Nonlinearity> = HashMap::default();
     for &e in &cone {
         let c = match *g.node(e) {
