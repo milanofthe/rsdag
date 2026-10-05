@@ -9,6 +9,14 @@ Tracing is operator overloading: the function is called once with tracer
 values (scalars and numpy object arrays of tracers), every arithmetic
 operation and numpy ufunc records a node. Data-dependent Python control flow
 is not traceable; use `rsdag.where(cond, a, b)`.
+
+Programs compose: a traced function called with tracers inside another
+trace is one instance of its program there, not unrolled, and the outer
+program compiles as one, the inner programs inlined where they call others
+and batched where they are leaves:
+
+    cell = jit(lambda a, b: [a * b, np.sin(a)])
+    chain = jit(lambda x: [cell(x[k], x[k + 1])[0] for k in range(3)])
 """
 
 import builtins
@@ -144,6 +152,20 @@ def _is_traced(v):
     return False
 
 
+def _shape_of(v):
+    """The shape of an argument as `_trace` keys it: None for a scalar."""
+    if isinstance(v, Tracer) or np.isscalar(v):
+        return None
+    return np.asarray(v, dtype=object).shape
+
+
+def _elements(v):
+    """An argument's values in C order: tracers or numbers."""
+    if isinstance(v, Tracer) or np.isscalar(v):
+        return [v]
+    return list(np.asarray(v, dtype=object).reshape(-1))
+
+
 def _size(shape):
     return 1 if shape is None else math.prod(shape)
 
@@ -204,6 +226,24 @@ class Compiled(Dispatch):
         if self.native:
             program.compile_native()
         return program, shape
+
+    def _traced(self, args):
+        return _is_traced(args)
+
+    def _compose(self, *args):
+        """Called with tracers inside another trace: the program for the
+        arguments' shapes as one instance there (see `Program.compose`),
+        the result shaped as a call returns it."""
+        key = tuple(_shape_of(a) for a in args)
+        found = self.__dict__.setdefault("_composed", {}).get(key)
+        if found is None:
+            found = self._composed[key] = self._trace(key)
+        program, shape = found
+        flat = [e for a in args for e in _elements(a)]
+        outs = program.compose(*flat)
+        if shape is None:
+            return outs[0]
+        return np.array(outs, dtype=object).reshape(shape)
 
     def pattern(self, *args):
         """`(rows, cols)` of a sparse Jacobian's values for arguments of the

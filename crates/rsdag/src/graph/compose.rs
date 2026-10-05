@@ -14,6 +14,8 @@ impl<K: Field> Graph<K> {
     /// imported to theirs here, so a function called from several imports
     /// comes over once; pass the same map to import more from `other`.
     ///
+    /// A symbolic function this graph already holds with the same
+    /// parameters, roles and outputs is taken for it rather than a copy made.
     /// An extern function shares its body. A body a consumer registered for
     /// a symbolic function stays with `other`; here the function compiles
     /// its own.
@@ -41,6 +43,30 @@ impl<K: Field> Graph<K> {
             })
             .collect();
         let mut built = self.import_exprs(other, &exprs, imported).into_iter();
+        let outputs: Vec<Output> = func
+            .outputs()
+            .iter()
+            .map(|o| match *o {
+                Output::Expr(_) => Output::Expr(built.next().expect("one per expression")),
+                other => other,
+            })
+            .collect();
+        // A symbolic function this graph already holds, the same over the
+        // same parameters, is the one to call: its instances, imported along
+        // different paths, then batch together.
+        let same = (0..self.funcs.len()).map(|k| FuncId(k as u32)).find(|&g| {
+            let h = &self.funcs[g.0 as usize];
+            func.extern_body().is_none()
+                && h.extern_body().is_none()
+                && h.params() == &params[..]
+                && h.param_roles() == func.param_roles()
+                && h.outputs() == &outputs[..]
+                && h.output_roles() == func.output_roles()
+        });
+        if let Some(g) = same {
+            imported.insert(f, g);
+            return g;
+        }
         let new = self.push_function(Function::new(
             func.name(),
             params,
@@ -49,11 +75,7 @@ impl<K: Field> Graph<K> {
         for (k, &role) in func.param_roles().iter().enumerate() {
             self.set_param_role(new, k as u32, role);
         }
-        for (o, &role) in func.outputs().iter().zip(func.output_roles()) {
-            let out = match *o {
-                Output::Expr(_) => Output::Expr(built.next().expect("one per expression")),
-                other => other,
-            };
+        for (out, &role) in outputs.into_iter().zip(func.output_roles()) {
             self.push_output(new, out, role);
         }
         imported.insert(f, new);
