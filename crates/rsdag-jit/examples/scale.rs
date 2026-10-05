@@ -7,7 +7,10 @@
 //! placed once at the top, as a netlist's top-level subcircuit is
 //! (`placed=once`), or its gates are placed at the top directly
 //! (`placed=flat`). Every function takes everything it reads as a
-//! parameter, the cards' parameters passed down the hierarchy.
+//! parameter, the cards' parameters passed down the hierarchy; with
+//! `--bind` a device is called through a binding of its card instead (see
+//! `Graph::bind`), and the cards are globals above it. `--trace` prints the
+//! stage timings of the compiles.
 //!
 //! Per configuration one CSV row: graph nodes, then the time of each stage
 //! (building, the sparse Jacobian in the states, the calls specialized to
@@ -17,11 +20,13 @@
 //! across versions that compute the same bits.
 //!
 //!     cargo run --release -p rsdag-jit --example scale -- [--gates <n>] [--card <n>] [--placed once|flat|both]
+//!         [--bind] [--trace]
 
 use std::time::Instant;
 
 use rsdag::{
-    sparse_jacobian, ExprId, FuncId, Graph, Node, ParamRole, ReduceOp, Scope, SymbolId, Tape, F64,
+    sparse_jacobian, Bound, ExprId, FuncId, Graph, Node, ParamRole, ReduceOp, Scope, SymbolId,
+    Tape, F64,
 };
 use rsdag_jit::NativeTape;
 
@@ -102,7 +107,7 @@ fn device(g: &mut Graph<F64>, card: usize) -> FuncId {
 /// The gate over `(a, b, y, vdd, m)` and both cards: two devices of card
 /// `p` from `vdd` to `y`, two of card `n` from `y` through `m` to ground.
 /// Out: the currents into `y`, `m` and `vdd`.
-fn gate(g: &mut Graph<F64>, dev: FuncId, card: usize, bound: Option<[FuncId; 2]>) -> FuncId {
+fn gate(g: &mut Graph<F64>, dev: FuncId, card: usize, bound: Option<[Bound; 2]>) -> FuncId {
     let mut s = Scope::new(g, "gate");
     let node: Vec<ExprId> = ["a", "b", "y", "vdd", "m"]
         .iter()
@@ -110,9 +115,15 @@ fn gate(g: &mut Graph<F64>, dev: FuncId, card: usize, bound: Option<[FuncId; 2]>
         .map(|(k, n)| s.param_with_role(n, ParamRole::State { id: k as u32 }))
         .collect();
     let (a, b, y, vdd, m) = (node[0], node[1], node[2], node[3], node[4]);
-    // the cards: parameters passed down, or bound into the devices
+    // the cards: parameters passed down, or bound into the devices and
+    // globals of the gate
     let (cn, cp): (Vec<ExprId>, Vec<ExprId>) = match bound {
-        Some(_) => (Vec::new(), Vec::new()),
+        Some(_) => {
+            for k in 0..2 * card {
+                s.global(&format!("card{k}"));
+            }
+            (Vec::new(), Vec::new())
+        }
         None => (
             (0..card)
                 .map(|k| s.param_with_role(&format!("n{k}"), ParamRole::Param))
@@ -124,18 +135,21 @@ fn gate(g: &mut Graph<F64>, dev: FuncId, card: usize, bound: Option<[FuncId; 2]>
     };
     let (w, l) = (s.konst_f64(2e-6), s.konst_f64(1e-7));
     let zero = s.konst_f64(0.0);
-    let place = |s: &mut Scope<F64>, d: ExprId, gt: ExprId, src: ExprId, c: &[ExprId], f| {
+    // a device: its card passed with the arguments, or bound
+    let place = |s: &mut Scope<F64>, d: ExprId, gt: ExprId, src: ExprId, c: &[ExprId], k| {
         let args: Vec<ExprId> = [d, gt, src, w, l]
             .into_iter()
             .chain(c.iter().copied())
             .collect();
-        s.calls(f, &[0, 1], &args)
+        match bound {
+            Some(b) => s.calls_bound(b[k], &[0, 1], &args),
+            None => s.calls(dev, &[0, 1], &args),
+        }
     };
-    let (dn, dp) = bound.map_or((dev, dev), |[n, p]| (n, p));
-    let p1 = place(&mut s, y, a, vdd, &cp, dp);
-    let p2 = place(&mut s, y, b, vdd, &cp, dp);
-    let n1 = place(&mut s, y, a, m, &cn, dn);
-    let n2 = place(&mut s, m, b, zero, &cn, dn);
+    let p1 = place(&mut s, y, a, vdd, &cp, 1);
+    let p2 = place(&mut s, y, b, vdd, &cp, 1);
+    let n1 = place(&mut s, y, a, m, &cn, 0);
+    let n2 = place(&mut s, m, b, zero, &cn, 0);
     let iy = s.reduce(ReduceOp::Sum, vec![p1[0], p2[0], n1[0]]);
     let im = s.reduce(ReduceOp::Sum, vec![n1[1], n2[0]]);
     let ivdd = s.reduce(ReduceOp::Sum, vec![p1[1], p2[1]]);
@@ -316,6 +330,16 @@ fn main() {
     let card: usize = option("--card").map_or(400, |v| v.parse().expect("--card <n>"));
     let placed = option("--placed").unwrap_or_else(|| "both".into());
     let bind = args.iter().any(|a| a == "--bind");
+    if args.iter().any(|a| a == "--trace") {
+        // the stage timings of the compiles, on stderr
+        struct Stderr;
+        impl rsdag::hooks::Log for Stderr {
+            fn log(&self, _: rsdag::hooks::Level, message: &str) {
+                eprintln!("{message}");
+            }
+        }
+        rsdag::hooks::set_log(&Stderr);
+    }
     println!(
         "placed,gates,card,states,nodes,build_ms,jacobian_ms,specialize_ms,inline_ms,tapes_ms,native_ms,\
          f_interp_us,f_native_us,j_interp_us,j_native_us,hash"

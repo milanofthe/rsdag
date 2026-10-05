@@ -200,7 +200,7 @@ fn classify_cone<K: Field>(
         let c = match *g.node(e) {
             Node::Symbol(s) => leaf(s),
             Node::Call(o, l) => {
-                let args: Vec<Nonlinearity> = g.args(l).iter().map(|a| memo[a]).collect();
+                let args: Vec<Nonlinearity> = g.full_args(o, l).iter().map(|a| memo[a]).collect();
                 classify_call(g, o, args, calls)
             }
             _ => classify(g, e, |a| memo[&a]),

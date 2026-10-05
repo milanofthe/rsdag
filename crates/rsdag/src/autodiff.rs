@@ -311,7 +311,7 @@ fn all_carrying<K: Field>(ctx: &Graph<K>, e: ExprId, mut test: impl FnMut(ExprId
             let (f, k) = ctx.output(o);
             ctx.output_support(f, k)
                 .iter()
-                .all(|&p| test(ctx.call_operand(f, l, p)))
+                .all(|&p| test(ctx.call_operand(o, l, p)))
         }
         ref node => ctx.operands(e)[inert(node)..].iter().all(|&c| test(c)),
     }
@@ -330,7 +330,7 @@ pub(crate) fn carrying<K: Field>(ctx: &Graph<K>, e: ExprId, out: &mut Vec<ExprId
             out.extend(
                 ctx.output_support(f, k)
                     .iter()
-                    .map(|&p| ctx.call_operand(f, l, p)),
+                    .map(|&p| ctx.call_operand(o, l, p)),
             );
         }
         ref node => out.extend_from_slice(&ctx.operands(e)[inert(node)..]),
@@ -511,7 +511,7 @@ fn tangent<K: Field>(ctx: &mut Graph<K>, e: ExprId, wrt: SymbolId, memo: &mut Me
             let moving: Vec<(u32, ExprId)> = ctx
                 .output_support(f, out)
                 .iter()
-                .map(|&i| (i, d(ctx.call_operand(f, l, i))))
+                .map(|&i| (i, d(ctx.call_operand(o, l, i))))
                 .filter(|&(_, da)| da != zero)
                 .collect();
             let params: Vec<u32> = moving.iter().map(|&(i, _)| i).collect();
@@ -519,7 +519,7 @@ fn tangent<K: Field>(ctx: &mut Graph<K>, e: ExprId, wrt: SymbolId, memo: &mut Me
             let mut acc = zero;
             for (&(_, dai), k) in moving.iter().zip(ks) {
                 // over the call's own list: no width to hash again
-                let partial = ctx.call_list(f, k, l);
+                let partial = ctx.call_list_in(f, k, ctx.context_of(o), l);
                 let term = ctx.mul(partial, dai);
                 acc = ctx.add(acc, term);
             }
@@ -839,13 +839,13 @@ pub fn gradient<K: Field>(ctx: &mut Graph<K>, f: ExprId, wrt: &[SymbolId]) -> Ve
                 let moving: Vec<(u32, ExprId)> = ctx
                     .output_support(func, out)
                     .iter()
-                    .map(|&i| (i, ctx.call_operand(func, l, i)))
+                    .map(|&i| (i, ctx.call_operand(o, l, i)))
                     .filter(|&(_, a)| act(a))
                     .collect();
                 let params: Vec<u32> = moving.iter().map(|&(i, _)| i).collect();
                 let ks = ctx.derivative_outputs(func, out, &params);
                 for (&(_, arg), k) in moving.iter().zip(ks) {
-                    let partial = ctx.call_list(func, k, l);
+                    let partial = ctx.call_list_in(func, k, ctx.context_of(o), l);
                     let t = ctx.mul(a_bar, partial);
                     push(&mut adj, arg, t);
                 }

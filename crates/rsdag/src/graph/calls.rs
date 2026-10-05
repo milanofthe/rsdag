@@ -138,7 +138,7 @@ impl<K: Field> Graph<K> {
         roots: &[ExprId],
         which: &mut dyn FnMut(&Self, FuncId) -> bool,
         bodies: &mut HashMap<OutputId, ExprId>,
-        instances: &mut HashMap<(FuncId, ArgList), Instance>,
+        instances: &mut HashMap<(FuncId, u32, ArgList), Instance>,
     ) -> Vec<ExprId> {
         crate::transform::rewrite(self, roots, |g, _, node, ops| {
             let (Node::Call(o, _), Some(l)) = (node, ops.list) else {
@@ -153,7 +153,9 @@ impl<K: Field> Graph<K> {
                 Output::Expr(_) if !which(g, f) => return g.rebuild(node, ops),
                 Output::Expr(_) => {}
             }
-            if !bodies.contains_key(&o) {
+            // the body of the output, whatever context it is called in
+            let plain = g.output_id(f, k);
+            if !bodies.contains_key(&plain) {
                 let outs: Vec<(u32, ExprId)> = g.funcs[f.0 as usize]
                     .outputs()
                     .iter()
@@ -170,12 +172,16 @@ impl<K: Field> Graph<K> {
                     bodies.insert(ok, b);
                 }
             }
-            let body = bodies[&o];
-            let inst = instances.entry((f, l)).or_insert_with(|| Instance {
-                bound: g.binding(f, ops.ops),
-                memo: HashMap::default(),
-                lists: HashMap::default(),
-            });
+            let body = bodies[&plain];
+            let full = g.full_args_in(ops.ctx, l);
+            let inst = instances
+                .entry((f, ops.ctx, l))
+                .or_insert_with(|| Instance {
+                    bound: g.binding(f, &full),
+                    memo: HashMap::default(),
+                    lists: HashMap::default(),
+                    contexts: HashMap::default(),
+                });
             inst.apply(g, body)
         })
     }
@@ -235,79 +241,6 @@ impl<K: Field> Graph<K> {
         }
         self.rebound.insert((f, binding), copy);
         Some(copy)
-    }
-
-    /// `f` with its parameters at the given positions bound to expressions:
-    /// a function over the others, in their order and with their roles,
-    /// whose body reads what the bound expressions read as globals (see
-    /// [`globals`](Self::globals)). A model card is a binding of its device
-    /// function: the calls of the bound function carry an instance's own
-    /// arguments only, the card once. Constants fold into the body. One
-    /// function per binding; output indices are `f`'s, the derivative roles
-    /// with respect to kept parameters renumbered.
-    pub fn bind(&mut self, f: FuncId, bound: &[(u32, ExprId)]) -> FuncId {
-        let mut key: Vec<(u32, ExprId)> = bound.to_vec();
-        key.sort_unstable();
-        key.dedup();
-        if key.is_empty() {
-            return f;
-        }
-        if let Some(&b) = self.bound.get(&(f, key.clone())) {
-            return b;
-        }
-        let func = self.func(f);
-        let (name, params) = (func.name().to_string(), func.params().to_vec());
-        let roles = func.param_roles().to_vec();
-        let (outputs, out_roles) = (func.outputs().to_vec(), func.output_roles().to_vec());
-        let map: HashMap<SymbolId, ExprId> =
-            key.iter().map(|&(k, e)| (params[k as usize], e)).collect();
-        let kept: Vec<usize> = (0..params.len())
-            .filter(|&k| !map.contains_key(&params[k]))
-            .collect();
-        // the new index of a kept parameter
-        let mut renumber = vec![u32::MAX; params.len()];
-        for (j, &k) in kept.iter().enumerate() {
-            renumber[k] = j as u32;
-        }
-        let exprs: Vec<ExprId> = outputs
-            .iter()
-            .filter_map(|o| match *o {
-                Output::Expr(e) => Some(e),
-                _ => None,
-            })
-            .collect();
-        let mut done = crate::transform::substitute(self, &exprs, &map).into_iter();
-        let b = self.push_function(Function::new(
-            &name,
-            kept.iter().map(|&k| params[k]).collect(),
-            None,
-        ));
-        for (j, &k) in kept.iter().enumerate() {
-            self.set_param_role(b, j as u32, roles[k]);
-        }
-        for (o, role) in outputs.iter().zip(out_roles) {
-            let out = match *o {
-                Output::Expr(_) => {
-                    let e = done.next().expect("one per expression");
-                    if self.is_zero(e) {
-                        Output::Zero
-                    } else {
-                        Output::Expr(e)
-                    }
-                }
-                _ => Output::Zero,
-            };
-            let role = match role {
-                OutputRole::Derivative { of, wrt } => match renumber.get(wrt as usize) {
-                    Some(&j) if j != u32::MAX => OutputRole::Derivative { of, wrt: j },
-                    _ => OutputRole::Plain,
-                },
-                r => r,
-            };
-            self.push_output(b, out, role);
-        }
-        self.bound.insert((f, key), b);
-        b
     }
 
     /// The parameters of `f` bound to the arguments of a call.
@@ -510,13 +443,178 @@ impl<K: Field> Graph<K> {
 
     /// The interned id of output `out` of `f`.
     pub fn output_id(&mut self, f: FuncId, out: u32) -> OutputId {
-        if let Some(&o) = self.output_dedup.get(&(f, out)) {
+        self.output_in(f, out, NO_CONTEXT)
+    }
+
+    /// The interned id of output `out` of `f` called in context `ctx`.
+    pub(crate) fn output_in(&mut self, f: FuncId, out: u32, ctx: u32) -> OutputId {
+        if let Some(&o) = self.output_dedup.get(&(f, out, ctx)) {
             return o;
         }
         let o = OutputId(self.outputs.len() as u32);
         self.outputs.push((f, out));
-        self.output_dedup.insert((f, out), o);
+        self.output_ctx.push(ctx);
+        self.output_dedup.insert((f, out, ctx), o);
         o
+    }
+
+    /// The context a call of output `o` runs in (see [`bind`](Self::bind)):
+    /// its function's bound parameters, ascending, and their expressions.
+    pub fn context(&self, o: OutputId) -> Option<(&[u32], &[ExprId])> {
+        match self.output_ctx[o.0 as usize] {
+            NO_CONTEXT => None,
+            c => {
+                let c = &self.contexts[c as usize];
+                Some((&c.at, self.args(c.exprs)))
+            }
+        }
+    }
+
+    /// The list of the bound expressions of context `c`.
+    pub(crate) fn context_list(&self, c: u32) -> ArgList {
+        self.contexts[c as usize].exprs
+    }
+
+    /// The context id of output `o` (`NO_CONTEXT` for none).
+    pub(crate) fn context_of(&self, o: OutputId) -> u32 {
+        self.output_ctx[o.0 as usize]
+    }
+
+    /// `f` with the parameters at the given positions bound to expressions:
+    /// a call through it passes the others, in their order, and runs `f`'s
+    /// body with the bound ones taken from the binding. A model card is a
+    /// binding of its device function: a call carries an instance's own
+    /// arguments, the card is the binding's, once. The body, its
+    /// derivatives and the positions of its parameters stay `f`'s; a bound
+    /// call is in every respect the call of `f` with all its arguments.
+    pub fn bind(&mut self, f: FuncId, bound: &[(u32, ExprId)]) -> Bound {
+        let mut pairs: Vec<(u32, ExprId)> = bound.to_vec();
+        pairs.sort_unstable();
+        pairs.dedup_by_key(|p| p.0);
+        if pairs.is_empty() {
+            return Bound {
+                func: f,
+                ctx: NO_CONTEXT,
+            };
+        }
+        let at: Box<[u32]> = pairs.iter().map(|&(k, _)| k).collect();
+        let exprs: Vec<ExprId> = pairs.iter().map(|&(_, e)| e).collect();
+        let exprs = self.intern_args(&exprs);
+        let key = (f, at.clone(), exprs);
+        if let Some(&ctx) = self.context_dedup.get(&key) {
+            return Bound { func: f, ctx };
+        }
+        let n = self.funcs[f.0 as usize].params().len();
+        let mut slot = vec![0u32; n];
+        let (mut next, mut j) = (0u32, 0usize);
+        for (p, s) in slot.iter_mut().enumerate() {
+            if at.get(j) == Some(&(p as u32)) {
+                *s = BOUND | j as u32;
+                j += 1;
+            } else {
+                *s = next;
+                next += 1;
+            }
+        }
+        let ctx = self.contexts.len() as u32;
+        self.contexts.push(Context {
+            f,
+            at,
+            exprs,
+            slot: slot.into(),
+        });
+        self.context_dedup.insert(key, ctx);
+        Bound { func: f, ctx }
+    }
+
+    /// Context `c` with its bound expressions `exprs` for a call of `f`
+    /// (`f` itself, or a copy with its parameters): the context id.
+    pub(crate) fn context_over(&mut self, c: u32, f: FuncId, exprs: &[ExprId]) -> u32 {
+        if c == NO_CONTEXT {
+            return NO_CONTEXT;
+        }
+        let ctx = &self.contexts[c as usize];
+        if ctx.f == f && self.args(ctx.exprs) == exprs {
+            return c;
+        }
+        let pairs: Vec<(u32, ExprId)> = ctx.at.iter().copied().zip(exprs.iter().copied()).collect();
+        self.bind(f, &pairs).ctx
+    }
+
+    /// Context `c` for a call of `f` (a copy with the parameters of `c`'s).
+    pub(crate) fn context_onto(&mut self, c: u32, f: FuncId) -> u32 {
+        if c == NO_CONTEXT {
+            return NO_CONTEXT;
+        }
+        let exprs = self.args(self.contexts[c as usize].exprs).to_vec();
+        self.context_over(c, f, &exprs)
+    }
+
+    /// The operands of a call of `f` in context `ctx` over `l`, in `f`'s
+    /// parameter order (see [`full_args`](Self::full_args)).
+    pub(crate) fn full_args_in(&self, ctx: u32, l: ArgList) -> Vec<ExprId> {
+        let args = self.args(l);
+        match ctx {
+            NO_CONTEXT => args.to_vec(),
+            c => {
+                let c = &self.contexts[c as usize];
+                let bound = self.args(c.exprs);
+                c.slot
+                    .iter()
+                    .map(|&s| match s & BOUND {
+                        0 => args[s as usize],
+                        _ => bound[(s & !BOUND) as usize],
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// The parameters a call through `b` passes, in order.
+    pub fn bound_arity(&self, b: Bound) -> usize {
+        let n = self.funcs[b.func.0 as usize].params().len();
+        match b.ctx {
+            NO_CONTEXT => n,
+            c => n - self.contexts[c as usize].at.len(),
+        }
+    }
+
+    /// A call of output `out` through `b`, over the parameters it leaves.
+    pub fn call_bound(&mut self, b: Bound, out: u32, args: &[ExprId]) -> ExprId {
+        debug_assert_eq!(args.len(), self.bound_arity(b), "call arity");
+        let l = self.intern_args(args);
+        self.call_list_in(b.func, out, b.ctx, l)
+    }
+
+    /// [`call_bound`](Self::call_bound) for several outputs over one list.
+    pub fn calls_bound(&mut self, b: Bound, outs: &[u32], args: &[ExprId]) -> Vec<ExprId> {
+        debug_assert_eq!(args.len(), self.bound_arity(b), "call arity");
+        let l = self.intern_args(args);
+        outs.iter()
+            .map(|&out| self.call_list_in(b.func, out, b.ctx, l))
+            .collect()
+    }
+
+    /// The operands of a call of output `o` over `l` in `f`'s parameter
+    /// order: an argument, or a bound expression where `o`'s context binds
+    /// the parameter.
+    pub(crate) fn full_args(&self, o: OutputId, l: ArgList) -> std::borrow::Cow<'_, [ExprId]> {
+        match self.output_ctx[o.0 as usize] {
+            NO_CONTEXT => std::borrow::Cow::Borrowed(self.args(l)),
+            c => {
+                let c = &self.contexts[c as usize];
+                let (args, bound) = (self.args(l), self.args(c.exprs));
+                std::borrow::Cow::Owned(
+                    c.slot
+                        .iter()
+                        .map(|&s| match s & BOUND {
+                            0 => args[s as usize],
+                            _ => bound[(s & !BOUND) as usize],
+                        })
+                        .collect(),
+                )
+            }
+        }
     }
 
     /// The expression of a symbolic output, `None` for a slot or zero output.
@@ -554,20 +652,52 @@ impl<K: Field> Graph<K> {
 
     /// [`call`](Self::call) over an argument list already interned.
     pub(crate) fn call_list(&mut self, f: FuncId, out: u32, l: ArgList) -> ExprId {
+        self.call_list_in(f, out, NO_CONTEXT, l)
+    }
+
+    /// [`call_list`](Self::call_list) in context `ctx`.
+    pub(crate) fn call_list_in(&mut self, f: FuncId, out: u32, ctx: u32, l: ArgList) -> ExprId {
         if matches!(
             self.funcs[f.0 as usize].outputs()[out as usize],
             Output::Zero
         ) {
             return self.zero;
         }
-        let o = self.output_id(f, out);
+        let o = self.output_in(f, out, ctx);
+        if ctx != NO_CONTEXT && !self.list_shape.contains_key(&(ctx, l)) {
+            // a bound call's is the one over all its operands in parameter
+            // order: the call it stands for
+            let shape = self.full_args(o, l).iter().fold(0, |h, &a| {
+                crate::node::shape::mix(h, self.shape[a.0 as usize])
+            });
+            self.list_shape.insert((ctx, l), shape);
+        }
         self.intern(Node::Call(o, l))
     }
 
     /// [`call`](Self::call) by output id.
     pub fn call_output(&mut self, o: OutputId, args: &[ExprId]) -> ExprId {
         let (f, out) = self.output(o);
-        self.call(f, out, args)
+        let ctx = self.context_of(o);
+        let l = self.intern_args(args);
+        self.call_list_in(f, out, ctx, l)
+    }
+
+    /// The call of output `o` over [`operands`](Self::operands): its
+    /// arguments, then its context's bound expressions (anew, whatever they
+    /// are now).
+    pub(crate) fn call_over_operands(&mut self, o: OutputId, ops: &[ExprId]) -> ExprId {
+        let (f, out) = self.output(o);
+        match self.context_of(o) {
+            NO_CONTEXT => self.call(f, out, ops),
+            c => {
+                let nb = self.contexts[c as usize].at.len();
+                let (args, bound) = ops.split_at(ops.len() - nb);
+                let ctx = self.context_over(c, f, bound);
+                let l = self.intern_args(args);
+                self.call_list_in(f, out, ctx, l)
+            }
+        }
     }
 
     /// The index of the derivative output `d outputs[out] / d params[param]`,
@@ -724,40 +854,45 @@ fn specialize_calls_in<K: Field>(
 ) -> Vec<ExprId> {
     // per instance (function, argument list): the copy it calls over the
     // arguments that are not constant, or none
-    let mut instances: HashMap<(FuncId, ArgList), Option<(FuncId, ArgList)>> = HashMap::default();
+    let mut instances: HashMap<(FuncId, u32, ArgList), Option<(FuncId, u32, ArgList)>> =
+        HashMap::default();
     crate::transform::rewrite(g, roots, |g, _e, node, ops| {
         let (Node::Call(o, _), Some(l)) = (node, ops.list) else {
             return g.rebuild(node, ops);
         };
         let (f, out) = g.output(o);
-        let target = match instances.get(&(f, l)) {
+        let target = match instances.get(&(f, ops.ctx, l)) {
             Some(&t) => t,
             None => {
-                let t = specialize_instance(g, f, ops.ops, made);
-                instances.insert((f, l), t);
+                let t = specialize_instance(g, f, ops.ctx, l, made);
+                instances.insert((f, ops.ctx, l), t);
                 t
             }
         };
         match target {
-            Some((copy, rest)) => g.call_list(copy, out, rest),
+            Some((copy, ctx, rest)) => g.call_list_in(copy, out, ctx, rest),
             None => g.rebuild(node, ops),
         }
     })
 }
 
-/// The copy of `f` a call over `args` runs, and the arguments it keeps
-/// interned; `None` when the call passes no constant to specialize on.
+/// The copy of `f` a call in context `ctx` over `l` runs, the context it
+/// keeps (the bound parameters that are not constants) and the arguments
+/// it keeps, interned; `None` when the call passes no constant to
+/// specialize on.
 fn specialize_instance<K: Field>(
     g: &mut Graph<K>,
     f: FuncId,
-    args: &[ExprId],
+    ctx: u32,
+    l: ArgList,
     made: &mut Specialized,
-) -> Option<(FuncId, ArgList)> {
+) -> Option<(FuncId, u32, ArgList)> {
     // A parameter stays an argument even when constant: its work is the
     // body's prolog, and specializing on it would split the instances of
     // one function into one copy per value.
+    let full = g.full_args_in(ctx, l);
     let roles = g.func(f).param_roles();
-    let consts: Vec<(u32, ExprId)> = args
+    let consts: Vec<(u32, ExprId)> = full
         .iter()
         .enumerate()
         .filter(|&(k, &a)| {
@@ -777,15 +912,32 @@ fn specialize_instance<K: Field>(
             c
         }
     };
-    // `key.1` is in argument order: one merge, not a search per argument.
-    let mut bound = key.1.iter().map(|&(p, _)| p as usize).peekable();
-    let rest: Vec<ExprId> = args
-        .iter()
-        .enumerate()
-        .filter(|&(k, _)| bound.next_if_eq(&k).is_none())
-        .map(|(_, &a)| a)
-        .collect();
-    Some((copy, g.intern_args(&rest)))
+    // The kept parameters, in order: those `ctx` binds stay bound in the
+    // copy, the others are the arguments. `key.1` is in parameter order:
+    // one merge, not a search per parameter.
+    let mut bound_at = vec![false; full.len()];
+    if ctx != NO_CONTEXT {
+        g.contexts[ctx as usize]
+            .at
+            .iter()
+            .for_each(|&p| bound_at[p as usize] = true);
+    }
+    let mut consts_at = key.1.iter().map(|&(p, _)| p as usize).peekable();
+    let (mut rest, mut rebound): (Vec<ExprId>, Vec<(u32, ExprId)>) = (Vec::new(), Vec::new());
+    let mut j = 0u32;
+    for (k, &a) in full.iter().enumerate() {
+        if consts_at.next_if_eq(&k).is_some() {
+            continue;
+        }
+        if bound_at[k] {
+            rebound.push((j, a));
+        } else {
+            rest.push(a);
+        }
+        j += 1;
+    }
+    let ctx = g.bind(copy, &rebound).ctx;
+    Some((copy, ctx, g.intern_args(&rest)))
 }
 
 /// The copy of `f` with the parameters `consts` names bound to their
@@ -855,6 +1007,8 @@ struct Instance {
     bound: HashMap<SymbolId, ExprId>,
     memo: HashMap<ExprId, ExprId>,
     lists: HashMap<ArgList, ArgList>,
+    /// Per context and function called in it, the context rewritten.
+    contexts: HashMap<(u32, FuncId), u32>,
 }
 
 impl Instance {
@@ -893,9 +1047,18 @@ impl Instance {
                         let new: Vec<ExprId> = g.args(l).iter().map(|c| memo[c]).collect();
                         g.intern_args(&new)
                     });
-                    let (f, k) = g.output(o);
-                    let f = g.rebound(f, &self.bound).unwrap_or(f);
-                    g.call_list(f, k, nl)
+                    let (f0, k) = g.output(o);
+                    let f = g.rebound(f0, &self.bound).unwrap_or(f0);
+                    let (c, memo) = (g.context_of(o), &self.memo);
+                    let ctx = match c {
+                        NO_CONTEXT => NO_CONTEXT,
+                        c => *self.contexts.entry((c, f)).or_insert_with(|| {
+                            let exprs = g.args(g.context_list(c));
+                            let new: Vec<ExprId> = exprs.iter().map(|e| memo[e]).collect();
+                            g.context_over(c, f, &new)
+                        }),
+                    };
+                    g.call_list_in(f, k, ctx, nl)
                 }
                 _ => {
                     ops.clear();

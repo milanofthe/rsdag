@@ -193,6 +193,7 @@ impl<K: Field> Graph<K> {
         at.begin(self.len());
         let mut lists: FxHashSet<ArgList> = FxHashSet::default();
         let mut funcs: FxHashSet<FuncId> = FxHashSet::default();
+        let mut contexts: FxHashSet<u32> = FxHashSet::default();
         let mut stack: Vec<ExprId> = roots.to_vec();
         let mut out = Vec::new();
         while let Some(e) = stack.pop() {
@@ -209,6 +210,10 @@ impl<K: Field> Graph<K> {
                     let f = self.output(o).0;
                     if globals && funcs.insert(f) {
                         stack.extend_from_slice(&self.globals(f));
+                    }
+                    let c = self.output_ctx[o.0 as usize];
+                    if c != NO_CONTEXT && contexts.insert(c) {
+                        stack.extend_from_slice(self.args(self.contexts[c as usize].exprs));
                     }
                 }
                 _ => stack.extend_from_slice(&self.operands(e)),
@@ -239,13 +244,25 @@ impl<K: Field> Graph<K> {
         }
     }
 
-    /// Operand `p` of a call of `f` over the list `l`: its argument, or
-    /// past them a global.
-    pub fn call_operand(&self, f: FuncId, l: ArgList, p: u32) -> ExprId {
+    /// Operand `p` of a call of output `o` over the list `l`: in its
+    /// function's parameter order its argument or, where its context binds
+    /// the parameter, the bound expression; past the parameters a global.
+    pub fn call_operand(&self, o: OutputId, l: ArgList, p: u32) -> ExprId {
+        let f = self.output(o).0;
+        let n = self.funcs[f.0 as usize].params().len();
+        if p as usize >= n {
+            return self.globals_of(f)[p as usize - n];
+        }
         let args = self.args(l);
-        match args.get(p as usize) {
-            Some(&a) => a,
-            None => self.globals_of(f)[p as usize - args.len()],
+        match self.output_ctx[o.0 as usize] {
+            NO_CONTEXT => args[p as usize],
+            c => {
+                let c = &self.contexts[c as usize];
+                match c.slot[p as usize] {
+                    s if s & BOUND == 0 => args[s as usize],
+                    s => self.args(c.exprs)[(s & !BOUND) as usize],
+                }
+            }
         }
     }
 
@@ -289,7 +306,7 @@ impl<K: Field> Graph<K> {
         let cone = self.cone(roots, &mut at);
         let mut vals: Vec<V> = Vec::with_capacity(cone.len());
         // per instance, what each output reads among its moving arguments
-        let mut sites: HashMap<(FuncId, ArgList), Arc<[Arc<[u32]>]>> = HashMap::default();
+        let mut sites: HashMap<(FuncId, u32, ArgList), Arc<[Arc<[u32]>]>> = HashMap::default();
         for &e in &cone {
             let val = |c: &ExprId| &vals[at.get(*c).expect("in the cone").0 as usize];
             let node = *self.node(e);
@@ -297,19 +314,20 @@ impl<K: Field> Graph<K> {
                 Node::Const(_) | Node::Symbol(_) => leaf(&node),
                 Node::Call(o, l) if through != Through::Syntax => {
                     let (f, k) = self.output(o);
-                    let (args, globals) = (self.args(l), self.globals(f));
+                    let (args, globals) = (self.full_args(o, l), self.globals(f));
                     let operand = |p: u32| match args.get(p as usize) {
                         Some(a) => a,
                         None => &globals[p as usize - args.len()],
                     };
-                    let reads = match sites.get(&(f, l)) {
+                    let site = (f, self.output_ctx[o.0 as usize], l);
+                    let reads = match sites.get(&site) {
                         Some(r) => r.clone(),
                         None => {
                             let moving: Vec<u32> = (0..(args.len() + globals.len()) as u32)
                                 .filter(|&p| !val(operand(p)).is_bottom())
                                 .collect();
                             let r = self.reads(f, through, &moving);
-                            sites.insert((f, l), r.clone());
+                            sites.insert(site, r.clone());
                             r
                         }
                     };

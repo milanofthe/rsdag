@@ -32,7 +32,12 @@ use crate::extern_fn::ExternBundle;
 use crate::field::Field;
 use crate::func::{Body, FuncId};
 use crate::graph::Graph;
+use crate::graph::NO_CONTEXT;
 use crate::node::{ArgList, ExprId, Node, SymbolId};
+
+/// One instance's calls: the context they run in (see `Graph::bind`) and
+/// their argument list.
+type Site = (u32, ArgList);
 use crate::semantics::{SOLVE_BATCH_MAX_K, SOLVE_BATCH_MAX_N};
 
 /// Row dots against one vector fuse into a `Gemv` from this many rows on.
@@ -213,7 +218,7 @@ struct Forest {
     /// The operands of the calls of functions with globals: the arguments,
     /// then the globals (see [`Graph::globals`]); a call of a function
     /// without has its argument list.
-    ext: HashMap<(u32, ArgList), Vec<ExprId>>,
+    ext: HashMap<(u32, Site), Vec<ExprId>>,
 }
 
 /// One instruction of the lowered program, before scheduling.
@@ -739,12 +744,12 @@ impl Forest {
         self.tables.input(s)
     }
 
-    /// The operands of the call of `f` over `l`: its arguments, then the
-    /// globals of `f`.
-    fn call_ops<'a, K: Field>(&'a self, ctx: &'a Graph<K>, f: u32, l: ArgList) -> &'a [ExprId] {
-        match self.ext.get(&(f, l)) {
+    /// The operands of the call of `f` at `site`: its arguments (and the
+    /// bound expressions, in parameter order), then the globals of `f`.
+    fn call_ops<'a, K: Field>(&'a self, ctx: &'a Graph<K>, f: u32, site: Site) -> &'a [ExprId] {
+        match self.ext.get(&(f, site)) {
             Some(ops) => ops,
-            None => ctx.args(l),
+            None => ctx.args(site.1),
         }
     }
 
@@ -765,9 +770,10 @@ impl Forest {
         let mut base: Vec<ExprId> = Vec::new();
         let mut stack = roots.to_vec();
         // the calls of one instance share their list: walked once
-        let mut walked: HashSet<ArgList> = HashSet::default();
-        // a call reads its function's globals besides its arguments
-        let mut ext: HashMap<(u32, ArgList), Vec<ExprId>> = HashMap::default();
+        let mut walked: HashSet<Site> = HashSet::default();
+        // a call reads its function's globals besides its arguments, and
+        // a bound call its context's expressions
+        let mut ext: HashMap<(u32, Site), Vec<ExprId>> = HashMap::default();
         let mut funcs: HashSet<u32> = HashSet::default();
         while let Some(id) = stack.pop() {
             if !t.mark(id) {
@@ -776,24 +782,28 @@ impl Forest {
             base.push(id);
             if let Node::Call(o, l) = *ctx.node(id) {
                 let f = ctx.output(o).0;
+                let site = (ctx.context_of(o), l);
                 let globals = ctx.globals(f);
-                if !globals.is_empty() {
-                    ext.entry((f.0, l))
-                        .or_insert_with(|| [ctx.args(l), &globals[..]].concat());
+                if !globals.is_empty() || site.0 != NO_CONTEXT {
+                    ext.entry((f.0, site)).or_insert_with(|| {
+                        let mut ops = ctx.full_args(o, l).into_owned();
+                        ops.extend_from_slice(&globals);
+                        ops
+                    });
                     if funcs.insert(f.0) {
                         stack.extend_from_slice(&globals);
                     }
                 }
-                if !walked.insert(l) {
+                if !walked.insert(site) {
                     continue;
                 }
             }
             stack.extend_from_slice(&ctx.operands(id));
         }
-        let call_ops = |f: u32, l: ArgList| -> &[ExprId] {
-            match ext.get(&(f, l)) {
+        let call_ops = |f: u32, site: Site| -> &[ExprId] {
+            match ext.get(&(f, site)) {
                 Some(ops) => ops,
-                None => ctx.args(l),
+                None => ctx.args(site.1),
             }
         };
         base.sort_unstable_by_key(|e| e.0);
@@ -808,7 +818,7 @@ impl Forest {
         // unmapped symbol is a NaN constant and so pure.
         let mut pure = vec![false; m];
         if let Some(mask) = pure_inputs {
-            let mut pure_list: HashMap<(u32, ArgList), bool> = HashMap::default();
+            let mut pure_list: HashMap<(u32, Site), bool> = HashMap::default();
             for (i, id) in base.iter().enumerate() {
                 pure[i] = match *ctx.node(*id) {
                     Node::Const(_) => true,
@@ -817,10 +827,10 @@ impl Forest {
                         Some(k) => mask.get(k as usize).copied().unwrap_or(false),
                     },
                     Node::Call(o, l) => {
-                        let f = ctx.output(o).0 .0;
+                        let (f, site) = (ctx.output(o).0 .0, (ctx.context_of(o), l));
                         *pure_list
-                            .entry((f, l))
-                            .or_insert_with(|| call_ops(f, l).iter().all(|a| pure[bp(*a)]))
+                            .entry((f, site))
+                            .or_insert_with(|| call_ops(f, site).iter().all(|a| pure[bp(*a)]))
                     }
                     _ => ctx.operands(*id).iter().all(|a| pure[bp(*a)]),
                 };
@@ -833,8 +843,8 @@ impl Forest {
         let mut uses = vec![0u32; m];
         walked.clear();
         for id in &base {
-            if let Node::Call(_, l) = *ctx.node(*id) {
-                if !walked.insert(l) {
+            if let Node::Call(o, l) = *ctx.node(*id) {
+                if !walked.insert((ctx.context_of(o), l)) {
                     continue;
                 }
             }
@@ -895,11 +905,11 @@ impl Forest {
         let mut bodies = Bodies::default();
         // The nodes of one call (same function, same arguments): a single
         // call is one instruction whichever of its outputs is reached first.
-        let mut call_sites: HashMap<(u32, ArgList), Vec<usize>> = HashMap::default();
+        let mut call_sites: HashMap<(u32, Site), Vec<usize>> = HashMap::default();
         for (i, &id) in self.base.iter().enumerate() {
             if let Node::Call(o, l) = *ctx.node(id) {
                 call_sites
-                    .entry((ctx.output(o).0 .0, l))
+                    .entry((ctx.output(o).0 .0, (ctx.context_of(o), l)))
                     .or_default()
                     .push(i);
             }
@@ -919,9 +929,9 @@ impl Forest {
                     }
                 }
                 (None, Node::Call(o, l)) => {
-                    let f = ctx.output(o).0 .0;
-                    let members = &call_sites[&(f, l)];
-                    let set = calls.set_of[&(f, l)];
+                    let (f, site) = (ctx.output(o).0 .0, (ctx.context_of(o), l));
+                    let members = &call_sites[&(f, site)];
+                    let set = calls.set_of[&(f, site)];
                     self.lower_calls(ctx, &mut lw, &mut bodies, &calls, f, set, members);
                 }
                 (None, _) => self.lower_node(ctx, &mut lw, i),
@@ -941,23 +951,26 @@ impl Forest {
     /// different output sets (a residual alone, the residual with its
     /// partials) take different bodies, so they are keyed by the set.
     fn call_sets<K: Field>(&self, ctx: &Graph<K>) -> CallSets {
-        let mut per_call: HashMap<(u32, ArgList), Vec<u32>> = HashMap::default();
+        let mut per_call: HashMap<(u32, Site), Vec<u32>> = HashMap::default();
         for &id in &self.base {
             if let Node::Call(o, l) = *ctx.node(id) {
                 let (f, out) = ctx.output(o);
-                per_call.entry((f.0, l)).or_default().push(out);
+                per_call
+                    .entry((f.0, (ctx.context_of(o), l)))
+                    .or_default()
+                    .push(out);
             }
         }
         let mut ids: HashMap<(u32, Vec<u32>), u32> = HashMap::default();
         let mut calls = CallSets::default();
-        for ((f, l), mut outs) in per_call {
+        for ((f, site), mut outs) in per_call {
             outs.sort_unstable();
             outs.dedup();
             let id = *ids.entry((f, outs.clone())).or_insert_with(|| {
                 calls.sets.push(outs);
                 calls.sets.len() as u32 - 1
             });
-            calls.set_of.insert((f, l), id);
+            calls.set_of.insert((f, site), id);
         }
         calls
     }
@@ -973,17 +986,20 @@ impl Forest {
         let base = &self.base;
         let m = base.len();
         // The functions called with two or more argument lists of one length.
-        let mut lists: HashMap<u32, Vec<ArgList>> = HashMap::default();
-        let mut seen: HashSet<(u32, ArgList)> = HashSet::default();
+        let mut lists: HashMap<u32, Vec<Site>> = HashMap::default();
+        let mut seen: HashSet<(u32, Site)> = HashSet::default();
         for &id in base {
             if let Node::Call(o, l) = *ctx.node(id) {
-                let f = ctx.output(o).0 .0;
-                if seen.insert((f, l)) {
-                    lists.entry(f).or_default().push(l);
+                let (f, site) = (ctx.output(o).0 .0, (ctx.context_of(o), l));
+                if seen.insert((f, site)) {
+                    lists.entry(f).or_default().push(site);
                 }
             }
         }
-        lists.retain(|_, g| g.len() >= 2 && g.iter().all(|a| a.len() == g[0].len()));
+        lists.retain(|&f, g| {
+            let width = |&s: &Site| self.call_ops(ctx, f, s).len();
+            g.len() >= 2 && g.iter().all(|a| width(a) == width(&g[0]))
+        });
         let mut rows_of: HashMap<Vec<ExprId>, Vec<usize>> = HashMap::default();
         for (i, &id) in base.iter().enumerate() {
             if let Node::Dot(l) = *ctx.node(id) {
@@ -1008,17 +1024,17 @@ impl Forest {
             };
         }
         let mut depth = vec![0u32; m];
-        let mut list_depth: HashMap<(u32, ArgList), u32> = HashMap::default();
+        let mut list_depth: HashMap<(u32, Site), u32> = HashMap::default();
         for (i, &id) in base.iter().enumerate() {
             let deepest = |depth: &[u32], ops: &[ExprId]| {
                 ops.iter().map(|&a| depth[self.pos(a)]).max().unwrap_or(0)
             };
             let over = match *ctx.node(id) {
                 Node::Call(o, l) => {
-                    let f = ctx.output(o).0 .0;
+                    let (f, site) = (ctx.output(o).0 .0, (ctx.context_of(o), l));
                     *list_depth
-                        .entry((f, l))
-                        .or_insert_with(|| deepest(&depth, self.call_ops(ctx, f, l)))
+                        .entry((f, site))
+                        .or_insert_with(|| deepest(&depth, self.call_ops(ctx, f, site)))
                 }
                 _ => deepest(&depth, &ctx.operands(id)),
             };
@@ -1033,8 +1049,8 @@ impl Forest {
             }
             let key = match *ctx.node(id) {
                 Node::Call(o, l) => {
-                    let f = ctx.output(o).0 .0;
-                    GroupKey::Call(f, depth[i], self.pure[i], calls.set_of[&(f, l)])
+                    let (f, site) = (ctx.output(o).0 .0, (ctx.context_of(o), l));
+                    GroupKey::Call(f, depth[i], self.pure[i], calls.set_of[&(f, site)])
                 }
                 Node::Dot(l) => GroupKey::Gemv(ctx.dot_args(l).1.to_vec(), depth[i], self.pure[i]),
                 Node::Solve(l, _) => GroupKey::Solve(l, self.pure[i]),
@@ -1056,10 +1072,10 @@ impl Forest {
             let is_kernel = match key {
                 GroupKey::Gemv(..) => members.len() >= GEMV_MIN_ROWS,
                 GroupKey::Call(..) => {
-                    let mut distinct: HashSet<ArgList> = HashSet::default();
+                    let mut distinct: HashSet<Site> = HashSet::default();
                     for &i in members {
-                        if let Node::Call(_, l) = *ctx.node(base[i]) {
-                            distinct.insert(l);
+                        if let Node::Call(o, l) = *ctx.node(base[i]) {
+                            distinct.insert((ctx.context_of(o), l));
                         }
                     }
                     distinct.len() >= 2
@@ -1254,11 +1270,12 @@ impl Forest {
             .collect();
         // The calls of one instance are one instruction: one unit, by the
         // first of them, over the one list.
-        let mut site_first: HashMap<(u32, ArgList), usize> = HashMap::default();
+        let mut site_first: HashMap<(u32, Site), usize> = HashMap::default();
         let mut site_of: Vec<usize> = (0..m).collect();
         for (i, &id) in self.base.iter().enumerate() {
             if let Node::Call(o, l) = *ctx.node(id) {
-                site_of[i] = *site_first.entry((ctx.output(o).0 .0, l)).or_insert(i);
+                let key = (ctx.output(o).0 .0, (ctx.context_of(o), l));
+                site_of[i] = *site_first.entry(key).or_insert(i);
             }
         }
         let unit_of = |i: usize| -> usize {
@@ -1269,7 +1286,7 @@ impl Forest {
         };
         let deps_of_node = |i: usize, out: &mut Vec<usize>| {
             if let Node::Call(o, l) = *ctx.node(self.base[i]) {
-                let ops = self.call_ops(ctx, ctx.output(o).0 .0, l);
+                let ops = self.call_ops(ctx, ctx.output(o).0 .0, (ctx.context_of(o), l));
                 out.extend(ops.iter().map(|&a| unit_of(self.pos(a))));
                 return;
             }
@@ -1290,7 +1307,7 @@ impl Forest {
         // distinct ones, reused: a million units are not two million
         // allocations.
         let mut stamp: Vec<usize> = vec![usize::MAX; m];
-        let mut lists: HashSet<ArgList> = HashSet::default();
+        let mut lists: HashSet<Site> = HashSet::default();
         let mut raw: Vec<usize> = Vec::new();
         let mut deps: Vec<usize> = Vec::new();
         let mut deps_of_unit = |u: usize, deps: &mut Vec<usize>| {
@@ -1300,8 +1317,8 @@ impl Forest {
                     // a member's list once: the instances of the group
                     lists.clear();
                     for &mi in &groups[g].1 {
-                        if let Node::Call(_, l) = *ctx.node(self.base[mi]) {
-                            if !lists.insert(l) {
+                        if let Node::Call(o, l) = *ctx.node(self.base[mi]) {
+                            if !lists.insert((ctx.context_of(o), l)) {
                                 continue;
                             }
                         }
@@ -1491,14 +1508,15 @@ impl Forest {
         let (bundle, body) = bodies.get(ctx, &mut lw.p.bundles, f, set, &calls.sets);
         let b = body.bundle.clone();
         let n_out = b.n_outputs() as u32;
-        let mut lists: Vec<ArgList> = Vec::new();
-        let mut group_of: HashMap<ArgList, u32> = HashMap::default();
+        let mut lists: Vec<Site> = Vec::new();
+        let mut group_of: HashMap<Site, u32> = HashMap::default();
         for &mi in members {
-            let Node::Call(_, l) = *ctx.node(self.base[mi]) else {
+            let Node::Call(o, l) = *ctx.node(self.base[mi]) else {
                 unreachable!()
             };
-            group_of.entry(l).or_insert_with(|| {
-                lists.push(l);
+            let site = (ctx.context_of(o), l);
+            group_of.entry(site).or_insert_with(|| {
+                lists.push(site);
                 lists.len() as u32 - 1
             });
         }
@@ -1540,7 +1558,7 @@ impl Forest {
             };
             let slot = body.slot_of[ctx.output(o).1 as usize];
             lw.value[mi] = Some(match slot {
-                Some(slot) => Ref::Value(inst, group_of[&l] * n_out + slot),
+                Some(slot) => Ref::Value(inst, group_of[&(ctx.context_of(o), l)] * n_out + slot),
                 // A zero output: a derivative the body does not carry.
                 None => lw.constant(0.0),
             });
@@ -1607,7 +1625,7 @@ impl Forest {
 #[derive(Default)]
 struct CallSets {
     /// Per function and argument list, the set of outputs called.
-    set_of: HashMap<(u32, ArgList), u32>,
+    set_of: HashMap<(u32, Site), u32>,
     sets: Vec<Vec<u32>>,
 }
 
