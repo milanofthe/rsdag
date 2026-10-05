@@ -146,3 +146,58 @@ fn two_instances_rewrite_differentiate_and_compile_as_inlined() {
         );
     }
 }
+
+/// A hierarchy compiled as it should run: the composite functions (a body of
+/// calls, a wrapper around two bodies) inlined, the leaf's calls from every
+/// instance left as calls, the values those of the hierarchy.
+#[test]
+fn composite_functions_inline_and_leaves_stay_calls() {
+    let mut g: Graph<F64> = Graph::new();
+    let f = body(&mut g);
+    // top(u, p) = body(u, p) + body(u shifted, p), one instance each
+    let mut s = Scope::new(&mut g, "top");
+    let u: Vec<ExprId> = (0..N).map(|k| s.param(&format!("u{k}"))).collect();
+    let p: Vec<ExprId> = (0..N).map(|k| s.param(&format!("q{k}"))).collect();
+    let a: Vec<ExprId> = u.iter().chain(&p).copied().collect();
+    let b: Vec<ExprId> = (0..N)
+        .map(|k| u[(k + 1) % N])
+        .chain(p.iter().copied())
+        .collect();
+    let outs: Vec<u32> = (0..N as u32).collect();
+    let fa = s.calls(f, &outs, &a);
+    let fb = s.calls(f, &outs, &b);
+    let sums: Vec<ExprId> = fa.iter().zip(&fb).map(|(&x, &y)| s.add(x, y)).collect();
+    let top = s.close(sums);
+    let mut args = Vec::new();
+    let mut ins = Vec::new();
+    for k in 0..2 * N {
+        let (e, s) = sym(&mut g, &format!("z{k}"));
+        args.push(e);
+        ins.push(s);
+    }
+    let rows = g.calls(top, &outs, &args);
+    let flat = g.inline_composite(&rows);
+    let leaves: std::collections::BTreeSet<FuncId> = g
+        .free_calls_in(&flat)
+        .iter()
+        .map(|&o| g.output(o).0)
+        .collect();
+    assert_eq!(leaves.len(), 1, "only the leaf is called");
+    assert!(!leaves.contains(&f) && !leaves.contains(&top));
+    let all = g.inline_all(&rows);
+    let x: Vec<f64> = (0..2 * N).map(|k| 0.1 + 0.02 * k as f64).collect();
+    let (mut w, mut r0, mut r1, mut r2) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    Tape::compile(&g, &rows, &ins).eval(&x, &mut w, &mut r0);
+    Tape::compile(&g, &flat, &ins).eval(&x, &mut w, &mut r1);
+    Tape::compile(&g, &all, &ins).eval(&x, &mut w, &mut r2);
+    for k in 0..N {
+        assert!(
+            (r0[k] - r1[k]).abs() <= 1e-13 * (1.0 + r0[k].abs()),
+            "row {k}"
+        );
+        assert!(
+            (r0[k] - r2[k]).abs() <= 1e-13 * (1.0 + r0[k].abs()),
+            "row {k}"
+        );
+    }
+}

@@ -67,7 +67,45 @@ impl<K: Field> Graph<K> {
     /// Calls into an extern body cannot be inlined (there is no expression
     /// to inline) and are left as they are.
     pub fn inline_all(&mut self, roots: &[ExprId]) -> Vec<ExprId> {
-        self.inline_with(roots, &mut HashMap::default())
+        self.inline_where(roots, &mut |_, _| true)
+    }
+
+    /// Every call into a function whose body calls further functions,
+    /// inlined, to the bottom; the calls of leaf functions (a device model's
+    /// body) stay calls. A hierarchy as a compiled program should see it: no
+    /// boundary but its leaves, so the calls of one leaf from every instance
+    /// anywhere in the hierarchy batch together, as they would in a flat
+    /// graph, while the symbolic work before (differentiation,
+    /// specialization) stays on the hierarchy.
+    pub fn inline_composite(&mut self, roots: &[ExprId]) -> Vec<ExprId> {
+        let mut composite: HashMap<FuncId, bool> = HashMap::default();
+        self.inline_where(roots, &mut |g, f| {
+            *composite.entry(f).or_insert_with(|| {
+                let exprs: Vec<ExprId> = g.funcs[f.0 as usize]
+                    .outputs()
+                    .iter()
+                    .filter_map(|o| match *o {
+                        Output::Expr(e) => Some(e),
+                        _ => None,
+                    })
+                    .collect();
+                !g.free_calls_in(&exprs).is_empty()
+            })
+        })
+    }
+
+    /// The calls into the functions `which` names inlined, to the bottom.
+    fn inline_where(
+        &mut self,
+        roots: &[ExprId],
+        which: &mut dyn FnMut(&Self, FuncId) -> bool,
+    ) -> Vec<ExprId> {
+        self.inline_with(
+            roots,
+            which,
+            &mut HashMap::default(),
+            &mut HashMap::default(),
+        )
     }
 
     /// Every call under `roots` that passes constants, redirected to a copy
@@ -89,38 +127,56 @@ impl<K: Field> Graph<K> {
         specialize_calls_in(self, roots, &mut HashMap::default())
     }
 
-    /// [`inline_all`](Self::inline_all) with `bodies` holding each output
-    /// already inlined over its function's parameters, so a function is
-    /// inlined once however many calls it has, and the recursion is only as
-    /// deep as the call hierarchy.
+    /// [`inline_where`](Self::inline_where) with `bodies` holding each
+    /// output of an inlined function already inlined over its parameters
+    /// (all of a function's outputs at once, so their shared body is walked
+    /// once), and `instances` the substitution of each instance, kept across
+    /// its outputs: an instance's body is rewritten once, however many of
+    /// its outputs are called.
     fn inline_with(
         &mut self,
         roots: &[ExprId],
+        which: &mut dyn FnMut(&Self, FuncId) -> bool,
         bodies: &mut HashMap<OutputId, ExprId>,
+        instances: &mut HashMap<(FuncId, ArgList), Instance>,
     ) -> Vec<ExprId> {
-        // per instance (function, argument list): its parameters bound
-        let mut binds: HashMap<(FuncId, ArgList), HashMap<SymbolId, ExprId>> = HashMap::default();
         crate::transform::rewrite(self, roots, |g, _, node, ops| {
             let (Node::Call(o, _), Some(l)) = (node, ops.list) else {
                 return g.rebuild(node, ops);
             };
             let (f, k) = g.output(o);
-            let e = match g.funcs[f.0 as usize].outputs()[k as usize] {
-                // An extern body stays a call, over inlined arguments.
-                Output::Slot(_) => return g.rebuild(node, ops),
+            match g.funcs[f.0 as usize].outputs()[k as usize] {
                 Output::Zero => return g.zero,
-                Output::Expr(e) => e,
-            };
-            let body = match bodies.get(&o) {
-                Some(&b) => b,
-                None => {
-                    let b = g.inline_with(&[e], bodies)[0];
-                    bodies.insert(o, b);
-                    b
+                // An extern body, or a function not to inline, stays a call
+                // over inlined arguments.
+                Output::Slot(_) => return g.rebuild(node, ops),
+                Output::Expr(_) if !which(g, f) => return g.rebuild(node, ops),
+                Output::Expr(_) => {}
+            }
+            if !bodies.contains_key(&o) {
+                let outs: Vec<(u32, ExprId)> = g.funcs[f.0 as usize]
+                    .outputs()
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(k, out)| match *out {
+                        Output::Expr(e) => Some((k as u32, e)),
+                        _ => None,
+                    })
+                    .collect();
+                let exprs: Vec<ExprId> = outs.iter().map(|&(_, e)| e).collect();
+                let inlined = g.inline_with(&exprs, which, bodies, instances);
+                for (&(k, _), b) in outs.iter().zip(inlined) {
+                    let ok = g.output_id(f, k);
+                    bodies.insert(ok, b);
                 }
-            };
-            let map = binds.entry((f, l)).or_insert_with(|| g.bind(f, ops.ops));
-            crate::transform::substitute(g, &[body], map)[0]
+            }
+            let body = bodies[&o];
+            let inst = instances.entry((f, l)).or_insert_with(|| Instance {
+                bound: g.bind(f, ops.ops),
+                memo: HashMap::default(),
+                lists: HashMap::default(),
+            });
+            inst.apply(g, body)
         })
     }
 
@@ -956,3 +1012,63 @@ const BITSET_MAX_WORDS: usize = 16;
 /// Per function and set of moving parameters, which of its outputs depend
 /// on them (see [`Graph::depends_on`]).
 type Called = HashMap<(FuncId, Vec<u32>), Arc<[bool]>>;
+
+/// One instance's substitution of its arguments into its function's body,
+/// kept across the body's outputs (they share most of it): the parameters
+/// bound, the nodes rewritten so far and the call lists.
+struct Instance {
+    bound: HashMap<SymbolId, ExprId>,
+    memo: HashMap<ExprId, ExprId>,
+    lists: HashMap<ArgList, ArgList>,
+}
+
+impl Instance {
+    /// `root` with the instance's arguments substituted.
+    fn apply<K: Field>(&mut self, g: &mut Graph<K>, root: ExprId) -> ExprId {
+        let mut stack: Vec<(ExprId, bool)> = vec![(root, false)];
+        let mut ops: Vec<ExprId> = Vec::new();
+        while let Some((e, expanded)) = stack.pop() {
+            if self.memo.contains_key(&e) {
+                continue;
+            }
+            let node = *g.node(e);
+            if !expanded {
+                stack.push((e, true));
+                if let Node::Call(_, l) = node {
+                    if self.lists.contains_key(&l) {
+                        continue;
+                    }
+                }
+                let pending = g.operands(e);
+                stack.extend(
+                    pending
+                        .iter()
+                        .rev()
+                        .filter(|c| !self.memo.contains_key(c))
+                        .map(|&c| (c, false)),
+                );
+                continue;
+            }
+            let r = match node {
+                Node::Const(_) => e,
+                Node::Symbol(s) => self.bound.get(&s).copied().unwrap_or(e),
+                Node::Call(o, l) => {
+                    let memo = &self.memo;
+                    let nl = *self.lists.entry(l).or_insert_with(|| {
+                        let new: Vec<ExprId> = g.args(l).iter().map(|c| memo[c]).collect();
+                        g.intern_args(&new)
+                    });
+                    let (f, k) = g.output(o);
+                    g.call_list(f, k, nl)
+                }
+                _ => {
+                    ops.clear();
+                    ops.extend(g.operands(e).iter().map(|c| self.memo[c]));
+                    g.build(node, &ops)
+                }
+            };
+            self.memo.insert(e, r);
+        }
+        self.memo[&root]
+    }
+}

@@ -109,6 +109,7 @@ impl Memo {
 }
 
 mod calls;
+mod compose;
 
 impl<K: Field> Default for Graph<K> {
     fn default() -> Self {

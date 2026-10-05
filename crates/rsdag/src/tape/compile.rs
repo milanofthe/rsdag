@@ -48,6 +48,34 @@ fn split_state(o: &[u32], stateful: bool) -> (&[u32], u32) {
 }
 
 impl Tape {
+    /// The program of `roots` over a composition of functions: the
+    /// composite functions (whose bodies call others) inlined, so the
+    /// program has no boundary but its leaves, and the calls of one leaf
+    /// from every instance batch together (see
+    /// [`Graph::inline_composite`]); then [`compile`](Self::compile).
+    /// Differentiate and specialize on the composition first: that work
+    /// stays on its functions.
+    pub fn compose<K: Field>(
+        ctx: &mut Graph<K>,
+        roots: &[ExprId],
+        input_syms: &[SymbolId],
+    ) -> Tape {
+        let program = ctx.inline_composite(roots);
+        Self::compile_inner(ctx, &program, input_syms, None)
+    }
+
+    /// [`compose`](Self::compose) with the prolog split of
+    /// [`compile_split`](Self::compile_split).
+    pub fn compose_split<K: Field>(
+        ctx: &mut Graph<K>,
+        roots: &[ExprId],
+        input_syms: &[SymbolId],
+        pure_inputs: &[bool],
+    ) -> Tape {
+        let program = ctx.inline_composite(roots);
+        Self::compile_inner(ctx, &program, input_syms, Some(pure_inputs))
+    }
+
     /// Compile a tape computing `roots`, where `inputs[k]` (passed to
     /// [`eval`](Self::eval)) is the value of symbol `input_syms[k]`. Symbols not
     /// listed evaluate to `NaN`.
