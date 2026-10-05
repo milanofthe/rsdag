@@ -172,7 +172,7 @@ impl<K: Field> Graph<K> {
             }
             let body = bodies[&o];
             let inst = instances.entry((f, l)).or_insert_with(|| Instance {
-                bound: g.bind(f, ops.ops),
+                bound: g.binding(f, ops.ops),
                 memo: HashMap::default(),
                 lists: HashMap::default(),
             });
@@ -237,8 +237,81 @@ impl<K: Field> Graph<K> {
         Some(copy)
     }
 
+    /// `f` with its parameters at the given positions bound to expressions:
+    /// a function over the others, in their order and with their roles,
+    /// whose body reads what the bound expressions read as globals (see
+    /// [`globals`](Self::globals)). A model card is a binding of its device
+    /// function: the calls of the bound function carry an instance's own
+    /// arguments only, the card once. Constants fold into the body. One
+    /// function per binding; output indices are `f`'s, the derivative roles
+    /// with respect to kept parameters renumbered.
+    pub fn bind(&mut self, f: FuncId, bound: &[(u32, ExprId)]) -> FuncId {
+        let mut key: Vec<(u32, ExprId)> = bound.to_vec();
+        key.sort_unstable();
+        key.dedup();
+        if key.is_empty() {
+            return f;
+        }
+        if let Some(&b) = self.bound.get(&(f, key.clone())) {
+            return b;
+        }
+        let func = self.func(f);
+        let (name, params) = (func.name().to_string(), func.params().to_vec());
+        let roles = func.param_roles().to_vec();
+        let (outputs, out_roles) = (func.outputs().to_vec(), func.output_roles().to_vec());
+        let map: HashMap<SymbolId, ExprId> =
+            key.iter().map(|&(k, e)| (params[k as usize], e)).collect();
+        let kept: Vec<usize> = (0..params.len())
+            .filter(|&k| !map.contains_key(&params[k]))
+            .collect();
+        // the new index of a kept parameter
+        let mut renumber = vec![u32::MAX; params.len()];
+        for (j, &k) in kept.iter().enumerate() {
+            renumber[k] = j as u32;
+        }
+        let exprs: Vec<ExprId> = outputs
+            .iter()
+            .filter_map(|o| match *o {
+                Output::Expr(e) => Some(e),
+                _ => None,
+            })
+            .collect();
+        let mut done = crate::transform::substitute(self, &exprs, &map).into_iter();
+        let b = self.push_function(Function::new(
+            &name,
+            kept.iter().map(|&k| params[k]).collect(),
+            None,
+        ));
+        for (j, &k) in kept.iter().enumerate() {
+            self.set_param_role(b, j as u32, roles[k]);
+        }
+        for (o, role) in outputs.iter().zip(out_roles) {
+            let out = match *o {
+                Output::Expr(_) => {
+                    let e = done.next().expect("one per expression");
+                    if self.is_zero(e) {
+                        Output::Zero
+                    } else {
+                        Output::Expr(e)
+                    }
+                }
+                _ => Output::Zero,
+            };
+            let role = match role {
+                OutputRole::Derivative { of, wrt } => match renumber.get(wrt as usize) {
+                    Some(&j) if j != u32::MAX => OutputRole::Derivative { of, wrt: j },
+                    _ => OutputRole::Plain,
+                },
+                r => r,
+            };
+            self.push_output(b, out, role);
+        }
+        self.bound.insert((f, key), b);
+        b
+    }
+
     /// The parameters of `f` bound to the arguments of a call.
-    fn bind(&self, f: FuncId, args: &[ExprId]) -> HashMap<SymbolId, ExprId> {
+    fn binding(&self, f: FuncId, args: &[ExprId]) -> HashMap<SymbolId, ExprId> {
         let params = self.funcs[f.0 as usize].params();
         params.iter().copied().zip(args.iter().copied()).collect()
     }
@@ -574,7 +647,7 @@ impl<K: Field> Graph<K> {
     /// substitution pass (the outputs of a device template share its core, so
     /// per-output substitution would rebuild that core per output).
     pub fn inline_outputs(&mut self, f: FuncId, outs: &[u32], args: &[ExprId]) -> Vec<ExprId> {
-        let map = self.bind(f, args);
+        let map = self.binding(f, args);
         let func = &self.funcs[f.0 as usize];
         let exprs: Vec<ExprId> = outs
             .iter()
@@ -600,6 +673,20 @@ impl<K: Field> Graph<K> {
             .collect()
     }
 
+    /// The symbols `exprs` read: what they mention and what the bodies they
+    /// call read as globals (see [`globals`](Self::globals)), the inputs a
+    /// program over them takes. [`free_symbols_in`](Self::free_symbols_in)
+    /// is what they mention only.
+    pub fn read_symbols_in(&self, exprs: &[ExprId]) -> std::collections::BTreeSet<SymbolId> {
+        self.cone_nodes(exprs, true)
+            .into_iter()
+            .filter_map(|e| match *self.node(e) {
+                Node::Symbol(s) => Some(s),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The set of free symbols reachable from `expr`.
     ///
     /// Memoised over shared subexpressions (a `visited` set): in a hash-consed
@@ -612,7 +699,9 @@ impl<K: Field> Graph<K> {
 
     /// Union of the free symbols across many expressions, sharing one `visited`
     /// set so a subexpression hash-consed into several of them is traversed once
-    /// (a single pass over the forest, not one per expression).
+    /// (a single pass over the forest, not one per expression). The symbols
+    /// they mention: a called body's globals are not (see
+    /// [`read_symbols_in`](Self::read_symbols_in)).
     pub fn free_symbols_in(&self, exprs: &[ExprId]) -> std::collections::BTreeSet<SymbolId> {
         self.cone_nodes(exprs, false)
             .into_iter()
