@@ -544,6 +544,7 @@ struct Emitted {
     bytes: Vec<u8>,
     calls: Vec<host::CallDesc>,
     kernels: Vec<host::KernelDesc>,
+    gathers: Vec<Box<[u32]>>,
 }
 
 // The mapping is immutable after `Mapping::new`, so calling the code from
@@ -797,6 +798,7 @@ impl NativeTape {
             offsets.push(bytes.len());
             bytes.extend_from_slice(&e.bytes);
             descs.push((e.calls, e.kernels));
+            tables.extend(e.gathers);
         }
         let code = Mapping::new(&bytes)?;
         let chunks = offsets
@@ -992,7 +994,14 @@ struct Emitter<'a, I: Isa> {
     /// first is emitted (their addresses go into the code).
     descs: Vec<host::CallDesc>,
     kernels: Vec<host::KernelDesc>,
+    /// The operand tables of the calls whose arguments the host gathers.
+    gathers: Vec<Box<[u32]>>,
 }
+
+/// Calls with this many arguments over all their instances and more have
+/// the host gather them from a table; narrower ones gather in the code,
+/// whose size would otherwise grow with every argument.
+const GATHER_TABLE: usize = 64;
 
 impl<'a, I: Isa> Emitter<'a, I> {
     fn new(layout: Layout, live: &'a Liveness, hot: &[*const ()]) -> Emitter<'a, I> {
@@ -1015,6 +1024,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
             pinned: vec![false; I::CACHE.len()],
             descs: Vec::new(),
             kernels: Vec::new(),
+            gathers: Vec::new(),
         }
     }
 
@@ -1234,6 +1244,19 @@ impl<'a, I: Isa> Emitter<'a, I> {
         base
     }
 
+    /// The slots among `slots` whose newest value is only in a register,
+    /// written back, so a host routine reading memory finds them.
+    fn publish(&mut self, slots: &[u32]) {
+        for s in slots {
+            if let Some(&i) = self.at.get(s) {
+                if self.dirty[i] {
+                    self.isa.store(I::CACHE[i], Base::Work, Self::slot_off(*s));
+                    self.dirty[i] = false;
+                }
+            }
+        }
+    }
+
     /// A dense operand's address: in place (inputs, a consecutive run of
     /// work slots), or gathered into the gather area from `*at`, so the
     /// area holds exactly the slots a kernel gathers
@@ -1439,7 +1462,15 @@ impl<'a, I: Isa> Emitter<'a, I> {
             ROp::Call(ref c) => {
                 // A call of a stage gathers apart from the others of it; the
                 // stage's last one hands them all to `h_stage`.
-                let at = self.gather_at(&c.args, c.gather_at);
+                let (at, table) = if c.args.len() < GATHER_TABLE {
+                    (self.gather_at(&c.args, c.gather_at), 0)
+                } else {
+                    self.publish(&c.args);
+                    let t: Box<[u32]> = c.args.clone().into_boxed_slice();
+                    let p = t.as_ptr() as u64;
+                    self.gathers.push(t);
+                    ((self.layout.gather + c.gather_at) * 8, p)
+                };
                 let d = self.descs.len();
                 assert!(
                     d < self.descs.capacity(),
@@ -1459,6 +1490,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
                     scratch: self.layout.scratch as u64 * 8,
                     scratch_len: self.layout.scratch_len as u64,
                     ops: c.ops,
+                    table,
                 };
                 // The table was sized up front: pushing never moves it, so
                 // the address baked into the code stays valid.
@@ -1470,6 +1502,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
                             Arg::I(IArg::Bundles),
                             Arg::I(IArg::Imm(ptr)),
                             Arg::I(IArg::WorkAddr(0)),
+                            Arg::I(IArg::InputAddr(0)),
                         ];
                         self.call(host::h_call as *const (), &args);
                         self.invalidate(c.dst, c.n_groups * c.n_out);
@@ -1483,6 +1516,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
                             Arg::I(IArg::Imm(ptr)),
                             Arg::I(IArg::Imm(n as u64)),
                             Arg::I(IArg::WorkAddr(0)),
+                            Arg::I(IArg::InputAddr(0)),
                         ];
                         self.call(host::h_stage as *const (), &args);
                         let written: Vec<(u32, u32)> = self.descs[first..]
@@ -1721,10 +1755,12 @@ fn emit_chunk<A: Isa>(ops: &[ROp], start: usize, layout: Layout, live: &Liveness
     e.flush();
     e.isa.epilogue();
     let (calls, kernels) = (std::mem::take(&mut e.descs), std::mem::take(&mut e.kernels));
+    let gathers = std::mem::take(&mut e.gathers);
     Emitted {
         bytes: e.isa.finish(),
         calls,
         kernels,
+        gathers,
     }
 }
 
