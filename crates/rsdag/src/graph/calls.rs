@@ -1007,7 +1007,7 @@ fn union_into(acc: &mut Vec<u32>, part: &[u32], scratch: &mut Vec<u32>) {
 /// Functions of up to this many 64-bit words of parameters take bit sets in
 /// the support pass; wider ones sorted lists, a node's set being a few of
 /// their parameters.
-const BITSET_MAX_WORDS: usize = 16;
+const BITSET_MAX_WORDS: usize = 64;
 
 /// Per function and set of moving parameters, which of its outputs depend
 /// on them (see [`Graph::depends_on`]).

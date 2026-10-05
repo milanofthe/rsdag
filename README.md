@@ -25,7 +25,8 @@ NOTICE); for a commercial license contact info@milanrother.com.
 ## Crates
 
 - `rsdag`: `Graph<K: Field>` (exact rationals or `f64`), functions with
-  calls and roles, `Scope`, `Module` (serialization), `differentiate`,
+  calls and roles, composition (`Graph::import`, `Tape::compose`),
+  `Scope`, `Module` (serialization), `differentiate`,
   `gradient` (reverse mode), `sparse_jacobian`, `hessian`, `substitute`,
   `Tape` (interpreter over any `Scalar`, choice specialization, instance
   batching, `Gemv`, `Gemm` and dense `Solve` kernels, prolog/main split),
@@ -38,7 +39,7 @@ NOTICE); for a commercial license contact info@milanrother.com.
   (`Program::eval_many_into` serially, on either backend). `rsdag_jit::compiler()` is
   the native `Compiler` for `Adaptive`.
 - `rsdag-py`: Python package `rsdag` (`trace`, `jit`, `jacobian`, `grad`,
-  `where`, `matmul`, `solve`), built with maturin.
+  `where`, `matmul`, `solve`; traced programs compose), built with maturin.
 
 Dependencies of the core: `rustc-hash`, `libm`. `Graph` is `Graph<F64>`.
 Features:
@@ -152,6 +153,31 @@ Three instances of a `diode(a, b, is, n)` body in a ring, `is` and `n`
 with the `Param` role: the prolog runs the body's parameter part for all
 three instances, the main phase one batched call.
 
+## Composition
+
+Programs built apart compose. A function of one graph comes into another
+with `Graph::import`, the functions it calls along (a structurally equal
+function already there is reused), and calls into it build the
+composition. A hierarchy (blocks of blocks, subcircuits of devices) stays
+functions for the symbolic work: a derivative through a call follows only
+what the called output reads (`Graph::output_support`), and specialization
+makes one copy per pattern of constant arguments. The program over it
+compiles with `Tape::compose`: functions whose bodies call others are
+inlined, the leaves stay calls, so the calls of one leaf from every
+instance anywhere in the hierarchy batch together. The calls of one
+instance share one argument list, and every stage works on it once per
+instance, so a body of n nodes called once costs O(n), whatever its number
+of outputs (see Benchmarks).
+
+In Python, a traced program called with tracers inside another trace is
+one instance of it there, not unrolled:
+
+```python
+cell = jit(lambda a, b: [a * b, np.sin(a)])
+chain = jit(lambda x: [cell(x[k], x[k + 1])[0] for k in range(len(x) - 1)])
+J = jacobian(chain)(np.linspace(0.0, 1.0, 100))   # cell's calls: one batched kernel
+```
+
 ## Choice specialization
 
 ![Choice specialization](docs/diagrams/specialize.svg)
@@ -216,19 +242,31 @@ each bit-identical to its own solve.
 
 ![Small matrices](docs/bench/matrices.svg)
 
+A hierarchy's symbolic work over the size of one body: a body of n circuit
+nodes (a ring of n devices, a capacitor per node, every node's current an
+output) called once, its calls (`calls`), the
+Jacobian through it, the residual specialized to `x' = 0` and the program
+compiled from it (`Tape::compose`). Each grows linearly with the body, not
+with the body times its outputs (`rsdag/examples/hierarchy.rs`).
+
+![A wide body, called once](docs/bench/hierarchy.svg)
+
 Against CasADi and JAX on circuits: the twelve AnalogGym amplifiers
 (BSIM4), a nine-stage PSP103 ring oscillator and the uA741, as SANE exports
 them (rsdag modules; `rsdag-jit/examples/modules.rs`,
-`docs/bench/modules.py`). The residual and its Jacobian per call on one
-core: the DC residual (the derivatives and time the constant zero, rsdag's
-calls specialized to them), with the parameters as inputs (rsdag keeps them
-in the prolog) and as constants (every instance's parameter branches decided
-at build time). Hatched: rsdag's interpreter on the same tape as its native
-code.
-CasADi builds SX functions and runs through its buffer interface, JAX maps
-each device body over its instances with `vmap` and builds the Jacobian
-dense; it does not compile the Jacobian of the PSP103 and BSIM4 circuits
-within a minute.
+`docs/bench/modules.py`). The residual and its Jacobian on one core, per
+call and the setup before the first call (building and compiling the
+function): the DC residual (the derivatives and time the constant zero,
+rsdag's calls specialized to them), with the parameters as inputs (rsdag
+keeps them in the prolog) and as constants (every instance's parameter
+branches decided at build time). Hatched: rsdag's interpreter on the same
+tape as its native code. The circuits are hierarchical (subcircuits of
+devices); CasADi and JAX get them composed into one function by rsdag
+first, so all three start from the same expressions. CasADi builds SX
+functions and runs through its buffer interface, JAX maps each device body
+over its instances with `vmap` and builds the Jacobian dense; it compiles
+neither the PSP103 residual nor the PSP103 and BSIM4 Jacobians within a
+minute.
 
 ![Against CasADi and JAX](docs/bench/modules.svg)
 

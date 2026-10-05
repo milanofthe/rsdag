@@ -3,8 +3,9 @@
 //! current into each node an output) called once, every output its own call
 //! over the one argument list. The cost of each stage a solver runs over it,
 //! by n: building the calls, the Jacobian, the derivatives set to zero, the
-//! calls specialized to that, and the tape. Each should grow with the body,
-//! not with its outputs times its width.
+//! calls specialized to that, and the program (`Tape::compose`: the body
+//! inlined, its device calls batched). Each grows with the body, not with
+//! its outputs times its width.
 //!
 //!     cargo run --release -p rsdag --example hierarchy
 
@@ -21,8 +22,8 @@ fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
 }
 
 fn main() {
-    println!("n,build_ms,jacobian_ms,substitute_ms,specialize_ms,tape_ms,nodes");
-    for n in [500usize, 1000, 2000, 4000, 8000] {
+    println!("n,build_ms,jacobian_ms,substitute_ms,specialize_ms,program_ms,nodes");
+    for n in [1000usize, 2000, 4000, 8000, 16000, 32000] {
         let mut g: Graph<F64> = Graph::new();
         // d(va, vb, p) = p tanh(va - vb): the current from a to b
         let mut s = Scope::new(&mut g, "d");
@@ -95,7 +96,7 @@ fn main() {
 
         let t = Instant::now();
         let inputs: Vec<SymbolId> = syms.iter().flatten().copied().collect();
-        let tape = Tape::compile(&g, &spec, &inputs);
+        let tape = Tape::compose(&mut g, &spec, &inputs);
         let tape_t = t.elapsed();
         std::hint::black_box(&tape);
 

@@ -3,17 +3,22 @@
 //! values by name and a point `x0`). The residual is the DC one, as the
 //! other tools get it: the derivatives and time bound to the constant zero
 //! and every call specialized to that (`Graph::specialize_calls`). The
-//! states are the inputs; the parameters are bound once, so their work runs
-//! in the prolog. Per module: the setup and the time per call of the
+//! residual and its Jacobian are derived on the module's functions and
+//! compiled as programs over them (`Graph::inline_composite`, the setup
+//! includes it): a subcircuit's function inlined, the device bodies called.
+//! The states are the inputs; the parameters are bound once, so their work
+//! runs in the prolog. Per module: the setup and the time per call of the
 //! residual and of its sparse Jacobian in the states, interpreted and
 //! native; then natively with the parameters folded (the calls inlined and
 //! every parameter a constant, each instance's parameter branches decided
 //! at build time, as a tool that folds constants does). One CSV row each.
 //! `--values <dir>` also writes the residual and the Jacobian at
 //! `x0 + 0.01` there (off the solution, where the residual is not zero),
-//! for comparing other tools against.
+//! for comparing other tools against. `--composed <dir>` writes each module
+//! as rsdag compiles it, the subcircuit functions inlined and the device
+//! bodies functions, the form the other tools are given.
 //!
-//!     cargo run --release -p rsdag-jit --example modules -- [--values <dir>] <module.json>...
+//!     cargo run --release -p rsdag-jit --example modules -- [--values <dir>] [--composed <dir>] <module.json>...
 
 use std::time::Instant;
 
@@ -94,11 +99,15 @@ fn measure(
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let values_dir = args.iter().position(|a| a == "--values").map(|i| {
-        let d = args.remove(i + 1);
-        args.remove(i);
-        d
-    });
+    let mut option = |flag: &str| {
+        args.iter().position(|a| a == flag).map(|i| {
+            let d = args.remove(i + 1);
+            args.remove(i);
+            d
+        })
+    };
+    let values_dir = option("--values");
+    let composed_dir = option("--composed");
     println!(
         "{}",
         [
@@ -129,6 +138,9 @@ fn main() {
         let (mut g, map) = Graph::from_module(&module).expect("a valid module");
         let f = map.funcs[v["circuit"].as_u64().expect("circuit") as usize];
         let x0: Vec<f64> = serde_json::from_value(v["x0"].clone()).expect("x0");
+        if let Some(dir) = &composed_dir {
+            write_composed(&mut g, f, &v, dir, path);
+        }
         let zero = g.zero();
         let func = g.func(f);
         // Inputs: the function's parameters; the states vary, the rest is bound.
@@ -175,7 +187,8 @@ fn main() {
             .zip(&pure)
             .map(|(&v, &p)| if p { v } else { v + 0.01 })
             .collect();
-        let (fm, fvals) = measure(&g, &residuals, &syms, &pure, &vals, &check);
+        let (program, s_inline) = timed(|| g.inline_composite(&residuals));
+        let (fm, fvals) = measure(&g, &program, &syms, &pure, &vals, &check);
         let (rows, s_diff) = timed(|| sparse_jacobian(&mut g, &residuals, &states));
         let (mut ri, mut ci, mut entries) = (Vec::new(), Vec::new(), Vec::new());
         for (i, row) in rows.iter().enumerate() {
@@ -185,7 +198,8 @@ fn main() {
                 entries.push(e);
             }
         }
-        let (jm, jvals) = measure(&g, &entries, &syms, &pure, &vals, &check);
+        let (entries_program, s_jinline) = timed(|| g.inline_composite(&entries));
+        let (jm, jvals) = measure(&g, &entries_program, &syms, &pure, &vals, &check);
         let (folded, s_fold) = timed(|| {
             let inlined = g.inline_all(&residuals);
             let map = syms
@@ -238,12 +252,12 @@ fn main() {
         println!(
             "{name},{},{:.6},{:.6},{:.4},{:.4},{:.6},{:.6},{:.4},{:.4},{},{:.6},{:.4},{:.6},{:.4}",
             states.len(),
-            fm[0],
-            fm[1],
+            s_inline + fm[0],
+            s_inline + fm[1],
             fm[2] * 1e6,
             fm[3] * 1e6,
-            s_diff + jm[0],
-            s_diff + jm[1],
+            s_diff + s_jinline + jm[0],
+            s_diff + s_jinline + jm[1],
             jm[2] * 1e6,
             jm[3] * 1e6,
             entries.len(),
@@ -258,4 +272,43 @@ fn main() {
                 .expect("write values");
         }
     }
+}
+
+/// The module at `path` (its graph `g`, its system `f`, its JSON `v`) as
+/// rsdag compiles it: the system's outputs with the composite functions
+/// inlined, a new system function over them with the same roles, written
+/// to `dir` under the module's file name.
+fn write_composed(
+    g: &mut Graph<F64>,
+    f: rsdag::FuncId,
+    v: &serde_json::Value,
+    dir: &str,
+    path: &str,
+) {
+    let zero = g.zero();
+    let func = g.func(f);
+    let params = func.params().to_vec();
+    let roles = func.param_roles().to_vec();
+    let out_roles = func.output_roles().to_vec();
+    let outs: Vec<ExprId> = func
+        .outputs()
+        .iter()
+        .map(|o| match *o {
+            Output::Expr(e) => e,
+            _ => zero,
+        })
+        .collect();
+    let program = g.inline_composite(&outs);
+    let c = g.define_func("circuit", params, program);
+    for (k, &r) in roles.iter().enumerate() {
+        g.set_param_role(c, k as u32, r);
+    }
+    for (k, &r) in out_roles.iter().enumerate() {
+        g.set_output_role(c, k as u32, r);
+    }
+    let mut out = v.clone();
+    out["module"] = serde_json::to_value(g.to_module()).expect("a module as JSON");
+    out["circuit"] = serde_json::json!(c.0);
+    let name = std::path::Path::new(path).file_name().unwrap();
+    std::fs::write(std::path::Path::new(dir).join(name), out.to_string()).expect("write");
 }
