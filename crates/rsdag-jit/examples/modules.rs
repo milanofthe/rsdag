@@ -129,7 +129,6 @@ fn main() {
     let values_dir = option("--values");
     let composed_dir = option("--composed");
     let threads: usize = option("--threads").map_or(1, |t| t.parse().expect("--threads <n>"));
-    drop(option);
     let rayon_pool = args
         .iter()
         .position(|a| a == "--rayon")
