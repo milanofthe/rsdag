@@ -23,7 +23,7 @@ fn fold_in<K: Field, T: Clone>(
     free: impl Fn(&mut Graph<K>, ExprId) -> T,
     mut node: impl FnMut(&mut Graph<K>, Node, &[T]) -> Option<T>,
 ) -> Option<T> {
-    let cone = g.cone_sorted(&[e]);
+    let cone = g.cone_sorted(&[e], false);
     // The values of the nodes that depend on `s`; `None` marks one outside
     // the algebra, which every node above it inherits.
     let mut vals: FxHashMap<ExprId, Option<T>> = FxHashMap::default();

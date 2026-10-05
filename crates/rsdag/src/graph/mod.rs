@@ -57,6 +57,9 @@ pub struct Graph<K: Field = F64> {
     /// substitution), a stack so a traversal nested in another reuses one
     /// too; see [`Memo`].
     memos: Vec<Memo>,
+    /// The copies of functions with globals bound (see
+    /// [`rebound`](Self::rebound)), by function and binding.
+    rebound: HashMap<(FuncId, Vec<(SymbolId, ExprId)>), FuncId>,
 }
 
 /// A per-node memo table over the arena, cleared in O(1) by bumping an epoch:
@@ -140,6 +143,7 @@ impl<K: Field> Graph<K> {
             outputs: Vec::new(),
             output_dedup: HashMap::default(),
             memos: Vec::new(),
+            rebound: HashMap::default(),
         };
         ctx.zero = ctx.konst(K::zero());
         ctx.one = ctx.konst(K::one());

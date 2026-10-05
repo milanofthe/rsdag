@@ -95,6 +95,9 @@ pub struct Function {
     /// What each output reads, per way through and set of moving
     /// parameters (see `Graph::reads`).
     reads: std::sync::Mutex<HashMap<ReadsKey, Arc<[Arc<[u32]>]>>>,
+    /// The symbols the body reads that are not its parameters, its calls'
+    /// included, once asked for (see `Graph::globals`).
+    pub(crate) globals: std::sync::OnceLock<Arc<[ExprId]>>,
 }
 
 /// A way through calls and a set of moving parameters (see `Graph::reads`).
@@ -193,11 +196,17 @@ impl Function {
             deriv_index: HashMap::default(),
             support: Default::default(),
             reads: Default::default(),
+            globals: Default::default(),
         }
     }
 
     /// Append an output with its role; returns its index.
     pub(crate) fn push_output(&mut self, output: Output, role: OutputRole) -> u32 {
+        // a derivative reads no symbol its output does not; anything else
+        // may read globals not known yet
+        if !matches!(role, OutputRole::Derivative { .. }) {
+            self.globals = Default::default();
+        }
         let k = self.outputs.len() as u32;
         self.outputs.push(output);
         self.output_roles.push(OutputRole::Plain);
@@ -232,6 +241,35 @@ impl Function {
             .get(out as usize)
             .cloned()
             .flatten()
+    }
+
+    /// The symbol nodes the body reads that are not its parameters, its
+    /// calls' included, ascending (see `Graph::globals`).
+    pub(crate) fn globals_in<K: crate::field::Field>(
+        &self,
+        ctx: &crate::graph::Graph<K>,
+    ) -> Arc<[ExprId]> {
+        if let Some(g) = self.globals.get() {
+            return g.clone();
+        }
+        let exprs: Vec<ExprId> = self
+            .outputs
+            .iter()
+            .filter_map(|o| match *o {
+                Output::Expr(e) => Some(e),
+                _ => None,
+            })
+            .collect();
+        let params: rustc_hash::FxHashSet<SymbolId> = self.params.iter().copied().collect();
+        let mut globals: Vec<ExprId> = ctx
+            .cone_nodes(&exprs, true)
+            .into_iter()
+            .filter(
+                |&e| matches!(*ctx.node(e), crate::node::Node::Symbol(s) if !params.contains(&s)),
+            )
+            .collect();
+        globals.sort_unstable();
+        self.globals.get_or_init(|| globals.into()).clone()
     }
 
     pub(crate) fn cached_reads(&self, key: &ReadsKey) -> Option<Arc<[Arc<[u32]>]>> {
@@ -340,22 +378,37 @@ impl Function {
                 roots.push(e);
             }
         }
-        // Split over the parameters the roles call pure, when there are any.
+        // The inputs: the parameters, then the globals a call passes after
+        // its arguments. Split over the parameters the roles call pure and
+        // the globals (pure where the caller has them pure, see the tape's
+        // `stateful`), when there are any.
+        let globals: Vec<crate::node::SymbolId> = self
+            .globals_in(ctx)
+            .iter()
+            .map(|&g| match *ctx.node(g) {
+                crate::node::Node::Symbol(s) => s,
+                _ => unreachable!("a global is a symbol"),
+            })
+            .collect();
+        let inputs: Vec<crate::node::SymbolId> = self
+            .params
+            .iter()
+            .copied()
+            .chain(globals.iter().copied())
+            .collect();
         let pure: Vec<bool> = self
             .param_roles
             .iter()
             .map(|r| matches!(r, ParamRole::Param))
+            .chain(globals.iter().map(|_| true))
             .collect();
         let (tape, pure) = if pure.iter().any(|&p| p) {
             (
-                crate::tape::Tape::compile_split(ctx, &roots, &self.params, &pure),
+                crate::tape::Tape::compile_split(ctx, &roots, &inputs, &pure),
                 pure,
             )
         } else {
-            (
-                crate::tape::Tape::compile(ctx, &roots, &self.params),
-                Vec::new(),
-            )
+            (crate::tape::Tape::compile(ctx, &roots, &inputs), Vec::new())
         };
         let body = Body {
             bundle: Arc::new(InterpretedBody {

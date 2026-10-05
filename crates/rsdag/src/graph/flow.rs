@@ -190,7 +190,7 @@ impl<K: Field> Graph<K> {
     /// in ascending id order (a topological one: a hash-consed node is
     /// newer than its operands), with each node's position in `at`.
     pub(crate) fn cone(&self, roots: &[ExprId], at: &mut Memo) -> Vec<ExprId> {
-        let mut out = self.reach(roots, at);
+        let mut out = self.reach(roots, at, true);
         out.sort_unstable();
         for (k, &e) in out.iter().enumerate() {
             at.set(e, ExprId(k as u32));
@@ -199,10 +199,13 @@ impl<K: Field> Graph<K> {
     }
 
     /// The nodes under `roots`, every operand and every argument list once,
-    /// in the order the walk meets them, marked in `at`.
-    fn reach(&self, roots: &[ExprId], at: &mut Memo) -> Vec<ExprId> {
+    /// in the order the walk meets them, marked in `at`; with `globals`, a
+    /// call's globals as its operands too (what it reads, not only what it
+    /// mentions).
+    fn reach(&self, roots: &[ExprId], at: &mut Memo, globals: bool) -> Vec<ExprId> {
         at.begin(self.len());
         let mut lists: FxHashSet<ArgList> = FxHashSet::default();
+        let mut funcs: FxHashSet<FuncId> = FxHashSet::default();
         let mut stack: Vec<ExprId> = roots.to_vec();
         let mut out = Vec::new();
         while let Some(e) = stack.pop() {
@@ -212,9 +215,13 @@ impl<K: Field> Graph<K> {
             at.set(e, e);
             out.push(e);
             match *self.node(e) {
-                Node::Call(_, l) => {
+                Node::Call(o, l) => {
                     if lists.insert(l) {
                         stack.extend_from_slice(self.args(l));
+                    }
+                    let f = self.output(o).0;
+                    if globals && funcs.insert(f) {
+                        stack.extend_from_slice(&self.globals(f));
                     }
                 }
                 _ => stack.extend_from_slice(&self.operands(e)),
@@ -223,17 +230,51 @@ impl<K: Field> Graph<K> {
         out
     }
 
-    /// The nodes under `roots`, ascending (see [`cone`](Self::cone)).
-    pub(crate) fn cone_sorted(&self, roots: &[ExprId]) -> Vec<ExprId> {
-        let mut cone = self.cone_nodes(roots);
+    /// The symbol nodes `f`'s body reads that are not its parameters, its
+    /// calls' included, ascending: the globals every call of `f` reads
+    /// besides its arguments. A call's operand `p` is its argument `p`, and
+    /// past the arguments global `p - arity` (see
+    /// [`operand_symbol`](Self::operand_symbol)).
+    pub fn globals(&self, f: FuncId) -> Arc<[ExprId]> {
+        self.funcs[f.0 as usize].globals_in(self)
+    }
+
+    /// The symbol a call of `f` binds by its operand `p`: parameter `p`, or
+    /// past the parameters a global (see [`globals`](Self::globals)).
+    pub fn operand_symbol(&self, f: FuncId, p: u32) -> SymbolId {
+        let params = self.funcs[f.0 as usize].params();
+        match params.get(p as usize) {
+            Some(&s) => s,
+            None => match *self.node(self.globals(f)[p as usize - params.len()]) {
+                Node::Symbol(s) => s,
+                _ => unreachable!("a global is a symbol"),
+            },
+        }
+    }
+
+    /// Operand `p` of a call of `f` over the list `l`: its argument, or
+    /// past them a global.
+    pub fn call_operand(&self, f: FuncId, l: ArgList, p: u32) -> ExprId {
+        let args = self.args(l);
+        match args.get(p as usize) {
+            Some(&a) => a,
+            None => self.globals(f)[p as usize - args.len()],
+        }
+    }
+
+    /// The nodes under `roots`, ascending; with `globals` the globals the
+    /// calls read (see [`cone`](Self::cone)).
+    pub(crate) fn cone_sorted(&self, roots: &[ExprId], globals: bool) -> Vec<ExprId> {
+        let mut cone = self.cone_nodes(roots, globals);
         cone.sort_unstable();
         cone
     }
 
-    /// The nodes under `roots`, unordered (see [`cone`](Self::cone)).
-    pub(crate) fn cone_nodes(&self, roots: &[ExprId]) -> Vec<ExprId> {
+    /// The nodes under `roots`, unordered; with `globals` the globals the
+    /// calls read (see [`cone`](Self::cone)).
+    pub(crate) fn cone_nodes(&self, roots: &[ExprId], globals: bool) -> Vec<ExprId> {
         let mut at = MEMOS.with(|m| m.borrow_mut().pop()).unwrap_or_default();
-        let cone = self.reach(roots, &mut at);
+        let cone = self.reach(roots, &mut at, globals);
         MEMOS.with(|m| m.borrow_mut().push(at));
         cone
     }
@@ -260,12 +301,16 @@ impl<K: Field> Graph<K> {
                 Node::Const(_) | Node::Symbol(_) => leaf(&node),
                 Node::Call(o, l) if through != Through::Syntax => {
                     let (f, k) = self.output(o);
-                    let args = self.args(l);
+                    let (args, globals) = (self.args(l), self.globals(f));
+                    let operand = |p: u32| match args.get(p as usize) {
+                        Some(a) => a,
+                        None => &globals[p as usize - args.len()],
+                    };
                     let reads = match sites.get(&(f, l)) {
                         Some(r) => r.clone(),
                         None => {
-                            let moving: Vec<u32> = (0..args.len() as u32)
-                                .filter(|&p| !val(&args[p as usize]).is_bottom())
+                            let moving: Vec<u32> = (0..(args.len() + globals.len()) as u32)
+                                .filter(|&p| !val(operand(p)).is_bottom())
                                 .collect();
                             let r = self.reads(f, through, &moving);
                             sites.insert((f, l), r.clone());
@@ -273,7 +318,7 @@ impl<K: Field> Graph<K> {
                         }
                     };
                     let read = reads.get(k as usize).map_or(&[][..], |r| &r[..]);
-                    V::join_all(read.iter().map(|&p| val(&args[p as usize])))
+                    V::join_all(read.iter().map(|&p| val(operand(p))))
                 }
                 _ => {
                     let ops = self.operands(e);
@@ -307,7 +352,7 @@ impl<K: Field> Graph<K> {
         }
         let index: HashMap<SymbolId, u32> = moving
             .iter()
-            .map(|&p| (func.params()[p as usize], p))
+            .map(|&p| (self.operand_symbol(f, p), p))
             .collect();
         let exprs: Vec<ExprId> = outputs[done..]
             .iter()

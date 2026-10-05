@@ -194,7 +194,7 @@ fn classify_cone<K: Field>(
 ) -> Vec<Nonlinearity> {
     // One sweep over the nodes the expressions reach, ascending (a node
     // after its operands), each classified from its operands'.
-    let cone = g.cone_sorted(exprs);
+    let cone = g.cone_sorted(exprs, false);
     let mut memo: HashMap<ExprId, Nonlinearity> = HashMap::default();
     for &e in &cone {
         let c = match *g.node(e) {

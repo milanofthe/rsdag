@@ -129,8 +129,16 @@ pub fn substitute<K: Field>(
     roots: &[ExprId],
     map: &HashMap<SymbolId, ExprId>,
 ) -> Vec<ExprId> {
-    rewrite(ctx, roots, |g, e, node, ops| match node {
-        Node::Symbol(s) => map.get(&s).copied().unwrap_or(e),
+    rewrite(ctx, roots, |g, e, node, ops| match (node, ops.list) {
+        (Node::Symbol(s), _) => map.get(&s).copied().unwrap_or(e),
+        // a call whose body reads a symbol `map` binds runs a copy bound so
+        (Node::Call(o, _), Some(l)) => {
+            let (f, k) = g.output(o);
+            match g.rebound(f, map) {
+                Some(copy) => g.call_list(copy, k, l),
+                None => g.rebuild(node, ops),
+            }
+        }
         _ => g.rebuild(node, ops),
     })
 }
