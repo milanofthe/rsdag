@@ -215,7 +215,7 @@ fn lane_costs(lt: &NativeTape, n_state: usize, n_out: usize) -> ([usize; 3], [us
 
 impl NativeBody {
     /// The instances of a batch of `n` that lane code takes, handed to
-    /// `run` as ranges of at most a block: the widest lane code that pays
+    /// `run` as ranges of blocks: the widest lane code that pays
     /// for `phase` (the cheapest per instance) fills its blocks, and the
     /// rest goes the cheapest way by [`lane_costs`], in blocks of any width
     /// (a short one runs with lanes empty) or scalar. Returns the first
@@ -232,8 +232,8 @@ impl NativeBody {
             return 0;
         };
         let full = n / widest.tape.lanes * widest.tape.lanes;
-        for c in (0..full).step_by(widest.tape.lanes) {
-            run(&widest.tape, c..c + widest.tape.lanes);
+        if full > 0 {
+            run(&widest.tape, 0..full);
         }
         // The rest, fewer than a block: `best[m]` the cheapest way to take
         // `m` of it, and the lane code it starts with (`None`: scalar).
