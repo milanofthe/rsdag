@@ -109,6 +109,15 @@ pub(crate) enum StageRole {
     Last(u32),
 }
 
+/// Integer powers up to this exponent are emitted as their products.
+pub(crate) const POWI_INLINE: u32 = 64;
+
+/// Whether `x^n` is emitted inline (as `semantics::powi_t` multiplies,
+/// product for product) rather than through the host.
+pub(crate) fn powi_inline(n: i32) -> bool {
+    n != 0 && n.unsigned_abs() <= POWI_INLINE
+}
+
 /// A dense operand: a run of inputs or of work slots read in place, or
 /// slots gathered.
 pub(crate) enum Dense {
@@ -211,7 +220,7 @@ impl ROp {
                 _ => crate::host::unary_addr(*op).0,
             },
             ROp::Binary(..) => crate::host::h_binary as *const (),
-            ROp::Powi(_, _, n) if *n != -1 && *n != 2 => crate::host::h_powi as *const (),
+            ROp::Powi(_, _, n) if !powi_inline(*n) => crate::host::h_powi as *const (),
             ROp::Reduce(_, ReduceOp::Min | ReduceOp::Max, _) => crate::host::h_reduce as *const (),
             ROp::Call(..) => crate::host::h_call as *const (),
             ROp::Kernel(..) => crate::host::h_kernel as *const (),

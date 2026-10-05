@@ -1,7 +1,9 @@
 //! Integer powers take rsdag's reference (`semantics::powi_f64`) in the
 //! interpreter and in native code, bit for bit: `x^-1` is `1 / x` and `x^2`
 //! is `x * x` exactly, on every target (a platform `powi` with a runtime
-//! exponent is not; the value below is one it rounds differently).
+//! exponent is not; the value below is one it rounds differently). Native
+//! code multiplies the powers out inline up to a bound and calls the host
+//! beyond it; both agree with the reference.
 
 use rsdag::{Graph, Node, Tape, F64};
 use rsdag_jit::NativeTape;
@@ -16,6 +18,11 @@ fn integer_powers_agree_with_the_reference_natively() {
         7.25e-200,
         0.0,
         -0.0,
+        1.0 - f64::EPSILON,
+        -0.999,
+        1.7e10,
+        f64::INFINITY,
+        f64::NAN,
     ];
     let mut g: Graph<F64> = Graph::new();
     let x = g.sym("x");
@@ -23,7 +30,8 @@ fn integer_powers_agree_with_the_reference_natively() {
         Node::Symbol(s) => s,
         _ => unreachable!(),
     };
-    let ns: Vec<i64> = (-4..=5).collect();
+    // inline up to |n| = 64, the host beyond
+    let ns: Vec<i64> = (-70..=70).filter(|&n| n != 0).collect();
     let roots: Vec<_> = ns.iter().map(|&n| g.pow_i(x, n)).collect();
     let tape = Tape::compile(&g, &roots, &[s]);
     let native = NativeTape::compile(&tape).expect("native code");
@@ -34,8 +42,9 @@ fn integer_powers_agree_with_the_reference_natively() {
         native.eval(&[v], &mut wn, &mut on);
         for (k, &n) in ns.iter().enumerate() {
             let r = rsdag::semantics::powi_f64(v, n as i32);
-            assert_eq!(o[k].to_bits(), r.to_bits(), "interpreter {v:e}^{n}");
-            assert_eq!(on[k].to_bits(), r.to_bits(), "native {v:e}^{n}");
+            let same = |a: f64| a.to_bits() == r.to_bits() || (a.is_nan() && r.is_nan());
+            assert!(same(o[k]), "interpreter {v:e}^{n}");
+            assert!(same(on[k]), "native {v:e}^{n}: {:e} vs {r:e}", on[k]);
         }
         assert_eq!(
             rsdag::semantics::powi_f64(v, -1).to_bits(),
