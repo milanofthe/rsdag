@@ -79,28 +79,21 @@ pub fn eval<T: Scalar, K: Field>(
     roots: &[ExprId],
     env: &HashMap<SymbolId, T>,
 ) -> Vec<T> {
-    let n = ctx.len();
-    let mut reach = vec![false; n];
-    let mut stack: Vec<ExprId> = roots.to_vec();
+    // the nodes the roots reach, ascending: a node after its operands
+    let cone = ctx.cone_sorted(roots);
+    let at = |e: ExprId| cone.binary_search(&e).expect("in the cone");
     let mut fe = FuncEval::new();
-    while let Some(e) = stack.pop() {
-        if std::mem::replace(&mut reach[e.0 as usize], true) {
-            continue;
-        }
+    for &e in &cone {
         if let Node::Call(o, _) = *ctx.node(e) {
             let (f, out) = ctx.output(o);
             fe.need(f, out);
         }
-        stack.extend(ctx.operands(e).iter().copied());
     }
-    let mut w = vec![T::nan(); n];
+    let mut w: Vec<T> = Vec::with_capacity(cone.len());
     // A dense system is solved once for all its components.
     let mut solved: HashMap<ArgList, Vec<T>> = HashMap::new();
-    for i in 0..n {
-        if !reach[i] {
-            continue;
-        }
-        let node = *ctx.node(ExprId(i as u32));
+    for &e in &cone {
+        let node = *ctx.node(e);
         let mut sym = |s: SymbolId| env.get(&s).copied().unwrap_or(T::nan());
         let mut call =
             |f: FuncId, out: u32, l: ArgList, args: &[T]| fe.output(ctx, f, out, l, args);
@@ -112,16 +105,10 @@ pub fn eval<T: Scalar, K: Field>(
                 out
             })[i as usize]
         };
-        w[i] = node_value(
-            ctx,
-            &node,
-            |e| w[e.0 as usize],
-            &mut sym,
-            &mut call,
-            &mut solve,
-        );
+        let v = node_value(ctx, &node, |e| w[at(e)], &mut sym, &mut call, &mut solve);
+        w.push(v);
     }
-    roots.iter().map(|&r| w[r.0 as usize]).collect()
+    roots.iter().map(|&r| w[at(r)]).collect()
 }
 
 /// [`eval`] with symbols bound by name.
