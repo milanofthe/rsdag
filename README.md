@@ -36,7 +36,7 @@ NOTICE); for a commercial license contact info@milanrother.com.
   tapes).
 - `rsdag-jit`: `NativeTape`, machine code for AArch64 and x86-64 on Linux,
   macOS and Windows; function bodies compiled once and batched over
-  instances; `eval_many` over many input sets in parallel
+  instances, on x86-64 in vector lanes; `eval_many` over many input sets in parallel
   (`Program::eval_many_into` serially, on either backend). `rsdag_jit::compiler()` is
   the native `Compiler` for `Adaptive`.
 - `rsdag-py`: Python package `rsdag` (`trace`, `jit`, `jacobian`, `grad`,
@@ -142,6 +142,13 @@ The body is compiled once; calls with the same shape lower to one kernel op
 that runs the body over all instances, serially or on the current rayon
 pool as `rsdag_jit::Options::batch` says. `Graph::set_func_body` registers
 a body compiled by the caller; programs whose calls it covers use it.
+
+On x86-64 a batch also runs in lanes: the body compiled once more per
+width over several instances at once, one in each lane of every vector
+register (four with AVX, two with SSE2), bit for bit the scalar code. Per
+phase, a cost estimate decides whether lanes pay and how a batch splits
+into blocks of each width and single instances; `rsdag_jit::Options::lanes`
+forces or disables them.
 
 Parameters with the `Param` role are a body's pure arguments; its tape is
 split over them. A caller compiled with `compile_split` whose prolog has
