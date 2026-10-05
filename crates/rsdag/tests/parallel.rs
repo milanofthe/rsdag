@@ -68,6 +68,13 @@ fn ring() -> (Graph<F64>, Vec<ExprId>, Vec<SymbolId>, Vec<bool>) {
 }
 
 fn pool(threads: usize) -> Parallel {
+    // `100 + n`: rsdag's own pool of n threads, else a rayon pool of n
+    if threads > 100 {
+        return Parallel {
+            pool: Arc::new(parallel::Workers::new(threads - 100)),
+            min_ops: 0,
+        };
+    }
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .build()
@@ -113,7 +120,7 @@ fn a_split_program_on_a_pool_is_the_serial_one() {
     let (mut w, mut out) = (Vec::new(), Vec::new());
     tape.eval_prolog(&x, &mut w);
     tape.eval_main(&x, &mut w, &mut out);
-    for threads in [2, 3, 8] {
+    for threads in [2, 3, 8, 102, 103, 108] {
         let (mut wp, mut op) = (Vec::new(), Vec::new());
         parallel::install(pool(threads), || {
             tape.eval_prolog(&x, &mut wp);
@@ -150,4 +157,38 @@ fn small_stages_stay_serial_and_nothing_is_installed_outside() {
     });
     assert!(parallel::current().is_none());
     assert_eq!(bits(&r), bits(&eval(&tape, &x)));
+}
+
+#[test]
+fn workers_run_every_piece_once_awake_or_woken() {
+    use rsdag::parallel::{Pool, Workers};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let w = Workers::with_spin(4, std::time::Duration::from_micros(50));
+    let hits: Vec<AtomicUsize> = (0..500).map(|_| AtomicUsize::new(0)).collect();
+    for round in 0..200 {
+        w.run(500, &|i| {
+            hits[i].fetch_add(1, Ordering::Relaxed);
+        });
+        // now and then long enough for the workers to fall asleep
+        if round % 50 == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+    assert!(hits.iter().all(|h| h.load(Ordering::Relaxed) == 200));
+}
+
+#[test]
+fn a_panic_in_a_piece_reaches_the_caller() {
+    use rsdag::parallel::{Pool, Workers};
+    let w = Workers::new(3);
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        w.run(64, &|i| assert!(i != 37, "piece 37"));
+    }));
+    assert!(r.is_err());
+    // the pool goes on
+    let n = std::sync::atomic::AtomicUsize::new(0);
+    w.run(64, &|_| {
+        n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    });
+    assert_eq!(n.into_inner(), 64);
 }

@@ -20,9 +20,10 @@
 //!
 //! `--threads <n>` runs the residual and the Jacobian with a pool of `n`
 //! threads installed, their independent calls (the device instances) in
-//! parallel (`rsdag::parallel`).
+//! parallel (`rsdag::parallel`): rsdag's `Workers`, or with `--rayon` a
+//! rayon pool.
 //!
-//!     cargo run --release -p rsdag-jit --example modules -- [--values <dir>] [--composed <dir>] [--threads <n>] <module.json>...
+//!     cargo run --release -p rsdag-jit --example modules -- [--values <dir>] [--composed <dir>] [--threads <n> [--rayon]] <module.json>...
 
 use std::time::Instant;
 
@@ -128,12 +129,24 @@ fn main() {
     let values_dir = option("--values");
     let composed_dir = option("--composed");
     let threads: usize = option("--threads").map_or(1, |t| t.parse().expect("--threads <n>"));
+    drop(option);
+    let rayon_pool = args
+        .iter()
+        .position(|a| a == "--rayon")
+        .map(|i| args.remove(i))
+        .is_some();
     let pool = (threads > 1).then(|| {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build()
-            .expect("a thread pool");
-        rsdag::parallel::Parallel::new(std::sync::Arc::new(pool))
+        let pool: std::sync::Arc<dyn rsdag::parallel::Pool> = if rayon_pool {
+            std::sync::Arc::new(
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .expect("a thread pool"),
+            )
+        } else {
+            std::sync::Arc::new(rsdag::parallel::Workers::new(threads))
+        };
+        rsdag::parallel::Parallel::new(pool)
     });
     POOL.set(pool).ok();
     println!(

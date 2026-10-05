@@ -71,6 +71,13 @@ fn ring() -> (Graph<F64>, Vec<ExprId>, Vec<SymbolId>, Vec<bool>) {
 }
 
 fn pool(threads: usize) -> Parallel {
+    // `100 + n`: rsdag's own pool of n threads, else a rayon pool of n
+    if threads > 100 {
+        return Parallel {
+            pool: Arc::new(parallel::Workers::new(threads - 100)),
+            min_ops: 0,
+        };
+    }
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .build()
@@ -105,7 +112,7 @@ fn a_split_native_program_on_a_pool_is_the_serial_one() {
     native.eval_prolog(&x, &mut wn);
     native.eval_main(&x, &mut wn, &mut on);
     assert_eq!(bits(&out), bits(&on), "native serial");
-    for threads in [2, 5, 8] {
+    for threads in [2, 5, 8, 102, 105, 108] {
         let (mut wp, mut op) = (Vec::new(), Vec::new());
         parallel::install(pool(threads), || {
             native.eval_prolog(&x, &mut wp);
