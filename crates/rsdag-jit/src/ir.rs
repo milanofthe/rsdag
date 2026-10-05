@@ -336,11 +336,8 @@ pub(crate) fn record(tape: &Tape) -> (Vec<ROp>, usize) {
             _ => (StageRole::Alone, 0),
         }
     };
-    let body_ops = |b: u32, ng: u32| {
-        ng as u64
-            * tape.bundles()[b as usize]
-                .body()
-                .map_or(1000, |t| t.n_ops() as u64)
+    let body_ops = |i: usize, b: u32, ng: u32| {
+        ng as u64 * rsdag::tape::call_ops(&*tape.bundles()[b as usize], &tape.ops()[i])
     };
     for i in 0..tape.n_ops() {
         if i == tape.prolog_len() {
@@ -387,7 +384,7 @@ pub(crate) fn record(tape: &Tape) -> (Vec<ROp>, usize) {
                     batch: n_groups > 1,
                     gather_at,
                     stage,
-                    ops: body_ops(bundle, n_groups),
+                    ops: body_ops(i, bundle, n_groups),
                 })
             }
             Op::CallProlog {
@@ -411,7 +408,7 @@ pub(crate) fn record(tape: &Tape) -> (Vec<ROp>, usize) {
                     batch: n_groups > 1,
                     gather_at,
                     stage,
-                    ops: body_ops(bundle, n_groups),
+                    ops: body_ops(i, bundle, n_groups),
                 })
             }
             Op::Gemv { a, x, m, n, acc } if m < INLINE_ROWS => {

@@ -115,9 +115,9 @@ pub fn run(n: usize, ops: usize, f: &(dyn Fn(usize) + Sync)) {
     }
 }
 
-/// Instances per piece of work for `n` instances of a stage: about four
-/// pieces per worker of the installed pool, one instance each when there
-/// is none.
+/// Instances per piece of work for a stage of `n` instances: about four
+/// pieces per worker of the installed pool (balance over instances of
+/// unequal cost), all in one piece when there is none.
 pub fn block(n: usize) -> usize {
     let threads = CURRENT.with(|c| c.borrow().as_ref().map_or(0, |p| p.pool.threads()));
     if threads < 2 {

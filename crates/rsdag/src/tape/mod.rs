@@ -236,6 +236,21 @@ pub struct Stage {
 /// per instance.
 const OPAQUE_OPS: u64 = 1000;
 
+/// Ops one instance of `call` runs in its bundle's body: the prolog for a
+/// prolog, the main phase for a call over a state, all of it for a call
+/// without one. A bundle without a body counts [`OPAQUE_OPS`].
+pub fn call_ops(bundle: &dyn ExternBundle, call: &Op) -> u64 {
+    let Some(t) = bundle.body() else {
+        return OPAQUE_OPS;
+    };
+    let (all, prolog) = (t.n_ops() as u64, t.prolog_len() as u64);
+    match *call {
+        Op::CallProlog { .. } => prolog.max(1),
+        Op::Call { state, .. } if state != NO_STATE => (all - prolog).max(1),
+        _ => all.max(1),
+    }
+}
+
 /// The stages of an op stream (see [`Stage`]): each maximal run of
 /// consecutive calls, within the prolog or within the main phase, in which
 /// no call reads or overwrites a slot another one writes, and which holds
@@ -290,9 +305,7 @@ fn plan_stages(
             _ => return None,
         };
         reads.sort_unstable();
-        let per = bundles[bundle as usize]
-            .body()
-            .map_or(OPAQUE_OPS, |t| t.n_ops() as u64);
+        let per = call_ops(&*bundles[bundle as usize], &ops[i]);
         Some((reads, (d, d + width), ng, ng as u64 * per))
     };
     let overlaps = |a: (u32, u32), b: (u32, u32)| a.0 < b.1 && b.0 < a.1;
