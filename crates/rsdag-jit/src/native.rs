@@ -169,6 +169,24 @@ impl NativeBody {
     }
 }
 
+/// `ops` in chunks of about `chunk_ops`, each ending after an op outside a
+/// stage or after a stage's last call.
+fn chunked(ops: &[ROp], chunk_ops: usize) -> Vec<&[ROp]> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (k, op) in ops.iter().enumerate() {
+        let inside = matches!(op, ROp::Call(c) if c.stage == StageRole::Deferred);
+        if k + 1 - start >= chunk_ops.max(1) && !inside {
+            out.push(&ops[start..=k]);
+            start = k + 1;
+        }
+    }
+    if start < ops.len() {
+        out.push(&ops[start..]);
+    }
+    out
+}
+
 /// The phase a run of lane code covers, in the order of [`LaneCode::pays`].
 #[derive(Clone, Copy, PartialEq)]
 enum Phase {
@@ -764,14 +782,12 @@ impl NativeTape {
             total: (n_work * lanes + gather_len + scratch_len).max(1),
         };
         // Chunk the prolog and main phases separately so no chunk straddles
-        // the split.
-        let chunk_ops = chunk_ops.max(1);
+        // the split, nor a stage: its last call runs the stage's calls from
+        // its chunk's descriptors.
         let (pro, main) = ops.split_at(split);
-        let jobs: Vec<&[ROp]> = pro
-            .chunks(chunk_ops)
-            .chain(main.chunks(chunk_ops))
-            .collect();
-        let prolog_chunks = pro.chunks(chunk_ops).count();
+        let pro = chunked(pro, chunk_ops);
+        let prolog_chunks = pro.len();
+        let jobs: Vec<&[ROp]> = pro.into_iter().chain(chunked(main, chunk_ops)).collect();
         let starts: Vec<usize> = jobs
             .iter()
             .scan(0, |acc, ops| {
