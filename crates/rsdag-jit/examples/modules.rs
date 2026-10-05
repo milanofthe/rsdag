@@ -21,16 +21,17 @@
 //! `--threads <n>` runs the residual and the Jacobian with a pool of `n`
 //! threads installed, their independent calls (the device instances) in
 //! parallel (`rsdag::parallel`): rsdag's `Workers`, or with `--rayon` a
-//! rayon pool.
+//! rayon pool. `--lanes auto|always|never` sets the device bodies' lane
+//! code (`rsdag_jit::Lanes`, `auto` by default).
 //!
-//!     cargo run --release -p rsdag-jit --example modules -- [--values <dir>] [--composed <dir>] [--threads <n> [--rayon]] <module.json>...
+//!     cargo run --release -p rsdag-jit --example modules -- [--values <dir>] [--composed <dir>] [--threads <n> [--rayon]] [--lanes <mode>] <module.json>...
 
 use std::time::Instant;
 
 use rsdag::{
     sparse_jacobian, substitute, ExprId, Graph, Module, Output, OutputRole, ParamRole, Tape, F64,
 };
-use rsdag_jit::NativeTape;
+use rsdag_jit::{Lanes, NativeTape, Options};
 
 /// Seconds per call: the best of five batches of at least 50 ms.
 fn per_call(mut f: impl FnMut()) -> f64 {
@@ -68,6 +69,9 @@ fn timed<R>(f: impl FnOnce() -> R) -> (R, f64) {
 /// it (`rsdag::parallel`).
 static POOL: std::sync::OnceLock<Option<rsdag::parallel::Parallel>> = std::sync::OnceLock::new();
 
+/// The lane code `--lanes` asks for.
+static LANES: std::sync::OnceLock<Lanes> = std::sync::OnceLock::new();
+
 /// `f` with the `--threads` pool installed, if any.
 fn on_pool<R: Send>(f: impl FnOnce() -> R + Send) -> R {
     match POOL.get().cloned().flatten() {
@@ -87,7 +91,12 @@ fn measure(
     check: &[f64],
 ) -> ([f64; 4], Vec<f64>) {
     let (tape, s_tape) = timed(|| Tape::compile_split(g, roots, syms, pure));
-    let (native, s_native) = timed(|| NativeTape::compile(&tape).expect("native code"));
+    let opts = Options {
+        lanes: LANES.get().copied().unwrap_or_default(),
+        ..Options::default()
+    };
+    let (native, s_native) =
+        timed(|| NativeTape::compile_opts(&tape, &opts, &[]).expect("native code"));
     let (mut w, mut o) = (Vec::new(), Vec::new());
     let (mut wn, mut on) = (Vec::new(), Vec::new());
     let (c_tape, c_native) = on_pool(|| {
@@ -128,6 +137,13 @@ fn main() {
     };
     let values_dir = option("--values");
     let composed_dir = option("--composed");
+    let lanes = match option("--lanes").as_deref() {
+        None | Some("auto") => Lanes::Auto,
+        Some("always") => Lanes::Always,
+        Some("never") => Lanes::Never,
+        Some(m) => panic!("--lanes auto|always|never, not {m}"),
+    };
+    LANES.set(lanes).ok();
     let threads: usize = option("--threads").map_or(1, |t| t.parse().expect("--threads <n>"));
     let rayon_pool = args
         .iter()

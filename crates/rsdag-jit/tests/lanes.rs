@@ -6,7 +6,7 @@
 
 use rsdag::node::{BinOp, CmpOp, ReduceOp, UnaryOp};
 use rsdag::{ExprId, FuncId, Graph, Node, ParamRole, Scope, SymbolId, Tape, F64};
-use rsdag_jit::NativeTape;
+use rsdag_jit::{Lanes, NativeTape, Options};
 
 fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
     let e = g.sym(name);
@@ -113,6 +113,15 @@ const SPECIAL: [f64; 13] = [
     1.0,
 ];
 
+/// Lane code wherever it compiles, whether it pays or not.
+fn native(tape: &Tape) -> NativeTape {
+    let opts = Options {
+        lanes: Lanes::Always,
+        ..Options::default()
+    };
+    NativeTape::compile_opts(tape, &opts, &[]).expect("native code")
+}
+
 fn same(a: f64, b: f64) -> bool {
     a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
 }
@@ -148,7 +157,7 @@ fn lanes_are_the_scalar_code_for_every_op_and_value() {
     for n in [2usize, 3, 7] {
         let (g, roots, syms, pure) = program(n);
         let tape = Tape::compile_split(&g, &roots, &syms, &pure);
-        let native = NativeTape::compile(&tape).expect("native code");
+        let native = native(&tape);
         for shift in 0..SPECIAL.len() {
             let x = inputs(n, shift);
             let (mut w, mut o) = (Vec::new(), Vec::new());
@@ -179,7 +188,7 @@ fn lanes_without_state_are_the_scalar_code() {
     let n = 5;
     let (g, roots, syms, _) = program(n);
     let tape = Tape::compile(&g, &roots, &syms);
-    let native = NativeTape::compile(&tape).expect("native code");
+    let native = native(&tape);
     for shift in 0..SPECIAL.len() {
         let x = inputs(n, shift);
         let (mut w, mut o) = (Vec::new(), Vec::new());

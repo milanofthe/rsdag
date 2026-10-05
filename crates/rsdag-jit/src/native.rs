@@ -37,7 +37,7 @@ use std::sync::Arc;
 use crate::host::{self, Bundles};
 use crate::ir::{Dense, Kernel, KernelKind, Liveness, ROp, StageRole};
 use crate::isa::{Arg, Arith, Base, IArg, Isa, Round};
-use crate::{Batch, JitError, Options};
+use crate::{Batch, JitError, Lanes, Options};
 
 #[cfg(target_arch = "aarch64")]
 type Arch = crate::aarch64::A64;
@@ -75,6 +75,9 @@ pub struct NativeTape {
     /// The inputs the prolog and the main phase read (a body's main phase
     /// reads its states' arguments, not the parameters its prolog took).
     reads: [Vec<u32>; 2],
+    /// Per phase (prolog, main): its ops, and those of them that call the
+    /// host (lane code calls it once per lane).
+    phase_ops: [(usize, usize); 2],
 }
 
 /// Instances lane code runs at once.
@@ -99,8 +102,12 @@ fn lane_gather_len(op: &ROp, l: usize) -> usize {
 /// serial loop's, bit for bit.
 struct NativeBody {
     tape: NativeTape,
-    /// The same body over [`LANES`] instances at once, where it compiles so.
+    /// The same body over [`LANES`] instances at once, where it compiles so
+    /// and pays for some phase.
     lanes: Option<NativeTape>,
+    /// Whether the lane code pays for the prolog, the main phase, a whole
+    /// call (see [`lanes_pay`]).
+    lanes_pay: [bool; 3],
     n_out: usize,
     /// The pure-argument flags of the body it replaces: its prolog runs on
     /// those, the rest NaN.
@@ -170,6 +177,20 @@ enum Phase {
     Prolog,
     Main,
     Whole,
+}
+
+/// Whether lane code pays for a phase of a body: the work it halves
+/// against what it adds per instance, the values moved into and out of the
+/// lanes (inputs read, the state, the outputs) and the host calls it makes
+/// lane by lane. In op-equivalents, measured on SANE's device bodies;
+/// a tie stays scalar.
+fn lanes_pay(lt: &NativeTape, phase: usize, n_state: usize, n_out: usize) -> bool {
+    const MOVE: usize = 2;
+    const HOST: usize = 6;
+    let (ops, host) = lt.phase_ops[phase];
+    let saved = (ops - host) * (LANES - 1) / LANES;
+    let moved = lt.reads[phase].len() + n_state + if phase == 1 { n_out } else { 0 };
+    saved > moved * MOVE + host * HOST
 }
 
 impl NativeBody {
@@ -322,7 +343,7 @@ impl ExternBundle for NativeBody {
     }
     fn prolog_batch(&self, pure: &[f64], n_groups: usize, n_pure: usize, states: &mut [f64]) {
         match &self.lanes {
-            Some(lt) if n_groups >= 2 => self.run_lanes(
+            Some(lt) if n_groups >= 2 && self.lanes_pay[0] => self.run_lanes(
                 lt,
                 Phase::Prolog,
                 pure,
@@ -353,7 +374,7 @@ impl ExternBundle for NativeBody {
         out: &mut [f64],
     ) {
         match &self.lanes {
-            Some(lt) if n_groups >= 2 => self.run_lanes(
+            Some(lt) if n_groups >= 2 && self.lanes_pay[1] => self.run_lanes(
                 lt,
                 Phase::Main,
                 args,
@@ -380,7 +401,7 @@ impl ExternBundle for NativeBody {
         if let Some(lt) = self
             .lanes
             .as_ref()
-            .filter(|_| n_groups >= 2 && self.batch == Batch::Serial)
+            .filter(|_| n_groups >= 2 && self.lanes_pay[2] && self.batch == Batch::Serial)
         {
             self.run_lanes(
                 lt,
@@ -425,7 +446,12 @@ fn options_key(opts: &Options) -> u64 {
         Batch::Serial => 0,
         Batch::Parallel { min_ops } => 1 + min_ops as u64,
     };
-    ((opts.chunk_ops as u64) << 32) ^ batch
+    let lanes = match opts.lanes {
+        Lanes::Auto => 0,
+        Lanes::Always => 1,
+        Lanes::Never => 2,
+    };
+    ((opts.chunk_ops as u64) << 32) ^ batch ^ (lanes << 62)
 }
 
 /// Instances per parallel task: about four tasks per thread of the
@@ -526,10 +552,25 @@ impl NativeTape {
                     // program that calls it; with its lane form when it has
                     // one.
                     let make = || -> Result<Arc<dyn ExternBundle>, JitError> {
+                        let lanes = (opts.lanes != Lanes::Never)
+                            .then(|| NativeTape::compile_lanes(body).ok())
+                            .flatten();
+                        let (sl, no) = (body.state_len(), b.n_outputs());
+                        let pays = lanes.as_ref().map_or([false; 3], |lt| {
+                            if opts.lanes == Lanes::Always {
+                                return [true; 3];
+                            }
+                            [
+                                lanes_pay(lt, 0, sl, no),
+                                lanes_pay(lt, 1, sl, no),
+                                lanes_pay(lt, 0, 0, 0) || lanes_pay(lt, 1, 0, no),
+                            ]
+                        });
                         Ok(Arc::new(NativeBody {
                             tape: NativeTape::compile_opts(body, opts, &[])?,
-                            lanes: NativeTape::compile_lanes(body).ok(),
-                            n_out: b.n_outputs(),
+                            lanes: lanes.filter(|_| pays.iter().any(|&p| p)),
+                            lanes_pay: pays,
+                            n_out: no,
                             pure: b.pure_args().to_vec(),
                             batch: opts.batch,
                         }))
@@ -601,6 +642,12 @@ impl NativeTape {
         for r in &mut reads {
             r.sort_unstable();
             r.dedup();
+        }
+        let mut phase_ops = [(0usize, 0usize); 2];
+        for (k, op) in ops.iter().enumerate() {
+            let p = &mut phase_ops[usize::from(k >= split)];
+            p.0 += 1;
+            p.1 += usize::from(op.host().is_some());
         }
         let gather_len = ops
             .iter()
@@ -692,6 +739,7 @@ impl NativeTape {
             state_len: tape.state_len(),
             lanes,
             reads,
+            phase_ops,
         })
     }
 
