@@ -2120,7 +2120,9 @@ impl Program {
             .chain(solves)
             .max()
             .unwrap_or(0);
+        let stages = super::plan_stages(&ops, &dst, &arg_pool, &self.bundles, prolog_ops);
         Tape {
+            stages,
             lent,
             ops,
             dst,

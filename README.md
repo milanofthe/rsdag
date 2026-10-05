@@ -31,8 +31,9 @@ NOTICE); for a commercial license contact info@milanrother.com.
   `Tape` (interpreter over any `Scalar`, choice specialization, instance
   batching, `Gemv`, `Gemm` and dense `Solve` kernels, prolog/main split),
   `semantics` (the reference arithmetic), `symbolic` (`determinant`,
-  `collect`, `rational_form`, `simplify_egraph`), `dot` (Graphviz of
-  graphs and tapes).
+  `collect`, `rational_form`, `simplify_egraph`), `parallel` (a program's
+  independent calls on a pool, `Workers`), `dot` (Graphviz of graphs and
+  tapes).
 - `rsdag-jit`: `NativeTape`, machine code for AArch64 and x86-64 on Linux,
   macOS and Windows; function bodies compiled once and batched over
   instances; `eval_many` over many input sets in parallel
@@ -50,6 +51,7 @@ Features:
 | `complex` | evaluation in `Complex64` | num-complex |
 | `egraph` | `simplify_egraph` (implies `exact`, native only) | egg |
 | `serde` | `Module` serialization | serde |
+| `rayon` | `rayon::ThreadPool` as a `parallel::Pool` | rayon |
 
 `rsdag` builds for `wasm32-unknown-unknown` (interpreter only) with every
 feature except `egraph`. It reads no clock unless `hooks::set_clock`
@@ -177,6 +179,40 @@ cell = jit(lambda a, b: [a * b, np.sin(a)])
 chain = jit(lambda x: [cell(x[k], x[k + 1])[0] for k in range(len(x) - 1)])
 J = jacobian(chain)(np.linspace(0.0, 1.0, 100))   # cell's calls: one batched kernel
 ```
+
+## Parallel
+
+A tape groups consecutive calls that read nothing another of them writes
+into stages (`Tape::stages`): the device instances of a circuit, the blocks
+of a model. With a pool installed (`parallel::install`), every instance of
+every call in a stage is a piece of work of its own, on the interpreter and
+in native code alike; a stage too small to be worth it runs serially. Each
+piece computes what the serial loop computes, so the results are the same
+bit for bit whatever the thread count, and a call inside a stage runs its
+own stages serially.
+
+`parallel::Workers` is the pool for it: its workers keep waiting for the
+next stage for a few hundred microseconds before they sleep, and the
+calling thread takes pieces too, so the stages of a solve, a factorization
+or a step decision apart, reach awake workers. Any `parallel::Pool` serves
+(with the `rayon` feature a `rayon::ThreadPool`).
+
+```rust
+use std::sync::Arc;
+use rsdag::parallel::{self, Parallel, Workers};
+
+let p = Parallel::new(Arc::new(Workers::new(4)));
+parallel::install(p, || {
+    tape.eval_prolog(&x, &mut work);
+    for _ in 0..iterations {
+        tape.eval_main(&x, &mut work, &mut out);   // stages on 4 threads
+    }
+});
+```
+
+On SANE's circuits (the modules of the Benchmarks), the Jacobian takes 10
+to 15 microseconds on 4 threads instead of 27 to 35 on one, the residual
+about half its time (`rsdag-jit/examples/modules.rs --threads`).
 
 ## Choice specialization
 

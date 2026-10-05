@@ -18,7 +18,12 @@
 //! as rsdag compiles it, the subcircuit functions inlined and the device
 //! bodies functions, the form the other tools are given.
 //!
-//!     cargo run --release -p rsdag-jit --example modules -- [--values <dir>] [--composed <dir>] <module.json>...
+//! `--threads <n>` runs the residual and the Jacobian with a pool of `n`
+//! threads installed, their independent calls (the device instances) in
+//! parallel (`rsdag::parallel`): rsdag's `Workers`, or with `--rayon` a
+//! rayon pool.
+//!
+//!     cargo run --release -p rsdag-jit --example modules -- [--values <dir>] [--composed <dir>] [--threads <n> [--rayon]] <module.json>...
 
 use std::time::Instant;
 
@@ -59,6 +64,18 @@ fn timed<R>(f: impl FnOnce() -> R) -> (R, f64) {
     (r, t.elapsed().as_secs_f64())
 }
 
+/// The pool `--threads` asks for: the programs' independent calls run on
+/// it (`rsdag::parallel`).
+static POOL: std::sync::OnceLock<Option<rsdag::parallel::Parallel>> = std::sync::OnceLock::new();
+
+/// `f` with the `--threads` pool installed, if any.
+fn on_pool<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+    match POOL.get().cloned().flatten() {
+        Some(p) => rsdag::parallel::install(p, f),
+        None => f(),
+    }
+}
+
 /// Setup (seconds) and per-call time (seconds) of `roots` over the inputs,
 /// interpreted then native; the values at `check`.
 fn measure(
@@ -72,11 +89,14 @@ fn measure(
     let (tape, s_tape) = timed(|| Tape::compile_split(g, roots, syms, pure));
     let (native, s_native) = timed(|| NativeTape::compile(&tape).expect("native code"));
     let (mut w, mut o) = (Vec::new(), Vec::new());
-    tape.eval_prolog(vals, &mut w);
-    let c_tape = per_call(|| tape.eval_main(vals, &mut w, &mut o));
     let (mut wn, mut on) = (Vec::new(), Vec::new());
-    native.eval_prolog(vals, &mut wn);
-    let c_native = per_call(|| native.eval_main(vals, &mut wn, &mut on));
+    let (c_tape, c_native) = on_pool(|| {
+        tape.eval_prolog(vals, &mut w);
+        let c_tape = per_call(|| tape.eval_main(vals, &mut w, &mut o));
+        native.eval_prolog(vals, &mut wn);
+        let c_native = per_call(|| native.eval_main(vals, &mut wn, &mut on));
+        (c_tape, c_native)
+    });
     if let Some((k, (a, b))) = o
         .iter()
         .zip(&on)
@@ -108,6 +128,26 @@ fn main() {
     };
     let values_dir = option("--values");
     let composed_dir = option("--composed");
+    let threads: usize = option("--threads").map_or(1, |t| t.parse().expect("--threads <n>"));
+    let rayon_pool = args
+        .iter()
+        .position(|a| a == "--rayon")
+        .map(|i| args.remove(i))
+        .is_some();
+    let pool = (threads > 1).then(|| {
+        let pool: std::sync::Arc<dyn rsdag::parallel::Pool> = if rayon_pool {
+            std::sync::Arc::new(
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .expect("a thread pool"),
+            )
+        } else {
+            std::sync::Arc::new(rsdag::parallel::Workers::new(threads))
+        };
+        rsdag::parallel::Parallel::new(pool)
+    });
+    POOL.set(pool).ok();
     println!(
         "{}",
         [

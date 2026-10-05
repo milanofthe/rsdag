@@ -35,7 +35,7 @@ use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 use crate::host::{self, Bundles};
-use crate::ir::{Dense, Kernel, KernelKind, Liveness, ROp};
+use crate::ir::{Dense, Kernel, KernelKind, Liveness, ROp, StageRole};
 use crate::isa::{Arg, Arith, Base, IArg, Isa, Round};
 use crate::{Batch, JitError, Options};
 
@@ -924,7 +924,9 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 self.put(dst, r);
             }
             ROp::Call(ref c) => {
-                let at = self.gather(&c.args);
+                // A call of a stage gathers apart from the others of it; the
+                // stage's last one hands them all to `h_stage`.
+                let at = self.gather_at(&c.args, c.gather_at);
                 let d = self.descs.len();
                 assert!(
                     d < self.descs.capacity(),
@@ -943,18 +945,42 @@ impl<'a, I: Isa> Emitter<'a, I> {
                     state: c.state as u64 * 8,
                     scratch: self.layout.scratch as u64 * 8,
                     scratch_len: self.layout.scratch_len as u64,
+                    ops: c.ops,
                 };
                 // The table was sized up front: pushing never moves it, so
                 // the address baked into the code stays valid.
                 self.descs.push(desc);
-                let ptr = &self.descs[d] as *const host::CallDesc as u64;
-                let args = [
-                    Arg::I(IArg::Bundles),
-                    Arg::I(IArg::Imm(ptr)),
-                    Arg::I(IArg::WorkAddr(0)),
-                ];
-                self.call(host::h_call as *const (), &args);
-                self.invalidate(c.dst, c.n_groups * c.n_out);
+                match c.stage {
+                    StageRole::Alone => {
+                        let ptr = &self.descs[d] as *const host::CallDesc as u64;
+                        let args = [
+                            Arg::I(IArg::Bundles),
+                            Arg::I(IArg::Imm(ptr)),
+                            Arg::I(IArg::WorkAddr(0)),
+                        ];
+                        self.call(host::h_call as *const (), &args);
+                        self.invalidate(c.dst, c.n_groups * c.n_out);
+                    }
+                    StageRole::Deferred => {}
+                    StageRole::Last(n) => {
+                        let first = d + 1 - n as usize;
+                        let ptr = &self.descs[first] as *const host::CallDesc as u64;
+                        let args = [
+                            Arg::I(IArg::Bundles),
+                            Arg::I(IArg::Imm(ptr)),
+                            Arg::I(IArg::Imm(n as u64)),
+                            Arg::I(IArg::WorkAddr(0)),
+                        ];
+                        self.call(host::h_stage as *const (), &args);
+                        let written: Vec<(u32, u32)> = self.descs[first..]
+                            .iter()
+                            .map(|e| ((e.out / 8) as u32, (e.n_groups * e.n_out) as u32))
+                            .collect();
+                        for (dst, len) in written {
+                            self.invalidate(dst, len);
+                        }
+                    }
+                }
             }
             ROp::Kernel(ref kn) => {
                 let mut at = 0usize;
