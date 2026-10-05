@@ -183,4 +183,20 @@ fn bodies_draw_each_called_function_once() {
     assert_eq!(count(&dot, "label=\"sin\""), 1, "{dot}");
     // a dashed link per call: two of mid, one of leaf in mid's body
     assert_eq!(count(&dot, "style=dashed"), 3, "{dot}");
+
+    // the same as data, a call relabelled by its instance
+    let data = GraphView::new(&g)
+        .root(r, "r")
+        .bodies()
+        .label(one, "X1")
+        .data();
+    assert_eq!(data.clusters, ["mid", "leaf"]);
+    assert_eq!(data.links.len(), 3);
+    let sine = data.nodes.iter().find(|n| n.label == "sin").expect("sin");
+    assert_eq!(sine.cluster, Some(1));
+    assert!(data.nodes.iter().any(|n| n.label == "X1"));
+    assert!(data
+        .nodes
+        .iter()
+        .any(|n| n.label == "mid" && n.cluster.is_none()));
 }
