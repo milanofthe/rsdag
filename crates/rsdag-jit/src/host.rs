@@ -236,6 +236,10 @@ unsafe fn run_call(
                 "bundle state length changed since compile"
             );
             let states = unsafe { std::slice::from_raw_parts(at(d.state).add(g0 * sl), ng * sl) };
+            if ng >= 2 {
+                b.main_batch(args, states, ng, na, out);
+                return;
+            }
             for g in 0..ng {
                 let (a, o) = (&args[g * na..(g + 1) * na], &mut out[g * no..(g + 1) * no]);
                 b.main_into(a, &states[g * sl..(g + 1) * sl], scratch, o);
@@ -247,6 +251,10 @@ unsafe fn run_call(
                 sl,
                 "bundle state length changed since compile"
             );
+            if ng >= 2 {
+                b.prolog_batch(args, ng, na, out);
+                return;
+            }
             for g in 0..ng {
                 let (a, st) = (&args[g * na..(g + 1) * na], &mut out[g * sl..(g + 1) * sl]);
                 b.prolog_into(a, scratch, st);

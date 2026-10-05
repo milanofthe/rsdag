@@ -42,7 +42,7 @@ use crate::{Batch, JitError, Options};
 #[cfg(target_arch = "aarch64")]
 type Arch = crate::aarch64::A64;
 #[cfg(target_arch = "x86_64")]
-type Arch = crate::x86_64::X64;
+type Arch = crate::x86_64::X64<1>;
 
 /// An emitted chunk: `(work, inputs, bundles)`. Unsafe to call: the code
 /// trusts the work array to have the layout's length and the inputs the
@@ -70,6 +70,27 @@ pub struct NativeTape {
     /// The tape's state prefix (see [`Tape::state_len`]); the slot layout
     /// is the tape's, so an interpreter's state serves here and back.
     state_len: usize,
+    /// Instances per run: `1`, or [`LANES`] for lane code.
+    lanes: usize,
+    /// The inputs the prolog and the main phase read (a body's main phase
+    /// reads its states' arguments, not the parameters its prolog took).
+    reads: [Vec<u32>; 2],
+}
+
+/// Instances lane code runs at once.
+const LANES: usize = 2;
+
+/// The gather area lane code needs for `op`: a host call's float
+/// arguments and results lane by lane, or a min/max's terms, one lane's
+/// row of them and the results.
+fn lane_gather_len(op: &ROp, l: usize) -> usize {
+    match op {
+        ROp::Reduce(_, rsdag::node::ReduceOp::Min | rsdag::node::ReduceOp::Max, a) => {
+            a.len() * l + a.len() + l
+        }
+        _ if op.host().is_some() => 3 * l,
+        _ => 0,
+    }
 }
 
 /// A function body compiled natively, behind the bundle interface the
@@ -78,6 +99,8 @@ pub struct NativeTape {
 /// serial loop's, bit for bit.
 struct NativeBody {
     tape: NativeTape,
+    /// The same body over [`LANES`] instances at once, where it compiles so.
+    lanes: Option<NativeTape>,
     n_out: usize,
     /// The pure-argument flags of the body it replaces: its prolog runs on
     /// those, the rest NaN.
@@ -141,6 +164,119 @@ impl NativeBody {
     }
 }
 
+/// The phase a run of lane code covers.
+#[derive(Clone, Copy, PartialEq)]
+enum Phase {
+    Prolog,
+    Main,
+    Whole,
+}
+
+impl NativeBody {
+    /// `n` instances through the lane code, [`LANES`] at a time: lane `l`
+    /// of every slot and input is the block's instance `l` (a short last
+    /// block repeats its last instance, whose copies are dropped). A
+    /// prolog's arguments are the pure ones, completed with NaN as
+    /// [`prolog_into`](ExternBundle::prolog_into) completes them, and
+    /// writes `states`; a main phase reads `states`; a main phase or a
+    /// whole run writes `out`.
+    #[allow(clippy::too_many_arguments)]
+    fn run_lanes(
+        &self,
+        lt: &NativeTape,
+        phase: Phase,
+        args: &[f64],
+        n: usize,
+        n_args: usize,
+        states: Option<&[f64]>,
+        states_out: Option<&mut [f64]>,
+        out: Option<&mut [f64]>,
+    ) {
+        const L: usize = LANES;
+        let sl = self.tape.state_len;
+        let n_in = lt.n_inputs.max(n_args).max(self.pure.len());
+        let mut states_out = states_out;
+        let mut out = out;
+        let n_out = self.n_out;
+        // Only the inputs the phase reads move into the lanes; a prolog's
+        // arguments are the pure ones, input `k` the pure argument of its
+        // rank among them.
+        let read: Vec<u32> = match phase {
+            Phase::Prolog => lt.reads[0].clone(),
+            Phase::Main => lt.reads[1].clone(),
+            Phase::Whole => {
+                let mut r = [lt.reads[0].as_slice(), lt.reads[1].as_slice()].concat();
+                r.sort_unstable();
+                r.dedup();
+                r
+            }
+        };
+        let rank: Vec<Option<usize>> = if phase == Phase::Prolog {
+            let mut next = 0;
+            self.pure
+                .iter()
+                .map(|&p| {
+                    p.then(|| {
+                        next += 1;
+                        next - 1
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        with_work(|work| {
+            work.resize(lt.layout.total, 0.0);
+            let mut ins = vec![f64::NAN; n_in * L];
+            for c in (0..n).step_by(L) {
+                for lane in 0..L {
+                    let g = (c + lane).min(n - 1);
+                    let a = &args[g * n_args..(g + 1) * n_args];
+                    for &k in &read {
+                        let k = k as usize;
+                        ins[k * L + lane] = if phase == Phase::Prolog {
+                            rank.get(k).copied().flatten().map_or(f64::NAN, |r| a[r])
+                        } else {
+                            a.get(k).copied().unwrap_or(f64::NAN)
+                        };
+                    }
+                    if let Some(st) = states {
+                        for s in 0..sl {
+                            work[s * L + lane] = st[g * sl + s];
+                        }
+                    }
+                }
+                let range = match phase {
+                    Phase::Prolog => 0..lt.prolog_chunks,
+                    Phase::Main => lt.prolog_chunks..lt.chunks.len(),
+                    Phase::Whole => 0..lt.chunks.len(),
+                };
+                lt.run(range, &ins, work);
+                for lane in 0..L.min(n - c) {
+                    let g = c + lane;
+                    if let Some(st) = states_out.as_deref_mut() {
+                        for s in 0..sl {
+                            st[g * sl + s] = work[s * L + lane];
+                        }
+                    }
+                    if let Some(o) = out.as_deref_mut() {
+                        for (k, &slot) in lt.outputs[..n_out].iter().enumerate() {
+                            o[g * n_out + k] = match input_index(slot) {
+                                Some(i) => args
+                                    .get(g * n_args + i as usize)
+                                    .copied()
+                                    .filter(|_| (i as usize) < n_args)
+                                    .unwrap_or(f64::NAN),
+                                None => work[slot as usize * L + lane],
+                            };
+                        }
+                    }
+                }
+            }
+        });
+    }
+}
+
 impl ExternBundle for NativeBody {
     fn n_outputs(&self) -> usize {
         self.n_out
@@ -184,7 +320,80 @@ impl ExternBundle for NativeBody {
             };
         }
     }
+    fn prolog_batch(&self, pure: &[f64], n_groups: usize, n_pure: usize, states: &mut [f64]) {
+        match &self.lanes {
+            Some(lt) if n_groups >= 2 => self.run_lanes(
+                lt,
+                Phase::Prolog,
+                pure,
+                n_groups,
+                n_pure,
+                None,
+                Some(states),
+                None,
+            ),
+            _ => {
+                let sl = self.tape.state_len;
+                with_work(|w| {
+                    w.resize(self.work_len(), 0.0);
+                    for g in 0..n_groups {
+                        let p = &pure[g * n_pure..(g + 1) * n_pure];
+                        self.prolog_into(p, w, &mut states[g * sl..(g + 1) * sl]);
+                    }
+                });
+            }
+        }
+    }
+    fn main_batch(
+        &self,
+        args: &[f64],
+        states: &[f64],
+        n_groups: usize,
+        n_args: usize,
+        out: &mut [f64],
+    ) {
+        match &self.lanes {
+            Some(lt) if n_groups >= 2 => self.run_lanes(
+                lt,
+                Phase::Main,
+                args,
+                n_groups,
+                n_args,
+                Some(states),
+                None,
+                Some(out),
+            ),
+            _ => {
+                let (sl, no) = (self.tape.state_len, self.n_out);
+                with_work(|w| {
+                    w.resize(self.work_len(), 0.0);
+                    for g in 0..n_groups {
+                        let a = &args[g * n_args..(g + 1) * n_args];
+                        let st = &states[g * sl..(g + 1) * sl];
+                        self.main_into(a, st, w, &mut out[g * no..(g + 1) * no]);
+                    }
+                });
+            }
+        }
+    }
     fn call_batch(&self, args: &[f64], n_groups: usize, n_args: usize, out: &mut [f64]) {
+        if let Some(lt) = self
+            .lanes
+            .as_ref()
+            .filter(|_| n_groups >= 2 && self.batch == Batch::Serial)
+        {
+            self.run_lanes(
+                lt,
+                Phase::Whole,
+                args,
+                n_groups,
+                n_args,
+                None,
+                None,
+                Some(out),
+            );
+            return;
+        }
         let parallel = match self.batch {
             Batch::Serial => false,
             Batch::Parallel { min_ops } => {
@@ -270,11 +479,43 @@ impl NativeTape {
     /// [`eval_prolog`](Self::eval_prolog) passes
     /// ([`rsdag::SpecializedTape::prolog_guards`]).
     pub fn compile_opts(tape: &Tape, opts: &Options, live: &[u32]) -> Result<NativeTape, JitError> {
+        Self::compile_isa::<Arch>(tape, opts, live)
+    }
+
+    /// The tape as code over [`LANES`] instances at once, each in its lane
+    /// of every register and every slot `LANES` values side by side (see
+    /// [`NativeBody`]'s batches). Bodies that call bodies or run dense
+    /// kernels are not compiled so; nor is anything off x86-64.
+    fn compile_lanes(tape: &Tape) -> Result<NativeTape, JitError> {
+        #[cfg(target_arch = "x86_64")]
+        {
+            Self::compile_isa::<crate::x86_64::X64<LANES>>(tape, &Options::default(), &[])
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = tape;
+            Err(JitError::Unsupported)
+        }
+    }
+
+    fn compile_isa<A: Isa>(
+        tape: &Tape,
+        opts: &Options,
+        live: &[u32],
+    ) -> Result<NativeTape, JitError> {
         let chunk_ops = opts.chunk_ops;
         if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
             return Err(JitError::Unsupported);
         }
         let (mut ops, split) = crate::ir::record(tape);
+        let lanes = A::LANES;
+        if lanes > 1
+            && ops
+                .iter()
+                .any(|op| matches!(op, ROp::Call(_) | ROp::Kernel(_)))
+        {
+            return Err(JitError::Unsupported);
+        }
         // Function bodies that are tapes become native bodies of their own.
         let bundles: Result<Bundles, JitError> = tape
             .bundles()
@@ -282,10 +523,12 @@ impl NativeTape {
             .map(|b| match b.body() {
                 Some(body) => {
                     // Emitted once per body and options, shared by every
-                    // program that calls it.
+                    // program that calls it; with its lane form when it has
+                    // one.
                     let make = || -> Result<Arc<dyn ExternBundle>, JitError> {
                         Ok(Arc::new(NativeBody {
                             tape: NativeTape::compile_opts(body, opts, &[])?,
+                            lanes: NativeTape::compile_lanes(body).ok(),
                             n_out: b.n_outputs(),
                             pure: b.pure_args().to_vec(),
                             batch: opts.batch,
@@ -337,7 +580,39 @@ impl NativeTape {
                 n_inputs = n_inputs.max(i as usize + 1);
             }
         }
-        let gather_len = ops.iter().map(ROp::gather_len).max().unwrap_or(0);
+        // The inputs each phase reads, and an output read from the inputs
+        // counts for the main phase.
+        let mut reads: [Vec<u32>; 2] = [Vec::new(), Vec::new()];
+        for (k, op) in ops.iter().enumerate() {
+            let r = &mut reads[usize::from(k >= split)];
+            op.for_each_operand(|o| {
+                if let Some(i) = input_index(o) {
+                    r.push(i);
+                }
+            });
+            if let ROp::Kernel(kn) = op {
+                for (d, len) in &kn.operands {
+                    if let Dense::Inputs(i) = d {
+                        r.extend(*i..i + len);
+                    }
+                }
+            }
+        }
+        for r in &mut reads {
+            r.sort_unstable();
+            r.dedup();
+        }
+        let gather_len = ops
+            .iter()
+            .map(|op| {
+                if lanes == 1 {
+                    op.gather_len()
+                } else {
+                    lane_gather_len(op, lanes)
+                }
+            })
+            .max()
+            .unwrap_or(0);
         let n_work = tape.n_slots();
         // When each value dies; the outputs are read after the program.
         let liveness = Liveness::new(&ops, n_work, tape.outputs().iter().chain(live).copied());
@@ -356,10 +631,10 @@ impl NativeTape {
             .max()
             .unwrap_or(0);
         let layout = Layout {
-            gather: n_work,
-            scratch: n_work + gather_len,
+            gather: n_work * lanes,
+            scratch: n_work * lanes + gather_len,
             scratch_len,
-            total: (n_work + gather_len + scratch_len).max(1),
+            total: (n_work * lanes + gather_len + scratch_len).max(1),
         };
         // Chunk the prolog and main phases separately so no chunk straddles
         // the split.
@@ -381,7 +656,7 @@ impl NativeTape {
         let emitted: Vec<Emitted> = jobs
             .par_iter()
             .zip(&starts)
-            .map(|(ops, &start)| emit_chunk(ops, start, layout, &liveness))
+            .map(|(ops, &start)| emit_chunk::<A>(ops, start, layout, &liveness))
             .collect();
         // One mapping for all of them: a chunk is position independent (it
         // reaches host routines, descriptors and tables by absolute
@@ -415,6 +690,8 @@ impl NativeTape {
             n_inputs,
             n_ops: tape.n_ops(),
             state_len: tape.state_len(),
+            lanes,
+            reads,
         })
     }
 
@@ -443,7 +720,7 @@ impl NativeTape {
     /// and `work` the layout's length.
     fn run(&self, range: std::ops::Range<usize>, inputs: &[f64], work: &mut [f64]) {
         assert!(
-            work.len() >= self.layout.total && inputs.len() >= self.n_inputs,
+            work.len() >= self.layout.total && inputs.len() >= self.n_inputs * self.lanes,
             "buffers not prepared by this tape"
         );
         let (wp, ip, bp) = (
@@ -620,7 +897,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
     fn drop_index(&mut self, i: usize) {
         if let Some(s) = self.held[i].take() {
             if self.dirty[i] && self.death[i] >= self.pos {
-                self.isa.store(I::CACHE[i], Base::Work, s as usize * 8);
+                self.isa.store(I::CACHE[i], Base::Work, Self::slot_off(s));
             }
             self.dirty[i] = false;
             self.at.remove(&s);
@@ -699,6 +976,10 @@ impl<'a, I: Isa> Emitter<'a, I> {
         self.pinned.iter_mut().for_each(|p| *p = false);
         keep.iter().for_each(|&r| self.pin(r));
     }
+    /// The byte offset of slot (or input) `s`: its `LANES` values side by side.
+    fn slot_off(s: u32) -> usize {
+        s as usize * 8 * I::LANES
+    }
     /// The register holding `slot`, loading it if the cache does not have it.
     fn get(&mut self, slot: u32) -> u8 {
         if let Some(&i) = self.at.get(&slot) {
@@ -709,14 +990,14 @@ impl<'a, I: Isa> Emitter<'a, I> {
             Some(k) => {
                 // An input: read in place, cached, never written back.
                 let r = self.fresh();
-                self.isa.load(r, Base::Inputs, k as usize * 8);
+                self.isa.load(r, Base::Inputs, Self::slot_off(k));
                 self.bind(r, slot, 0);
                 r
             }
             None => {
                 let death = self.live.death(slot, self.pos, false);
                 let r = self.fresh_until(death);
-                self.isa.load(r, Base::Work, slot as usize * 8);
+                self.isa.load(r, Base::Work, Self::slot_off(slot));
                 self.bind(r, slot, death);
                 r
             }
@@ -764,11 +1045,48 @@ impl<'a, I: Isa> Emitter<'a, I> {
         }
         self.isa.call(addr, args);
     }
-    /// A host call whose result is the value of `dst`.
+    /// A host call whose result is the value of `dst`. With lanes, one call
+    /// per lane: the float arguments' lanes go to the gather area, each
+    /// call takes its lane's values, and the results come back together.
     fn call_into(&mut self, dst: u32, addr: *const (), args: &[Arg]) {
-        self.call(addr, args);
+        if I::LANES == 1 {
+            self.call(addr, args);
+            let r = self.fresh_for(dst);
+            self.isa.mov(r, I::RESULT);
+            self.put(dst, r);
+            return;
+        }
+        let l = I::LANES;
+        let base = self.layout.gather * 8;
+        let mut nf = 0;
+        for a in args {
+            if let Arg::F(r) = *a {
+                self.isa.store(r, Base::Work, base + nf * l * 8);
+                nf += 1;
+            }
+        }
+        let res = base + nf * l * 8;
+        for lane in 0..l {
+            self.release_except(&[]);
+            let mut j = 0;
+            let lane_args: Vec<Arg> = args
+                .iter()
+                .map(|a| match *a {
+                    Arg::F(_) => {
+                        let r = self.fresh();
+                        self.isa.load_lane(r, Base::Work, base + (j * l + lane) * 8);
+                        j += 1;
+                        Arg::F(r)
+                    }
+                    Arg::I(i) => Arg::I(i),
+                })
+                .collect();
+            self.call(addr, &lane_args);
+            self.isa.store_lane(I::RESULT, Base::Work, res + lane * 8);
+        }
+        self.release_except(&[]);
         let r = self.fresh_for(dst);
-        self.isa.mov(r, I::RESULT);
+        self.isa.load(r, Base::Work, res);
         self.put(dst, r);
     }
     /// Copy `slots` into the gather area; its byte offset.
@@ -778,6 +1096,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
     /// Copy `slots` into the gather area from element `at` on; the byte
     /// offset of the copy.
     fn gather_at(&mut self, slots: &[u32], at: usize) -> usize {
+        debug_assert_eq!(I::LANES, 1, "lane code gathers lane by lane");
         let base = (self.layout.gather + at) * 8;
         for (k, &s) in slots.iter().enumerate() {
             let r = self.get(s);
@@ -944,6 +1263,37 @@ impl<'a, I: Isa> Emitter<'a, I> {
                     }
                     self.put(dst, acc);
                 }
+                ReduceOp::Min | ReduceOp::Max if I::LANES > 1 => {
+                    // Lane by lane: each term's lanes to the gather area, one
+                    // lane's terms side by side for the routine, its result
+                    // into its lane.
+                    let (l, m) = (I::LANES, args.len());
+                    let base = self.layout.gather * 8;
+                    for (j, &a) in args.iter().enumerate() {
+                        let r = self.get(a);
+                        self.isa.store(r, Base::Work, base + j * l * 8);
+                        self.release_except(&[]);
+                    }
+                    let (row, res) = (base + m * l * 8, base + (m * l + m) * 8);
+                    for lane in 0..l {
+                        for j in 0..m {
+                            let t = self.fresh();
+                            self.isa.load_lane(t, Base::Work, base + (j * l + lane) * 8);
+                            self.isa.store_lane(t, Base::Work, row + j * 8);
+                            self.release_except(&[]);
+                        }
+                        let call = [
+                            Arg::I(IArg::Imm(host::reduce_code(rop))),
+                            Arg::I(IArg::WorkAddr(row)),
+                            Arg::I(IArg::Imm(m as u64)),
+                        ];
+                        self.call(host::h_reduce as *const (), &call);
+                        self.isa.store_lane(I::RESULT, Base::Work, res + lane * 8);
+                    }
+                    let r = self.fresh_for(dst);
+                    self.isa.load(r, Base::Work, res);
+                    self.put(dst, r);
+                }
                 ReduceOp::Min | ReduceOp::Max => {
                     let at = self.gather(args);
                     let args = [
@@ -1086,7 +1436,8 @@ impl<'a, I: Isa> Emitter<'a, I> {
             && !self.at.contains_key(&slot)
             && self.live.death(slot, self.pos, false) == self.pos
         {
-            self.isa.arith_mem(op, d, a, Base::Work, slot as usize * 8);
+            self.isa
+                .arith_mem(op, d, a, Base::Work, Self::slot_off(slot));
             return;
         }
         let b = self.get(slot);
@@ -1216,7 +1567,7 @@ fn hot_routines(ops: &[ROp]) -> Vec<*const ()> {
     count.into_iter().map(|(a, _)| a).collect()
 }
 
-fn emit_chunk(ops: &[ROp], start: usize, layout: Layout, live: &Liveness) -> Emitted {
+fn emit_chunk<A: Isa>(ops: &[ROp], start: usize, layout: Layout, live: &Liveness) -> Emitted {
     let hot = hot_routines(ops);
     // For each op, the next op at or after it that calls out.
     let mut next_call = vec![u32::MAX; ops.len() + 1];
@@ -1227,7 +1578,7 @@ fn emit_chunk(ops: &[ROp], start: usize, layout: Layout, live: &Liveness) -> Emi
             next_call[k + 1]
         };
     }
-    let mut e: Emitter<Arch> = Emitter::new(layout, live, &hot);
+    let mut e: Emitter<A> = Emitter::new(layout, live, &hot);
     let count = |f: fn(&ROp) -> bool| ops.iter().filter(|op| f(op)).count();
     e.descs = Vec::with_capacity(count(|op| matches!(op, ROp::Call(_))));
     e.kernels = Vec::with_capacity(count(|op| matches!(op, ROp::Kernel(_))));

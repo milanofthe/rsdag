@@ -118,6 +118,45 @@ pub trait ExternBundle: Send + Sync {
         self.call_into(args, work, out);
     }
 
+    /// [`prolog_into`](Self::prolog_into) for `n_groups` instances: `pure`
+    /// group-major (`n_pure` values each), `states` likewise
+    /// ([`state_len`](Self::state_len) each). The default loops;
+    /// implementations may run instances side by side, the states bit for
+    /// bit the loop's.
+    fn prolog_batch(&self, pure: &[f64], n_groups: usize, n_pure: usize, states: &mut [f64]) {
+        let sl = self.state_len();
+        crate::parallel::with_scratch(self.work_len(), 0.0, |w| {
+            for g in 0..n_groups {
+                let (p, st) = (
+                    &pure[g * n_pure..(g + 1) * n_pure],
+                    &mut states[g * sl..(g + 1) * sl],
+                );
+                self.prolog_into(p, w, st);
+            }
+        });
+    }
+
+    /// [`main_into`](Self::main_into) for `n_groups` instances: `args`,
+    /// `states` and `out` group-major. The default loops; implementations
+    /// may run instances side by side, the outputs bit for bit the loop's.
+    fn main_batch(
+        &self,
+        args: &[f64],
+        states: &[f64],
+        n_groups: usize,
+        n_args: usize,
+        out: &mut [f64],
+    ) {
+        let (sl, no) = (self.state_len(), self.n_outputs());
+        crate::parallel::with_scratch(self.work_len(), 0.0, |w| {
+            for g in 0..n_groups {
+                let a = &args[g * n_args..(g + 1) * n_args];
+                let st = &states[g * sl..(g + 1) * sl];
+                self.main_into(a, st, w, &mut out[g * no..(g + 1) * no]);
+            }
+        });
+    }
+
     /// Evaluate `n_groups` independent argument groups at once (instance
     /// batching): `args` is group-major (`n_groups * n_args`), `out` likewise
     /// (`n_groups * n_outputs`). The default loops over [`call`](Self::call);
