@@ -151,12 +151,15 @@ pub fn substitute<K: Field>(
     roots: &[ExprId],
     map: &HashMap<SymbolId, ExprId>,
 ) -> Vec<ExprId> {
+    // per function, the copy its calls run (see `Graph::rebound`)
+    let mut copies: HashMap<crate::func::FuncId, Option<crate::func::FuncId>> = HashMap::default();
     rewrite(ctx, roots, |g, e, node, ops| match (node, ops.list) {
         (Node::Symbol(s), _) => map.get(&s).copied().unwrap_or(e),
         // a call whose body reads a symbol `map` binds runs a copy bound so
         (Node::Call(o, _), Some(l)) => {
             let (f, k) = g.output(o);
-            match g.rebound(f, map) {
+            let copy = *copies.entry(f).or_insert_with(|| g.rebound(f, map));
+            match copy {
                 Some(copy) => {
                     let ctx = g.context_onto(ops.ctx, copy);
                     g.call_list_in(copy, k, ctx, l)

@@ -174,11 +174,10 @@ impl<K: Field> Graph<K> {
                 }
             }
             let body = bodies[&plain];
-            let full = g.full_args_in(ops.ctx, l);
             let inst = instances
                 .entry((f, ops.ctx, l))
                 .or_insert_with(|| Instance {
-                    bound: g.binding(f, &full),
+                    bound: g.binding(f, &g.full_args_in(ops.ctx, l)),
                     memo: HashMap::default(),
                     lists: HashMap::default(),
                     contexts: HashMap::default(),
@@ -849,6 +848,8 @@ fn specialize_calls_in<K: Field>(
     // arguments that are not constant, or none
     let mut instances: HashMap<(FuncId, u32, ArgList), Option<(FuncId, u32, ArgList)>> =
         HashMap::default();
+    // per copy and context of the original, the context the copy keeps
+    let mut kept: HashMap<(FuncId, u32), u32> = HashMap::default();
     crate::transform::rewrite(g, roots, |g, _e, node, ops| {
         let (Node::Call(o, _), Some(l)) = (node, ops.list) else {
             return g.rebuild(node, ops);
@@ -857,7 +858,7 @@ fn specialize_calls_in<K: Field>(
         let target = match instances.get(&(f, ops.ctx, l)) {
             Some(&t) => t,
             None => {
-                let t = specialize_instance(g, f, ops.ctx, l, made);
+                let t = specialize_instance(g, f, ops.ctx, l, made, &mut kept);
                 instances.insert((f, ops.ctx, l), t);
                 t
             }
@@ -879,6 +880,7 @@ fn specialize_instance<K: Field>(
     ctx: u32,
     l: ArgList,
     made: &mut Specialized,
+    kept: &mut HashMap<(FuncId, u32), u32>,
 ) -> Option<(FuncId, u32, ArgList)> {
     // A parameter stays an argument even when constant: its work is the
     // body's prolog, and specializing on it would split the instances of
@@ -907,7 +909,8 @@ fn specialize_instance<K: Field>(
     };
     // The kept parameters, in order: those `ctx` binds stay bound in the
     // copy, the others are the arguments. `key.1` is in parameter order:
-    // one merge, not a search per parameter.
+    // one merge, not a search per parameter. The copy's context is the same
+    // for every instance of the context, made once.
     let mut bound_at = vec![false; full.len()];
     if ctx != NO_CONTEXT {
         g.contexts[ctx as usize]
@@ -917,19 +920,27 @@ fn specialize_instance<K: Field>(
     }
     let mut consts_at = key.1.iter().map(|&(p, _)| p as usize).peekable();
     let (mut rest, mut rebound): (Vec<ExprId>, Vec<(u32, ExprId)>) = (Vec::new(), Vec::new());
+    let known = kept.get(&(copy, ctx)).copied();
     let mut j = 0u32;
     for (k, &a) in full.iter().enumerate() {
         if consts_at.next_if_eq(&k).is_some() {
             continue;
         }
-        if bound_at[k] {
-            rebound.push((j, a));
-        } else {
+        if !bound_at[k] {
             rest.push(a);
+        } else if known.is_none() {
+            rebound.push((j, a));
         }
         j += 1;
     }
-    let ctx = g.bind(copy, &rebound).ctx;
+    let ctx = match known {
+        Some(c) => c,
+        None => {
+            let c = g.bind(copy, &rebound).ctx;
+            kept.insert((copy, ctx), c);
+            c
+        }
+    };
     Some((copy, ctx, g.intern_args(&rest)))
 }
 
