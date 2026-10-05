@@ -110,6 +110,9 @@ impl Memo {
 
 mod calls;
 mod compose;
+mod flow;
+
+pub(crate) use flow::{Join, Set, Through};
 
 impl<K: Field> Default for Graph<K> {
     fn default() -> Self {
