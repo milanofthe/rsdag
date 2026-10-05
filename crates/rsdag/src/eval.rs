@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use crate::field::Field;
-use crate::func::{Body, FuncId, Output};
+use crate::func::{Body, FuncId, Output, OutputId};
 use crate::graph::Graph;
 use crate::node::ArgList;
 use crate::node::{ExprId, Node, SymbolId};
@@ -25,7 +25,7 @@ fn node_value<T: Scalar, K: Field>(
     node: &Node,
     mut get: impl FnMut(ExprId) -> T,
     sym: &mut impl FnMut(SymbolId) -> T,
-    call: &mut impl FnMut(FuncId, u32, ArgList, &[T]) -> T,
+    call: &mut impl FnMut(OutputId, ArgList, &[T]) -> T,
     solve: &mut impl FnMut(ArgList, &[T], u32) -> T,
 ) -> T {
     match *node {
@@ -56,16 +56,11 @@ fn node_value<T: Scalar, K: Field>(
             T::dot_slice(&va, &vb)
         }
         Node::Call(o, l) => {
-            // the arguments, then the globals the body reads
-            let (f, out) = ctx.output(o);
-            let globals = ctx.globals(f);
-            let vals: Vec<T> = ctx
-                .args(l)
-                .iter()
-                .chain(&globals[..])
-                .map(|&a| get(a))
-                .collect();
-            call(f, out, l, &vals)
+            // the operands in parameter order, then the globals the body reads
+            let globals = ctx.globals(ctx.output(o).0);
+            let full = ctx.full_args(o, l);
+            let vals: Vec<T> = full.iter().chain(&globals[..]).map(|&a| get(a)).collect();
+            call(o, l, &vals)
         }
         Node::Solve(l, i) => {
             let vals: Vec<T> = ctx.args(l).iter().map(|&a| get(a)).collect();
@@ -102,8 +97,7 @@ pub fn eval<T: Scalar, K: Field>(
     for &e in &cone {
         let node = *ctx.node(e);
         let mut sym = |s: SymbolId| env.get(&s).copied().unwrap_or(T::nan());
-        let mut call =
-            |f: FuncId, out: u32, l: ArgList, args: &[T]| fe.output(ctx, f, out, l, args);
+        let mut call = |o: OutputId, l: ArgList, args: &[T]| fe.output(ctx, o, l, args);
         let mut solve = |l: ArgList, vals: &[T], i: u32| -> T {
             solved.entry(l).or_insert_with(|| {
                 let n = Graph::<K>::solve_n(vals.len());
@@ -141,7 +135,8 @@ pub fn eval_named<T: Scalar, K: Field>(
 /// every distinct `(function, argument list)` already evaluated.
 pub struct FuncEval<T: Scalar> {
     bodies: rustc_hash::FxHashMap<FuncId, Body>,
-    vals: rustc_hash::FxHashMap<(FuncId, ArgList), Vec<T>>,
+    /// Per instance (function, context, argument list), its outputs.
+    vals: rustc_hash::FxHashMap<(FuncId, u32, ArgList), Vec<T>>,
     /// The outputs the sweep calls per function, declared up front so one
     /// body serves the whole sweep (see [`Function::body_for`]).
     needed: rustc_hash::FxHashMap<FuncId, Vec<u32>>,
@@ -165,16 +160,12 @@ impl<T: Scalar> FuncEval<T> {
         }
     }
 
-    /// Output `out` of `f` at the argument values `args` (whose interned list
-    /// `l` keys the memo).
-    pub fn output<K: Field>(
-        &mut self,
-        ctx: &Graph<K>,
-        f: FuncId,
-        out: u32,
-        l: ArgList,
-        args: &[T],
-    ) -> T {
+    /// The value of a call of output `o` over the list `l` at the values
+    /// `args` of its operands (in its function's parameter order, then its
+    /// globals); the instance keys the memo.
+    pub fn output<K: Field>(&mut self, ctx: &Graph<K>, o: OutputId, l: ArgList, args: &[T]) -> T {
+        let (f, out) = ctx.output(o);
+        let site = (f, ctx.context_of(o), l);
         let func = ctx.func(f);
         if matches!(func.outputs()[out as usize], Output::Zero) {
             return T::zero();
@@ -194,14 +185,14 @@ impl<T: Scalar> FuncEval<T> {
             self.vals.retain(|k, _| k.0 != f);
             *body = fresh;
             let slot = body.slot_of[out as usize].expect("a body carries every output");
-            return self.eval_slot(f, l, args, slot);
+            return self.eval_slot(site, args, slot);
         };
-        self.eval_slot(f, l, args, slot)
+        self.eval_slot(site, args, slot)
     }
 
-    fn eval_slot(&mut self, f: FuncId, l: ArgList, args: &[T], slot: u32) -> T {
-        let body = &self.bodies[&f];
-        let vals = self.vals.entry((f, l)).or_insert_with(|| {
+    fn eval_slot(&mut self, site: (FuncId, u32, ArgList), args: &[T], slot: u32) -> T {
+        let body = &self.bodies[&site.0];
+        let vals = self.vals.entry(site).or_insert_with(|| {
             let mut out = vec![T::zero(); body.bundle.n_outputs()];
             T::call_bundle(&*body.bundle, args, &mut out);
             out

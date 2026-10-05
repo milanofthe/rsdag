@@ -114,7 +114,16 @@ impl<K: Field> Graph<K> {
                             nl
                         }
                     };
-                    self.call_list(g, k, nl)
+                    // a bound call: its context over the imported expressions
+                    let ctx = match other.context(o) {
+                        None => crate::graph::NO_CONTEXT,
+                        Some((at, exprs)) => {
+                            let pairs: Vec<(u32, ExprId)> =
+                                at.iter().zip(exprs).map(|(&p, e)| (p, map[e])).collect();
+                            self.bind(g, &pairs).ctx
+                        }
+                    };
+                    self.call_list_in(g, k, ctx, nl)
                 }
                 _ => {
                     ops.clear();
