@@ -23,6 +23,7 @@ pub mod mathfn;
 pub mod module;
 pub mod node;
 pub mod nonlinearity;
+pub mod parallel;
 pub mod role;
 pub mod scalar;
 pub mod scope;

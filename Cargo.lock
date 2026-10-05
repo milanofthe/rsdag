@@ -340,6 +340,7 @@ dependencies = [
  "num-complex",
  "num-rational",
  "num-traits",
+ "rayon",
  "rsdag",
  "rustc-hash",
  "serde",
