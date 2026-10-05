@@ -155,6 +155,7 @@ fn inert(node: &Node) -> usize {
 /// Values over a cone (see [`Graph::flow`]).
 pub(crate) struct Flow<V> {
     at: Memo,
+    cone: Vec<ExprId>,
     vals: Vec<V>,
 }
 
@@ -169,6 +170,18 @@ impl<V> Flow<V> {
     /// The value of a node of the cone.
     pub(crate) fn get(&self, e: ExprId) -> &V {
         &self.vals[self.at.get(e).expect("a node of the cone").0 as usize]
+    }
+    /// The cone, ascending (topological).
+    pub(crate) fn cone(&self) -> &[ExprId] {
+        &self.cone
+    }
+    /// A node's place in the cone, if it is in it.
+    pub(crate) fn position(&self, e: ExprId) -> Option<usize> {
+        self.at.get(e).map(|p| p.0 as usize)
+    }
+    /// The values, in the cone's order.
+    pub(crate) fn values(&self) -> &[V] {
+        &self.vals
     }
 }
 
@@ -267,7 +280,7 @@ impl<K: Field> Graph<K> {
             };
             vals.push(v);
         }
-        Flow { at, vals }
+        Flow { at, cone, vals }
     }
 
     /// Per output of `f`, the parameters among `moving` (indices, ascending)

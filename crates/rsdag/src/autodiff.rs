@@ -335,25 +335,6 @@ pub(crate) fn carrying<K: Field>(ctx: &Graph<K>, e: ExprId, out: &mut Vec<ExprId
     }
 }
 
-/// The nodes under `root` through operands that carry a derivative, marked
-/// in `seen`, in ascending id order: a topological one, a hash-consed node
-/// having a larger id than its operands.
-fn cone<K: Field>(ctx: &Graph<K>, root: ExprId, seen: &mut Memo) -> Vec<ExprId> {
-    let mut out = Vec::new();
-    let mut stack = vec![root];
-    let mut ops = Vec::new();
-    while let Some(e) = stack.pop() {
-        if seen.get(e).is_none() {
-            seen.set(e, e);
-            out.push(e);
-            carrying(ctx, e, &mut ops);
-            stack.extend_from_slice(&ops);
-        }
-    }
-    out.sort_unstable();
-    out
-}
-
 /// One forward sweep: `d root / d wrt` for every root. The derivative of
 /// every node below is kept in `memo`, so a subexpression shared by the
 /// roots (or by the roots of a later sweep over the same `wrt` and memo)
@@ -617,29 +598,18 @@ pub fn sparse_jacobian<K: Field>(
 /// be differentiated again (see [`hessian`]).
 pub fn gradient<K: Field>(ctx: &mut Graph<K>, f: ExprId, wrt: &[SymbolId]) -> Vec<ExprId> {
     // The cone of f, ascending: walked backwards, every node comes after
-    // all of its consumers. `pos` is a node's place in it.
-    let mut pos = ctx.take_memo();
-    let nodes = cone(ctx, f, &mut pos);
-    for (k, &e) in nodes.iter().enumerate() {
-        pos.set(e, ExprId(k as u32));
-    }
-    let at = |e: ExprId| pos.get(e).expect("in the cone").0 as usize;
-    // Activity: a node is active if it depends on a symbol of `wrt`. Only
-    // active operands receive an adjoint, so a subgraph over other symbols
-    // (the parameters not asked for, a call's constant arguments) builds
-    // nothing.
+    // all of its consumers. Activity: a node is active if a derivative
+    // reaches it from a symbol of `wrt`. Only active operands receive an
+    // adjoint, so a subgraph over other symbols (the parameters not asked
+    // for, a call's constant arguments) builds nothing.
     let wanted: rustc_hash::FxHashSet<SymbolId> = wrt.iter().copied().collect();
-    let mut active = vec![false; nodes.len()];
-    let mut ops = Vec::new();
-    for (k, &e) in nodes.iter().enumerate() {
-        active[k] = match *ctx.node(e) {
-            Node::Symbol(s) => wanted.contains(&s),
-            _ => {
-                carrying(ctx, e, &mut ops);
-                ops.iter().any(|&c| active[at(c)])
-            }
-        };
-    }
+    let flow = ctx.flow(&[f], Through::Carries, |n| match *n {
+        Node::Symbol(s) => wanted.contains(&s),
+        _ => false,
+    });
+    let nodes = flow.cone().to_vec();
+    let active = flow.values().to_vec();
+    let at = |e: ExprId| flow.position(e).expect("in the cone");
     let act = |e: ExprId| active[at(e)];
 
     // Adjoint accumulation: per node a term list, folded into one fused
@@ -806,9 +776,9 @@ pub fn gradient<K: Field>(ctx: &mut Graph<K>, f: ExprId, wrt: &[SymbolId]) -> Ve
                     x_bar[k] = if xk == e {
                         a_bar
                     } else {
-                        match pos.get(xk) {
+                        match flow.position(xk) {
                             Some(p) => {
-                                let t = std::mem::take(&mut adj[p.0 as usize]);
+                                let t = std::mem::take(&mut adj[p]);
                                 ctx.reduce(ReduceOp::Sum, t)
                             }
                             None => zero,
@@ -852,7 +822,7 @@ pub fn gradient<K: Field>(ctx: &mut Graph<K>, f: ExprId, wrt: &[SymbolId]) -> Ve
             }
         }
     }
-    ctx.put_memo(pos);
+    drop(flow);
     wrt.iter()
         .map(|s| sym_adj.get(s).copied().unwrap_or(zero))
         .collect()
