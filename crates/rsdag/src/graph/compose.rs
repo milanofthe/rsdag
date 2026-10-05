@@ -92,26 +92,7 @@ impl<K: Field> Graph<K> {
         imported: &mut HashMap<FuncId, FuncId>,
     ) -> Vec<ExprId> {
         // the cone of `roots` in `other`, ascending: operands first
-        // (a call's list once: an instance's calls share it)
-        let mut seen: FxHashSet<ExprId> = FxHashSet::default();
-        let mut walked: FxHashSet<ArgList> = FxHashSet::default();
-        let mut stack: Vec<ExprId> = roots.to_vec();
-        let mut cone: Vec<ExprId> = Vec::new();
-        while let Some(e) = stack.pop() {
-            if !seen.insert(e) {
-                continue;
-            }
-            cone.push(e);
-            match *other.node(e) {
-                Node::Call(_, l) => {
-                    if walked.insert(l) {
-                        stack.extend_from_slice(other.args(l));
-                    }
-                }
-                _ => stack.extend_from_slice(&other.operands(e)),
-            }
-        }
-        cone.sort_unstable();
+        let cone = other.cone_sorted(roots);
         let mut map: HashMap<ExprId, ExprId> = HashMap::default();
         map.reserve(cone.len());
         let mut lists: HashMap<ArgList, ArgList> = HashMap::default();
