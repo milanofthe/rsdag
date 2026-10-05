@@ -92,7 +92,13 @@ pub struct Function {
     /// [`Graph::output_support`](crate::Graph::output_support)). An output
     /// never changes once pushed, so neither does its support.
     support: std::sync::Mutex<Vec<Option<Arc<[u32]>>>>,
+    /// What each output reads, per way through and set of moving
+    /// parameters (see `Graph::reads`).
+    reads: std::sync::Mutex<HashMap<ReadsKey, Arc<[Arc<[u32]>]>>>,
 }
+
+/// A way through calls and a set of moving parameters (see `Graph::reads`).
+pub(crate) type ReadsKey = (crate::graph::Through, Box<[u32]>);
 
 /// A function body evaluated by the interpreter: the fallback every consumer
 /// can build from the symbolic outputs alone, so a tape or an arena sweep is
@@ -186,6 +192,7 @@ impl Function {
             interpreted: Default::default(),
             deriv_index: HashMap::default(),
             support: Default::default(),
+            reads: Default::default(),
         }
     }
 
@@ -225,6 +232,14 @@ impl Function {
             .get(out as usize)
             .cloned()
             .flatten()
+    }
+
+    pub(crate) fn cached_reads(&self, key: &ReadsKey) -> Option<Arc<[Arc<[u32]>]>> {
+        self.reads.lock().unwrap().get(key).cloned()
+    }
+
+    pub(crate) fn cache_reads(&self, key: ReadsKey, reads: Arc<[Arc<[u32]>]>) {
+        self.reads.lock().unwrap().insert(key, reads);
     }
 
     pub(crate) fn cache_support(&self, out: u32, support: Arc<[u32]>) {

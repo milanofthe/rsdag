@@ -7,7 +7,7 @@
 use crate::field::Field;
 use rustc_hash::FxHashMap as HashMap;
 
-use crate::graph::{Graph, Memo};
+use crate::graph::{Graph, Join, Memo, Set, Through};
 use crate::node::{BinOp, CmpOp, ExprId, Node, ReduceOp, SymbolId, UnaryOp};
 
 /// Derivative of `expr` with respect to the symbol `wrt`.
@@ -553,20 +553,27 @@ pub fn sparse_jacobian<K: Field>(
     residuals: &[ExprId],
     wrt: &[SymbolId],
 ) -> SparseRows {
-    let col: rustc_hash::FxHashMap<SymbolId, usize> =
-        wrt.iter().enumerate().map(|(j, &s)| (s, j)).collect();
+    let col: rustc_hash::FxHashMap<SymbolId, u32> = wrt
+        .iter()
+        .enumerate()
+        .map(|(j, &s)| (s, j as u32))
+        .collect();
+    // every row's columns in one pass over the rows' cone
+    let flow = ctx.flow(residuals, Through::Carries, |n| match *n {
+        Node::Symbol(s) => col.get(&s).map_or(Set::bottom(), |&j| Set::one(j)),
+        _ => Set::bottom(),
+    });
     let touched: Vec<Vec<(usize, SymbolId)>> = residuals
         .iter()
         .map(|&r| {
-            let mut t: Vec<(usize, SymbolId)> = ctx
-                .support_in(&[r])
-                .into_iter()
-                .filter_map(|s| col.get(&s).map(|&j| (j, s)))
-                .collect();
-            t.sort_unstable_by_key(|&(j, _)| j);
-            t
+            flow.get(r)
+                .as_slice()
+                .iter()
+                .map(|&j| (j as usize, wrt[j as usize]))
+                .collect()
         })
         .collect();
+    drop(flow);
     let mut rows: SparseRows = vec![Vec::new(); residuals.len()];
     // Forward rows by the columns they touch, rows in order within one.
     let mut by_col: Vec<Vec<usize>> = vec![Vec::new(); wrt.len()];
