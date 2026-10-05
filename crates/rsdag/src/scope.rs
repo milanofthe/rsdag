@@ -111,7 +111,7 @@ impl<'g, K: Field> Scope<'g, K> {
     /// As [`Scope::close`], giving each output its role.
     pub fn close_with_roles(mut self, outputs: Vec<(OutputRole, ExprId)>) -> FuncId {
         let exprs: Vec<ExprId> = outputs.iter().map(|&(_, e)| e).collect();
-        for s in self.graph.free_symbols_in(&exprs) {
+        for s in self.graph.mentioned_symbols_in(&exprs) {
             if !self.params.contains(&s) && !self.globals.contains(&s) {
                 self.params.push(s);
                 self.roles.push(ParamRole::Free);

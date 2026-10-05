@@ -132,8 +132,9 @@ fn a_call_reads_the_globals_of_its_body() {
     let support = c.g.support_in(&roots);
     assert!(support.contains(&c.card[0]) && support.contains(&c.card[1]));
     assert!(c.g.depends_on(&roots[..1], &[c.card[1]])[0]);
-    // what the roots mention, not what the bodies they call read
-    assert!(!c.g.free_symbols_in(&roots).contains(&c.card[0]));
+    // what the roots read, not only what they mention
+    assert!(c.g.free_symbols_in(&roots).contains(&c.card[0]));
+    assert!(!c.g.mentioned_symbols_in(&roots).contains(&c.card[0]));
 }
 
 #[test]
