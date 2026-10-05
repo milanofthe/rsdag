@@ -109,17 +109,26 @@ pub(crate) struct CallDesc {
     /// Ops the call carries (its instances times its body's), for
     /// [`h_stage`]'s choice of running in parallel.
     pub(crate) ops: u64,
+    /// The operands the arguments are gathered from (a slot, or an input
+    /// tagged as in the tape), for a call too wide to gather in its code;
+    /// `0` when the code gathered them.
+    pub(crate) table: u64,
 }
 
 /// Every bundle call: whole, main phase over its states, or prolog.
-pub(crate) extern "C" fn h_call(bundles: *const Bundles, d: *const CallDesc, work: *mut f64) {
+pub(crate) extern "C" fn h_call(
+    bundles: *const Bundles,
+    d: *const CallDesc,
+    work: *mut f64,
+    inputs: *const f64,
+) {
     let d = unsafe { &*d };
     let b = unsafe { &*bundles };
     let scratch = unsafe {
         std::slice::from_raw_parts_mut(work.add(d.scratch as usize / 8), d.scratch_len as usize)
     };
     // SAFETY: the call's regions are disjoint by the layout.
-    guarded(|| unsafe { run_call(b, d, work, 0..d.n_groups as usize, scratch) });
+    guarded(|| unsafe { run_call(b, d, work, inputs, 0..d.n_groups as usize, scratch) });
 }
 
 /// The calls of a stage ([`rsdag::Stage`]): `n` descriptors from `d` on,
@@ -132,6 +141,7 @@ pub(crate) extern "C" fn h_stage(
     d: *const CallDesc,
     n: u64,
     work: *mut f64,
+    inputs: *const f64,
 ) {
     let descs = unsafe { std::slice::from_raw_parts(d, n as usize) };
     let b = unsafe { &*bundles };
@@ -146,7 +156,7 @@ pub(crate) extern "C" fn h_stage(
                     )
                 };
                 // SAFETY: as in `h_call`, one call at a time.
-                unsafe { run_call(b, d, work, 0..d.n_groups as usize, scratch) };
+                unsafe { run_call(b, d, work, inputs, 0..d.n_groups as usize, scratch) };
             }
             return;
         }
@@ -162,7 +172,7 @@ pub(crate) extern "C" fn h_stage(
                     .map(move |g0| (k, g0, (g0 + bs).min(ng)))
             })
             .collect();
-        let w = WorkPtr(work);
+        let (w, ins) = (WorkPtr(work), WorkPtr(inputs as *mut f64));
         rsdag::parallel::run(items.len(), ops as usize, &|it| {
             let (k, g0, g1) = items[it];
             let d = &descs[k];
@@ -171,13 +181,14 @@ pub(crate) extern "C" fn h_stage(
                 // writes (`rsdag`'s stage planning), their arguments are
                 // gathered apart, and a block writes its own instances'
                 // part of its call's outputs.
-                unsafe { run_call(b, d, w.get(), g0..g1, scratch) }
+                unsafe { run_call(b, d, w.get(), ins.get(), g0..g1, scratch) }
             });
         });
     });
 }
 
-/// The work array of a stage, shared by its blocks of instances.
+/// The work array (or the inputs) of a stage, shared by its blocks of
+/// instances.
 #[derive(Clone, Copy)]
 struct WorkPtr(*mut f64);
 // SAFETY: the blocks of a stage access disjoint parts of the work array or
@@ -190,15 +201,18 @@ impl WorkPtr {
     }
 }
 
-/// Instances `groups` of the call `d` over `scratch`.
+/// Instances `groups` of the call `d` over `scratch`, their arguments
+/// gathered first where the code left that to the table.
 ///
 /// # Safety
-/// `work` holds the call's regions; nothing else accesses the instances'
-/// outputs while this runs, and nothing writes their arguments or states.
+/// `work` holds the call's regions and `inputs` the program's inputs;
+/// nothing else accesses the instances' arguments and outputs while this
+/// runs, and nothing writes what they read or their states.
 unsafe fn run_call(
     bundles: &Bundles,
     d: &CallDesc,
     work: *mut f64,
+    inputs: *const f64,
     groups: std::ops::Range<usize>,
     scratch: &mut [f64],
 ) {
@@ -206,6 +220,19 @@ unsafe fn run_call(
     let (na, no, sl) = (d.n_args as usize, d.n_out as usize, d.state_len as usize);
     let (g0, ng) = (groups.start, groups.len());
     let at = |off: u64| unsafe { work.add(off as usize / 8) };
+    if d.table != 0 {
+        let from =
+            unsafe { std::slice::from_raw_parts((d.table as *const u32).add(g0 * na), ng * na) };
+        let to = unsafe { std::slice::from_raw_parts_mut(at(d.args).add(g0 * na), ng * na) };
+        for (x, &s) in to.iter_mut().zip(from) {
+            *x = unsafe {
+                match rsdag::tape::input_index(s) {
+                    Some(i) => *inputs.add(i as usize),
+                    None => *work.add(s as usize),
+                }
+            };
+        }
+    }
     let args = unsafe { std::slice::from_raw_parts(at(d.args).add(g0 * na), ng * na) };
     let out = unsafe { std::slice::from_raw_parts_mut(at(d.out).add(g0 * no), ng * no) };
     match d.kind {
