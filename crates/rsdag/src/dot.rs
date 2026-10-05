@@ -555,16 +555,23 @@ impl<'g, K: Field> GraphView<'g, K> {
     /// The clusters and links of the called functions' bodies (see
     /// [`bodies`](Self::bodies)), after the given ones: a body's frame
     /// holds the nodes it reaches that nothing drawn before reaches.
+    /// The bodies' parameters with the `Param` role are drawn as
+    /// parameters.
     #[allow(clippy::type_complexity)]
     fn with_bodies(
         &self,
         seeds: &[ExprId],
-    ) -> (Vec<(String, Vec<ExprId>)>, Vec<(ExprId, ExprId, String)>) {
+    ) -> (
+        Vec<(String, Vec<ExprId>)>,
+        Vec<(ExprId, ExprId, String)>,
+        FxHashSet<SymbolId>,
+    ) {
         let g = self.g;
         let mut clusters = self.clusters.clone();
         let mut links = self.links.clone();
+        let mut params = self.params.clone();
         if !self.bodies {
-            return (clusters, links);
+            return (clusters, links, params);
         }
         let mut drawn = reachable(g, seeds);
         let mut frame: FxHashMap<FuncId, usize> = FxHashMap::default();
@@ -586,7 +593,15 @@ impl<'g, K: Field> GraphView<'g, K> {
                     continue;
                 }
                 let c = *frame.entry(f).or_insert_with(|| {
-                    clusters.push((g.func(f).name().to_string(), Vec::new()));
+                    let func = g.func(f);
+                    params.extend(
+                        func.params()
+                            .iter()
+                            .zip(func.param_roles())
+                            .filter(|(_, r)| matches!(r, crate::ParamRole::Param))
+                            .map(|(&s, _)| s),
+                    );
+                    clusters.push((func.name().to_string(), Vec::new()));
                     clusters.len() - 1
                 });
                 for n in reachable(g, &[b]) {
@@ -598,7 +613,7 @@ impl<'g, K: Field> GraphView<'g, K> {
             }
             todo = next;
         }
-        (clusters, links)
+        (clusters, links, params)
     }
 
     fn faded(&self, e: ExprId) -> bool {
@@ -606,7 +621,7 @@ impl<'g, K: Field> GraphView<'g, K> {
     }
 
     /// The label and kind of node `e`.
-    fn style(&self, e: ExprId) -> (String, Kind) {
+    fn style(&self, e: ExprId, params: &FxHashSet<SymbolId>) -> (String, Kind) {
         let g = self.g;
         let math = self.theme.notation == Notation::Math;
         match *g.node(e) {
@@ -620,7 +635,7 @@ impl<'g, K: Field> GraphView<'g, K> {
             }
             Node::Symbol(s) => (
                 g.symbol_name(s).to_string(),
-                if self.params.contains(&s) {
+                if params.contains(&s) {
                     Kind::Param
                 } else {
                     Kind::Input
@@ -688,7 +703,7 @@ impl<'g, K: Field> GraphView<'g, K> {
             seeds.push(a);
             seeds.push(b);
         }
-        let (clusters, links) = self.with_bodies(&seeds);
+        let (clusters, links, params) = self.with_bodies(&seeds);
         for (_, ids) in &clusters {
             seeds.extend(ids.iter().copied());
         }
@@ -703,7 +718,7 @@ impl<'g, K: Field> GraphView<'g, K> {
         }
         let mut s = t.header(self.rankdir);
         let node_line = |e: ExprId| {
-            let (label, kind) = self.style(e);
+            let (label, kind) = self.style(e, &params);
             format!("n{} [{}];\n", e.0, t.node(kind, &label, self.faded(e)))
         };
         for (c, (label, _)) in clusters.iter().enumerate() {
