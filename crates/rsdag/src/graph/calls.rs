@@ -180,24 +180,83 @@ impl<K: Field> Graph<K> {
         })
     }
 
+    /// `f` with the globals `map` binds to something else than themselves
+    /// substituted in its body, its nested calls' included: the function a
+    /// call of `f` runs where `map` holds (a substitution, a caller binding
+    /// a parameter some called body reads as a global). `None` when `map`
+    /// binds none of them. One copy per function and binding; the copy
+    /// keeps `f`'s parameters, roles and output indices, and the derivative
+    /// roles with respect to its parameters.
+    pub(crate) fn rebound(&mut self, f: FuncId, map: &HashMap<SymbolId, ExprId>) -> Option<FuncId> {
+        let globals = self.globals(f);
+        let mut binding: Vec<(SymbolId, ExprId)> = globals
+            .iter()
+            .filter_map(|&e| match *self.node(e) {
+                Node::Symbol(s) => map.get(&s).filter(|&&v| v != e).map(|&v| (s, v)),
+                _ => None,
+            })
+            .collect();
+        if binding.is_empty() {
+            return None;
+        }
+        binding.sort_unstable();
+        if let Some(&copy) = self.rebound.get(&(f, binding.clone())) {
+            return Some(copy);
+        }
+        let func = self.func(f);
+        let (name, params) = (func.name().to_string(), func.params().to_vec());
+        let roles = func.param_roles().to_vec();
+        let (outputs, out_roles) = (func.outputs().to_vec(), func.output_roles().to_vec());
+        let bound: HashMap<SymbolId, ExprId> = binding.iter().copied().collect();
+        let exprs: Vec<ExprId> = outputs
+            .iter()
+            .filter_map(|o| match *o {
+                Output::Expr(e) => Some(e),
+                _ => None,
+            })
+            .collect();
+        let mut done = crate::transform::substitute(self, &exprs, &bound).into_iter();
+        let copy = self.push_function(Function::new(&name, params.clone(), None));
+        for (k, &r) in roles.iter().enumerate() {
+            self.set_param_role(copy, k as u32, r);
+        }
+        for (o, role) in outputs.iter().zip(out_roles) {
+            let out = match *o {
+                Output::Expr(_) => Output::Expr(done.next().expect("one per expression")),
+                other => other,
+            };
+            let role = match role {
+                OutputRole::Derivative { wrt, .. } if wrt as usize >= params.len() => {
+                    OutputRole::Plain
+                }
+                r => r,
+            };
+            self.push_output(copy, out, role);
+        }
+        self.rebound.insert((f, binding), copy);
+        Some(copy)
+    }
+
     /// The parameters of `f` bound to the arguments of a call.
     fn bind(&self, f: FuncId, args: &[ExprId]) -> HashMap<SymbolId, ExprId> {
         let params = self.funcs[f.0 as usize].params();
         params.iter().copied().zip(args.iter().copied()).collect()
     }
 
-    /// The parameters output `out` of `f` can have a nonzero derivative in,
-    /// by index, ascending: its [`support_in`](Self::support_in) among the
-    /// function's parameters. Structural, read off the graph. The outputs of
-    /// a function share their body, so the ones not known yet are found in
-    /// one pass over it, and each is kept. An extern output is taken to read
-    /// every parameter, a zero one none.
+    /// The operands of a call (its parameters, then its globals, see
+    /// [`globals`](Self::globals)) output `out` of `f` can have a nonzero
+    /// derivative in, by index, ascending: its [`support_in`](Self::support_in)
+    /// among them. Structural, read off the graph. The outputs of a function
+    /// share their body, so the ones not known yet are found in one pass
+    /// over it, and each is kept. An extern output is taken to read every
+    /// parameter, a zero one none.
     pub fn output_support(&self, f: FuncId, out: u32) -> Arc<[u32]> {
         let func = &self.funcs[f.0 as usize];
         if let Some(s) = func.cached_support(out) {
             return s;
         }
-        let all: Vec<u32> = (0..func.params().len() as u32).collect();
+        let n = func.params().len() + self.globals(f).len();
+        let all: Vec<u32> = (0..n as u32).collect();
         let reads = self.reads(f, Through::Carries, &all);
         for (k, r) in reads.iter().enumerate() {
             func.cache_support(k as u32, r.clone());
@@ -449,7 +508,7 @@ impl<K: Field> Graph<K> {
         let output = func.outputs()[out as usize];
         let d = match output {
             Output::Expr(e) => {
-                let wrt = func.params()[param as usize];
+                let wrt = self.operand_symbol(f, param);
                 let de = crate::autodiff::differentiate(self, e, wrt);
                 if self.is_zero(de) {
                     Output::Zero
@@ -484,7 +543,7 @@ impl<K: Field> Graph<K> {
                 .collect();
             if missing.len() >= crate::autodiff::REVERSE_MIN_TOUCHED {
                 let wrt: Vec<SymbolId> =
-                    missing.iter().map(|&p| func.params()[p as usize]).collect();
+                    missing.iter().map(|&p| self.operand_symbol(f, p)).collect();
                 let grad = crate::autodiff::gradient(self, e, &wrt);
                 for (&p, d) in missing.iter().zip(grad) {
                     let d = if self.is_zero(d) {
@@ -532,7 +591,7 @@ impl<K: Field> Graph<K> {
     /// the forest). A solver uses it to compile exactly the outputs a set of
     /// roots reads.
     pub fn free_calls_in(&self, exprs: &[ExprId]) -> std::collections::BTreeSet<OutputId> {
-        self.cone_nodes(exprs)
+        self.cone_nodes(exprs, false)
             .into_iter()
             .filter_map(|e| match *self.node(e) {
                 Node::Call(o, _) => Some(o),
@@ -555,7 +614,7 @@ impl<K: Field> Graph<K> {
     /// set so a subexpression hash-consed into several of them is traversed once
     /// (a single pass over the forest, not one per expression).
     pub fn free_symbols_in(&self, exprs: &[ExprId]) -> std::collections::BTreeSet<SymbolId> {
-        self.cone_nodes(exprs)
+        self.cone_nodes(exprs, false)
             .into_iter()
             .filter_map(|e| match *self.node(e) {
                 Node::Symbol(s) => Some(s),
@@ -746,6 +805,7 @@ impl Instance {
                         g.intern_args(&new)
                     });
                     let (f, k) = g.output(o);
+                    let f = g.rebound(f, &self.bound).unwrap_or(f);
                     g.call_list(f, k, nl)
                 }
                 _ => {

@@ -309,10 +309,9 @@ fn all_carrying<K: Field>(ctx: &Graph<K>, e: ExprId, mut test: impl FnMut(ExprId
     match *ctx.node(e) {
         Node::Call(o, l) => {
             let (f, k) = ctx.output(o);
-            let args = ctx.args(l);
             ctx.output_support(f, k)
                 .iter()
-                .all(|&p| test(args[p as usize]))
+                .all(|&p| test(ctx.call_operand(f, l, p)))
         }
         ref node => ctx.operands(e)[inert(node)..].iter().all(|&c| test(c)),
     }
@@ -328,8 +327,11 @@ pub(crate) fn carrying<K: Field>(ctx: &Graph<K>, e: ExprId, out: &mut Vec<ExprId
     match *ctx.node(e) {
         Node::Call(o, l) => {
             let (f, k) = ctx.output(o);
-            let args = ctx.args(l);
-            out.extend(ctx.output_support(f, k).iter().map(|&p| args[p as usize]));
+            out.extend(
+                ctx.output_support(f, k)
+                    .iter()
+                    .map(|&p| ctx.call_operand(f, l, p)),
+            );
         }
         ref node => out.extend_from_slice(&ctx.operands(e)[inert(node)..]),
     }
@@ -485,14 +487,12 @@ fn tangent<K: Field>(ctx: &mut Graph<K>, e: ExprId, wrt: SymbolId, memo: &mut Me
         // each partial a call into the function's derivative output.
         Node::Call(o, l) => {
             let (f, out) = ctx.output(o);
-            let moving: Vec<(u32, ExprId)> = {
-                let args = ctx.args(l);
-                ctx.output_support(f, out)
-                    .iter()
-                    .map(|&i| (i, d(args[i as usize])))
-                    .filter(|&(_, da)| da != zero)
-                    .collect()
-            };
+            let moving: Vec<(u32, ExprId)> = ctx
+                .output_support(f, out)
+                .iter()
+                .map(|&i| (i, d(ctx.call_operand(f, l, i))))
+                .filter(|&(_, da)| da != zero)
+                .collect();
             let params: Vec<u32> = moving.iter().map(|&(i, _)| i).collect();
             let ks = ctx.derivative_outputs(f, out, &params);
             let mut acc = zero;
@@ -804,14 +804,12 @@ pub fn gradient<K: Field>(ctx: &mut Graph<K>, f: ExprId, wrt: &[SymbolId]) -> Ve
             // forward mode, for the arguments that move.
             Node::Call(o, l) => {
                 let (func, out) = ctx.output(o);
-                let moving: Vec<(u32, ExprId)> = {
-                    let args = ctx.args(l);
-                    ctx.output_support(func, out)
-                        .iter()
-                        .map(|&i| (i, args[i as usize]))
-                        .filter(|&(_, a)| act(a))
-                        .collect()
-                };
+                let moving: Vec<(u32, ExprId)> = ctx
+                    .output_support(func, out)
+                    .iter()
+                    .map(|&i| (i, ctx.call_operand(func, l, i)))
+                    .filter(|&(_, a)| act(a))
+                    .collect();
                 let params: Vec<u32> = moving.iter().map(|&(i, _)| i).collect();
                 let ks = ctx.derivative_outputs(func, out, &params);
                 for (&(_, arg), k) in moving.iter().zip(ks) {

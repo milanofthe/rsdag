@@ -92,7 +92,7 @@ impl<K: Field> Graph<K> {
         imported: &mut HashMap<FuncId, FuncId>,
     ) -> Vec<ExprId> {
         // the cone of `roots` in `other`, ascending: operands first
-        let cone = other.cone_sorted(roots);
+        let cone = other.cone_sorted(roots, false);
         let mut map: HashMap<ExprId, ExprId> = HashMap::default();
         map.reserve(cone.len());
         let mut lists: HashMap<ArgList, ArgList> = HashMap::default();

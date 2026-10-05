@@ -56,8 +56,15 @@ fn node_value<T: Scalar, K: Field>(
             T::dot_slice(&va, &vb)
         }
         Node::Call(o, l) => {
-            let vals: Vec<T> = ctx.args(l).iter().map(|&a| get(a)).collect();
+            // the arguments, then the globals the body reads
             let (f, out) = ctx.output(o);
+            let globals = ctx.globals(f);
+            let vals: Vec<T> = ctx
+                .args(l)
+                .iter()
+                .chain(&globals[..])
+                .map(|&a| get(a))
+                .collect();
             call(f, out, l, &vals)
         }
         Node::Solve(l, i) => {
@@ -80,7 +87,7 @@ pub fn eval<T: Scalar, K: Field>(
     env: &HashMap<SymbolId, T>,
 ) -> Vec<T> {
     // the nodes the roots reach, ascending: a node after its operands
-    let cone = ctx.cone_sorted(roots);
+    let cone = ctx.cone_sorted(roots, true);
     let at = |e: ExprId| cone.binary_search(&e).expect("in the cone");
     let mut fe = FuncEval::new();
     for &e in &cone {
