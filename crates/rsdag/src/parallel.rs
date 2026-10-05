@@ -14,7 +14,7 @@
 //! workers awake across the short serial stretches between a solver's
 //! evaluations (a factorization, a step decision) and lets the calling
 //! thread take a share, so a stage costs no thread put to sleep and woken;
-//! with the `rayon` feature every [`rayon::ThreadPool`] is a [`Pool`] too.
+//! with the `rayon` feature every `rayon::ThreadPool` is a [`Pool`] too.
 //! Work running on a pool, and a stage's calls, see no pool installed, so
 //! a call inside a parallel stage runs its own stages serially.
 

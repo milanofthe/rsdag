@@ -238,7 +238,7 @@ const OPAQUE_OPS: u64 = 1000;
 
 /// Ops one instance of `call` runs in its bundle's body: the prolog for a
 /// prolog, the main phase for a call over a state, all of it for a call
-/// without one. A bundle without a body counts [`OPAQUE_OPS`].
+/// without one. A bundle without a body counts 1000 ops.
 pub fn call_ops(bundle: &dyn ExternBundle, call: &Op) -> u64 {
     let Some(t) = bundle.body() else {
         return OPAQUE_OPS;

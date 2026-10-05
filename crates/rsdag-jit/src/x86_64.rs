@@ -11,6 +11,11 @@
 //! keeps to the baseline (as it keeps rsdag's dense kernels to SSE2), so
 //! both paths can be tested on one machine.
 //! Constants are read rip-relative from a pool at the end of the chunk.
+//!
+//! `X64<2>` is the same code over two instances at once: the packed forms
+//! of the same instructions (`addpd` for `addsd`, `cmppd` for `cmpsd`),
+//! each lane the IEEE operation of the scalar code, so a lane's result is
+//! the scalar result bit for bit.
 
 use crate::isa::*;
 use rsdag::node::{CmpOp, ReduceOp};
@@ -33,7 +38,7 @@ const WIN_FRAME: i32 = 168;
 /// Windows wants 32 bytes of shadow space below every call's arguments.
 const WIN_SHADOW: i32 = 32;
 
-pub(crate) struct X64 {
+pub(crate) struct X64<const L: usize> {
     code: Vec<u8>,
     sse41: bool,
     /// Three-operand VEX forms and `vblendvpd`.
@@ -48,7 +53,11 @@ pub(crate) struct X64 {
 
 const HOT_REGS: [u8; 2] = [12, 15];
 
-impl X64 {
+impl<const L: usize> X64<L> {
+    /// The legacy prefix of the arithmetic forms: `F2` (`sd`) or `66` (`pd`).
+    const PFX: u8 = if L == 1 { 0xF2 } else { 0x66 };
+    /// The same as a VEX `pp` field.
+    const PP: u8 = if L == 1 { 3 } else { 1 };
     fn b(&mut self, byte: u8) {
         self.code.push(byte);
     }
@@ -221,10 +230,10 @@ impl X64 {
     /// `xmm0 = (x pred y) ? all ones : 0`, `cmpsd`.
     fn cmp_mask(&mut self, x: u8, y: u8, pred: u8) {
         if self.avx {
-            self.vex_rr(3, 0xC2, 0, x, y);
+            self.vex_rr(Self::PP, 0xC2, 0, x, y);
         } else {
             self.mov(0, x);
-            self.sse(0xF2, 0xC2, 0, y);
+            self.sse(Self::PFX, 0xC2, 0, y);
         }
         self.b(pred);
     }
@@ -245,7 +254,8 @@ impl X64 {
     }
 }
 
-impl Isa for X64 {
+impl<const L: usize> Isa for X64<L> {
+    const LANES: usize = L;
     const CACHE: &'static [u8] = if WIN {
         &[6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 2, 3, 4, 5]
     } else {
@@ -254,7 +264,8 @@ impl Isa for X64 {
     const SAVED: usize = if WIN { 10 } else { 0 };
     const RESULT: u8 = 0;
 
-    fn new(hot: &[*const ()]) -> X64 {
+    fn new(hot: &[*const ()]) -> X64<L> {
+        assert!(L == 1 || L == 2, "one lane or two");
         static BASELINE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let baseline = *BASELINE.get_or_init(|| std::env::var_os("RSDAG_SSE2").is_some());
         #[cfg(target_arch = "x86_64")]
@@ -276,13 +287,14 @@ impl Isa for X64 {
     fn finish(mut self) -> Vec<u8> {
         // The constant pool after the code, each use rip-relative. An entry
         // is 16 bytes, 16-byte aligned (a chunk is placed so): a legacy
-        // `andpd` or `xorpd` reads 16 aligned bytes from memory.
+        // `andpd` or `xorpd` reads 16 aligned bytes from memory. Both halves
+        // hold the constant, so packed code finds it in every lane.
         if !self.pool.is_empty() {
             self.code.resize(self.code.len().next_multiple_of(16), 0xCC);
             let base = self.code.len();
             for c in &self.pool {
                 self.code.extend_from_slice(&c.to_le_bytes());
-                self.code.extend_from_slice(&[0; 8]);
+                self.code.extend_from_slice(&c.to_le_bytes());
             }
             for &(at, k) in &self.fixups {
                 let disp = (base + 16 * k) as i64 - (at + 4) as i64;
@@ -333,19 +345,27 @@ impl Isa for X64 {
     }
 
     fn load(&mut self, r: u8, base: Base, off: usize) {
-        self.sse_mem(0xF2, 0x10, r, Self::base(base), off);
+        // movsd, or movupd (the work array is 8-byte aligned)
+        self.sse_mem(Self::PFX, 0x10, r, Self::base(base), off);
     }
     fn store(&mut self, r: u8, base: Base, off: usize) {
+        self.sse_mem(Self::PFX, 0x11, r, Self::base(base), off);
+    }
+    fn load_lane(&mut self, r: u8, base: Base, off: usize) {
+        self.sse_mem(0xF2, 0x10, r, Self::base(base), off);
+    }
+    fn store_lane(&mut self, r: u8, base: Base, off: usize) {
         self.sse_mem(0xF2, 0x11, r, Self::base(base), off);
     }
     fn fconst(&mut self, r: u8, v: f64) {
         if v.to_bits() == 0 {
             self.sse(0x66, 0x57, r, r); // xorpd r, r
         } else {
-            // movsd r, [rip + constant]
-            self.b(0xF2);
+            // movsd r, [rip + constant], or movapd for both lanes (the pool
+            // entry is 16 aligned bytes holding the constant twice)
+            self.b(if L == 1 { 0xF2 } else { 0x66 });
             self.rex(false, r, 0);
-            self.bytes(&[0x0F, 0x10]);
+            self.bytes(&[0x0F, if L == 1 { 0x10 } else { 0x28 }]);
             self.modrm_const(r, v.to_bits());
         }
     }
@@ -358,28 +378,30 @@ impl Isa for X64 {
     fn arith(&mut self, op: Arith, d: u8, a: u8, b: u8) {
         let opc = Self::arith_op(op);
         if self.avx {
-            self.vex_rr(3, opc, d, a, b);
+            self.vex_rr(Self::PP, opc, d, a, b);
         } else if d == b && d != a {
             if matches!(op, Arith::Add | Arith::Mul) {
-                self.sse(0xF2, opc, d, a);
+                self.sse(Self::PFX, opc, d, a);
             } else {
                 self.mov(0, a);
-                self.sse(0xF2, opc, 0, b);
+                self.sse(Self::PFX, opc, 0, b);
                 self.mov(d, 0);
             }
         } else {
             self.mov(d, a);
-            self.sse(0xF2, opc, d, b);
+            self.sse(Self::PFX, opc, d, b);
         }
     }
-    const MEM_OPERANDS: bool = true;
+    // A legacy packed memory operand must be 16-byte aligned; the work
+    // array is 8-byte aligned, so packed code loads into a register.
+    const MEM_OPERANDS: bool = L == 1;
     fn arith_mem(&mut self, op: Arith, d: u8, a: u8, base: Base, off: usize) {
         let base = Self::base(base);
         if self.avx {
-            self.vex(3, 1, d, a, base);
+            self.vex(Self::PP, 1, d, a, base);
         } else {
             self.mov(d, a);
-            self.b(0xF2);
+            self.b(Self::PFX);
             self.rex(false, d, base);
             self.b(0x0F);
         }
@@ -399,7 +421,7 @@ impl Isa for X64 {
         self.op_const(0x66, 1, 0x54, d, a, 0x7FFF_FFFF_FFFF_FFFF); // andpd
     }
     fn sqrt(&mut self, d: u8, a: u8) {
-        self.sse(0xF2, 0x51, d, a);
+        self.sse(Self::PFX, 0x51, d, a);
     }
     fn round(&mut self, mode: Round, d: u8, a: u8) -> bool {
         if !self.sse41 {
@@ -412,7 +434,8 @@ impl Isa for X64 {
         };
         self.b(0x66);
         self.rex(false, d, a);
-        self.bytes(&[0x0F, 0x3A, 0x0B]);
+        // roundsd, or roundpd
+        self.bytes(&[0x0F, 0x3A, if L == 1 { 0x0B } else { 0x09 }]);
         self.modrm_reg(d, a);
         self.b(imm);
         true
