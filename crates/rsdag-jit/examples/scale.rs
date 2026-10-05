@@ -102,7 +102,7 @@ fn device(g: &mut Graph<F64>, card: usize) -> FuncId {
 /// The gate over `(a, b, y, vdd, m)` and both cards: two devices of card
 /// `p` from `vdd` to `y`, two of card `n` from `y` through `m` to ground.
 /// Out: the currents into `y`, `m` and `vdd`.
-fn gate(g: &mut Graph<F64>, dev: FuncId, card: usize) -> FuncId {
+fn gate(g: &mut Graph<F64>, dev: FuncId, card: usize, bound: Option<[FuncId; 2]>) -> FuncId {
     let mut s = Scope::new(g, "gate");
     let node: Vec<ExprId> = ["a", "b", "y", "vdd", "m"]
         .iter()
@@ -110,25 +110,32 @@ fn gate(g: &mut Graph<F64>, dev: FuncId, card: usize) -> FuncId {
         .map(|(k, n)| s.param_with_role(n, ParamRole::State { id: k as u32 }))
         .collect();
     let (a, b, y, vdd, m) = (node[0], node[1], node[2], node[3], node[4]);
-    let cn: Vec<ExprId> = (0..card)
-        .map(|k| s.param_with_role(&format!("n{k}"), ParamRole::Param))
-        .collect();
-    let cp: Vec<ExprId> = (0..card)
-        .map(|k| s.param_with_role(&format!("p{k}"), ParamRole::Param))
-        .collect();
+    // the cards: parameters passed down, or bound into the devices
+    let (cn, cp): (Vec<ExprId>, Vec<ExprId>) = match bound {
+        Some(_) => (Vec::new(), Vec::new()),
+        None => (
+            (0..card)
+                .map(|k| s.param_with_role(&format!("n{k}"), ParamRole::Param))
+                .collect(),
+            (0..card)
+                .map(|k| s.param_with_role(&format!("p{k}"), ParamRole::Param))
+                .collect(),
+        ),
+    };
     let (w, l) = (s.konst_f64(2e-6), s.konst_f64(1e-7));
     let zero = s.konst_f64(0.0);
-    let place = |s: &mut Scope<F64>, d: ExprId, gt: ExprId, src: ExprId, c: &[ExprId]| {
+    let place = |s: &mut Scope<F64>, d: ExprId, gt: ExprId, src: ExprId, c: &[ExprId], f| {
         let args: Vec<ExprId> = [d, gt, src, w, l]
             .into_iter()
             .chain(c.iter().copied())
             .collect();
-        s.calls(dev, &[0, 1], &args)
+        s.calls(f, &[0, 1], &args)
     };
-    let p1 = place(&mut s, y, a, vdd, &cp);
-    let p2 = place(&mut s, y, b, vdd, &cp);
-    let n1 = place(&mut s, y, a, m, &cn);
-    let n2 = place(&mut s, m, b, zero, &cn);
+    let (dn, dp) = bound.map_or((dev, dev), |[n, p]| (n, p));
+    let p1 = place(&mut s, y, a, vdd, &cp, dp);
+    let p2 = place(&mut s, y, b, vdd, &cp, dp);
+    let n1 = place(&mut s, y, a, m, &cn, dn);
+    let n2 = place(&mut s, m, b, zero, &cn, dn);
     let iy = s.reduce(ReduceOp::Sum, vec![p1[0], p2[0], n1[0]]);
     let im = s.reduce(ReduceOp::Sum, vec![n1[1], n2[0]]);
     let ivdd = s.reduce(ReduceOp::Sum, vec![p1[1], p2[1]]);
@@ -177,20 +184,31 @@ fn hash(v: &[f64]) -> u64 {
     })
 }
 
-fn run(gates: usize, card: usize, once: bool) {
+fn run(gates: usize, card: usize, once: bool, bind: bool) {
     let n = gates / 2;
     let t = Instant::now();
     let mut g: Graph<F64> = Graph::new();
     let dev = device(&mut g, card);
-    let gt = gate(&mut g, dev, card);
+    let cards: Vec<(ExprId, SymbolId)> = (0..2 * card)
+        .map(|k| sym(&mut g, &format!("card{k}")))
+        .collect();
+    let all_cards: Vec<ExprId> = cards.iter().map(|&(e, _)| e).collect();
+    // bound: a device function per card, the cards its globals
+    let bound = bind.then(|| {
+        let at = |c: usize| -> Vec<(u32, ExprId)> {
+            (0..card)
+                .map(|k| ((5 + k) as u32, all_cards[c * card + k]))
+                .collect()
+        };
+        let (bn, bp) = (at(0), at(1));
+        [g.bind(dev, &bn), g.bind(dev, &bp)]
+    });
+    let gt = gate(&mut g, dev, card, bound);
     let (vdd, vdd_s) = sym(&mut g, "vdd");
     let top: Vec<(ExprId, SymbolId)> = (0..n + gates)
         .map(|k| sym(&mut g, &format!("v{k}")))
         .collect();
-    let cards: Vec<(ExprId, SymbolId)> = (0..2 * card)
-        .map(|k| sym(&mut g, &format!("card{k}")))
-        .collect();
-    let card_e: Vec<ExprId> = cards.iter().map(|&(e, _)| e).collect();
+    let card_e: Vec<ExprId> = if bind { Vec::new() } else { all_cards.clone() };
     let roots = if once {
         // the block over formal nodes, placed once on the top-level ones
         let mut s = Scope::new(&mut g, "block");
@@ -203,7 +221,7 @@ fn run(gates: usize, card: usize, once: bool) {
                 id: (n + gates) as u32,
             },
         );
-        let fc: Vec<ExprId> = (0..2 * card)
+        let fc: Vec<ExprId> = (0..card_e.len())
             .map(|k| s.param_with_role(&format!("blk.card{k}"), ParamRole::Param))
             .collect();
         let outs = residuals(&mut s, gt, &fv, fvdd, &fc, gates, n);
@@ -277,8 +295,9 @@ fn run(gates: usize, card: usize, once: bool) {
     let (fi, fnat, fh) = eval(&tape_f, &nat_f);
     let (ji, jnat, jh) = eval(&tape_j, &nat_j);
     println!(
-        "{},{gates},{card},{},{nodes},{build:.1},{jacobian:.1},{specialize:.1},{inline:.1},{tapes:.1},{native:.1},{fi:.1},{fnat:.1},{ji:.1},{jnat:.1},{:016x}",
+        "{}{},{gates},{card},{},{nodes},{build:.1},{jacobian:.1},{specialize:.1},{inline:.1},{tapes:.1},{native:.1},{fi:.1},{fnat:.1},{ji:.1},{jnat:.1},{:016x}",
         if once { "once" } else { "flat" },
+        if bind { "+bind" } else { "" },
         states.len(),
         fh ^ jh.rotate_left(1),
     );
@@ -296,13 +315,14 @@ fn main() {
     let gates: usize = option("--gates").map_or(2400, |v| v.parse().expect("--gates <n>"));
     let card: usize = option("--card").map_or(400, |v| v.parse().expect("--card <n>"));
     let placed = option("--placed").unwrap_or_else(|| "both".into());
+    let bind = args.iter().any(|a| a == "--bind");
     println!(
         "placed,gates,card,states,nodes,build_ms,jacobian_ms,specialize_ms,inline_ms,tapes_ms,native_ms,\
          f_interp_us,f_native_us,j_interp_us,j_native_us,hash"
     );
     for once in [true, false] {
         if placed == "both" || (placed == "once") == once {
-            run(gates, card, once);
+            run(gates, card, once, bind);
         }
     }
 }

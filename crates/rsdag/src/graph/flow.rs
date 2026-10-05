@@ -155,7 +155,6 @@ fn inert(node: &Node) -> usize {
 /// Values over a cone (see [`Graph::flow`]).
 pub(crate) struct Flow<V> {
     at: Memo,
-    cone: Vec<ExprId>,
     vals: Vec<V>,
 }
 
@@ -170,18 +169,6 @@ impl<V> Flow<V> {
     /// The value of a node of the cone.
     pub(crate) fn get(&self, e: ExprId) -> &V {
         &self.vals[self.at.get(e).expect("a node of the cone").0 as usize]
-    }
-    /// The cone, ascending (topological).
-    pub(crate) fn cone(&self) -> &[ExprId] {
-        &self.cone
-    }
-    /// A node's place in the cone, if it is in it.
-    pub(crate) fn position(&self, e: ExprId) -> Option<usize> {
-        self.at.get(e).map(|p| p.0 as usize)
-    }
-    /// The values, in the cone's order.
-    pub(crate) fn values(&self) -> &[V] {
-        &self.vals
     }
 }
 
@@ -258,8 +245,17 @@ impl<K: Field> Graph<K> {
         let args = self.args(l);
         match args.get(p as usize) {
             Some(&a) => a,
-            None => self.globals(f)[p as usize - args.len()],
+            None => self.globals_of(f)[p as usize - args.len()],
         }
+    }
+
+    /// [`globals`](Self::globals), borrowed.
+    pub(crate) fn globals_of(&self, f: FuncId) -> &[ExprId] {
+        let func = &self.funcs[f.0 as usize];
+        if func.globals.get().is_none() {
+            func.globals_in(self);
+        }
+        func.globals.get().expect("just found")
     }
 
     /// The nodes under `roots`, ascending; with `globals` the globals the
@@ -332,7 +328,7 @@ impl<K: Field> Graph<K> {
             };
             vals.push(v);
         }
-        Flow { at, cone, vals }
+        Flow { at, vals }
     }
 
     /// Per output of `f`, the parameters among `moving` (indices, ascending)
