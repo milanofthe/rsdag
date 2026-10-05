@@ -60,6 +60,8 @@ pub struct Graph<K: Field = F64> {
     /// The copies of functions with globals bound (see
     /// [`rebound`](Self::rebound)), by function and binding.
     rebound: HashMap<(FuncId, Vec<(SymbolId, ExprId)>), FuncId>,
+    /// The functions with parameters bound (see [`bind`](Self::bind)).
+    bound: HashMap<(FuncId, Vec<(u32, ExprId)>), FuncId>,
 }
 
 /// A per-node memo table over the arena, cleared in O(1) by bumping an epoch:
@@ -144,6 +146,7 @@ impl<K: Field> Graph<K> {
             output_dedup: HashMap::default(),
             memos: Vec::new(),
             rebound: HashMap::default(),
+            bound: HashMap::default(),
         };
         ctx.zero = ctx.konst(K::zero());
         ctx.one = ctx.konst(K::one());
