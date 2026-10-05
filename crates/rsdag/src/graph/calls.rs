@@ -37,11 +37,12 @@ impl<K: Field> Graph<K> {
         f
     }
 
-    /// Close an open graph over `outputs` into a function: every free symbol
-    /// the outputs depend on becomes a parameter, in symbol order. The
-    /// `Scope` idiom: build with named symbols, then close.
+    /// Close an open graph over `outputs` into a function: every symbol the
+    /// outputs mention becomes a parameter, in symbol order; a called
+    /// function's globals stay globals. The `Scope` idiom: build with named
+    /// symbols, then close.
     pub fn close(&mut self, name: &str, outputs: Vec<ExprId>) -> FuncId {
-        let params: Vec<SymbolId> = self.free_symbols_in(&outputs).into_iter().collect();
+        let params: Vec<SymbolId> = self.mentioned_symbols_in(&outputs).into_iter().collect();
         self.define_func(name, params, outputs)
     }
 
@@ -803,37 +804,29 @@ impl<K: Field> Graph<K> {
             .collect()
     }
 
-    /// The symbols `exprs` read: what they mention and what the bodies they
-    /// call read as globals (see [`globals`](Self::globals)), the inputs a
-    /// program over them takes. [`free_symbols_in`](Self::free_symbols_in)
-    /// is what they mention only.
-    pub fn read_symbols_in(&self, exprs: &[ExprId]) -> std::collections::BTreeSet<SymbolId> {
-        self.cone_nodes(exprs, true)
-            .into_iter()
-            .filter_map(|e| match *self.node(e) {
-                Node::Symbol(s) => Some(s),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// The set of free symbols reachable from `expr`.
-    ///
-    /// Memoised over shared subexpressions (a `visited` set): in a hash-consed
-    /// DAG a node may be reachable by exponentially many paths, so without this
-    /// the traversal is super-linear in the node count. With it, each node is
-    /// visited once -- O(nodes reachable from `expr`).
+    /// The free symbols of `expr` (see
+    /// [`free_symbols_in`](Self::free_symbols_in)).
     pub fn free_symbols(&self, expr: ExprId) -> std::collections::BTreeSet<SymbolId> {
         self.free_symbols_in(&[expr])
     }
 
-    /// Union of the free symbols across many expressions, sharing one `visited`
-    /// set so a subexpression hash-consed into several of them is traversed once
-    /// (a single pass over the forest, not one per expression). The symbols
-    /// they mention: a called body's globals are not (see
-    /// [`read_symbols_in`](Self::read_symbols_in)).
+    /// The symbols `exprs` read: what they mention and what the bodies they
+    /// call read as globals (see [`globals`](Self::globals)), the inputs a
+    /// program over them takes. One walk over the forest, each shared node
+    /// once.
     pub fn free_symbols_in(&self, exprs: &[ExprId]) -> std::collections::BTreeSet<SymbolId> {
-        self.cone_nodes(exprs, false)
+        self.symbols_of(self.cone_nodes(exprs, true))
+    }
+
+    /// The symbols `exprs` mention, the bodies they call not looked into: the
+    /// parameters a function closed over them takes (see
+    /// [`close`](Self::close)).
+    pub fn mentioned_symbols_in(&self, exprs: &[ExprId]) -> std::collections::BTreeSet<SymbolId> {
+        self.symbols_of(self.cone_nodes(exprs, false))
+    }
+
+    fn symbols_of(&self, nodes: Vec<ExprId>) -> std::collections::BTreeSet<SymbolId> {
+        nodes
             .into_iter()
             .filter_map(|e| match *self.node(e) {
                 Node::Symbol(s) => Some(s),
