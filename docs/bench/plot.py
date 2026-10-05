@@ -53,13 +53,13 @@ def rows(name):
         return list(csv.DictReader(f))
 
 
-def key(fig, colors, styles):
-    """One legend under the figure: a colour per series, then the line and
-    marker styles."""
+def key(fig, colors, styles, y=-0.06):
+    """One legend under the figure (at `y`, in figure coordinates): a colour
+    per series, then the line and marker styles."""
     handles = [Line2D([], [], color=c, lw=2, label=l) for l, c in colors]
     handles += [Line2D([], [], color=GREY, ls=ls, marker=m, ms=4, label=l) for l, ls, m in styles]
     fig.legend(handles=handles, loc="lower center", ncol=len(handles), frameon=False,
-               fontsize=8, bbox_to_anchor=(0.5, -0.06))
+               fontsize=8, bbox_to_anchor=(0.5, y))
 
 
 def save(fig, name):
@@ -127,37 +127,75 @@ def matrices():
     save(fig, "matrices")
 
 
+def hierarchy():
+    """One instance of a wide body (hierarchy.csv): each stage over the
+    body's width, every output a call over one argument list."""
+    r = rows("hierarchy.csv")
+    n = [int(x["n"]) for x in r]
+    fig, a = plt.subplots(1, 1, figsize=(4.6, 3.2))
+    stages = (("calls", GREY, ("build_ms",)), ("Jacobian", BLUE, ("jacobian_ms",)),
+              ("x' = 0, specialized", ORANGE, ("substitute_ms", "specialize_ms")),
+              ("program", GREEN, ("program_ms",)))
+    for label, color, cols in stages:
+        ms = [sum(float(x[c]) for c in cols) for x in r]
+        a.plot(n, ms, "o-", color=color, ms=4, label=label)
+    a.set_xscale("log"); a.set_yscale("log")
+    a.set_xlabel("circuit nodes in the body (one instance)"); a.set_ylabel("ms")
+    a.set_title("A wide body, called once")
+    a.legend(fontsize=8, frameon=False)
+    save(fig, "hierarchy")
+
+
 def modules():
     """rsdag against CasADi and JAX on SANE's circuits (modules_rsdag.csv,
-    modules_other.csv): the residual and its Jacobian per call, with the
-    parameters as inputs and as constants; the twelve BSIM4 amplifiers as
-    their median and range. rsdag's interpreter (hatched) runs the same
-    tape as its native code."""
+    modules_other.csv): the residual and its Jacobian per call, and the
+    setup each takes (differentiation and compilation), with the parameters
+    as inputs and as constants; the twelve BSIM4 amplifiers as their median
+    and range. rsdag's interpreter (hatched) runs the same tape as its
+    native code."""
     ours = rows("modules_rsdag.csv")
     other = rows("modules_other.csv")
     groups = (("uA741, BJT", lambda m: m == "ua741"),
               ("PSP103 ring", lambda m: m == "ring_psp103"),
               ("BSIM4 amplifiers (12)", lambda m: m not in ("ua741", "ring_psp103")))
 
-    def ours_col(col):
-        return lambda m: [float(x[col]) for x in ours if x["module"] == m]
+    def ours_col(col, scale=1.0):
+        return lambda m: [float(x[col]) * scale for x in ours if x["module"] == m]
 
-    def other_col(tool, col):
-        return lambda m: [float(x[col]) for x in other if x["module"] == m and x["tool"] == tool and x[col]]
+    def other_col(tool, col, scale=1.0):
+        return lambda m: [float(x[col]) * scale for x in other
+                          if x["module"] == m and x["tool"] == tool and x[col]]
 
-    bars = (  # label, color, solid (parameters constant), hatch, value per module for F and J
-        ("rsdag", BLUE, False, "////", ours_col("call_f_interp_us"), ours_col("call_j_interp_us")),
-        ("rsdag", BLUE, False, None, ours_col("call_f_native_us"), ours_col("call_j_native_us")),
-        ("CasADi", ORANGE, False, None, other_col("CasADi (parameter inputs)", "call_f_us"),
-         other_col("CasADi (parameter inputs)", "call_j_us")),
-        ("rsdag", BLUE, True, None, ours_col("call_f_folded_us"), ours_col("call_j_folded_us")),
-        ("CasADi", ORANGE, True, None, other_col("CasADi", "call_f_us"), other_col("CasADi", "call_j_us")),
-        ("JAX", GREEN, True, None, other_col("JAX", "call_f_us"), other_col("JAX", "call_j_us")),
+    ms = 1e3
+    cas_in, cas = "CasADi (parameter inputs)", "CasADi"
+    # label, color, solid (parameters constant), hatch; per module the residual
+    # and the Jacobian per call (us), then their setup (ms)
+    bars = (
+        ("rsdag", BLUE, False, "////",
+         ours_col("call_f_interp_us"), ours_col("call_j_interp_us"),
+         ours_col("setup_f_interp_s", ms), ours_col("setup_j_interp_s", ms)),
+        ("rsdag", BLUE, False, None,
+         ours_col("call_f_native_us"), ours_col("call_j_native_us"),
+         ours_col("setup_f_native_s", ms), ours_col("setup_j_native_s", ms)),
+        ("CasADi", ORANGE, False, None,
+         other_col(cas_in, "call_f_us"), other_col(cas_in, "call_j_us"),
+         other_col(cas_in, "setup_f_s", ms), other_col(cas_in, "setup_j_s", ms)),
+        ("rsdag", BLUE, True, None,
+         ours_col("call_f_folded_us"), ours_col("call_j_folded_us"),
+         ours_col("setup_f_folded_s", ms), ours_col("setup_j_folded_s", ms)),
+        ("CasADi", ORANGE, True, None,
+         other_col(cas, "call_f_us"), other_col(cas, "call_j_us"),
+         other_col(cas, "setup_f_s", ms), other_col(cas, "setup_j_s", ms)),
+        ("JAX", GREEN, True, None,
+         other_col("JAX", "call_f_us"), other_col("JAX", "call_j_us"),
+         other_col("JAX", "setup_f_s", ms), other_col("JAX", "setup_j_s", ms)),
     )
     modules_ = sorted({x["module"] for x in ours})
-    fig, axes = plt.subplots(1, 2, figsize=(9.6, 3.4), sharey=True)
+    fig, axes = plt.subplots(2, 2, figsize=(9.6, 6.4), sharey="row")
     width = 0.13
-    for a, (title, k) in zip(axes, (("Residual, per call", 4), ("Jacobian, per call", 5))):
+    panels = ((axes[0, 0], "Residual, per call", 4), (axes[0, 1], "Jacobian, per call", 5),
+              (axes[1, 0], "Residual, setup", 6), (axes[1, 1], "Jacobian, setup", 7))
+    for a, title, k in panels:
         for gi, (gname, member) in enumerate(groups):
             mods = [m for m in modules_ if member(m)]
             for bi, bar in enumerate(bars):
@@ -179,13 +217,14 @@ def modules():
         a.set_xticklabels([g[0] for g in groups], fontsize=8)
         a.set_title(title)
         a.grid(axis="x", visible=False)
-    axes[0].set_ylabel("microseconds")
-    key(fig, (("rsdag", BLUE), ("CasADi", ORANGE), ("JAX", GREEN)), ())
+    axes[0, 0].set_ylabel("microseconds")
+    axes[1, 0].set_ylabel("milliseconds")
+    key(fig, (("rsdag", BLUE), ("CasADi", ORANGE), ("JAX", GREEN)), (), y=-0.015)
     fig.legend(handles=[Patch(fc="none", ec=GREY, lw=1.2, label="parameters as inputs"),
                         Patch(fc=GREY, ec=GREY, label="parameters as constants"),
                         Patch(fc="none", ec=GREY, lw=1.2, hatch="////", label="rsdag interpreter"),
                         Line2D([], [], color=GREY, marker="$x$", ls="", label="no compile in 1 min")],
-               loc="lower center", ncol=4, frameon=False, fontsize=8, bbox_to_anchor=(0.5, -0.13))
+               loc="lower center", ncol=4, frameon=False, fontsize=8, bbox_to_anchor=(0.5, -0.05))
     save(fig, "modules")
 
 
@@ -193,7 +232,8 @@ if __name__ == "__main__":
     ops()
     dense()
     matrices()
-    names = ["ops", "dense", "matrices"]
+    hierarchy()
+    names = ["ops", "dense", "matrices", "hierarchy"]
     if os.path.exists(os.path.join(DATA, "modules_other.csv")):
         modules()
         names.append("modules")

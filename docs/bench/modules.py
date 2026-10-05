@@ -246,7 +246,7 @@ def casadi_model(mod, params_as_inputs=False):
             vals = evaluate(mod, ops, roots, dict(zip(params, args)), call)
             it = iter(vals)
             res = [next(it) if o is not None else ca.SX(0) for o in outs]
-            bodies[f] = ca.Function(mod.funcs[f]["name"], args, res)
+            bodies[f] = ca.Function(f"f{f}", args, res)  # a name CasADi takes
         return bodies[f]
 
     def call(f, out, args, _node):
