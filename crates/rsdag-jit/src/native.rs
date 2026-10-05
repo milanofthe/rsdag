@@ -851,6 +851,41 @@ impl<'a, I: Isa> Emitter<'a, I> {
                     self.put(dst, r);
                 }
                 2 => self.bin2(Arith::Mul, dst, a, a),
+                n if crate::ir::powi_inline(n) => {
+                    // `semantics::powi_t`'s binary exponentiation, product
+                    // for product, so the result is the reference's bits.
+                    let x = self.get(a);
+                    let (mut base, mut acc, mut e) = (x, None::<u8>, n.unsigned_abs());
+                    while e > 0 {
+                        if e & 1 == 1 {
+                            acc = Some(match acc {
+                                None => base,
+                                Some(p) => {
+                                    let r = self.fresh();
+                                    self.isa.arith(Arith::Mul, r, p, base);
+                                    r
+                                }
+                            });
+                        }
+                        e >>= 1;
+                        if e > 0 {
+                            let r = self.fresh();
+                            self.isa.arith(Arith::Mul, r, base, base);
+                            base = r;
+                        }
+                        let keep: Vec<u8> = [Some(base), acc].into_iter().flatten().collect();
+                        self.release_except(&keep);
+                    }
+                    let p = acc.expect("a nonzero exponent");
+                    let r = self.fresh_for(dst);
+                    if n < 0 {
+                        let one = self.fconst(1.0);
+                        self.isa.arith(Arith::Div, r, one, p);
+                    } else {
+                        self.isa.mov(r, p);
+                    }
+                    self.put(dst, r);
+                }
                 _ => {
                     let x = self.get(a);
                     self.call_into(
