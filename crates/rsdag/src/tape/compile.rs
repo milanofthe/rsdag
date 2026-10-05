@@ -266,11 +266,13 @@ pub(super) enum Kind {
     Dot(u32),
     /// `n_groups` argument lists of `n_args`, group-major; with `stateful`,
     /// the last operand is the instances' state block (the value of a
-    /// [`Kind::CallProlog`]).
+    /// [`Kind::CallProlog`]). With `reads`, a list holds only the arguments
+    /// at those positions (see [`Op::Call`]).
     Call {
         bundle: u32,
         n_groups: u32,
         n_args: u32,
+        reads: Option<Arc<[u32]>>,
         stateful: bool,
     },
     /// The prolog of `n_groups` instances over their pure arguments,
@@ -637,12 +639,15 @@ impl Tape {
                     bundle,
                     n_groups,
                     n_args,
+                    n_in,
+                    reads,
                     state,
                     ..
                 } => Kind::Call {
                     bundle,
                     n_groups,
                     n_args,
+                    reads: (reads != super::ALL_ARGS).then(|| self.pool(reads, n_in).into()),
                     stateful: state != super::NO_STATE,
                 },
                 Op::CallProlog {
@@ -1524,11 +1529,26 @@ impl Forest {
         let (n_groups, n_args) = (lists.len() as u32, args[0].len() as u32);
         let pure = members.iter().all(|&mi| self.pure[mi]);
         let stateful = !pure && self.stateful(&*b, &args);
-        let mut ins: Vec<Ref> = args
-            .iter()
-            .flat_map(|a| a.iter())
-            .map(|&a| self.val(lw, a))
-            .collect();
+        // After its prolog a body reads what its main phase reads only: the
+        // others (a model card bound to every instance) are not gathered
+        // per evaluation.
+        let reads: Option<Arc<[u32]>> = stateful
+            .then(|| b.body().map(|t| t.main_reads()))
+            .flatten()
+            .filter(|r| r.len() < n_args as usize)
+            .map(Into::into);
+        let mut ins: Vec<Ref> = match &reads {
+            None => args
+                .iter()
+                .flat_map(|a| a.iter())
+                .map(|&a| self.val(lw, a))
+                .collect(),
+            Some(r) => args
+                .iter()
+                .flat_map(|a| r.iter().map(move |&p| a[p as usize]))
+                .map(|a| self.val(lw, a))
+                .collect(),
+        };
         if stateful {
             let mask = b.pure_args();
             let pure_args: Vec<Ref> = args
@@ -1549,6 +1569,7 @@ impl Forest {
             bundle,
             n_groups,
             n_args,
+            reads,
             stateful,
         };
         let inst = lw.push(kind, ins, n_groups * n_out, pure);
@@ -2071,16 +2092,29 @@ impl Program {
                     bundle,
                     n_groups,
                     n_args,
+                    ref reads,
                     stateful,
                 } => {
                     // A stateful call's last operand is its state block.
                     let (args, state) = split_state(o, stateful);
                     let start = gather(&mut arg_pool, &mut max_args, args);
+                    // its arguments are laid out whole, read or not
+                    max_args = max_args.max((n_groups * n_args) as usize);
+                    let (n_in, reads) = match reads {
+                        None => (n_args, super::ALL_ARGS),
+                        Some(r) => {
+                            let at = arg_pool.len() as u32;
+                            arg_pool.extend_from_slice(r);
+                            (r.len() as u32, at)
+                        }
+                    };
                     Op::Call {
                         bundle,
                         start,
                         n_groups,
                         n_args,
+                        n_in,
+                        reads,
                         n_out: inst.n_out / n_groups,
                         state,
                     }

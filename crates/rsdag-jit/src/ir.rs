@@ -82,6 +82,9 @@ pub(crate) struct CallSite {
     pub(crate) dst: u32,
     pub(crate) bundle: u32,
     pub(crate) args: Vec<u32>,
+    /// Where each of `args` goes among the groups' arguments, when the
+    /// call gathers only some of them (see [`rsdag::tape::Op::Call`]).
+    pub(crate) places: Option<Vec<u32>>,
     pub(crate) n_groups: u32,
     pub(crate) n_args: u32,
     pub(crate) n_out: u32,
@@ -232,7 +235,7 @@ impl ROp {
     pub(crate) fn gather_len(&self) -> usize {
         match self {
             ROp::Reduce(_, ReduceOp::Min | ReduceOp::Max, args) => args.len(),
-            ROp::Call(c) => c.gather_at + c.args.len(),
+            ROp::Call(c) => c.gather_at + (c.n_groups * c.n_args) as usize,
             ROp::Kernel(k) => k.operands.iter().map(|(d, _)| d.gathered()).sum(),
             _ => 0,
         }
@@ -372,14 +375,22 @@ pub(crate) fn record(tape: &Tape) -> (Vec<ROp>, usize) {
                 start,
                 n_groups,
                 n_args,
+                n_in,
+                reads,
                 n_out,
                 state,
             } => {
                 let (stage, gather_at) = role(i, (n_groups * n_args) as usize);
+                let at = tape.call_places(reads, n_args, n_in);
                 ROp::Call(CallSite {
                     dst,
                     bundle,
-                    args: tape.pool(start, n_groups * n_args).to_vec(),
+                    args: tape.pool(start, n_groups * n_in).to_vec(),
+                    places: (reads != rsdag::tape::ALL_ARGS).then(|| {
+                        (0..(n_groups * n_in) as usize)
+                            .map(|j| at(j) as u32)
+                            .collect()
+                    }),
                     n_groups,
                     n_args,
                     n_out,
@@ -408,6 +419,7 @@ pub(crate) fn record(tape: &Tape) -> (Vec<ROp>, usize) {
                     dst,
                     bundle,
                     args: tape.pool(start, n_groups * n_pure).to_vec(),
+                    places: None,
                     n_groups,
                     n_args: n_pure,
                     n_out: state_len,

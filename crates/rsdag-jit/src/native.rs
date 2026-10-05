@@ -1245,16 +1245,17 @@ impl<'a, I: Isa> Emitter<'a, I> {
     }
     /// Copy `slots` into the gather area; its byte offset.
     fn gather(&mut self, slots: &[u32]) -> usize {
-        self.gather_at(slots, 0)
+        self.gather_at(slots, None, 0)
     }
     /// Copy `slots` into the gather area from element `at` on; the byte
     /// offset of the copy.
-    fn gather_at(&mut self, slots: &[u32], at: usize) -> usize {
+    fn gather_at(&mut self, slots: &[u32], places: Option<&[u32]>, at: usize) -> usize {
         debug_assert_eq!(I::LANES, 1, "lane code gathers lane by lane");
         let base = (self.layout.gather + at) * 8;
         for (k, &s) in slots.iter().enumerate() {
             let r = self.get(s);
-            self.isa.store(r, Base::Work, base + k * 8);
+            let to = places.map_or(k, |p| p[k] as usize);
+            self.isa.store(r, Base::Work, base + to * 8);
             self.release_except(&[]);
         }
         base
@@ -1291,7 +1292,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 IArg::WorkAddr(*s as usize * 8)
             }
             Dense::Slots(s) => {
-                let p = IArg::WorkAddr(this.gather_at(s, *at));
+                let p = IArg::WorkAddr(this.gather_at(s, None, *at));
                 *at += s.len();
                 p
             }
@@ -1478,14 +1479,26 @@ impl<'a, I: Isa> Emitter<'a, I> {
             ROp::Call(ref c) => {
                 // A call of a stage gathers apart from the others of it; the
                 // stage's last one hands them all to `h_stage`.
-                let (at, table) = if c.args.len() < GATHER_TABLE {
-                    (self.gather_at(&c.args, c.gather_at), 0)
+                let (at, table, places) = if c.args.len() < GATHER_TABLE {
+                    (
+                        self.gather_at(&c.args, c.places.as_deref(), c.gather_at),
+                        0,
+                        0,
+                    )
                 } else {
                     self.publish(&c.args);
-                    let t: Box<[u32]> = c.args.clone().into_boxed_slice();
-                    let p = t.as_ptr() as u64;
-                    self.gathers.push(t);
-                    ((self.layout.gather + c.gather_at) * 8, p)
+                    let mut table = |v: &[u32]| {
+                        let t: Box<[u32]> = v.into();
+                        let p = t.as_ptr() as u64;
+                        self.gathers.push(t);
+                        p
+                    };
+                    let places = c.places.as_deref().map_or(0, &mut table);
+                    (
+                        (self.layout.gather + c.gather_at) * 8,
+                        table(&c.args),
+                        places,
+                    )
                 };
                 let d = self.descs.len();
                 assert!(
@@ -1507,6 +1520,8 @@ impl<'a, I: Isa> Emitter<'a, I> {
                     scratch_len: self.layout.scratch_len as u64,
                     ops: c.ops,
                     table,
+                    places,
+                    n_in: (c.args.len() / c.n_groups as usize) as u64,
                 };
                 // The table was sized up front: pushing never moves it, so
                 // the address baked into the code stays valid.

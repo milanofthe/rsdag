@@ -194,6 +194,31 @@ fn a_bound_call_compiles_and_inlines_as_the_full_one() {
 }
 
 #[test]
+fn a_main_phase_gathers_what_it_reads() {
+    // the device's main phase reads its states, `w` and the card entries
+    // it multiplies a state by; the card's sum is the prolog's
+    let b = ring(9, true);
+    let syms: Vec<SymbolId> = b.states.iter().chain(&b.params).copied().collect();
+    let pure: Vec<bool> = (0..syms.len()).map(|k| k >= b.states.len()).collect();
+    let tape = Tape::compile_split(&b.g, &b.roots, &syms, &pure);
+    let calls: Vec<(u32, u32)> = tape
+        .ops()
+        .iter()
+        .filter_map(|op| match *op {
+            rsdag::tape::Op::Call {
+                n_args,
+                n_in,
+                state,
+                ..
+            } if state != rsdag::tape::NO_STATE => Some((n_args, n_in)),
+            _ => None,
+        })
+        .collect();
+    assert!(!calls.is_empty(), "the calls keep a state");
+    assert!(calls.iter().all(|&(n_args, n_in)| n_in == 5 && n_args == 9));
+}
+
+#[test]
 fn substitution_reaches_into_a_binding() {
     // a card parameter made a constant: the bound circuit as the full one
     let run = |mut b: Built| -> (Vec<u64>, bool) {
