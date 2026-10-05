@@ -115,6 +115,21 @@ impl std::fmt::Display for ModuleError {
 impl std::error::Error for ModuleError {}
 
 impl<K> Module<K> {
+    /// The module with its constants in another field: the graph in exact
+    /// rationals, the doubles every execution type starts from.
+    pub fn map_consts<L>(self, f: impl FnMut(&K) -> L) -> Module<L> {
+        Module {
+            version: self.version,
+            nodes: self.nodes,
+            consts: self.consts.iter().map(f).collect(),
+            arg_pool: self.arg_pool,
+            symbols: self.symbols,
+            funcs: self.funcs,
+            call_outputs: self.call_outputs,
+            call_contexts: self.call_contexts,
+        }
+    }
+
     /// Check that every id the module holds names something that is there
     /// and, for a node's operands, precedes it; and that every operand list
     /// has a length its node can have. A module that passes loads without
