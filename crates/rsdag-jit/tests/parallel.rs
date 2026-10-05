@@ -138,3 +138,27 @@ fn native_calls_without_state_on_a_pool_are_the_serial_ones() {
     parallel::install(pool(4), || native.eval(&x, &mut wn, &mut par));
     assert_eq!(bits(&serial), bits(&par));
 }
+
+#[test]
+fn a_stage_across_chunks_is_the_serial_one() {
+    // Chunks of a few ops split the stages of the ring's calls.
+    let (g, roots, syms, pure) = ring();
+    let tape = Tape::compile_split(&g, &roots, &syms, &pure);
+    let x = inputs();
+    let (mut w, mut out) = (Vec::new(), Vec::new());
+    tape.eval_prolog(&x, &mut w);
+    tape.eval_main(&x, &mut w, &mut out);
+    for chunk in [1, 2, 3, 5] {
+        let native = NativeTape::compile_with(&tape, chunk).expect("native code");
+        let (mut wn, mut on) = (Vec::new(), Vec::new());
+        native.eval_prolog(&x, &mut wn);
+        native.eval_main(&x, &mut wn, &mut on);
+        assert_eq!(bits(&out), bits(&on), "chunks of {chunk}, serial");
+        let (mut wp, mut op) = (Vec::new(), Vec::new());
+        parallel::install(pool(4), || {
+            native.eval_prolog(&x, &mut wp);
+            native.eval_main(&x, &mut wp, &mut op);
+        });
+        assert_eq!(bits(&out), bits(&op), "chunks of {chunk}, on a pool");
+    }
+}
