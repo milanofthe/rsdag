@@ -152,3 +152,35 @@ fn blocks_have_bold_titles_notes_and_patterns() {
     // A row lines up across the group's border.
     assert!(dot.contains("{ rank=same; a; p; }") && dot.contains("newrank=true"));
 }
+
+#[test]
+fn bodies_draw_each_called_function_once() {
+    // leaf(a) = sin(a); mid(x, y) = leaf(x) * y; two calls of mid at the top
+    let mut g: Graph<F64> = Graph::new();
+    let mut s = rsdag::Scope::new(&mut g, "leaf");
+    let a = s.param("a");
+    let sa = s.sin(a);
+    let leaf = s.close(vec![sa]);
+    let mut s = rsdag::Scope::new(&mut g, "mid");
+    let (x, y) = (s.param("x"), s.param("y"));
+    let l = s.call(leaf, 0, &[x]);
+    let m = s.mul(l, y);
+    let mid = s.close(vec![m]);
+    let (p, q) = (g.sym("p"), g.sym("q"));
+    let one = g.call(mid, 0, &[p, q]);
+    let two = g.call(mid, 0, &[q, p]);
+    let r = g.add(one, two);
+
+    let flat = GraphView::new(&g).root(r, "r").render();
+    assert_eq!(count(&flat, "subgraph cluster_"), 0);
+    let dot = GraphView::new(&g).root(r, "r").bodies().render();
+    assert_eq!(count(&dot, "subgraph cluster_"), 2, "{dot}");
+    assert!(
+        dot.contains("<B>mid</B>") && dot.contains("<B>leaf</B>"),
+        "{dot}"
+    );
+    // the sine of leaf's body drawn once, however many calls reach it
+    assert_eq!(count(&dot, "label=\"sin\""), 1, "{dot}");
+    // a dashed link per call: two of mid, one of leaf in mid's body
+    assert_eq!(count(&dot, "style=dashed"), 3, "{dot}");
+}

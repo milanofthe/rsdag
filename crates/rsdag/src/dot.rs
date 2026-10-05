@@ -5,7 +5,8 @@
 //! node with several parents. A focus set keeps its nodes at full strength
 //! and fades the rest (the nodes a transform added, the arms a
 //! specialization keeps), clusters group nodes (a function body), links add
-//! dashed edges between nodes. [`TapeView`] draws a program's dataflow, one
+//! dashed edges between nodes; `bodies` draws the bodies of the functions
+//! the drawn calls reach, each once in its frame, every call linked to it. [`TapeView`] draws a program's dataflow, one
 //! node per instruction, the prolog and the main phase as two clusters and
 //! the values the prolog leaves in the state as dashed edges.
 //!
@@ -16,6 +17,7 @@ use std::fmt::Write;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::field::Field;
+use crate::func::{FuncId, Output};
 use crate::graph::Graph;
 use crate::node::{ExprId, Node, ReduceOp, SymbolId};
 use crate::tape::{input_index, Op, Tape};
@@ -479,6 +481,7 @@ pub struct GraphView<'g, K: Field> {
     focus: Option<FxHashSet<ExprId>>,
     clusters: Vec<(String, Vec<ExprId>)>,
     links: Vec<(ExprId, ExprId, String)>,
+    bodies: bool,
 }
 
 impl<'g, K: Field> GraphView<'g, K> {
@@ -492,6 +495,7 @@ impl<'g, K: Field> GraphView<'g, K> {
             focus: None,
             clusters: Vec::new(),
             links: Vec::new(),
+            bodies: false,
         }
     }
 
@@ -537,6 +541,64 @@ impl<'g, K: Field> GraphView<'g, K> {
     pub fn link(mut self, a: ExprId, b: ExprId, label: &str) -> Self {
         self.links.push((a, b, label.to_string()));
         self
+    }
+
+    /// Draw the bodies of the functions the drawn calls reach, to the
+    /// bottom: each function once, in a frame named after it, and every
+    /// call linked (dashed) to the output it calls. The whole hierarchy,
+    /// a function shared by its instances rather than repeated per call.
+    pub fn bodies(mut self) -> Self {
+        self.bodies = true;
+        self
+    }
+
+    /// The clusters and links of the called functions' bodies (see
+    /// [`bodies`](Self::bodies)), after the given ones: a body's frame
+    /// holds the nodes it reaches that nothing drawn before reaches.
+    #[allow(clippy::type_complexity)]
+    fn with_bodies(
+        &self,
+        seeds: &[ExprId],
+    ) -> (Vec<(String, Vec<ExprId>)>, Vec<(ExprId, ExprId, String)>) {
+        let g = self.g;
+        let mut clusters = self.clusters.clone();
+        let mut links = self.links.clone();
+        if !self.bodies {
+            return (clusters, links);
+        }
+        let mut drawn = reachable(g, seeds);
+        let mut frame: FxHashMap<FuncId, usize> = FxHashMap::default();
+        let mut entered: FxHashSet<(FuncId, u32)> = FxHashSet::default();
+        let mut todo: Vec<ExprId> = drawn.iter().copied().collect();
+        while !todo.is_empty() {
+            todo.sort_by_key(|e| e.0);
+            let mut next = Vec::new();
+            for e in todo {
+                let Node::Call(o, _) = *g.node(e) else {
+                    continue;
+                };
+                let (f, k) = g.output(o);
+                let Output::Expr(b) = g.func(f).outputs()[k as usize] else {
+                    continue;
+                };
+                links.push((e, b, String::new()));
+                if !entered.insert((f, k)) {
+                    continue;
+                }
+                let c = *frame.entry(f).or_insert_with(|| {
+                    clusters.push((g.func(f).name().to_string(), Vec::new()));
+                    clusters.len() - 1
+                });
+                for n in reachable(g, &[b]) {
+                    if drawn.insert(n) {
+                        clusters[c].1.push(n);
+                        next.push(n);
+                    }
+                }
+            }
+            todo = next;
+        }
+        (clusters, links)
     }
 
     fn faded(&self, e: ExprId) -> bool {
@@ -626,11 +688,15 @@ impl<'g, K: Field> GraphView<'g, K> {
             seeds.push(a);
             seeds.push(b);
         }
+        let (clusters, links) = self.with_bodies(&seeds);
+        for (_, ids) in &clusters {
+            seeds.extend(ids.iter().copied());
+        }
         // Nodes in id order: operands before the nodes that read them.
         let mut nodes: Vec<ExprId> = reachable(g, &seeds).into_iter().collect();
         nodes.sort_by_key(|e| e.0);
         let mut home: FxHashMap<ExprId, usize> = FxHashMap::default();
-        for (c, (_, ids)) in self.clusters.iter().enumerate() {
+        for (c, (_, ids)) in clusters.iter().enumerate() {
             for &e in ids {
                 home.entry(e).or_insert(c);
             }
@@ -640,7 +706,7 @@ impl<'g, K: Field> GraphView<'g, K> {
             let (label, kind) = self.style(e);
             format!("n{} [{}];\n", e.0, t.node(kind, &label, self.faded(e)))
         };
-        for (c, (label, _)) in self.clusters.iter().enumerate() {
+        for (c, (label, _)) in clusters.iter().enumerate() {
             let _ = writeln!(s, "  subgraph cluster_{c} {{\n    {}", t.cluster(label));
             for &e in nodes.iter().filter(|e| home.get(e) == Some(&c)) {
                 s.push_str("    ");
@@ -683,7 +749,7 @@ impl<'g, K: Field> GraphView<'g, K> {
                 }
             );
         }
-        for (a, b, label) in &self.links {
+        for (a, b, label) in &links {
             let _ = writeln!(
                 s,
                 "  n{} -> n{} [style=dashed, label=\"{}\", constraint=false];",
