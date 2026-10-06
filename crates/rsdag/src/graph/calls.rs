@@ -293,14 +293,14 @@ impl<K: Field> Graph<K> {
     /// derivative of `exprs`, nested calls included.
     pub fn support_in(&self, exprs: &[ExprId]) -> std::collections::BTreeSet<SymbolId> {
         let flow = self.flow(exprs, Through::Carries, |n| match *n {
-            Node::Symbol(s) => Set::one(s.0),
+            Node::Symbol(s) => Set::one(s.0, self.n_symbols()),
             _ => Set::bottom(),
         });
         let mut all = Set::bottom();
         for &e in exprs {
             all.join(flow.get(e));
         }
-        all.as_slice().iter().map(|&s| SymbolId(s)).collect()
+        all.iter().map(SymbolId).collect()
     }
 
     /// Which outputs of `f` structurally read which of its parameters:

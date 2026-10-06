@@ -63,82 +63,105 @@ impl Join for bool {
     }
 }
 
-/// A sorted set of small integers; a node with one contributing operand
-/// shares that operand's.
+/// A set of small integers: indices of a universe of at most
+/// [`BITS_MAX`] as a bitset (a union an `or` over a few words), of a wider
+/// one sorted. A node with one contributing operand shares that operand's.
 #[derive(Clone, Default, PartialEq, Debug)]
-pub(crate) struct Set(Option<Rc<[u32]>>);
+pub(crate) struct Set(Option<Ids>);
+
+#[derive(Clone, PartialEq, Debug)]
+enum Ids {
+    Bits(Rc<[u64]>),
+    Sorted(Rc<[u32]>),
+}
+
+/// The widest universe a [`Set`] keeps as a bitset.
+pub(crate) const BITS_MAX: usize = 4096;
 
 impl Set {
-    pub(crate) fn one(k: u32) -> Set {
-        Set(Some(Rc::from([k])))
+    /// `{k}`, of a universe of `n`.
+    pub(crate) fn one(k: u32, n: usize) -> Set {
+        if n <= BITS_MAX {
+            let mut w = vec![0u64; k as usize / 64 + 1];
+            w[k as usize / 64] = 1 << (k % 64);
+            Set(Some(Ids::Bits(w.into())))
+        } else {
+            Set(Some(Ids::Sorted(Rc::from([k]))))
+        }
     }
-    pub(crate) fn as_slice(&self) -> &[u32] {
-        self.0.as_deref().unwrap_or(&[])
+
+    /// The members, ascending.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+        let (bits, sorted): (&[u64], &[u32]) = match &self.0 {
+            None => (&[], &[]),
+            Some(Ids::Bits(w)) => (w, &[]),
+            Some(Ids::Sorted(v)) => (&[], v),
+        };
+        let from_bits = bits.iter().enumerate().flat_map(|(i, &w)| {
+            let mut w = w;
+            std::iter::from_fn(move || {
+                (w != 0).then(|| {
+                    let b = w.trailing_zeros();
+                    w &= w - 1;
+                    i as u32 * 64 + b
+                })
+            })
+        });
+        from_bits.chain(sorted.iter().copied())
     }
 }
 
 impl Join for Set {
     fn join_all<'a>(parts: impl Iterator<Item = &'a Set>) -> Set {
         let mut first: Option<&Set> = None;
-        let mut all: Vec<u32> = Vec::new();
+        let (mut bits, mut sorted): (Vec<u64>, Vec<u32>) = (Vec::new(), Vec::new());
+        let add = |p: &Set, bits: &mut Vec<u64>, sorted: &mut Vec<u32>| match &p.0 {
+            Some(Ids::Bits(w)) => {
+                if bits.len() < w.len() {
+                    bits.resize(w.len(), 0);
+                }
+                bits.iter_mut().zip(w.iter()).for_each(|(a, &b)| *a |= b);
+            }
+            Some(Ids::Sorted(v)) => sorted.extend_from_slice(v),
+            None => {}
+        };
+        let mut many = false;
         for p in parts.filter(|p| !p.is_bottom()) {
             match first {
                 None => first = Some(p),
                 Some(f) => {
-                    if all.is_empty() {
-                        all.extend_from_slice(f.as_slice());
+                    if !many {
+                        add(f, &mut bits, &mut sorted);
+                        many = true;
                     }
-                    all.extend_from_slice(p.as_slice());
+                    add(p, &mut bits, &mut sorted);
                 }
             }
         }
-        if all.is_empty() {
+        if !many {
             // none, or one set: shared as it is
             return first.cloned().unwrap_or_default();
         }
-        all.sort_unstable();
-        all.dedup();
-        Set(Some(Rc::from(all)))
+        if sorted.is_empty() {
+            return Set(Some(Ids::Bits(bits.into())));
+        }
+        // one flow takes one kind; mixed, the bits join the list
+        sorted.extend(Set(Some(Ids::Bits(bits.into()))).iter());
+        sorted.sort_unstable();
+        sorted.dedup();
+        Set(Some(Ids::Sorted(sorted.into())))
     }
     fn bottom() -> Set {
         Set(None)
     }
     fn is_bottom(&self) -> bool {
-        self.as_slice().is_empty()
+        self.0.is_none()
     }
     fn join(&mut self, other: &Set) {
         if other.is_bottom() {
             return;
         }
-        if self.is_bottom() {
-            *self = other.clone();
-            return;
-        }
-        let (a, b) = (self.as_slice(), other.as_slice());
-        let mut out = Vec::with_capacity(a.len() + b.len());
-        let (mut i, mut j) = (0, 0);
-        while i < a.len() && j < b.len() {
-            match a[i].cmp(&b[j]) {
-                std::cmp::Ordering::Less => {
-                    out.push(a[i]);
-                    i += 1;
-                }
-                std::cmp::Ordering::Greater => {
-                    out.push(b[j]);
-                    j += 1;
-                }
-                std::cmp::Ordering::Equal => {
-                    out.push(a[i]);
-                    i += 1;
-                    j += 1;
-                }
-            }
-        }
-        out.extend_from_slice(&a[i..]);
-        out.extend_from_slice(&b[j..]);
-        if out.len() != a.len() {
-            *self = Set(Some(Rc::from(out)));
-        }
+        *self = Set::join_all([&*self, other].into_iter());
     }
 }
 
@@ -368,6 +391,7 @@ impl<K: Field> Graph<K> {
             .iter()
             .map(|&p| (self.operand_symbol(f, p), p))
             .collect();
+        let universe = moving.iter().max().map_or(0, |&p| p as usize + 1);
         let exprs: Vec<ExprId> = outputs[done..]
             .iter()
             .filter_map(|o| match *o {
@@ -377,7 +401,9 @@ impl<K: Field> Graph<K> {
             .collect();
         let found = (!moving.is_empty() && !exprs.is_empty()).then(|| {
             self.flow(&exprs, through, |n| match *n {
-                Node::Symbol(s) => index.get(&s).map_or(Set::bottom(), |&p| Set::one(p)),
+                Node::Symbol(s) => index
+                    .get(&s)
+                    .map_or(Set::bottom(), |&p| Set::one(p, universe)),
                 _ => Set::bottom(),
             })
         });
@@ -386,7 +412,7 @@ impl<K: Field> Graph<K> {
             Output::Slot(_) => Arc::from(moving),
             Output::Expr(e) => found
                 .as_ref()
-                .map_or(Arc::from([]), |fl| Arc::from(fl.get(e).as_slice())),
+                .map_or(Arc::from([]), |fl| fl.get(e).iter().collect()),
         });
         let r: Arc<[Arc<[u32]>]> = known
             .iter()
