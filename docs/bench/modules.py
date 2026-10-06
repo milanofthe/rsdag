@@ -57,6 +57,9 @@ class Module:
         self.symbols = m["symbols"]
         self.funcs = m["funcs"]
         self.call_outputs = m["call_outputs"]
+        # per call output, the parameters its calls have bound and the list
+        # of their expressions (a model card bound to its device function)
+        self.contexts = m.get("call_contexts") or [None] * len(self.call_outputs)
         self.params = d["params"]
         self.x0 = np.array(d["x0"])
         f = self.funcs[d["circuit"]]
@@ -79,6 +82,18 @@ class Module:
     def args(self, lst):
         return self.pool[lst["start"]:lst["start"] + lst["len"]]
 
+    def call_args(self, o, lst):
+        """The operands of a call of output `o` over `lst` in its function's
+        parameter order: the arguments, and where its context binds a
+        parameter the bound expression."""
+        args = self.args(lst)
+        if self.contexts[o] is None:
+            return args
+        at, exprs = self.contexts[o]
+        bound = dict(zip(at, self.args(exprs)))
+        rest = iter(args)
+        return [bound[p] if p in bound else next(rest) for p in range(len(args) + len(bound))]
+
     def operands(self, i):
         k, v = next(iter(self.nodes[i].items()))
         if k in ("Add", "Mul"):
@@ -96,7 +111,7 @@ class Module:
         if k == "Reduce":
             return self.args(v[1])
         if k == "Call":
-            return self.args(v[1])
+            return self.call_args(v[0], v[1])
         return []
 
     def cone(self, roots):
@@ -210,7 +225,7 @@ def evaluate(mod, ops, roots, env, call):
                 r = r + x
         elif k == "Call":
             f, out = mod.call_outputs[v[0]]
-            r = call(f, out, [val[a] for a in mod.args(v[1])], i)
+            r = call(f, out, [val[a] for a in mod.call_args(v[0], v[1])], i)
         else:
             raise NotImplementedError(k)
         val[i] = r
@@ -291,7 +306,7 @@ def jax_model(mod):
         n = mod.nodes[i]
         if "Call" in n:
             f, out = mod.call_outputs[n["Call"][0]]
-            calls.setdefault(f, []).append((i, out, tuple(mod.args(n["Call"][1]))))
+            calls.setdefault(f, []).append((i, out, tuple(mod.call_args(n["Call"][0], n["Call"][1]))))
 
     def residual(x):
         env = {s: x[k] for k, (_, s) in enumerate(mod.states)}
