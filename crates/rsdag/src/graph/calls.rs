@@ -73,11 +73,10 @@ impl<K: Field> Graph<K> {
 
     /// Every call into a function whose body calls further functions,
     /// inlined, to the bottom; the calls of leaf functions (a device model's
-    /// body) stay calls. A hierarchy as a compiled program should see it: no
-    /// boundary but its leaves, so the calls of one leaf from every instance
-    /// anywhere in the hierarchy batch together, as they would in a flat
-    /// graph, while the symbolic work before (differentiation,
-    /// specialization) stays on the hierarchy.
+    /// body) stay calls: the hierarchy flattened down to its leaves, as an
+    /// expression. A compiled program needs no such rewrite: the tape
+    /// compiler takes a composite function as a template and batches the
+    /// leaf calls of every instance itself (see [`Tape::compile`](crate::Tape::compile)).
     pub fn inline_composite(&mut self, roots: &[ExprId]) -> Vec<ExprId> {
         let mut composite: HashMap<FuncId, bool> = HashMap::default();
         self.inline_where(roots, &mut |g, f| {

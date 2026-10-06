@@ -96,7 +96,7 @@ fn main() {
 
         let t = Instant::now();
         let inputs: Vec<SymbolId> = syms.iter().flatten().copied().collect();
-        let tape = Tape::compose(&mut g, &spec, &inputs);
+        let tape = Tape::compose(&g, &spec, &inputs);
         let tape_t = t.elapsed();
         std::hint::black_box(&tape);
 

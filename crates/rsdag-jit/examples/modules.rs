@@ -4,8 +4,8 @@
 //! other tools get it: the derivatives and time bound to the constant zero
 //! and every call specialized to that (`Graph::specialize_calls`). The
 //! residual and its Jacobian are derived on the module's functions and
-//! compiled as programs over them (`Graph::inline_composite`, the setup
-//! includes it): a subcircuit's function inlined, the device bodies called.
+//! compiled as programs over them: a subcircuit's function a template, the
+//! device bodies called.
 //! The states are the inputs; the parameters are bound once, so their work
 //! runs in the prolog. Per module: the setup and the time per call of the
 //! residual and of its sparse Jacobian in the states, interpreted and
@@ -15,8 +15,8 @@
 //! `--values <dir>` also writes the residual and the Jacobian at
 //! `x0 + 0.01` there (off the solution, where the residual is not zero),
 //! for comparing other tools against. `--composed <dir>` writes each module
-//! as rsdag compiles it, the subcircuit functions inlined and the device
-//! bodies functions, the form the other tools are given.
+//! with its subcircuit functions inlined and the device bodies functions,
+//! the form the other tools are given.
 //!
 //! `--threads <n>` runs the residual and the Jacobian with a pool of `n`
 //! threads installed, their independent calls (the device instances) in
@@ -243,8 +243,7 @@ fn main() {
             .zip(&pure)
             .map(|(&v, &p)| if p { v } else { v + 0.01 })
             .collect();
-        let (program, s_inline) = timed(|| g.inline_composite(&residuals));
-        let (fm, fvals) = measure(&g, &program, &syms, &pure, &vals, &check);
+        let (fm, fvals) = measure(&g, &residuals, &syms, &pure, &vals, &check);
         let (rows, s_diff) = timed(|| sparse_jacobian(&mut g, &residuals, &states));
         let (mut ri, mut ci, mut entries) = (Vec::new(), Vec::new(), Vec::new());
         for (i, row) in rows.iter().enumerate() {
@@ -254,8 +253,7 @@ fn main() {
                 entries.push(e);
             }
         }
-        let (entries_program, s_jinline) = timed(|| g.inline_composite(&entries));
-        let (jm, jvals) = measure(&g, &entries_program, &syms, &pure, &vals, &check);
+        let (jm, jvals) = measure(&g, &entries, &syms, &pure, &vals, &check);
         let (folded, s_fold) = timed(|| {
             let inlined = g.inline_all(&residuals);
             let map = syms
@@ -308,12 +306,12 @@ fn main() {
         println!(
             "{name},{},{:.6},{:.6},{:.4},{:.4},{:.6},{:.6},{:.4},{:.4},{},{:.6},{:.4},{:.6},{:.4}",
             states.len(),
-            s_inline + fm[0],
-            s_inline + fm[1],
+            fm[0],
+            fm[1],
             fm[2] * 1e6,
             fm[3] * 1e6,
-            s_diff + s_jinline + jm[0],
-            s_diff + s_jinline + jm[1],
+            s_diff + jm[0],
+            s_diff + jm[1],
             jm[2] * 1e6,
             jm[3] * 1e6,
             entries.len(),
