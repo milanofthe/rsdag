@@ -1,19 +1,14 @@
-//! The DOT views: one node per expression or instruction, a shared
-//! subexpression once, faded nodes outside the focus, the prolog and main
-//! phase as clusters with the state crossing between them as dashed edges.
+//! The graph view as data: one node per expression, a shared subexpression
+//! once, faded nodes outside the focus, the bodies of the calls in frames.
 
-use rsdag::dot::{number, reachable, Blocks, GraphView, Kind, Notation, Style, TapeView, Theme};
-use rsdag::{differentiate, ExprId, Graph, Node, SymbolId, Tape, F64};
+use rsdag::dot::{number, reachable, GraphView, Kind};
+use rsdag::{differentiate, ExprId, Graph, Node, SymbolId, F64};
 
 fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
     match g.node(e) {
         Node::Symbol(s) => *s,
         _ => unreachable!(),
     }
-}
-
-fn count(s: &str, pat: &str) -> usize {
-    s.matches(pat).count()
 }
 
 #[test]
@@ -23,21 +18,21 @@ fn a_shared_subexpression_is_one_node() {
     let xy = g.mul(x, y);
     let s = g.sin(xy);
     let f = g.add(s, xy);
-    let dot = GraphView::new(&g).root(f, "f").render();
-    // x, y, x*y, sin and +, and five edges between them.
-    let nodes = dot
-        .lines()
-        .filter(|l| l.starts_with("  n") && l.contains(" [label="))
-        .count();
-    assert_eq!(nodes, 5, "{dot}");
-    assert_eq!(count(&dot, " -> n"), 5, "{dot}");
-    assert_eq!(count(&dot, "out0 ["), 1);
+    let d = GraphView::new(&g).root(f, "f").data();
+    // x, y, x*y, sin and +, the result f, and the edges between them
+    let exprs = d.nodes.iter().filter(|n| n.kind != Kind::Output).count();
+    assert_eq!(exprs, 5, "{d:?}");
+    assert_eq!(d.nodes.len(), 6, "one result node");
+    let at = d
+        .nodes
+        .iter()
+        .position(|n| n.id == format!("n{}", xy.0))
+        .unwrap();
     assert_eq!(
-        count(&dot, &format!("n{} -> ", xy.0)),
+        d.edges.iter().filter(|e| e.0 == at).count(),
         2,
         "x*y feeds sin and +"
     );
-    assert!(dot.starts_with("digraph G {") && dot.ends_with("}\n"));
 }
 
 #[test]
@@ -50,43 +45,15 @@ fn nodes_outside_the_focus_are_faded() {
     let wrt = sym(&g, x);
     let df = differentiate(&mut g, f, wrt);
     let keep = reachable(&g, &[df]);
-    let dot = GraphView::new(&g)
+    let d = GraphView::new(&g)
         .root(f, "f")
         .root(df, "df/dx")
         .focus(keep.clone())
-        .render();
-    let faded = dot
-        .lines()
-        .filter(|l| l.contains("fontcolor=\"#8b8b8b40\""))
-        .count();
+        .data();
+    let faded = d.nodes.iter().filter(|n| n.faded).count();
     let all = reachable(&g, &[f, df]);
     // Every node only f reaches is faded, and f's result with them.
-    assert_eq!(faded, all.len() - keep.len() + 1, "{dot}");
-}
-
-#[test]
-fn a_split_tape_has_two_phases_and_state_edges() {
-    let mut g: Graph<F64> = Graph::new();
-    let (v, p, q) = (g.sym("v"), g.sym("p"), g.sym("q"));
-    let pq = g.mul(p, q);
-    let r = g.pow_i(pq, -1);
-    let u = g.mul(v, r);
-    let e = g.exp(u);
-    let syms = [sym(&g, v), sym(&g, p), sym(&g, q)];
-    let pure = [false, true, true];
-    let tape = Tape::compile_split(&g, &[e], &syms, &pure);
-    assert!(tape.prolog_len() > 0);
-    let dot = TapeView::new(&tape)
-        .inputs(&["v", "p", "q"])
-        .params(&pure)
-        .outputs(&["e"])
-        .render();
-    assert_eq!(count(&dot, "subgraph cluster_"), 2, "{dot}");
-    for i in 0..tape.n_ops() {
-        assert!(dot.contains(&format!("o{i} [")), "op {i} drawn");
-    }
-    assert!(count(&dot, "style=dashed") >= 1, "the state crosses: {dot}");
-    assert!(dot.contains("label=\"v\"") && dot.contains("label=<<B>e</B>>"));
+    assert_eq!(faded, all.len() - keep.len() + 1, "{d:?}");
 }
 
 #[test]
@@ -97,60 +64,6 @@ fn numbers_are_short() {
     assert_eq!(number(0.001), "0.001");
     assert_eq!(number(5.5406e34), "5.541e34");
     assert_eq!(number(1.0 / 3.0), "0.3333");
-}
-
-#[test]
-fn a_theme_with_one_line_color_and_opaque_fills() {
-    let mut g: Graph<F64> = Graph::new();
-    let (x, y) = (g.sym("x"), g.sym("y"));
-    let xy = g.mul(x, y);
-    let s = g.sin(xy);
-    let f = g.add(s, xy);
-    let theme = Theme {
-        style: Style::Filled,
-        text: "#000000",
-        line: Some("#000000"),
-        fill_alpha: "",
-        op: "#E0E0E0",
-        notation: Notation::Math,
-        ..Theme::default()
-    };
-    let dot = GraphView::new(&g).theme(theme).root(f, "F").render();
-    assert!(dot.contains("label=\"\u{00d7}\", shape=circle"), "{dot}");
-    assert!(dot.contains("label=\"sin(\u{00b7})\""), "{dot}");
-    assert!(
-        dot.contains("color=\"#000000\", fillcolor=\"#E0E0E0\""),
-        "{dot}"
-    );
-    assert!(!dot.contains("#E0E0E026"));
-}
-
-#[test]
-fn blocks_have_bold_titles_notes_and_patterns() {
-    let dot = Blocks::new(Theme::default(), "LR")
-        .block("a", "Graph", &["one line", "**bold line**"])
-        .note("n", "guard", &["x < y"])
-        .pattern("p", &["x.", ".x"], "pattern")
-        .group("tape", &["a", "n"])
-        .row(&["a", "p"])
-        .edge("a", "p", "")
-        .accent_edge("a", "n", "")
-        .caption("under it all")
-        .render();
-    assert!(
-        dot.contains("<B>Graph</B></FONT><BR/>one line<BR/><B>bold line</B>>"),
-        "{dot}"
-    );
-    assert!(dot.contains("x &lt; y"), "{dot}");
-    assert_eq!(count(&dot, "BGCOLOR="), 2, "{dot}");
-    assert_eq!(count(&dot, "subgraph cluster_0"), 1);
-    assert!(
-        dot.contains("style=\"rounded,dashed\", color=\"#3b82f6\""),
-        "{dot}"
-    );
-    assert!(dot.contains("labelloc=b"));
-    // A row lines up across the group's border.
-    assert!(dot.contains("{ rank=same; a; p; }") && dot.contains("newrank=true"));
 }
 
 #[test]
@@ -171,26 +84,19 @@ fn bodies_draw_each_called_function_once() {
     let two = g.call(mid, 0, &[q, p]);
     let r = g.add(one, two);
 
-    let flat = GraphView::new(&g).root(r, "r").render();
-    assert_eq!(count(&flat, "subgraph cluster_"), 0);
-    let dot = GraphView::new(&g).root(r, "r").bodies().render();
-    assert_eq!(count(&dot, "subgraph cluster_"), 2, "{dot}");
-    assert!(
-        dot.contains("<B>mid</B>") && dot.contains("<B>leaf</B>"),
-        "{dot}"
-    );
-    // the sine of leaf's body drawn once, however many calls reach it
-    assert_eq!(count(&dot, "label=\"sin\""), 1, "{dot}");
-    // a dashed link per call: two of mid, one of leaf in mid's body
-    assert_eq!(count(&dot, "style=dashed"), 3, "{dot}");
+    let flat = GraphView::new(&g).root(r, "r").data();
+    assert!(flat.clusters.is_empty());
 
-    // the same as data, a call relabelled by its instance
+    // each body once in its frame, the sine of leaf's body once however many
+    // calls reach it, a link per call (two of mid, one of leaf in mid's
+    // body), and a call relabelled by its instance
     let data = GraphView::new(&g)
         .root(r, "r")
         .bodies()
         .label(one, "X1")
         .data();
     assert_eq!(data.clusters, ["mid", "leaf"]);
+    assert_eq!(data.nodes.iter().filter(|n| n.label == "sin").count(), 1);
     assert_eq!(data.links.len(), 3);
     let sine = data.nodes.iter().find(|n| n.label == "sin").expect("sin");
     assert_eq!(sine.cluster, Some(1));
@@ -263,8 +169,6 @@ fn inline_draws_every_instance_as_its_body() {
         readers.contains(&leaf_of(x1)) && readers.contains(&Some(x2)),
         "{readers:?}"
     );
-    // nested frames in the DOT
-    let dot = GraphView::new(&g).root(r, "r").inline().render();
-    assert_eq!(count(&dot, "subgraph cluster_"), 4, "{dot}");
-    assert!(!dot.contains("style=dashed"), "{dot}");
+    // no call left to link to its body
+    assert!(data.links.is_empty());
 }

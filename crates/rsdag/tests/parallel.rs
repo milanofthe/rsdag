@@ -68,19 +68,8 @@ fn ring() -> (Graph<F64>, Vec<ExprId>, Vec<SymbolId>, Vec<bool>) {
 }
 
 fn pool(threads: usize) -> Parallel {
-    // `100 + n`: rsdag's own pool of n threads, else a rayon pool of n
-    if threads > 100 {
-        return Parallel {
-            pool: Arc::new(parallel::Workers::new(threads - 100)),
-            min_ops: 0,
-        };
-    }
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .build()
-        .unwrap();
     Parallel {
-        pool: Arc::new(pool),
+        pool: Arc::new(parallel::Workers::new(threads)),
         min_ops: 0,
     }
 }
@@ -120,7 +109,7 @@ fn a_split_program_on_a_pool_is_the_serial_one() {
     let (mut w, mut out) = (Vec::new(), Vec::new());
     tape.eval_prolog(&x, &mut w);
     tape.eval_main(&x, &mut w, &mut out);
-    for threads in [2, 3, 8, 102, 103, 108] {
+    for threads in [2, 3, 8] {
         let (mut wp, mut op) = (Vec::new(), Vec::new());
         parallel::install(pool(threads), || {
             tape.eval_prolog(&x, &mut wp);

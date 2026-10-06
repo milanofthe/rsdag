@@ -28,13 +28,11 @@ NOTICE); for a commercial license contact info@milanrother.com.
   calls and roles, bindings (`Graph::bind`), composition (`Graph::import`,
   hierarchies compiled through templates),
   `Scope`, `Module` (serialization), `differentiate`,
-  `gradient` (reverse mode), `sparse_jacobian`, `hessian`, `substitute`,
-  `Tape` (interpreter over any `Scalar`, choice specialization, instance
-  batching, `Gemv`, `Gemm` and dense `Solve` kernels, prolog/main split),
-  `semantics` (the reference arithmetic), `symbolic` (`determinant`,
-  `collect`, `rational_form`, `simplify_egraph`), `parallel` (a program's
-  independent calls on a pool, `Workers`), `dot` (Graphviz of graphs and
-  tapes).
+  `gradient` (reverse mode), `sparse_jacobian`, `substitute`, `Tape`
+  (interpreter, choice specialization, instance batching, `Gemv`, `Gemm`
+  and dense `Solve` kernels, prolog/main split), `semantics` (the reference
+  arithmetic), `parallel` (a program's independent calls on a pool,
+  `Workers`), `dot` (a graph's DAG as data for a viewer).
 - `rsdag-jit`: `NativeTape`, machine code for AArch64 and x86-64 on Linux,
   macOS and Windows; function bodies compiled once and batched over
   instances, on x86-64 in vector lanes; `eval_many` over many input sets in parallel
@@ -49,14 +47,10 @@ Features:
 | feature | adds | dependencies |
 |---|---|---|
 | `exact` | `Graph<BigRational>`, folding without rounding | num-bigint, num-rational |
-| `complex` | evaluation in `Complex64` | num-complex |
-| `egraph` | `simplify_egraph` (implies `exact`, native only) | egg |
 | `serde` | `Module` serialization | serde |
-| `rayon` | `rayon::ThreadPool` as a `parallel::Pool` | rayon |
 
 `rsdag` builds for `wasm32-unknown-unknown` (interpreter only) with every
-feature except `egraph`. It reads no clock unless `hooks::set_clock`
-installs one.
+feature. It reads no clock unless `hooks::set_clock` installs one.
 
 ## Architecture
 
@@ -111,7 +105,6 @@ A diode current and its derivative in `v` with parameters `is`, `n`, `vt`,
 compiled with `compile_split`: `1/(n vt)` is the prolog, the dashed edges
 are the state the main phase reads.
 
-`Tape::eval` runs over any `Scalar` (`f64`, `f32`, `Complex64`).
 `Adaptive` serves a tape by the interpreter, its choice specialization or
 native code (with a `Compiler`, compiled in the background), chosen per
 call; `Policy` sets the thresholds. `Adaptive::eval_prolog` returns the
@@ -122,8 +115,8 @@ falls back to the full tape when a region flips.
 ![Adaptive](docs/diagrams/adaptive.svg)
 
 Evaluation is allocation-free once the buffers exist. `Tape::work_len` and
-`out_len` size them, `eval_into` writes into slices the caller owns,
-`Tape::runner` holds the buffers itself. Function bodies: `ExternBundle::work_len`
+`out_len` size them, `eval_into` writes into slices the caller owns.
+Function bodies: `ExternBundle::work_len`
 and `call_into` take a caller-owned buffer; a calling tape lends its own.
 `NativeTape::compile` emits the same instruction sequence as machine code
 in chunked functions with a write-back register cache.
@@ -143,8 +136,7 @@ runner (`tape::calls`).
 A multiply-instantiated model is one function and one call per instance.
 The body is compiled once; calls with the same shape lower to one kernel op
 that runs the body over all instances, serially or on the current rayon
-pool as `rsdag_jit::Options::batch` says. `Graph::set_func_body` registers
-a body compiled by the caller; programs whose calls it covers use it.
+pool as `rsdag_jit::Options::batch` says.
 
 On x86-64 a batch also runs in lanes: the body compiled once more per
 width over several instances at once, one in each lane of every vector
@@ -210,8 +202,7 @@ own stages serially.
 `parallel::Workers` is the pool for it: its workers keep waiting for the
 next stage for a few hundred microseconds before they sleep, and the
 calling thread takes pieces too, so the stages of a solve, a factorization
-or a step decision apart, reach awake workers. Any `parallel::Pool` serves
-(with the `rayon` feature a `rayon::ThreadPool`).
+or a step decision apart, reach awake workers. Any `parallel::Pool` serves.
 
 ```rust
 use std::sync::Arc;
@@ -249,17 +240,12 @@ specialized tape.
 
 ## Diagrams
 
-`dot::GraphView` draws a graph under some roots: one node per expression,
-a shared subexpression once, a focus set at full strength and the rest
-faded, clusters and extra dashed links. `dot::TapeView` draws a tape's
-dataflow: one node per instruction, the prolog and the main phase as
-clusters, the state edges dashed, named inputs, outputs and function
-bodies. `dot::Blocks` draws architecture diagrams: blocks with a bold
-title over lines of text, groups, notes, sparsity patterns. `dot::Theme`
-sets fonts, colors and the style: `Outline` (the default: lines only, one
-grey, the branches, guards and state in one accent, a transparent
-background) or `Filled` (a fill per node kind, the notation `Ascii` or
-`Math`).
+`dot::GraphView` gives a graph under some roots as data for a viewer that
+lays it out itself: one node per expression with its kind, a shared
+subexpression once, a focus set at full strength and the rest faded,
+clusters, extra links, and the bodies of the calls in nested frames
+(`bodies`, or `inline` for every instance). The operators are labelled in
+the notation `Ascii` or `Math`.
 
 ## Bit-exactness
 
@@ -267,8 +253,8 @@ All backends compute the same IEEE operation sequence: no fast-math, no
 fused multiply-add, one reference routine per elementary function, one
 four-accumulator order for reductions and dot products, the same domain
 guards. `rsdag::synth` generates random programs over the whole op
-vocabulary; the test suites compare the arena sweep, the tape, the native
-code and the typed evaluation on them bit for bit.
+vocabulary; the test suites compare the arena sweep, the tape and the
+native code on them bit for bit.
 
 ## Benchmarks
 
@@ -298,7 +284,7 @@ A hierarchy's symbolic work over the size of one body: a body of n circuit
 nodes (a ring of n devices, a capacitor per node, every node's current an
 output) called once, its calls (`calls`), the
 Jacobian through it, the residual specialized to `x' = 0` and the program
-compiled from it (`Tape::compose`). Each grows linearly with the body, not
+compiled from it (`Tape::compile`). Each grows linearly with the body, not
 with the body times its outputs (`rsdag/examples/hierarchy.rs`).
 
 ![A wide body, called once](docs/bench/hierarchy.svg)

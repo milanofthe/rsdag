@@ -3,7 +3,7 @@
 //! current into each node an output) called once, every output its own call
 //! over the one argument list. The cost of each stage a solver runs over it,
 //! by n: building the calls, the Jacobian, the derivatives set to zero, the
-//! calls specialized to that, and the program (`Tape::compose`: the body
+//! calls specialized to that, and the program (`Tape::compile`: the body
 //! inlined, its device calls batched). Each grows with the body, not with
 //! its outputs times its width.
 //!
@@ -96,7 +96,7 @@ fn main() {
 
         let t = Instant::now();
         let inputs: Vec<SymbolId> = syms.iter().flatten().copied().collect();
-        let tape = Tape::compose(&g, &spec, &inputs);
+        let tape = Tape::compile(&g, &spec, &inputs);
         let tape_t = t.elapsed();
         std::hint::black_box(&tape);
 

@@ -1,4 +1,3 @@
-use num_complex::Complex64;
 use rsdag::eval::eval;
 use rsdag::BigRational;
 use rsdag::*;
@@ -41,19 +40,19 @@ fn derivative_matches_finite_difference() {
     let is_id = sid(&mut ctx, "Is");
     let g_id = sid(&mut ctx, "g");
 
-    let mut env: HashMap<SymbolId, Complex64> = HashMap::new();
-    env.insert(vt_id, Complex64::new(0.05, 0.0));
-    env.insert(is_id, Complex64::new(1e-12, 0.0));
-    env.insert(g_id, Complex64::new(0.3, 0.0));
+    let mut env: HashMap<SymbolId, f64> = HashMap::new();
+    env.insert(vt_id, 0.05);
+    env.insert(is_id, 1e-12);
+    env.insert(g_id, 0.3);
 
     let h = 1e-6;
     for &x0 in &[-0.1, 0.0, 0.1, 0.3] {
-        env.insert(v_id, Complex64::new(x0, 0.0));
-        let analytic = eval(&ctx, &[df], &env)[0].re;
-        env.insert(v_id, Complex64::new(x0 + h, 0.0));
-        let fp = eval(&ctx, &[f], &env)[0].re;
-        env.insert(v_id, Complex64::new(x0 - h, 0.0));
-        let fm = eval(&ctx, &[f], &env)[0].re;
+        env.insert(v_id, x0);
+        let analytic = eval(&ctx, &[df], &env)[0];
+        env.insert(v_id, x0 + h);
+        let fp = eval(&ctx, &[f], &env)[0];
+        env.insert(v_id, x0 - h);
+        let fm = eval(&ctx, &[f], &env)[0];
         let numeric = (fp - fm) / (2.0 * h);
         assert!(
             (analytic - numeric).abs() <= 1e-4 * (1.0 + analytic.abs()),
@@ -104,8 +103,8 @@ fn select_and_opaque_autodiff() {
 
     let eval_at = |ctx: &Graph<BigRational>, e: ExprId, xv: f64| {
         let mut env = HashMap::new();
-        env.insert(xid, Complex64::new(xv, 0.0));
-        eval(ctx, &[e], &env)[0].re
+        env.insert(xid, xv);
+        eval(ctx, &[e], &env)[0]
     };
     assert!((eval_at(&ctx, df, 3.0) - 6.0).abs() < 1e-9); // 2*3
     assert!((eval_at(&ctx, df, -2.0) + 1.0).abs() < 1e-9); // -1
@@ -164,13 +163,13 @@ fn gradient_matches_forward_mode() {
         (-2.0, -0.7, 0.9),
     ];
     for &(xv, yv, zv) in &pts {
-        let mut env: HashMap<SymbolId, Complex64> = HashMap::new();
-        env.insert(xs, Complex64::new(xv, 0.0));
-        env.insert(ys, Complex64::new(yv, 0.0));
-        env.insert(zs, Complex64::new(zv, 0.0));
+        let mut env: HashMap<SymbolId, f64> = HashMap::new();
+        env.insert(xs, xv);
+        env.insert(ys, yv);
+        env.insert(zs, zv);
         for (g, d) in grad.iter().zip(&fwd) {
-            let gv = eval(&ctx, &[*g], &env)[0].re;
-            let dv = eval(&ctx, &[*d], &env)[0].re;
+            let gv = eval(&ctx, &[*g], &env)[0];
+            let dv = eval(&ctx, &[*d], &env)[0];
             assert!(
                 (gv - dv).abs() <= 1e-12 * (1.0 + dv.abs()),
                 "at ({xv},{yv},{zv}): reverse={gv} forward={dv}"
@@ -197,39 +196,6 @@ fn gradient_handles_calls_and_absent_symbols() {
     assert!(rsdag::to_string(&ctx, grad[0]).contains("cube#1"));
     // Absent symbol: structurally zero.
     assert!(ctx.is_zero(grad[1]));
-}
-
-#[test]
-fn hessian_is_symmetric_and_correct() {
-    // f = exp(x*y) + x^3*y  ->  d2f/dxdy = exp(xy)*(1 + xy) + 3x^2 (both orders).
-    let mut ctx: Graph<BigRational> = Graph::new();
-    let x = ctx.sym("x");
-    let y = ctx.sym("y");
-    let xy = ctx.mul(x, y);
-    let e = ctx.exp(xy);
-    let x3 = ctx.pow_i(x, 3);
-    let x3y = ctx.mul(x3, y);
-    let f = ctx.add(e, x3y);
-    let (xs, ys) = (sid(&mut ctx, "x"), sid(&mut ctx, "y"));
-    let h = hessian(&mut ctx, f, &[xs, ys]);
-    assert_eq!(h[0][1], h[1][0], "one expression for both orders");
-
-    let mut env: HashMap<SymbolId, Complex64> = HashMap::new();
-    env.insert(xs, Complex64::new(0.6, 0.0));
-    env.insert(ys, Complex64::new(-0.8, 0.0));
-    let (xv, yv) = (0.6_f64, -0.8_f64);
-    let want_xy = (xv * yv).exp() * (1.0 + xv * yv) + 3.0 * xv * xv;
-    let h01 = eval(&ctx, &[h[0][1]], &env)[0].re;
-    let h10 = eval(&ctx, &[h[1][0]], &env)[0].re;
-    assert!((h01 - want_xy).abs() <= 1e-12 * (1.0 + want_xy.abs()));
-    assert!((h10 - want_xy).abs() <= 1e-12 * (1.0 + want_xy.abs()));
-    // Third order by repeated application: d3f/dx3 = 6y + y^3*exp(xy).
-    let gx = gradient(&mut ctx, f, &[xs])[0];
-    let gxx = differentiate(&mut ctx, gx, xs);
-    let gxxx = differentiate(&mut ctx, gxx, xs);
-    let want3 = 6.0 * yv + yv.powi(3) * (xv * yv).exp();
-    let got3 = eval(&ctx, &[gxxx], &env)[0].re;
-    assert!((got3 - want3).abs() <= 1e-12 * (1.0 + want3.abs()));
 }
 
 #[test]

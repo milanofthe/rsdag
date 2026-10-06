@@ -7,7 +7,7 @@
 
 use rsdag::synth::{cases, Spec, Vocabulary};
 use rsdag::{Graph, Tape};
-use rsdag_jit::NativeTape;
+use rsdag_jit::{NativeTape, Options};
 
 /// The corpus both fuzz tests draw from: sizes and vocabularies varying with
 /// the seed, three symbols' worth of inputs.
@@ -35,7 +35,15 @@ fn native_matches_the_arena_at_every_chunk_size() {
             o.clone()
         });
         let chunk_ops = [3, 7, rsdag_jit::CHUNK_OPS][i % 3];
-        let jit = NativeTape::compile_with(&case.tape, chunk_ops).expect("compile chunks");
+        let jit = NativeTape::compile_opts(
+            &case.tape,
+            &Options {
+                chunk_ops,
+                ..Options::default()
+            },
+            &[],
+        )
+        .expect("compile chunks");
         let (mut jw, mut jo) = (Vec::new(), Vec::new());
         case.expect_bits(&format!("native (chunk {chunk_ops})"), |row| {
             jit.eval(row, &mut jw, &mut jo);
@@ -57,8 +65,15 @@ fn compiled_specialized_tape_matches_the_interpreter() {
         let spec = case
             .tape
             .specialize(&choices, &vec![true; case.tape.n_selects()]);
-        let jit = NativeTape::compile_with(spec.tape(), [3, rsdag_jit::CHUNK_OPS][i % 2])
-            .expect("compile specialized tape");
+        let jit = NativeTape::compile_opts(
+            spec.tape(),
+            &Options {
+                chunk_ops: [3, rsdag_jit::CHUNK_OPS][i % 2],
+                ..Options::default()
+            },
+            &[],
+        )
+        .expect("compile specialized tape");
 
         // Every row, not just the one the choices were traced on: outside
         // the region the two paths must still agree with each other.
@@ -108,7 +123,15 @@ fn function_call_and_short_input_parity() {
 
     let (xi, yi) = (symbol_of(&ctx, x), symbol_of(&ctx, y));
     let tape = Tape::compile(&ctx, &[e, s], &[xi, yi]);
-    let jit = NativeTape::compile_with(&tape, 2).expect("compile");
+    let jit = NativeTape::compile_opts(
+        &tape,
+        &Options {
+            chunk_ops: 2,
+            ..Options::default()
+        },
+        &[],
+    )
+    .expect("compile");
 
     let (mut w1, mut o1) = (Vec::new(), Vec::new());
     let (mut w2, mut o2) = (Vec::new(), Vec::new());
