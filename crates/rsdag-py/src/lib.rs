@@ -19,7 +19,7 @@
 // `PyResult` method; the conversions are the macro's, not ours.
 #![allow(clippy::useless_conversion)]
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -580,18 +580,6 @@ struct Scratch {
     out: Vec<f64>,
 }
 
-thread_local! {
-    static SCRATCH: Cell<Scratch> = Cell::default();
-}
-
-/// Run `f` on this thread's [`Scratch`].
-fn with_scratch<R>(f: impl FnOnce(&mut Scratch) -> R) -> R {
-    let mut s = SCRATCH.take();
-    let r = f(&mut s);
-    SCRATCH.set(s);
-    r
-}
-
 /// Programs from this many ops on release the GIL while they run; below,
 /// releasing and retaking it costs more than the evaluation.
 const DETACH_OPS: usize = 256;
@@ -801,7 +789,7 @@ impl Dispatch {
         args: &Bound<'py, PyTuple>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
-        with_scratch(|s| {
+        rsdag::scratch::with(|s: &mut Scratch| {
             if let Err(e) = gather_all(args, s) {
                 // Called with tracers inside another trace: a composition.
                 if slf.call_method1("_traced", (args,))?.is_truthy()? {
@@ -900,7 +888,7 @@ impl Program {
         args: &Bound<'py, PyTuple>,
         out: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        with_scratch(|s| {
+        rsdag::scratch::with(|s: &mut Scratch| {
             gather_all(args, s)?;
             self.run(py, s)?;
             emit(py, &s.out, out)

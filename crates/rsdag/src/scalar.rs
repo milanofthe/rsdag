@@ -132,13 +132,15 @@ pub trait Scalar: Copy + Send + Sync + std::fmt::Debug + 'static {
         // A body that is a tape runs in this scalar: a complex small-signal
         // evaluation through a call stays complex. An opaque body runs in f64.
         if let Some(tape) = b.body() {
-            with_scratch::<Self, _>(|work, res| {
-                tape.eval(args, work, res);
-                out.copy_from_slice(&res[..out.len()]);
+            crate::scratch::with(|work: &mut Vec<Self>| {
+                crate::scratch::with(|res: &mut Vec<Self>| {
+                    tape.eval(args, work, res);
+                    out.copy_from_slice(&res[..out.len()]);
+                })
             });
             return;
         }
-        with_f64_scratch(args.len(), out.len(), |a, o| {
+        f64_buffers(args.len(), out.len(), |a, o| {
             for (dst, &x) in a.iter_mut().zip(args) {
                 *dst = x.to_f64();
             }
@@ -205,7 +207,7 @@ pub trait Scalar: Copy + Send + Sync + std::fmt::Debug + 'static {
             }
             return;
         }
-        with_f64_scratch(args.len(), out.len(), |a, o| {
+        f64_buffers(args.len(), out.len(), |a, o| {
             for (dst, &x) in a.iter_mut().zip(args) {
                 *dst = x.to_f64();
             }
@@ -217,52 +219,11 @@ pub trait Scalar: Copy + Send + Sync + std::fmt::Debug + 'static {
     }
 }
 
-/// Two `f64` buffers of the requested lengths, borrowed from a thread-local
-/// stack (a bundle that calls a bundle nests) and returned afterwards.
-fn with_f64_scratch<R>(
-    n_args: usize,
-    n_out: usize,
-    f: impl FnOnce(&mut [f64], &mut [f64]) -> R,
-) -> R {
-    thread_local! {
-        static STACK: std::cell::RefCell<Vec<(Vec<f64>, Vec<f64>)>> = const {
-            std::cell::RefCell::new(Vec::new())
-        };
-    }
-    let (mut a, mut o) = STACK
-        .with(|s| s.borrow_mut().pop())
-        .unwrap_or_else(|| (Vec::new(), Vec::new()));
-    if a.len() < n_args {
-        a.resize(n_args, 0.0);
-    }
-    if o.len() < n_out {
-        o.resize(n_out, 0.0);
-    }
-    let r = f(&mut a[..n_args], &mut o[..n_out]);
-    STACK.with(|s| s.borrow_mut().push((a, o)));
-    r
-}
-
-/// A work and an output buffer of scalar `T`, borrowed from a thread-local
-/// stack (a body that calls a body nests) and returned afterwards, so a call
-/// in a loop allocates only on its first round.
-fn with_scratch<T: Scalar, R>(f: impl FnOnce(&mut Vec<T>, &mut Vec<T>) -> R) -> R {
-    thread_local! {
-        static STACK: std::cell::RefCell<Vec<Box<dyn std::any::Any>>> = const {
-            std::cell::RefCell::new(Vec::new())
-        };
-    }
-    let mut bufs: Box<(Vec<T>, Vec<T>)> = STACK
-        .with(|s| {
-            let mut s = s.borrow_mut();
-            let at = s.iter().rposition(|b| b.is::<(Vec<T>, Vec<T>)>())?;
-            s.swap_remove(at).downcast().ok()
-        })
-        .unwrap_or_default();
-    let (work, out) = &mut *bufs;
-    let r = f(work, out);
-    STACK.with(|s| s.borrow_mut().push(bufs));
-    r
+/// Two `f64` buffers of this thread's, of the given lengths.
+fn f64_buffers<R>(n_args: usize, n_out: usize, f: impl FnOnce(&mut [f64], &mut [f64]) -> R) -> R {
+    crate::scratch::with_len(n_args, 0.0, |a| {
+        crate::scratch::with_len(n_out, 0.0, |o| f(a, o))
+    })
 }
 
 impl Scalar for f64 {

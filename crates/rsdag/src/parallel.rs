@@ -136,29 +136,6 @@ pub fn block(n: usize) -> usize {
     (n / (threads * 4)).max(1)
 }
 
-/// Scratch of values of type `T` for the work this thread runs, kept between
-/// calls: a buffer per thread and type, grown on demand.
-pub fn with_scratch<T: Copy + 'static, R>(len: usize, zero: T, f: impl FnOnce(&mut [T]) -> R) -> R {
-    use std::any::{Any, TypeId};
-    thread_local! {
-        static BUFS: RefCell<Vec<(TypeId, Box<dyn Any>)>> = const { RefCell::new(Vec::new()) };
-    }
-    // Taken out for the call, so a body that runs a stage of its own (on
-    // this thread, serially) takes a buffer of its own.
-    let mut buf: Box<Vec<T>> = BUFS.with(|b| {
-        let mut b = b.borrow_mut();
-        let at = b.iter().position(|(t, _)| *t == TypeId::of::<T>());
-        at.and_then(|i| b.swap_remove(i).1.downcast::<Vec<T>>().ok())
-            .unwrap_or_default()
-    });
-    if buf.len() < len {
-        buf.resize(len, zero);
-    }
-    let r = f(&mut buf[..len]);
-    BUFS.with(|b| b.borrow_mut().push((TypeId::of::<T>(), buf)));
-    r
-}
-
 #[cfg(feature = "rayon")]
 impl Pool for rayon::ThreadPool {
     fn threads(&self) -> usize {
