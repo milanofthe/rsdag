@@ -562,16 +562,17 @@ pub fn sparse_jacobian<K: Field>(
         .collect();
     // every row's columns in one pass over the rows' cone
     let flow = ctx.flow(residuals, Through::Carries, |n| match *n {
-        Node::Symbol(s) => col.get(&s).map_or(Set::bottom(), |&j| Set::one(j)),
+        Node::Symbol(s) => col
+            .get(&s)
+            .map_or(Set::bottom(), |&j| Set::one(j, wrt.len())),
         _ => Set::bottom(),
     });
     let touched: Vec<Vec<(usize, SymbolId)>> = residuals
         .iter()
         .map(|&r| {
             flow.get(r)
-                .as_slice()
                 .iter()
-                .map(|&j| (j as usize, wrt[j as usize]))
+                .map(|j| (j as usize, wrt[j as usize]))
                 .collect()
         })
         .collect();
