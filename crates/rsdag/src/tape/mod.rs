@@ -779,8 +779,6 @@ impl Tape {
             if let Some(st) = self.stages.get(next).filter(|st| st.lo as usize == i) {
                 next += 1;
                 if st.hi as usize <= hi && crate::parallel::worth(st.ops as usize) {
-                    let calls: Vec<calls::Call> =
-                        (st.lo..st.hi).map(|i| self.call(i as usize)).collect();
                     let (slots, gather) = (
                         Shared::new(work),
                         Shared::new(&mut scratch[..self.max_args]),
@@ -789,7 +787,9 @@ impl Tape {
                     // it reads no slot another call of the stage writes and
                     // writes no slot another one reads or writes; their
                     // arguments are apart in the gather area.
-                    unsafe { calls::run_stage(&calls, slots, gather, inputs) };
+                    let (lo, n) = (st.lo as usize, (st.hi - st.lo) as usize);
+                    let call = |k| self.call(lo + k);
+                    unsafe { calls::run_stage(n, call, slots, gather, inputs) };
                     skip = st.hi as usize;
                     continue;
                 }

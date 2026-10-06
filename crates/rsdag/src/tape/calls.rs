@@ -158,47 +158,51 @@ pub unsafe fn run_call<T: Scalar>(
     }
 }
 
-/// A stage of independent calls: on the installed pool when it is worth it
-/// ([`crate::parallel`]), every block of instances over scratch of its
-/// thread's, else one call after the other. Either way the results are the
-/// serial ones.
+/// A stage of `n` independent calls, the `k`th of them `call(k)`: on the
+/// installed pool when it is worth it ([`crate::parallel`]), every block of
+/// instances over scratch of its thread's, else one call after the other.
+/// Either way the results are the serial ones, and nothing is allocated.
 ///
 /// # Safety
 /// As [`run_call`], for every call; and the calls of the stage read nothing
 /// another one writes, their arguments apart in the gather area.
-pub unsafe fn run_stage<T: Scalar>(
-    calls: &[Call],
+pub unsafe fn run_stage<'a, T: Scalar>(
+    n: usize,
+    call: impl Fn(usize) -> Call<'a> + Sync,
     slots: Shared<T>,
     gather: Shared<T>,
     inputs: &[T],
 ) {
-    let ops: u64 = calls.iter().map(|c| c.ops).sum();
-    let scratch = |c: &Call| c.bundle.work_len();
+    let ops: u64 = (0..n).map(|k| call(k).ops).sum();
+    let run_groups = |c: &Call, groups: std::ops::Range<usize>| {
+        crate::scratch::with_len(c.bundle.work_len(), T::zero(), |s| unsafe {
+            run_call(c, slots, gather, inputs, groups, s)
+        })
+    };
     if !crate::parallel::worth(ops as usize) {
-        for c in calls {
-            crate::scratch::with_len(scratch(c), T::zero(), |s| unsafe {
-                run_call(c, slots, gather, inputs, 0..c.n_groups, s)
-            });
+        for k in 0..n {
+            let c = call(k);
+            run_groups(&c, 0..c.n_groups);
         }
         return;
     }
-    let total: usize = calls.iter().map(|c| c.n_groups).sum();
-    let bs = crate::parallel::block(total);
-    let items: Vec<(usize, usize, usize)> = calls
-        .iter()
-        .enumerate()
-        .flat_map(|(k, c)| {
-            (0..c.n_groups)
-                .step_by(bs)
-                .map(move |g0| (k, g0, (g0 + bs).min(c.n_groups)))
-        })
-        .collect();
-    let run = |it: usize| {
-        let (k, g0, g1) = items[it];
-        let c = &calls[k];
-        crate::scratch::with_len(scratch(c), T::zero(), |s| unsafe {
-            run_call(c, slots, gather, inputs, g0..g1, s)
-        });
+    // Pieces of `bs` instances, call after call; the `it`th found by
+    // counting through the calls (a stage has few).
+    let bs = crate::parallel::block((0..n).map(|k| call(k).n_groups).sum());
+    let pieces = |c: &Call| c.n_groups.div_ceil(bs);
+    let run = |mut it: usize| {
+        let mut k = 0;
+        let c = loop {
+            let c = call(k);
+            if it < pieces(&c) {
+                break c;
+            }
+            it -= pieces(&c);
+            k += 1;
+        };
+        let g0 = it * bs;
+        run_groups(&c, g0..(g0 + bs).min(c.n_groups));
     };
-    crate::parallel::run(items.len(), ops as usize, &run);
+    let total = (0..n).map(|k| pieces(&call(k))).sum();
+    crate::parallel::run(total, ops as usize, &run);
 }

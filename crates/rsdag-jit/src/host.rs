@@ -201,7 +201,6 @@ pub(crate) extern "C" fn h_stage(
     let descs = unsafe { std::slice::from_raw_parts(d, n as usize) };
     let b = unsafe { &*bundles };
     guarded(|| unsafe {
-        let calls: Vec<Call> = descs.iter().map(|d| call_of(b, d)).collect();
         let n_inputs = descs.iter().map(|d| d.n_inputs).max().unwrap_or(0);
         let wide = CallDesc {
             n_inputs,
@@ -210,7 +209,8 @@ pub(crate) extern "C" fn h_stage(
         let (slots, gather, inputs) = regions(&wide, work, inputs);
         // SAFETY: the calls of a stage read nothing another one writes
         // (`rsdag`'s stage planning), their arguments apart.
-        run_stage(&calls, slots, gather, inputs)
+        let call = |k: usize| call_of(b, &descs[k]);
+        run_stage(descs.len(), call, slots, gather, inputs)
     });
 }
 
