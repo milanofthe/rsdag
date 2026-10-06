@@ -113,17 +113,6 @@ struct NativeBody {
     batch: Batch,
 }
 
-/// Run `f` on a work buffer of this thread's, kept for its next call (a
-/// stack, so a body calling bodies takes one each).
-fn with_work<R>(f: impl FnOnce(&mut Vec<f64>) -> R) -> R {
-    thread_local! {
-        static FREE: std::cell::RefCell<Vec<Vec<f64>>> = Default::default();
-    }
-    let mut work = FREE.with(|p| p.borrow_mut().pop()).unwrap_or_default();
-    let r = f(&mut work);
-    FREE.with(|p| p.borrow_mut().push(work));
-    r
-}
 /// A min or max over at most this many terms is a chain of instructions
 /// where the ISA has one; longer ones go through the host routine, whose
 /// call costs about as much as this many terms.
@@ -334,7 +323,7 @@ impl NativeBody {
         } else {
             Vec::new()
         };
-        with_work(|work| {
+        rsdag::scratch::with::<Vec<f64>, _>(|work| {
             work.resize(lt.layout.total, 0.0);
             let mut ins = vec![f64::NAN; n_in * l];
             let end = groups.end;
@@ -444,7 +433,7 @@ impl ExternBundle for NativeBody {
             )
         });
         let sl = self.tape.state_len;
-        with_work(|w| {
+        rsdag::scratch::with::<Vec<f64>, _>(|w| {
             w.resize(self.work_len(), 0.0);
             for g in g0..n_groups {
                 let p = &pure[g * n_pure..(g + 1) * n_pure];
@@ -473,7 +462,7 @@ impl ExternBundle for NativeBody {
             )
         });
         let (sl, no) = (self.tape.state_len, self.n_out);
-        with_work(|w| {
+        rsdag::scratch::with::<Vec<f64>, _>(|w| {
             w.resize(self.work_len(), 0.0);
             for g in g0..n_groups {
                 let a = &args[g * n_args..(g + 1) * n_args];
@@ -496,7 +485,9 @@ impl ExternBundle for NativeBody {
                     Some(&mut *out),
                 )
             });
-            with_work(|work| self.run_groups(work, args, n_args, out, g0..n_groups));
+            rsdag::scratch::with::<Vec<f64>, _>(|work| {
+                self.run_groups(work, args, n_args, out, g0..n_groups)
+            });
             return;
         }
         let parallel = match self.batch {
@@ -506,7 +497,9 @@ impl ExternBundle for NativeBody {
             }
         };
         if !parallel {
-            with_work(|work| self.run_groups(work, args, n_args, out, 0..n_groups));
+            rsdag::scratch::with::<Vec<f64>, _>(|work| {
+                self.run_groups(work, args, n_args, out, 0..n_groups)
+            });
             return;
         }
         // Blocks of instances per task, so a thread amortises the
@@ -518,7 +511,9 @@ impl ExternBundle for NativeBody {
                 let g0 = b * block;
                 let g1 = (g0 + block).min(n_groups);
                 let ins = &args[g0 * n_args..g1 * n_args];
-                with_work(|work| self.run_groups(work, ins, n_args, dst, 0..g1 - g0));
+                rsdag::scratch::with::<Vec<f64>, _>(|work| {
+                    self.run_groups(work, ins, n_args, dst, 0..g1 - g0)
+                });
             });
     }
 }
@@ -960,7 +955,7 @@ impl NativeTape {
         out.par_chunks_mut(block * n_out)
             .zip(inputs.par_chunks(block * stride))
             .for_each(|(dst, ins)| {
-                with_work(|work| {
+                rsdag::scratch::with::<Vec<f64>, _>(|work| {
                     work.resize(self.layout.total, 0.0);
                     if n_in == stride {
                         self.eval_many_into(ins, stride, work, dst);

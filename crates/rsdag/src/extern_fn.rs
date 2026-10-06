@@ -62,20 +62,7 @@ pub trait ExternBundle: Send + Sync {
     /// caller in an inner loop holds one buffer per bundle and calls
     /// `call_into` directly.
     fn call(&self, args: &[f64], out: &mut [f64]) {
-        thread_local! {
-            static SCRATCH: std::cell::RefCell<Vec<Vec<f64>>> = const {
-                std::cell::RefCell::new(Vec::new())
-            };
-        }
-        // A stack rather than one buffer: a body that calls a body nests.
-        let mut work = SCRATCH
-            .with(|s| s.borrow_mut().pop())
-            .unwrap_or_else(|| vec![0.0; self.work_len()]);
-        if work.len() < self.work_len() {
-            work.resize(self.work_len(), 0.0);
-        }
-        self.call_into(args, &mut work, out);
-        SCRATCH.with(|s| s.borrow_mut().push(work));
+        crate::scratch::with_len(self.work_len(), 0.0, |w| self.call_into(args, w, out));
     }
 
     /// Scratch values [`call_into`](Self::call_into) needs; `0` for a bundle
@@ -125,7 +112,7 @@ pub trait ExternBundle: Send + Sync {
     /// bit the loop's.
     fn prolog_batch(&self, pure: &[f64], n_groups: usize, n_pure: usize, states: &mut [f64]) {
         let sl = self.state_len();
-        crate::parallel::with_scratch(self.work_len(), 0.0, |w| {
+        crate::scratch::with_len(self.work_len(), 0.0, |w| {
             for g in 0..n_groups {
                 let (p, st) = (
                     &pure[g * n_pure..(g + 1) * n_pure],
@@ -148,7 +135,7 @@ pub trait ExternBundle: Send + Sync {
         out: &mut [f64],
     ) {
         let (sl, no) = (self.state_len(), self.n_outputs());
-        crate::parallel::with_scratch(self.work_len(), 0.0, |w| {
+        crate::scratch::with_len(self.work_len(), 0.0, |w| {
             for g in 0..n_groups {
                 let a = &args[g * n_args..(g + 1) * n_args];
                 let st = &states[g * sl..(g + 1) * sl];

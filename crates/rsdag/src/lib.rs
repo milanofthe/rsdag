@@ -27,6 +27,7 @@ pub mod parallel;
 pub mod role;
 pub mod scalar;
 pub mod scope;
+pub mod scratch;
 pub mod semantics;
 mod simd;
 pub mod simplify;

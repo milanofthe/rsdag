@@ -176,7 +176,7 @@ pub unsafe fn run_stage<T: Scalar>(
     let scratch = |c: &Call| c.bundle.work_len();
     if !crate::parallel::worth(ops as usize) {
         for c in calls {
-            crate::parallel::with_scratch(scratch(c), T::zero(), |s| unsafe {
+            crate::scratch::with_len(scratch(c), T::zero(), |s| unsafe {
                 run_call(c, slots, gather, inputs, 0..c.n_groups, s)
             });
         }
@@ -196,7 +196,7 @@ pub unsafe fn run_stage<T: Scalar>(
     let run = |it: usize| {
         let (k, g0, g1) = items[it];
         let c = &calls[k];
-        crate::parallel::with_scratch(scratch(c), T::zero(), |s| unsafe {
+        crate::scratch::with_len(scratch(c), T::zero(), |s| unsafe {
             run_call(c, slots, gather, inputs, g0..g1, s)
         });
     };
