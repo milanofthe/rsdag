@@ -158,28 +158,33 @@ pub trait Scalar: Copy + Send + Sync + std::fmt::Debug + 'static {
     ) {
         Self::call_bundle(b, args, out);
     }
-    /// A stateful call's prolog: the bundle's state from its pure
-    /// arguments. Only `f64` evaluates bundles in phases; another scalar
-    /// runs every call whole ([`call_bundle_main`](Self::call_bundle_main)),
-    /// so its state is never read.
-    fn call_bundle_prolog(
+    /// The prolog of `n_groups` stateful calls: their states from their
+    /// pure arguments (`n_pure` each). Only `f64` evaluates bundles in
+    /// phases; another scalar runs every call whole
+    /// ([`call_bundle_main_batch`](Self::call_bundle_main_batch)), so its
+    /// states are never read.
+    fn call_bundle_prolog_batch(
         _b: &dyn crate::extern_fn::ExternBundle,
         _pure: &[Self],
+        _n_groups: usize,
+        _n_pure: usize,
         _work: &mut [Self],
-        state: &mut [Self],
+        states: &mut [Self],
     ) {
-        state.fill(Self::nan());
+        states.fill(Self::nan());
     }
-    /// A stateful call's main phase; see
-    /// [`call_bundle_prolog`](Self::call_bundle_prolog).
-    fn call_bundle_main(
+    /// The main phase of `n_groups` stateful calls over their states; see
+    /// [`call_bundle_prolog_batch`](Self::call_bundle_prolog_batch).
+    fn call_bundle_main_batch(
         b: &dyn crate::extern_fn::ExternBundle,
         args: &[Self],
-        _state: &[Self],
+        _states: &[Self],
+        n_groups: usize,
+        n_args: usize,
         _work: &mut [Self],
         out: &mut [Self],
     ) {
-        Self::call_bundle(b, args, out);
+        Self::call_bundle_batch(b, args, n_groups, n_args, out);
     }
     /// [`call_bundle`](Self::call_bundle) for `n_groups` argument groups.
     fn call_bundle_batch(
@@ -335,22 +340,34 @@ impl Scalar for f64 {
     ) {
         b.call_into(args, work, out);
     }
-    fn call_bundle_prolog(
+    fn call_bundle_prolog_batch(
         b: &dyn crate::extern_fn::ExternBundle,
         pure: &[f64],
+        n_groups: usize,
+        n_pure: usize,
         work: &mut [f64],
-        state: &mut [f64],
+        states: &mut [f64],
     ) {
-        b.prolog_into(pure, work, state);
+        if n_groups >= 2 {
+            b.prolog_batch(pure, n_groups, n_pure, states);
+        } else if n_groups == 1 {
+            b.prolog_into(pure, work, states);
+        }
     }
-    fn call_bundle_main(
+    fn call_bundle_main_batch(
         b: &dyn crate::extern_fn::ExternBundle,
         args: &[f64],
-        state: &[f64],
+        states: &[f64],
+        n_groups: usize,
+        n_args: usize,
         work: &mut [f64],
         out: &mut [f64],
     ) {
-        b.main_into(args, state, work, out);
+        if n_groups >= 2 {
+            b.main_batch(args, states, n_groups, n_args, out);
+        } else if n_groups == 1 {
+            b.main_into(args, states, work, out);
+        }
     }
     fn call_bundle_batch(
         b: &dyn crate::extern_fn::ExternBundle,
