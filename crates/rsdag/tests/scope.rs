@@ -20,19 +20,19 @@ fn parameters_keep_the_order_they_were_asked_for() {
 }
 
 #[test]
-fn roles_survive_and_select_jacobian_blocks() {
+fn roles_survive_closing() {
     let mut g: Graph<F64> = Graph::new();
     let mut s = Scope::new(&mut g, "sys");
     let x = s.param_with_role("x", ParamRole::State { id: 0 });
     let k = s.param("k");
     let kx = s.mul(k, x);
     let f = s.close_with_roles(vec![(OutputRole::Residual { id: 0 }, kx)]);
-    let blocks = g.jacobian_by_role(
-        f,
-        |o| matches!(o, OutputRole::Residual { .. }),
-        |p| matches!(p, ParamRole::State { .. }),
+    let func = g.func(f);
+    assert_eq!(
+        func.outputs_with_role(|o| matches!(o, OutputRole::Residual { .. })),
+        vec![0]
     );
-    assert_eq!(blocks.len(), 1);
+    assert!(func.param_roles().contains(&ParamRole::State { id: 0 }));
 }
 
 #[test]

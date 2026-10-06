@@ -6,8 +6,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use num_complex::Complex64;
-use rsdag::{Graph, Node, Scalar, Tape, F64};
+use rsdag::{Graph, Node, Tape, F64};
 
 thread_local!(static ALLOCS: Cell<usize> = const { Cell::new(0) });
 
@@ -77,15 +76,6 @@ fn the_evaluation_paths_do_not_allocate() {
         "eval_into allocated"
     );
 
-    let mut run = tape.runner::<f64>();
-    assert_eq!(
-        allocs(50, || {
-            let _ = run.eval(&inputs);
-        }),
-        0,
-        "runner allocated"
-    );
-
     let f = g.define_func("body", syms, roots);
     let body = g.func(f).body(&g);
     let bundle = &*body.bundle;
@@ -102,20 +92,37 @@ fn the_evaluation_paths_do_not_allocate() {
         "call allocated beyond its thread-local buffer"
     );
 
-    // The generic scalars convert through f64 and must borrow their buffers.
-    let f32_in: Vec<f32> = inputs.iter().map(|&v| v as f32).collect();
-    let mut f32_out = vec![0.0f32; bundle.n_outputs()];
-    assert_eq!(
-        allocs(50, || f32::call_bundle(bundle, &f32_in, &mut f32_out)),
-        0,
-        "call_bundle in f32 allocated"
-    );
-    let cx_in: Vec<Complex64> = inputs.iter().map(|&v| Complex64::new(v, 0.0)).collect();
-    let mut cx_out = vec![Complex64::new(0.0, 0.0); bundle.n_outputs()];
-    assert_eq!(
-        allocs(50, || Complex64::call_bundle(bundle, &cx_in, &mut cx_out)),
-        0,
-        "call_bundle in Complex64 allocated"
-    );
-    // A dense solve works in the scratch the work buffer lends, in any    // scalar, on both sides of the blocked elimination.    for n in [3usize, 80] {        let mut g: Graph<F64> = Graph::new();        let xs: Vec<_> = (0..n).map(|i| g.sym(&format!("x{i}"))).collect();        let syms: Vec<_> = xs            .iter()            .map(|&x| match g.node(x) {                Node::Symbol(s) => *s,                _ => unreachable!(),            })            .collect();        let one = g.one();        let a: Vec<_> = (0..n * n)            .map(|k| if k / n == k % n { g.add(xs[k % n], one) } else { xs[(k + 1) % n] })            .collect();        let x = g.solve_dense(a, xs.clone());        let tape = Tape::compile(&g, &x, &syms);        let vals: Vec<f64> = (0..n).map(|i| 1.0 + i as f64 * 0.01).collect();        let mut work = vec![0.0; tape.work_len()];        let mut out = vec![0.0; tape.out_len()];        assert_eq!(            allocs(5, || tape.eval_into(&vals, &mut work, &mut out)),            0,            "solve of {n} in f64 allocated"        );        let cx: Vec<Complex64> = vals.iter().map(|&v| Complex64::new(v, 0.5)).collect();        let mut work = vec![Complex64::new(0.0, 0.0); tape.work_len()];        let mut out = vec![Complex64::new(0.0, 0.0); tape.out_len()];        assert_eq!(            allocs(5, || tape.eval_into(&cx, &mut work, &mut out)),            0,            "solve of {n} in Complex64 allocated"        );    }
+    // A dense solve works in the scratch the work buffer lends, on both
+    // sides of the blocked elimination.
+    for n in [3usize, 80] {
+        let mut g: Graph<F64> = Graph::new();
+        let xs: Vec<_> = (0..n).map(|i| g.sym(&format!("x{i}"))).collect();
+        let syms: Vec<_> = xs
+            .iter()
+            .map(|&x| match g.node(x) {
+                Node::Symbol(s) => *s,
+                _ => unreachable!(),
+            })
+            .collect();
+        let one = g.one();
+        let a: Vec<_> = (0..n * n)
+            .map(|k| {
+                if k / n == k % n {
+                    g.add(xs[k % n], one)
+                } else {
+                    xs[(k + 1) % n]
+                }
+            })
+            .collect();
+        let x = g.solve_dense(a, xs.clone());
+        let tape = Tape::compile(&g, &x, &syms);
+        let vals: Vec<f64> = (0..n).map(|i| 1.0 + i as f64 * 0.01).collect();
+        let mut work = vec![0.0; tape.work_len()];
+        let mut out = vec![0.0; tape.out_len()];
+        assert_eq!(
+            allocs(5, || tape.eval_into(&vals, &mut work, &mut out)),
+            0,
+            "solve of {n} allocated"
+        );
+    }
 }

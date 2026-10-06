@@ -10,7 +10,7 @@ fn tables_line_up_with_the_enums() {
         assert_eq!(spec.op as usize, i, "row {i} describes {:?}", spec.op);
         assert_eq!(spec.op.spec().name, spec.name);
         assert_eq!(UnaryOp::from_code(spec.op.code()), spec.op);
-        assert!(!spec.name.is_empty() && !spec.c_fn.is_empty());
+        assert!(!spec.name.is_empty());
     }
     for (i, spec) in BINARY_OPS.iter().enumerate() {
         assert_eq!(spec.op as usize, i);

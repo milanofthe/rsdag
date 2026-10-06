@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use rsdag::parallel::{self, Parallel};
 use rsdag::{ExprId, FuncId, Graph, Node, ParamRole, ReduceOp, Scope, SymbolId, Tape, F64};
-use rsdag_jit::NativeTape;
+use rsdag_jit::{NativeTape, Options};
 
 const N: usize = 96;
 
@@ -71,19 +71,8 @@ fn ring() -> (Graph<F64>, Vec<ExprId>, Vec<SymbolId>, Vec<bool>) {
 }
 
 fn pool(threads: usize) -> Parallel {
-    // `100 + n`: rsdag's own pool of n threads, else a rayon pool of n
-    if threads > 100 {
-        return Parallel {
-            pool: Arc::new(parallel::Workers::new(threads - 100)),
-            min_ops: 0,
-        };
-    }
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .build()
-        .unwrap();
     Parallel {
-        pool: Arc::new(pool),
+        pool: Arc::new(parallel::Workers::new(threads)),
         min_ops: 0,
     }
 }
@@ -112,7 +101,7 @@ fn a_split_native_program_on_a_pool_is_the_serial_one() {
     native.eval_prolog(&x, &mut wn);
     native.eval_main(&x, &mut wn, &mut on);
     assert_eq!(bits(&out), bits(&on), "native serial");
-    for threads in [2, 5, 8, 102, 105, 108] {
+    for threads in [2, 5, 8] {
         let (mut wp, mut op) = (Vec::new(), Vec::new());
         parallel::install(pool(threads), || {
             native.eval_prolog(&x, &mut wp);
@@ -149,7 +138,15 @@ fn a_stage_across_chunks_is_the_serial_one() {
     tape.eval_prolog(&x, &mut w);
     tape.eval_main(&x, &mut w, &mut out);
     for chunk in [1, 2, 3, 5] {
-        let native = NativeTape::compile_with(&tape, chunk).expect("native code");
+        let native = NativeTape::compile_opts(
+            &tape,
+            &Options {
+                chunk_ops: chunk,
+                ..Options::default()
+            },
+            &[],
+        )
+        .expect("native code");
         let (mut wn, mut on) = (Vec::new(), Vec::new());
         native.eval_prolog(&x, &mut wn);
         native.eval_main(&x, &mut wn, &mut on);

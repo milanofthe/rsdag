@@ -1,56 +1,9 @@
 use rsdag::*;
 
 #[test]
-fn roles_select_jacobian_blocks() {
-    // A one-state system: residual r = x' - (-k x + u), output y = 2 x.
-    let mut g: Graph<BigRational> = Graph::new();
-    let (x, xd, u, k) = (g.sym("x"), g.sym("xd"), g.sym("u"), g.sym("k"));
-    let kx = g.mul(k, x);
-    let rhs = g.sub(u, kx);
-    let r = g.sub(xd, rhs);
-    let two = g.konst_int(2);
-    let y = g.mul(two, x);
-    let f = g.close("sys", vec![r, y]);
-    let params = g.func(f).params().to_vec();
-    assert_eq!(params.len(), 4);
-    for (i, s) in params.iter().enumerate() {
-        let role = match g.symbol_name(*s) {
-            "x" => ParamRole::State { id: 0 },
-            "xd" => ParamRole::StateDot { id: 0 },
-            "u" => ParamRole::Input { port: 0, elem: 0 },
-            _ => ParamRole::Param,
-        };
-        g.set_param_role(f, i as u32, role);
-    }
-    g.set_output_role(f, 0, OutputRole::Residual { id: 0 });
-    g.set_output_role(f, 1, OutputRole::Output { port: 0, elem: 0 });
-    let jx = g.jacobian_by_role(
-        f,
-        |o| matches!(o, OutputRole::Residual { .. }),
-        |p| matches!(p, ParamRole::State { .. }),
-    );
-    assert_eq!(jx.len(), 1);
-    let jy = g.jacobian_by_role(
-        f,
-        |o| matches!(o, OutputRole::Output { .. }),
-        |p| matches!(p, ParamRole::State { .. }),
-    );
-    assert_eq!(jy.len(), 1);
-    let (of, wrt, k) = jy[0];
-    assert_eq!(
-        g.func(f).output_roles()[k as usize],
-        OutputRole::Derivative { of, wrt }
-    );
-    match g.func(f).outputs()[k as usize] {
-        Output::Expr(e) => assert_eq!(g.const_f64(e), Some(2.0)),
-        _ => panic!("expected an expression"),
-    }
-}
-
-#[test]
 fn charge_form_rows_select_by_role() {
     // One row in charge form: i(x) = x/r, q(x) = c x (an RC node), so
-    // dF/dx' = dq/dx is the Jacobian of the charge outputs.
+    // dF/dx' = dq/dx is the derivative of the charge output.
     let mut g: Graph<F64> = Graph::new();
     let (x, r, c) = (g.sym("x"), g.sym("r"), g.sym("c"));
     let i = g.div(x, r);
@@ -70,18 +23,11 @@ fn charge_form_rows_select_by_role() {
             .outputs_with_role(|o| matches!(o, OutputRole::Charge { .. })),
         vec![1]
     );
-    let jq = g.jacobian_by_role(
-        f,
-        |o| matches!(o, OutputRole::Charge { .. }),
-        |p| matches!(p, ParamRole::State { .. }),
-    );
-    assert_eq!(jq.len(), 1);
-    let (of, wrt, k) = jq[0];
-    assert_eq!((of, wrt), (1, 0));
-    match g.func(f).outputs()[k as usize] {
-        Output::Expr(e) => assert_eq!(e, c),
-        _ => panic!("dq/dx is an expression"),
-    }
+    let x = match g.node(x) {
+        Node::Symbol(s) => *s,
+        _ => unreachable!(),
+    };
+    assert_eq!(differentiate(&mut g, q, x), c);
 }
 
 #[test]
@@ -99,7 +45,7 @@ fn f64_field_builds_folds_and_evaluates() {
     assert_eq!(out[0], 2.125);
     assert_eq!(to_string(&g, e), "(x + 0.125)");
 }
-use num_complex::Complex64;
+
 use rsdag::BigRational;
 
 #[test]
@@ -138,31 +84,6 @@ fn folds_constants_and_identities() {
 }
 
 #[test]
-fn evaluates_admittance_like_expression() {
-    // Y = 1/R + s*C, a capacitor-in-parallel-with-resistor admittance.
-    let mut ctx: Graph<BigRational> = Graph::new();
-    let r = ctx.sym("R");
-    let c = ctx.sym("C");
-    let s = ctx.sym("s");
-    let g = ctx.recip(r);
-    let sc = ctx.mul(s, c);
-    let y = ctx.add(g, sc);
-
-    // R=1k, C=1u, omega=1000 rad/s  ->  Y = 1e-3 + j*1e-3
-    let val = eval_named(
-        &mut ctx,
-        &[y],
-        &[
-            ("R", Complex64::new(1000.0, 0.0)),
-            ("C", Complex64::new(1e-6, 0.0)),
-            ("s", Complex64::new(0.0, 1000.0)),
-        ],
-    )[0];
-    assert!((val.re - 1e-3).abs() < 1e-12);
-    assert!((val.im - 1e-3).abs() < 1e-12);
-}
-
-#[test]
 fn unary_folding_and_eval() {
     let mut ctx: Graph<BigRational> = Graph::new();
     // exp(0) = 1, ln(1) = 0 fold structurally.
@@ -178,16 +99,15 @@ fn unary_folding_and_eval() {
     let vt = ctx.sym("Vt");
     let arg = ctx.div(v, vt);
     let e = ctx.exp(arg);
-    let got = eval_named(
-        &mut ctx,
-        &[e],
-        &[
-            ("v", Complex64::new(0.5, 0.0)),
-            ("Vt", Complex64::new(0.025, 0.0)),
-        ],
-    )[0];
+    let sym = |e| match ctx.node(e) {
+        Node::Symbol(s) => *s,
+        _ => unreachable!(),
+    };
+    let env: std::collections::HashMap<SymbolId, f64> =
+        [(sym(v), 0.5), (sym(vt), 0.025)].into_iter().collect();
+    let got = eval(&ctx, &[e], &env)[0];
     let want = (0.5_f64 / 0.025).exp();
-    assert!((got.re - want).abs() <= want * 1e-12);
+    assert!((got - want).abs() <= want * 1e-12);
 }
 
 /// Printing is linear in the graph: a small expression is infix, a large

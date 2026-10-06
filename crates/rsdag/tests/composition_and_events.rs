@@ -149,13 +149,13 @@ fn an_event_is_a_guard_output_and_a_state_write() {
         .outputs_with_role(|r| matches!(r, OutputRole::Guard { .. }));
     assert_eq!(guards.len(), 1);
 
-    // A derivative-based locator wants dg/dt along the flow, which is the
-    // graph's own `time_derivative`: dh/dt = v.
-    let mut deriv_of: HashMap<SymbolId, ExprId> = HashMap::default();
+    // A derivative-based locator wants dg/dt along the flow: (dg/dh) dh/dt
+    // with dh/dt = v.
     let h_sym = params[0];
     let v_sym = params[1];
-    deriv_of.insert(h_sym, g.symbol_expr(v_sym));
-    let dgdt = rsdag::time_derivative(&mut g, guard, &deriv_of);
+    let dgdh = rsdag::differentiate(&mut g, guard, h_sym);
+    let v = g.symbol_expr(v_sym);
+    let dgdt = g.mul(dgdh, v);
 
     // The effect: a second function writing the reflected velocity.
     let mut e = Scope::new(&mut g, "bounce_effect");

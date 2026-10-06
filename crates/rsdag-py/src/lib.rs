@@ -10,7 +10,7 @@
 //! (`Scope::jacobian`, `Scope::gradient`). A program keeps its symbolic
 //! form, so it composes: called with tracers inside another trace it is a
 //! function of that trace's graph, called as one instance, and the program
-//! traced around it is compiled as one (`Tape::compose`). `Dispatch` keeps a traced
+//! traced around it is compiled as one (`Tape::compile`). `Dispatch` keeps a traced
 //! function's programs by argument shapes; a call reads numpy arrays
 //! through the buffer protocol and evaluates on per-thread buffers without
 //! leaving Rust.
@@ -505,7 +505,7 @@ impl Scope {
         let f = g.define_func("program", self.inputs.clone(), roots.to_vec());
         let mut own = Graph::new();
         let func = own.import(&g, f, &mut Default::default());
-        let tape = Tape::compose(&g, roots, &self.inputs);
+        let tape = Tape::compile(&g, roots, &self.inputs);
         let mut p = Program::new(tape, self.inputs.len(), roots.len());
         p.symbolic = Some(Arc::new(Symbolic {
             graph: own,

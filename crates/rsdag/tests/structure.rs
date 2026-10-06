@@ -1,6 +1,6 @@
 //! What a block simulator asks about the *shape* of a system rather than
 //! about its values: does hierarchy survive, what does an incremental change
-//! cost, does the interface order matter, and where is an algebraic loop.
+//! cost, and does the interface order matter.
 
 use rsdag::synth::{build, Spec};
 use rsdag::{
@@ -29,13 +29,6 @@ fn contains_call(g: &Graph<F64>, e: ExprId) -> bool {
         stack.extend_from_slice(&g.operands(id));
     }
     false
-}
-
-fn sym_of(g: &Graph<F64>, e: ExprId) -> SymbolId {
-    match g.node(e) {
-        Node::Symbol(s) => *s,
-        _ => unreachable!(),
-    }
 }
 
 /// A gain block `y = k * u`, as a function with roles.
@@ -83,18 +76,9 @@ fn subsystems_nest_and_instances_keep_their_parameters() {
     tape.eval(&[5.0f64], &mut w, &mut o);
     assert_eq!(o[0], 30.0, "2 * 3 * 5 through two levels of calls");
 
-    // `inline_outputs` opens one level: the system's call becomes the
-    // chain's body, which still calls the gain.
-    let arg = g.symbol_expr(params[0]);
-    let one_level = g.inline_outputs(sys, &[0], &[arg])[0];
-    assert!(
-        contains_call(&g, one_level),
-        "one level of inlining leaves the inner calls"
-    );
-
     // `inline_all` goes to the bottom, which is the static fusion a build
     // does before compiling: no call survives and the value is the same.
-    let flat = g.inline_all(&[one_level])[0];
+    let flat = g.inline_all(&[expr_of(&g, sys, 0)])[0];
     assert!(!contains_call(&g, flat), "fully inlined");
     let tape = Tape::compile(&g, &[flat], &params);
     let (mut w, mut o) = (Vec::new(), Vec::new());
@@ -168,58 +152,4 @@ fn permuting_the_interface_is_free() {
         .rev()
         .zip(&ro)
         .all(|(a, b)| a.to_bits() == b.to_bits()));
-}
-
-/// Direct feedthrough per block, and the algebraic loop that falls out of it
-/// when two blocks feed each other.
-#[test]
-fn feedthrough_shows_where_an_algebraic_loop_is() {
-    let mut g: Graph<F64> = Graph::new();
-
-    // A block with feedthrough: y = k * u reads its input directly.
-    let direct = gain(&mut g, "direct");
-    let ft = g.feedthrough(direct);
-    assert_eq!(ft[0], vec![true, true], "y reads u and k");
-
-    // A block without: y = x, dx/dt = u. The output reads the state only,
-    // so it breaks a loop.
-    let mut s = Scope::new(&mut g, "integrator");
-    let x = s.param_with_role("x", ParamRole::State { id: 0 });
-    let u = s.param_with_role("u", ParamRole::Input { port: 0, elem: 0 });
-    let integ = s.close_with_roles(vec![
-        (OutputRole::Output { port: 0, elem: 0 }, x),
-        (OutputRole::StateDeriv { id: 0 }, u),
-    ]);
-    let ft = g.feedthrough(integ);
-    assert_eq!(
-        ft[0],
-        vec![true, false],
-        "the output reads the state, not u"
-    );
-    assert_eq!(ft[1], vec![false, true], "the derivative reads u");
-
-    // Two blocks wired into a cycle. The loop is algebraic exactly when
-    // every hop has feedthrough, which is a walk over these rows.
-    let feeds = |f: FuncId, out: usize| -> bool {
-        // Does output `out` read the block's *input* parameter?
-        g.func(f).params().iter().enumerate().any(|(k, _)| {
-            matches!(g.func(f).param_roles()[k], ParamRole::Input { .. })
-                && g.feedthrough(f)[out][k]
-        })
-    };
-    assert!(feeds(direct, 0), "gain -> gain is an algebraic loop");
-    assert!(
-        !feeds(integ, 0),
-        "an integrator in the cycle breaks the loop"
-    );
-
-    // The same question on a composed expression: after splicing the gain
-    // into itself, its output still depends on the outer input, which is
-    // what a solver would have to iterate on.
-    let k = g.sym("k");
-    let uu = g.sym("u");
-    let once = g.inline_outputs(direct, &[0], &[uu, k])[0];
-    let u_sym = sym_of(&g, uu);
-    let twice = substitute(&mut g, &[once], &std::iter::once((u_sym, once)).collect())[0];
-    assert!(g.free_symbols(twice).contains(&u_sym));
 }

@@ -1,9 +1,9 @@
 //! Everything the crate does on one path, built for `wasm32-unknown-unknown`
 //! by CI, which then checks the module imports nothing: a browser supplies
 //! no host functions to a plain wasm module, so any import (a clock, a
-//! random source) fails instantiation. (`egraph` is native only.)
+//! random source) fails instantiation.
 //!
-//!     cargo build --release -p rsdag --example wasm_probe --target wasm32-unknown-unknown --features exact,complex,serde
+//!     cargo build --release -p rsdag --example wasm_probe --target wasm32-unknown-unknown --features exact,serde
 //!     python3 scripts/wasm_imports.py target/wasm32-unknown-unknown/release/examples/wasm_probe.wasm
 
 use std::hint::black_box;
@@ -24,16 +24,6 @@ fn main() {
     let (mut w, mut o) = (Vec::new(), Vec::new());
     tape.eval(&[black_box(0.5)], &mut w, &mut o);
     black_box(&o);
-    #[cfg(feature = "complex")]
-    {
-        let (mut w, mut o) = (Vec::new(), Vec::new());
-        tape.eval(
-            &[num_complex::Complex64::new(black_box(0.5), 1.0)],
-            &mut w,
-            &mut o,
-        );
-        black_box(&o);
-    }
     #[cfg(feature = "serde")]
     black_box(g.to_module());
 }

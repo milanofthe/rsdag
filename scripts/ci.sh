@@ -20,13 +20,13 @@ run $CARGO test --workspace --exclude rsdag-py --features "$FEATURES"
 RSDAG_SSE2=1 run $CARGO test -p rsdag-jit --features rsdag/synth
 RSDAG_SSE2=1 run $CARGO test -p rsdag --features synth --test simd_kernels
 run $CARGO clippy -p rsdag --all-targets -- -D warnings
-RUSTDOCFLAGS='-D warnings' run $CARGO doc --no-deps --workspace --exclude rsdag-py --features "$FEATURES rsdag/exact rsdag/egraph rsdag/complex"
-for f in "" exact complex serde egraph exact,serde; do
+RUSTDOCFLAGS='-D warnings' run $CARGO doc --no-deps --workspace --exclude rsdag-py --features "$FEATURES rsdag/exact"
+for f in "" exact serde exact,serde; do
     run $CARGO clippy -p rsdag --lib --no-default-features --features "$f" -- -D warnings
 done
 # The graph crate in the browser (a consumer's web build interprets there),
 # linked and importing nothing.
-run $CARGO build --release -p rsdag --example wasm_probe --target wasm32-unknown-unknown --features exact,complex,serde
+run $CARGO build --release -p rsdag --example wasm_probe --target wasm32-unknown-unknown --features exact,serde
 run python3 scripts/wasm_imports.py target/wasm32-unknown-unknown/release/examples/wasm_probe.wasm
 run $CARGO check -p rsdag-py
 # The Python job: the wheel, installed into the interpreter that runs the
