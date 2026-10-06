@@ -30,7 +30,7 @@ use super::topo::Topo;
 use super::{input_index, Accum, Fold, Op, Src, Tape, INPUT};
 use crate::extern_fn::ExternBundle;
 use crate::field::Field;
-use crate::func::{Body, FuncId};
+use crate::func::{Body, FuncId, Output};
 use crate::graph::Graph;
 use crate::graph::NO_CONTEXT;
 use crate::node::{ArgList, ExprId, Node, SymbolId};
@@ -53,37 +53,36 @@ fn split_state(o: &[u32], stateful: bool) -> (&[u32], u32) {
 }
 
 impl Tape {
-    /// The program of `roots` over a composition of functions: the
-    /// composite functions (whose bodies call others) inlined, so the
-    /// program has no boundary but its leaves, and the calls of one leaf
-    /// from every instance batch together (see
-    /// [`Graph::inline_composite`]); then [`compile`](Self::compile).
-    /// Differentiate and specialize on the composition first: that work
-    /// stays on its functions.
-    pub fn compose<K: Field>(
-        ctx: &mut Graph<K>,
-        roots: &[ExprId],
-        input_syms: &[SymbolId],
-    ) -> Tape {
-        let program = ctx.inline_composite(roots);
-        Self::compile_inner(ctx, &program, input_syms, None)
+    /// The program of `roots` over a composition of functions: the same as
+    /// [`compile`](Self::compile), which compiles every composite function
+    /// once into a template and appends it per call.
+    pub fn compose<K: Field>(ctx: &Graph<K>, roots: &[ExprId], input_syms: &[SymbolId]) -> Tape {
+        Self::compile_inner(ctx, roots, input_syms, None)
     }
 
     /// [`compose`](Self::compose) with the prolog split of
     /// [`compile_split`](Self::compile_split).
     pub fn compose_split<K: Field>(
-        ctx: &mut Graph<K>,
+        ctx: &Graph<K>,
         roots: &[ExprId],
         input_syms: &[SymbolId],
         pure_inputs: &[bool],
     ) -> Tape {
-        let program = ctx.inline_composite(roots);
-        Self::compile_inner(ctx, &program, input_syms, Some(pure_inputs))
+        Self::compile_inner(ctx, roots, input_syms, Some(pure_inputs))
     }
 
     /// Compile a tape computing `roots`, where `inputs[k]` (passed to
     /// [`eval`](Self::eval)) is the value of symbol `input_syms[k]`. Symbols not
     /// listed evaluate to `NaN`.
+    ///
+    /// A hierarchy is compiled as it stands: a composite function (one
+    /// whose body calls others) is lowered once into a template, its
+    /// instructions over its operands, and a call of it appends the
+    /// template with its operands in their place; no graph is rewritten
+    /// per instance. The calls of a leaf function (a device model's body)
+    /// from every instance then run as one batch, as in a flat graph.
+    /// Differentiate and specialize on the hierarchy first: that work stays
+    /// on its functions.
     pub fn compile<K: Field>(ctx: &Graph<K>, roots: &[ExprId], input_syms: &[SymbolId]) -> Tape {
         Self::compile_inner(ctx, roots, input_syms, None)
     }
@@ -116,7 +115,11 @@ impl Tape {
         let forest = timed("tape analyze", || {
             Forest::analyze(ctx, roots, input_syms, pure_inputs)
         });
-        let mut program = timed("tape lower", || forest.lower(ctx, roots));
+        let mut templates = Templates::default();
+        let mut program = timed("tape lower", || forest.lower(ctx, roots, &mut templates));
+        if templates.expanded {
+            timed("tape merge", || program.merge_calls());
+        }
         timed("tape fuse", || program.fuse_accumulators(pure_inputs));
         let order = timed("tape schedule", || program.schedule());
         let mut tape = timed("tape emit", || program.emit(&order, pure_inputs.is_some()));
@@ -565,6 +568,187 @@ impl Program {
             .collect();
     }
 
+    /// The calls of one bundle the expanded templates left apart, one per
+    /// instance's body, merged into one call each (and their prologs into
+    /// one prolog): calls of the same bundle, phase, purity and arguments
+    /// read, at the same call depth, so no member reads another's output.
+    pub(super) fn merge_calls(&mut self) {
+        #[derive(PartialEq, Eq, Hash)]
+        struct Key {
+            bundle: u32,
+            n_args: u32,
+            reads: Option<Vec<u32>>,
+            stateful: bool,
+            pure: bool,
+            depth: u32,
+        }
+        let m = self.insts.len();
+        // the insts are in a dependency order: operands first
+        let mut depth = vec![0u32; m];
+        for i in 0..m {
+            let d = self
+                .ins(i)
+                .iter()
+                .filter_map(|r| match *r {
+                    Ref::Value(j, _) => Some(depth[j as usize]),
+                    Ref::Input(_) => None,
+                })
+                .max()
+                .unwrap_or(0);
+            depth[i] = d + u32::from(matches!(self.insts[i].kind, Kind::Call { .. }));
+        }
+        let mut index: HashMap<Key, usize> = HashMap::default();
+        let mut groups: Vec<Vec<u32>> = Vec::new();
+        for i in 0..m {
+            if let Kind::Call {
+                bundle,
+                n_args,
+                ref reads,
+                stateful,
+                ..
+            } = self.insts[i].kind
+            {
+                let key = Key {
+                    bundle,
+                    n_args,
+                    reads: reads.as_ref().map(|r| r.to_vec()),
+                    stateful,
+                    pure: self.insts[i].pure,
+                    depth: depth[i],
+                };
+                let g = *index.entry(key).or_insert_with(|| {
+                    groups.push(Vec::new());
+                    groups.len() - 1
+                });
+                groups[g].push(i as u32);
+            }
+        }
+        let mut dead = vec![false; m];
+        // per merged-away call: the merged call, and per group of it the
+        // group it is in the merged one
+        let mut moved: HashMap<u32, (u32, Vec<u32>)> = HashMap::default();
+        for members in groups.iter().filter(|g| g.len() >= 2) {
+            let first = &self.insts[members[0] as usize];
+            let Kind::Call {
+                bundle,
+                n_args,
+                ref reads,
+                stateful,
+                ..
+            } = first.kind
+            else {
+                unreachable!()
+            };
+            let (reads, pure) = (reads.clone(), first.pure);
+            let n_groups_of = |c: u32| match self.insts[c as usize].kind {
+                Kind::Call { n_groups, .. } | Kind::CallProlog { n_groups, .. } => {
+                    n_groups as usize
+                }
+                _ => unreachable!(),
+            };
+            let prolog_of = |c: u32| match *self.ins(c as usize).last().expect("a state") {
+                Ref::Value(p, 0) => p,
+                _ => unreachable!("a stateful call's last operand is its state"),
+            };
+            // The instances, each once: one with the operands of another
+            // (and the pure ones of its prolog) computes the same.
+            let mut seen: HashMap<Vec<Ref>, u32> = HashMap::default();
+            let (mut ins, mut pure_ins): (Vec<Ref>, Vec<Ref>) = (Vec::new(), Vec::new());
+            let (mut out_g, mut state_g) = (0u32, 0u32);
+            for &c in members {
+                let ng = n_groups_of(c);
+                let own = self.ins(c as usize);
+                let own = &own[..own.len() - usize::from(stateful)];
+                let ni = own.len() / ng;
+                let pro = stateful.then(|| {
+                    let p = prolog_of(c);
+                    (
+                        self.ins(p as usize),
+                        self.insts[p as usize].n_out as usize / ng,
+                    )
+                });
+                out_g = self.insts[c as usize].n_out / ng as u32;
+                let mut map = Vec::with_capacity(ng);
+                for g in 0..ng {
+                    let mut key = own[g * ni..(g + 1) * ni].to_vec();
+                    if let Some((p, _)) = pro {
+                        let np = p.len() / ng;
+                        key.extend_from_slice(&p[g * np..(g + 1) * np]);
+                    }
+                    let n = seen.len() as u32;
+                    let at = *seen.entry(key).or_insert_with(|| {
+                        ins.extend_from_slice(&own[g * ni..(g + 1) * ni]);
+                        if let Some((p, sl)) = pro {
+                            let np = p.len() / ng;
+                            pure_ins.extend_from_slice(&p[g * np..(g + 1) * np]);
+                            state_g = sl as u32;
+                        }
+                        n
+                    });
+                    map.push(at);
+                }
+                if stateful {
+                    dead[prolog_of(c) as usize] = true;
+                }
+                dead[c as usize] = true;
+                moved.insert(c, (0, map));
+            }
+            let n_groups = seen.len() as u32;
+            if stateful {
+                let Kind::CallProlog { n_pure, .. } =
+                    self.insts[prolog_of(members[0]) as usize].kind
+                else {
+                    unreachable!()
+                };
+                let kind = Kind::CallProlog {
+                    bundle,
+                    n_groups,
+                    n_pure,
+                };
+                let p = self.push(kind, pure_ins, n_groups * state_g, true);
+                ins.push(Ref::Value(p, 0));
+            }
+            let kind = Kind::Call {
+                bundle,
+                n_groups,
+                n_args,
+                reads,
+                stateful,
+            };
+            let at = self.push(kind, ins, n_groups * out_g, pure);
+            for &c in members {
+                let (to, map) = moved.get_mut(&c).expect("just moved");
+                *to = at;
+                // the outputs per group, for the resolution below
+                map.push(out_g);
+            }
+        }
+        dead.resize(self.insts.len(), false);
+        self.compact(&dead, |r| match r {
+            Ref::Value(i, o) => match moved.get(&i) {
+                Some((at, map)) => {
+                    let w = *map.last().expect("the width last");
+                    Ref::Value(*at, map[(o / w) as usize] * w + o % w)
+                }
+                None => r,
+            },
+            r => r,
+        });
+    }
+
+    /// Append an instruction; its index.
+    fn push(&mut self, kind: Kind, ins: Vec<Ref>, n_out: u32, pure: bool) -> u32 {
+        let start = self.pool.len() as u32;
+        self.pool.extend(ins);
+        self.insts.push(Inst {
+            kind,
+            ins: (start, self.pool.len() as u32 - start),
+            n_out,
+            pure,
+        });
+        self.insts.len() as u32 - 1
+    }
+
     /// Drop what the roots do not reach.
     pub(super) fn retain_reachable(&mut self) {
         let m = self.insts.len();
@@ -892,9 +1076,24 @@ impl Forest {
     /// ([`Forest::groups`]), an order of units, each a node or a whole group,
     /// after its operands ([`Forest::unit_order`]), and the instructions in
     /// that order.
-    fn lower<K: Field>(&self, ctx: &Graph<K>, roots: &[ExprId]) -> Program {
+    fn lower<K: Field>(
+        &self,
+        ctx: &Graph<K>,
+        roots: &[ExprId],
+        templates: &mut Templates,
+    ) -> Program {
         let calls = self.call_sets(ctx);
-        let groups = self.groups(ctx, &calls);
+        // the functions whose calls expand a template rather than batch
+        let mut composite: HashSet<u32> = HashSet::default();
+        for &id in &self.base {
+            if let Node::Call(o, _) = *ctx.node(id) {
+                let f = ctx.output(o).0;
+                if ctx.func(f).composite_in(ctx) {
+                    composite.insert(f.0);
+                }
+            }
+        }
+        let groups = self.groups(ctx, &calls, &composite);
         let order = self.unit_order(ctx, roots, &groups);
         let m = self.base.len();
         let mut lw = Lowering {
@@ -906,6 +1105,7 @@ impl Forest {
                 placeholder: None,
             },
             value: vec![None; m],
+            consts: HashMap::default(),
         };
         let mut bodies = Bodies::default();
         // The nodes of one call (same function, same arguments): a single
@@ -937,6 +1137,25 @@ impl Forest {
                     let (f, site) = (ctx.output(o).0 .0, (ctx.context_of(o), l));
                     let members = &call_sites[&(f, site)];
                     let set = calls.set_of[&(f, site)];
+                    if composite.contains(&f) {
+                        let outs = &calls.sets[set as usize];
+                        let ops = self.call_ops(ctx, f, site);
+                        let args: Vec<Ref> = ops.iter().map(|&a| self.val(&lw, a)).collect();
+                        let mask: Option<Vec<bool>> = self
+                            .split
+                            .then(|| ops.iter().map(|&a| self.pure[self.pos(a)]).collect());
+                        let t = templates.get(ctx, f, outs, mask);
+                        let values = lw.expand(&mut bodies, &t, &args);
+                        for &mi in members {
+                            let Node::Call(o, _) = *ctx.node(self.base[mi]) else {
+                                unreachable!()
+                            };
+                            let k = ctx.output(o).1;
+                            lw.value[mi] =
+                                Some(values[outs.binary_search(&k).expect("in its set")]);
+                        }
+                        continue;
+                    }
                     self.lower_calls(ctx, &mut lw, &mut bodies, &calls, f, set, members);
                 }
                 (None, _) => self.lower_node(ctx, &mut lw, i),
@@ -987,7 +1206,12 @@ impl Forest {
     /// member depends on another's output, and the group's operands all
     /// precede it. Gemv groups over the same rows become one Gemm, solves
     /// over one matrix one solve of several right-hand sides.
-    fn groups<K: Field>(&self, ctx: &Graph<K>, calls: &CallSets) -> Groups {
+    fn groups<K: Field>(
+        &self,
+        ctx: &Graph<K>,
+        calls: &CallSets,
+        composite: &HashSet<u32>,
+    ) -> Groups {
         let base = &self.base;
         let m = base.len();
         // The functions called with two or more argument lists of one length.
@@ -1003,7 +1227,7 @@ impl Forest {
         }
         lists.retain(|&f, g| {
             let width = |&s: &Site| self.call_ops(ctx, f, s).len();
-            g.len() >= 2 && g.iter().all(|a| width(a) == width(&g[0]))
+            !composite.contains(&f) && g.len() >= 2 && g.iter().all(|a| width(a) == width(&g[0]))
         });
         let mut rows_of: HashMap<Vec<ExprId>, Vec<usize>> = HashMap::default();
         for (i, &id) in base.iter().enumerate() {
@@ -1683,6 +1907,8 @@ struct Groups {
 struct Lowering {
     p: Program,
     value: Vec<Option<Ref>>,
+    /// The constants the expanded templates share, by value.
+    consts: HashMap<u64, Ref>,
 }
 
 impl Lowering {
@@ -1709,6 +1935,127 @@ impl Lowering {
     fn constant(&mut self, v: f64) -> Ref {
         Ref::Value(self.push(Kind::Const(v), [], 1, true), 0)
     }
+
+    /// Template `t` appended over the operands `args`: its instructions
+    /// with its inputs the operands, its bundles interned here. The values
+    /// of its roots.
+    fn expand(&mut self, bodies: &mut Bodies, t: &Program, args: &[Ref]) -> Vec<Ref> {
+        let bundles: Vec<u32> = t
+            .bundles
+            .iter()
+            .map(|b| bodies.intern(&mut self.p.bundles, b))
+            .collect();
+        // a template's constant is the program's one of that value
+        let mut at: Vec<Option<Ref>> = vec![None; t.insts.len()];
+        for (i, inst) in t.insts.iter().enumerate() {
+            if let Kind::Const(v) = inst.kind {
+                at[i] = Some(*self.consts.entry(v.to_bits()).or_insert_with(|| {
+                    let start = self.p.pool.len() as u32;
+                    self.p.insts.push(Inst {
+                        kind: Kind::Const(v),
+                        ins: (start, 0),
+                        n_out: 1,
+                        pure: true,
+                    });
+                    Ref::Value(self.p.insts.len() as u32 - 1, 0)
+                }));
+            }
+        }
+        let base = self.p.insts.len() as u32;
+        let mut next = base;
+        let mut index = vec![0u32; t.insts.len()];
+        for (i, slot) in at.iter().enumerate() {
+            if slot.is_none() {
+                index[i] = next;
+                next += 1;
+            }
+        }
+        let map = |r: Ref| match r {
+            Ref::Input(k) => args[k as usize],
+            Ref::Value(i, o) => at[i as usize].unwrap_or(Ref::Value(index[i as usize], o)),
+        };
+        for (i, inst) in t.insts.iter().enumerate() {
+            if at[i].is_some() {
+                continue;
+            }
+            let mut kind = inst.kind.clone();
+            if let Kind::Call { bundle, .. } | Kind::CallProlog { bundle, .. } = &mut kind {
+                *bundle = bundles[*bundle as usize];
+            }
+            let ins = t.ins(i).iter().map(|&r| map(r));
+            self.push(kind, ins, inst.n_out, inst.pure);
+        }
+        t.roots.iter().map(|&r| map(r)).collect()
+    }
+}
+
+/// The templates of a compilation: per composite function, output set and
+/// purity of its operands (under a split), its body lowered once over its
+/// operands (its parameters, then its globals), the composite calls in it
+/// expanded in turn.
+#[derive(Default)]
+struct Templates {
+    /// A template was expanded: the leaf calls of its instances are apart.
+    expanded: bool,
+}
+
+impl Templates {
+    /// The template of `f` for the outputs `outs` (ascending), its operands
+    /// pure as `mask` says (`None` without a split).
+    fn get<K: Field>(
+        &mut self,
+        ctx: &Graph<K>,
+        f: u32,
+        outs: &[u32],
+        mask: Option<Vec<bool>>,
+    ) -> Arc<Program> {
+        self.expanded = true;
+        let key = (f, outs.to_vec(), mask);
+        // kept by the graph, built outside its lock (a template expands others)
+        // kept by the graph, built outside its lock (a template expands others)
+        let cached = ctx.templates.lock().unwrap().get(&key).cloned();
+        if let Some(t) = cached {
+            return t.downcast().expect("a template is a program");
+        }
+        let func = ctx.func(FuncId(f));
+        let mut syms: Vec<SymbolId> = func.params().to_vec();
+        syms.extend(
+            ctx.globals_of(FuncId(f))
+                .iter()
+                .map(|&e| match *ctx.node(e) {
+                    Node::Symbol(s) => s,
+                    _ => unreachable!("a global is a symbol"),
+                }),
+        );
+        let exprs: Vec<ExprId> = outs
+            .iter()
+            .filter_map(|&k| match func.outputs()[k as usize] {
+                Output::Expr(e) => Some(e),
+                _ => None,
+            })
+            .collect();
+        let forest = Forest::analyze(ctx, &exprs, &syms, key.2.as_deref());
+        let mut p = forest.lower(ctx, &exprs, self);
+        drop(forest);
+        // a zero output is a constant
+        let mut roots = std::mem::take(&mut p.roots).into_iter();
+        let mut lw = Lowering {
+            p,
+            value: Vec::new(),
+            consts: HashMap::default(),
+        };
+        let all: Vec<Ref> = outs
+            .iter()
+            .map(|&k| match func.outputs()[k as usize] {
+                Output::Expr(_) => roots.next().expect("one per expression"),
+                _ => lw.constant(0.0),
+            })
+            .collect();
+        lw.p.roots = all;
+        let t = Arc::new(lw.p);
+        ctx.templates.lock().unwrap().insert(key, t.clone());
+        t
+    }
 }
 
 /// The bodies serving the calls, by function and output set, with their
@@ -1720,6 +2067,19 @@ struct Bodies {
 }
 
 impl Bodies {
+    /// The index of `bundle` in `bundles`, appended if new.
+    fn intern(
+        &mut self,
+        bundles: &mut Vec<Arc<dyn ExternBundle>>,
+        bundle: &Arc<dyn ExternBundle>,
+    ) -> u32 {
+        let ptr = Arc::as_ptr(bundle) as *const () as usize;
+        *self.bundle_idx.entry(ptr).or_insert_with(|| {
+            bundles.push(bundle.clone());
+            bundles.len() as u32 - 1
+        })
+    }
+
     /// The body of `f` for the output set `set`, compiled on first demand,
     /// its bundle interned into `bundles`.
     fn get<K: Field>(

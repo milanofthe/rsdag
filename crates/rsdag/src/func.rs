@@ -98,6 +98,9 @@ pub struct Function {
     /// The symbols the body reads that are not its parameters, its calls'
     /// included, once asked for (see `Graph::globals`).
     pub(crate) globals: std::sync::OnceLock<Arc<[ExprId]>>,
+    /// Whether the body calls functions, once asked for (see
+    /// [`composite_in`](Self::composite_in)).
+    composite: std::sync::OnceLock<bool>,
 }
 
 /// A way through calls and a set of moving parameters (see `Graph::reads`).
@@ -197,6 +200,7 @@ impl Function {
             support: Default::default(),
             reads: Default::default(),
             globals: Default::default(),
+            composite: Default::default(),
         }
     }
 
@@ -206,6 +210,7 @@ impl Function {
         // may read globals not known yet
         if !matches!(role, OutputRole::Derivative { .. }) {
             self.globals = Default::default();
+            self.composite = Default::default();
         }
         let k = self.outputs.len() as u32;
         self.outputs.push(output);
@@ -270,6 +275,28 @@ impl Function {
             .collect();
         globals.sort_unstable();
         self.globals.get_or_init(|| globals.into()).clone()
+    }
+
+    /// Whether the body calls functions: a composite function, its calls
+    /// compiled as templates. A derivative calls what its output calls, so
+    /// the outputs that are no derivatives decide.
+    pub(crate) fn composite_in<K: crate::field::Field>(
+        &self,
+        ctx: &crate::graph::Graph<K>,
+    ) -> bool {
+        *self.composite.get_or_init(|| {
+            let exprs: Vec<ExprId> = self
+                .outputs
+                .iter()
+                .zip(&self.output_roles)
+                .filter_map(|(o, r)| match (*o, r) {
+                    (_, OutputRole::Derivative { .. }) => None,
+                    (Output::Expr(e), _) => Some(e),
+                    _ => None,
+                })
+                .collect();
+            !ctx.free_calls_in(&exprs).is_empty()
+        })
     }
 
     pub(crate) fn cached_reads(&self, key: &ReadsKey) -> Option<Arc<[Arc<[u32]>]>> {

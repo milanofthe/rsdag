@@ -505,7 +505,7 @@ impl Scope {
         let f = g.define_func("program", self.inputs.clone(), roots.to_vec());
         let mut own = Graph::new();
         let func = own.import(&g, f, &mut Default::default());
-        let tape = Tape::compose(&mut g, roots, &self.inputs);
+        let tape = Tape::compose(&g, roots, &self.inputs);
         let mut p = Program::new(tape, self.inputs.len(), roots.len());
         p.symbolic = Some(Arc::new(Symbolic {
             graph: own,

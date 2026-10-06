@@ -9,18 +9,20 @@
 //! (`placed=flat`). Every function takes everything it reads as a
 //! parameter, the cards' parameters passed down the hierarchy; with
 //! `--bind` a device is called through a binding of its card instead (see
-//! `Graph::bind`), and the cards are globals above it. `--trace` prints the
-//! stage timings of the compiles.
+//! `Graph::bind`), and the cards are globals above it. The tapes compile the
+//! hierarchy as it stands (its composite functions as templates); with
+//! `--inline` the composite functions are inlined first. `--trace` prints
+//! the stage timings of the compiles.
 //!
 //! Per configuration one CSV row: graph nodes, then the time of each stage
 //! (building, the sparse Jacobian in the states, the calls specialized to
-//! the ground constant, the composite functions inlined, the residual and
+//! the ground constant, the composite functions inlined (`--inline`), the residual and
 //! Jacobian tapes, their native code), the time per evaluation of each
 //! (interpreted and native), and a hash of the native outputs, the same
 //! across versions that compute the same bits.
 //!
 //!     cargo run --release -p rsdag-jit --example scale -- [--gates <n>] [--card <n>] [--placed once|flat|both]
-//!         [--bind] [--trace]
+//!         [--bind] [--inline] [--trace]
 
 use std::time::Instant;
 
@@ -198,7 +200,7 @@ fn hash(v: &[f64]) -> u64 {
     })
 }
 
-fn run(gates: usize, card: usize, once: bool, bind: bool) {
+fn run(gates: usize, card: usize, once: bool, bind: bool, inline_first: bool) {
     let n = gates / 2;
     let t = Instant::now();
     let mut g: Graph<F64> = Graph::new();
@@ -265,8 +267,13 @@ fn run(gates: usize, card: usize, once: bool, bind: bool) {
     let spec = g.specialize_calls(&both);
     let specialize = ms(t);
 
+    // the hierarchy compiled as it stands, or (`--inline`) inlined first
     let t = Instant::now();
-    let flat = g.inline_composite(&spec);
+    let flat = if inline_first {
+        g.inline_composite(&spec)
+    } else {
+        spec
+    };
     let inline = ms(t);
     let (res, jac) = flat.split_at(roots.len());
     let nodes = g.len();
@@ -309,9 +316,10 @@ fn run(gates: usize, card: usize, once: bool, bind: bool) {
     let (fi, fnat, fh) = eval(&tape_f, &nat_f);
     let (ji, jnat, jh) = eval(&tape_j, &nat_j);
     println!(
-        "{}{},{gates},{card},{},{nodes},{build:.1},{jacobian:.1},{specialize:.1},{inline:.1},{tapes:.1},{native:.1},{fi:.1},{fnat:.1},{ji:.1},{jnat:.1},{:016x}",
+        "{}{}{},{gates},{card},{},{nodes},{build:.1},{jacobian:.1},{specialize:.1},{inline:.1},{tapes:.1},{native:.1},{fi:.1},{fnat:.1},{ji:.1},{jnat:.1},{:016x}",
         if once { "once" } else { "flat" },
         if bind { "+bind" } else { "" },
+        if inline_first { "+inline" } else { "" },
         states.len(),
         fh ^ jh.rotate_left(1),
     );
@@ -330,6 +338,7 @@ fn main() {
     let card: usize = option("--card").map_or(400, |v| v.parse().expect("--card <n>"));
     let placed = option("--placed").unwrap_or_else(|| "both".into());
     let bind = args.iter().any(|a| a == "--bind");
+    let inline_first = args.iter().any(|a| a == "--inline");
     if args.iter().any(|a| a == "--trace") {
         // the stage timings of the compiles, on stderr
         struct Stderr;
@@ -346,7 +355,7 @@ fn main() {
     );
     for once in [true, false] {
         if placed == "both" || (placed == "once") == once {
-            run(gates, card, once, bind);
+            run(gates, card, once, bind, inline_first);
         }
     }
 }

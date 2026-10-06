@@ -71,7 +71,7 @@ fn a_composed_program_runs_as_the_functions_do() {
     let two = g.calls(b, &[0, 1], &[e[1], e[2], e[3]]);
     let mut roots = one.clone();
     roots.extend(two);
-    let composed = Tape::compose(&mut g, &roots, &syms);
+    let composed = Tape::compose(&g, &roots, &syms);
     let hierarchical = Tape::compile(&g, &roots, &syms);
     let x: [f64; 4] = [0.3, -0.7, 1.1, 0.4];
     let (mut w, mut a, mut c) = (Vec::new(), Vec::new(), Vec::new());

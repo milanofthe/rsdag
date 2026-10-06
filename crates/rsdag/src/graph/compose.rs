@@ -1,7 +1,7 @@
 //! Composition: programs built apart, called as one. A function of another
 //! graph is imported with the functions it calls; calls into it compose it
 //! into whatever this graph builds, and a program over the composition is
-//! compiled as one (see [`Graph::inline_composite`] and
+//! compiled as one, its composite functions as templates (see
 //! [`Tape::compose`](crate::Tape::compose)).
 
 use super::*;

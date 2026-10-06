@@ -66,7 +66,16 @@ pub struct Graph<K: Field = F64> {
     /// The copies of functions with globals bound (see
     /// [`rebound`](Self::rebound)), by function and binding.
     rebound: HashMap<(FuncId, Vec<(SymbolId, ExprId)>), FuncId>,
+    /// The templates the tape compiler made of composite functions, by
+    /// function, output set and operand purity: shared by every program
+    /// compiled over this graph (see [`Tape::compile`](crate::Tape::compile)).
+    pub(crate) templates: std::sync::Mutex<TemplateCache>,
 }
+
+/// The templates of [`Graph::templates`]: what the tape compiler keeps,
+/// its type its own.
+pub(crate) type TemplateCache =
+    HashMap<(u32, Vec<u32>, Option<Vec<bool>>), Arc<dyn std::any::Any + Send + Sync>>;
 
 /// No context: a call passes every parameter.
 pub(crate) const NO_CONTEXT: u32 = u32::MAX;
@@ -179,6 +188,7 @@ impl<K: Field> Graph<K> {
             context_dedup: HashMap::default(),
             memos: Vec::new(),
             rebound: HashMap::default(),
+            templates: Default::default(),
         };
         ctx.zero = ctx.konst(K::zero());
         ctx.one = ctx.konst(K::one());
