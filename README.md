@@ -226,9 +226,9 @@ parallel::install(p, || {
 });
 ```
 
-On SANE's circuits (the modules of the Benchmarks), the Jacobian takes 10
-to 15 microseconds on 4 threads instead of 27 to 35 on one, the residual
-about half its time (`rsdag-jit/examples/modules.rs --threads`).
+On SANE's circuits (the modules of the Benchmarks), the Jacobian takes 7
+to 12 microseconds on 4 threads instead of 11 to 18 on one, the residual
+3 to 6 instead of 6 to 9 (`rsdag-jit/examples/modules.rs --threads`).
 
 ## Choice specialization
 
@@ -317,8 +317,7 @@ devices); CasADi and JAX get them composed into one function by rsdag
 first, so all three start from the same expressions. CasADi builds SX
 functions and runs through its buffer interface, JAX maps each device body
 over its instances with `vmap` and builds the Jacobian dense; it compiles
-neither the PSP103 residual nor the PSP103 and BSIM4 Jacobians within a
-minute.
+neither the PSP103 nor the BSIM4 Jacobians within a minute.
 
 ![Against CasADi and JAX](docs/bench/modules.svg)
 
