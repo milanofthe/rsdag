@@ -25,7 +25,8 @@ NOTICE); for a commercial license contact info@milanrother.com.
 ## Crates
 
 - `rsdag`: `Graph<K: Field>` (exact rationals or `f64`), functions with
-  calls and roles, composition (`Graph::import`, `Tape::compose`),
+  calls and roles, bindings (`Graph::bind`), composition (`Graph::import`,
+  hierarchies compiled through templates),
   `Scope`, `Module` (serialization), `differentiate`,
   `gradient` (reverse mode), `sparse_jacobian`, `hessian`, `substitute`,
   `Tape` (interpreter over any `Scalar`, choice specialization, instance
@@ -130,8 +131,10 @@ in chunked functions with a write-back register cache.
 ![Work array](docs/diagrams/work.svg)
 
 The work array: the prolog's results first, then the main phase's slots,
-the same layout in every backend; native code appends a gather area for
-host calls and the scratch of called bodies.
+the same layout in every backend, then a gather area where the calls (and
+in native code the host routines) gather their arguments, and the scratch
+of called bodies. Interpreter and native code run their calls through one
+runner (`tape::calls`).
 
 ## Function bodies
 
@@ -170,10 +173,16 @@ function already there is reused), and calls into it build the
 composition. A hierarchy (blocks of blocks, subcircuits of devices) stays
 functions for the symbolic work: a derivative through a call follows only
 what the called output reads (`Graph::output_support`), and specialization
-makes one copy per pattern of constant arguments. The program over it
-compiles with `Tape::compose`: functions whose bodies call others are
-inlined, the leaves stay calls, so the calls of one leaf from every
-instance anywhere in the hierarchy batch together. The calls of one
+makes one copy per pattern of constant arguments. A model card is a
+binding: `Graph::bind` binds parameters of a function once, a call through
+it (`Graph::calls_bound`) carries only the instance's own arguments, and
+every analysis, derivative and program takes it as the call with all its
+arguments. The program over a hierarchy compiles as it stands
+(`Tape::compile`): a function whose body calls others is lowered once into
+a template, a call of it appends the template, the leaves stay calls, so
+the calls of one leaf from every instance anywhere in the hierarchy run as
+one batch; after its prolog, such a batch gathers per evaluation only the
+arguments its main phase reads, not the bound card. The calls of one
 instance share one argument list, and every stage works on it once per
 instance, so a body of n nodes called once costs O(n), whatever its number
 of outputs (see Benchmarks).
