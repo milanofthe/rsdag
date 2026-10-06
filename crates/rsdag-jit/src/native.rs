@@ -1479,27 +1479,35 @@ impl<'a, I: Isa> Emitter<'a, I> {
             ROp::Call(ref c) => {
                 // A call of a stage gathers apart from the others of it; the
                 // stage's last one hands them all to `h_stage`.
-                let (at, table, places) = if c.args.len() < GATHER_TABLE {
-                    (
-                        self.gather_at(&c.args, c.places.as_deref(), c.gather_at),
-                        0,
-                        0,
-                    )
+                let table = if c.args.len() < GATHER_TABLE {
+                    // where each operand goes among the groups' arguments
+                    let places: Option<Vec<u32>> = c.positions.as_ref().map(|p| {
+                        (0..c.args.len())
+                            .map(|k| ((k / p.len()) * c.n_args as usize) as u32 + p[k % p.len()])
+                            .collect()
+                    });
+                    self.gather_at(&c.args, places.as_deref(), c.gather_at);
+                    None
                 } else {
                     self.publish(&c.args);
-                    let mut table = |v: &[u32]| {
-                        let t: Box<[u32]> = v.into();
-                        let p = t.as_ptr() as u64;
-                        self.gathers.push(t);
-                        p
-                    };
-                    let places = c.places.as_deref().map_or(0, &mut table);
-                    (
-                        (self.layout.gather + c.gather_at) * 8,
-                        table(&c.args),
-                        places,
-                    )
+                    Some(())
                 };
+                let mut keep = |v: &[u32]| {
+                    let t: Box<[u32]> = v.into();
+                    let p = t.as_ptr() as u64;
+                    self.gathers.push(t);
+                    p
+                };
+                let (table, places) = match table {
+                    None => (0, 0),
+                    Some(()) => (keep(&c.args), c.positions.as_deref().map_or(0, &mut keep)),
+                };
+                let n_inputs = c
+                    .args
+                    .iter()
+                    .filter_map(|&s| input_index(s))
+                    .max()
+                    .map_or(0, |i| i as u64 + 1);
                 let d = self.descs.len();
                 assert!(
                     d < self.descs.capacity(),
@@ -1508,20 +1516,20 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 let desc = host::CallDesc {
                     bundle: c.bundle as u64,
                     kind: c.kind as u64,
-                    batch: c.batch as u64,
                     n_groups: c.n_groups as u64,
                     n_args: c.n_args as u64,
+                    n_in: (c.args.len() / c.n_groups as usize) as u64,
                     n_out: c.n_out as u64,
-                    state_len: c.state_len as u64,
-                    args: at as u64,
-                    out: c.dst as u64 * 8,
-                    state: c.state as u64 * 8,
-                    scratch: self.layout.scratch as u64 * 8,
+                    args: c.gather_at as u64,
+                    out: c.dst as u64,
+                    state: c.state as u64,
+                    gather: self.layout.gather as u64,
+                    scratch: self.layout.scratch as u64,
                     scratch_len: self.layout.scratch_len as u64,
                     ops: c.ops,
                     table,
                     places,
-                    n_in: (c.args.len() / c.n_groups as usize) as u64,
+                    n_inputs,
                 };
                 // The table was sized up front: pushing never moves it, so
                 // the address baked into the code stays valid.
@@ -1552,7 +1560,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
                         self.call(host::h_stage as *const (), &args);
                         let written: Vec<(u32, u32)> = self.descs[first..]
                             .iter()
-                            .map(|e| ((e.out / 8) as u32, (e.n_groups * e.n_out) as u32))
+                            .map(|e| (e.out as u32, (e.n_groups * e.n_out) as u32))
                             .collect();
                         for (dst, len) in written {
                             self.invalidate(dst, len);

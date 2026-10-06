@@ -6,6 +6,7 @@
 use rsdag::extern_fn::ExternBundle;
 use rsdag::node::{BinOp, ReduceOp, UnaryOp};
 use rsdag::semantics::{binary_f64, reduce_slice, unary_f64};
+use rsdag::tape::calls::{run_call, run_stage, Call, Phase, Shared};
 use std::sync::Arc;
 
 pub(crate) type Bundles = Vec<Arc<dyn ExternBundle>>;
@@ -87,23 +88,26 @@ pub(crate) fn resume_panic() {
 }
 
 /// A call site as the emitted code hands it to [`h_call`]: every size
-/// fixed when the tape was compiled, every place a byte offset into the
-/// work array. The descriptors live as long as the code that points at them.
+/// fixed when the tape was compiled, every place an index into the work
+/// array's regions: its slots `0..gather`, the gather area
+/// `gather..scratch` and the bundles' scratch from `scratch`. The
+/// descriptors live as long as the code that points at them.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub(crate) struct CallDesc {
     pub(crate) bundle: u64,
+    /// 0 whole, 1 the main phase, 2 the prolog.
     pub(crate) kind: u64,
-    pub(crate) batch: u64,
     pub(crate) n_groups: u64,
     pub(crate) n_args: u64,
+    pub(crate) n_in: u64,
     pub(crate) n_out: u64,
-    pub(crate) state_len: u64,
-    /// Byte offsets: the gathered arguments, the outputs (the states for a
-    /// prolog), the states (a main phase), the bundle's scratch.
+    /// The arguments in the gather area; the outputs (the states for a
+    /// prolog) and the states (a main phase) among the slots.
     pub(crate) args: u64,
     pub(crate) out: u64,
     pub(crate) state: u64,
+    pub(crate) gather: u64,
     pub(crate) scratch: u64,
     pub(crate) scratch_len: u64,
     /// Ops the call carries (its instances times its body's), for
@@ -113,11 +117,57 @@ pub(crate) struct CallDesc {
     /// tagged as in the tape), for a call too wide to gather in its code;
     /// `0` when the code gathered them.
     pub(crate) table: u64,
-    /// Where each operand of `table` goes among the groups' arguments, for
-    /// a call that gathers only some (`n_in` per group); `0` for all, in
-    /// order.
+    /// The argument each of an instance's `n_in` operands is, for a call
+    /// that gathers only some; `0` for all, in order.
     pub(crate) places: u64,
-    pub(crate) n_in: u64,
+    /// The inputs the operands read reach this far.
+    pub(crate) n_inputs: u64,
+}
+
+/// `d` as the tape's call runner takes it.
+///
+/// # Safety
+/// `d` describes a call of the code `bundles` belong to.
+unsafe fn call_of<'a>(bundles: &'a Bundles, d: &'a CallDesc) -> Call<'a> {
+    let (ng, ni) = (d.n_groups as usize, d.n_in as usize);
+    let table = |p: u64, n: usize| unsafe { std::slice::from_raw_parts(p as *const u32, n) };
+    Call {
+        bundle: &*bundles[d.bundle as usize],
+        phase: match d.kind {
+            0 => Phase::Whole,
+            1 => Phase::Main,
+            _ => Phase::Prolog,
+        },
+        n_groups: ng,
+        n_args: d.n_args as usize,
+        n_out: d.n_out as usize,
+        operands: (d.table != 0).then(|| table(d.table, ng * ni)),
+        places: (d.places != 0).then(|| table(d.places, ni)),
+        args: d.args as usize,
+        out: d.out as usize,
+        state: d.state as usize,
+        ops: d.ops,
+    }
+}
+
+/// The regions of the work array `d` names, and the inputs its operands
+/// read.
+///
+/// # Safety
+/// `work` and `inputs` are the program's buffers.
+unsafe fn regions<'a>(
+    d: &CallDesc,
+    work: *mut f64,
+    inputs: *const f64,
+) -> (Shared<f64>, Shared<f64>, &'a [f64]) {
+    let (g, s) = (d.gather as usize, d.scratch as usize);
+    unsafe {
+        (
+            Shared::from_raw(work, g),
+            Shared::from_raw(work.add(g), s - g),
+            std::slice::from_raw_parts(inputs, d.n_inputs as usize),
+        )
+    }
 }
 
 /// Every bundle call: whole, main phase over its states, or prolog.
@@ -129,18 +179,18 @@ pub(crate) extern "C" fn h_call(
 ) {
     let d = unsafe { &*d };
     let b = unsafe { &*bundles };
-    let scratch = unsafe {
-        std::slice::from_raw_parts_mut(work.add(d.scratch as usize / 8), d.scratch_len as usize)
-    };
     // SAFETY: the call's regions are disjoint by the layout.
-    guarded(|| unsafe { run_call(b, d, work, inputs, 0..d.n_groups as usize, scratch) });
+    guarded(|| unsafe {
+        let c = call_of(b, d);
+        let (slots, gather, inputs) = regions(d, work, inputs);
+        let scratch =
+            std::slice::from_raw_parts_mut(work.add(d.scratch as usize), d.scratch_len as usize);
+        run_call(&c, slots, gather, inputs, 0..c.n_groups, scratch)
+    });
 }
 
 /// The calls of a stage ([`rsdag::Stage`]): `n` descriptors from `d` on,
-/// their arguments gathered apart. On the installed pool when there is one
-/// and the stage is worth it ([`rsdag::parallel`]), every block of
-/// instances over scratch of its thread's; else one call after the other,
-/// as [`h_call`] runs them. Either way the results are the serial ones.
+/// run by the tape's [`run_stage`].
 pub(crate) extern "C" fn h_stage(
     bundles: *const Bundles,
     d: *const CallDesc,
@@ -150,161 +200,18 @@ pub(crate) extern "C" fn h_stage(
 ) {
     let descs = unsafe { std::slice::from_raw_parts(d, n as usize) };
     let b = unsafe { &*bundles };
-    guarded(|| {
-        let ops: u64 = descs.iter().map(|d| d.ops).sum();
-        if !rsdag::parallel::worth(ops as usize) {
-            for d in descs {
-                let scratch = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        work.add(d.scratch as usize / 8),
-                        d.scratch_len as usize,
-                    )
-                };
-                // SAFETY: as in `h_call`, one call at a time.
-                unsafe { run_call(b, d, work, inputs, 0..d.n_groups as usize, scratch) };
-            }
-            return;
-        }
-        let total: usize = descs.iter().map(|d| d.n_groups as usize).sum();
-        let bs = rsdag::parallel::block(total);
-        let items: Vec<(usize, usize, usize)> = descs
-            .iter()
-            .enumerate()
-            .flat_map(|(k, d)| {
-                let ng = d.n_groups as usize;
-                (0..ng)
-                    .step_by(bs)
-                    .map(move |g0| (k, g0, (g0 + bs).min(ng)))
-            })
-            .collect();
-        let (w, ins) = (WorkPtr(work), WorkPtr(inputs as *mut f64));
-        rsdag::parallel::run(items.len(), ops as usize, &|it| {
-            let (k, g0, g1) = items[it];
-            let d = &descs[k];
-            rsdag::parallel::with_scratch(d.scratch_len as usize, 0.0, |scratch| {
-                // SAFETY: the calls of a stage read nothing another one
-                // writes (`rsdag`'s stage planning), their arguments are
-                // gathered apart, and a block writes its own instances'
-                // part of its call's outputs.
-                unsafe { run_call(b, d, w.get(), ins.get(), g0..g1, scratch) }
-            });
-        });
-    });
-}
-
-/// The work array (or the inputs) of a stage, shared by its blocks of
-/// instances.
-#[derive(Clone, Copy)]
-struct WorkPtr(*mut f64);
-// SAFETY: the blocks of a stage access disjoint parts of the work array or
-// read the same ones (see `h_stage`).
-unsafe impl Send for WorkPtr {}
-unsafe impl Sync for WorkPtr {}
-impl WorkPtr {
-    fn get(self) -> *mut f64 {
-        self.0
-    }
-}
-
-/// Instances `groups` of the call `d` over `scratch`, their arguments
-/// gathered first where the code left that to the table.
-///
-/// # Safety
-/// `work` holds the call's regions and `inputs` the program's inputs;
-/// nothing else accesses the instances' arguments and outputs while this
-/// runs, and nothing writes what they read or their states.
-unsafe fn run_call(
-    bundles: &Bundles,
-    d: &CallDesc,
-    work: *mut f64,
-    inputs: *const f64,
-    groups: std::ops::Range<usize>,
-    scratch: &mut [f64],
-) {
-    let b = &bundles[d.bundle as usize];
-    let (na, no, sl) = (d.n_args as usize, d.n_out as usize, d.state_len as usize);
-    let (g0, ng) = (groups.start, groups.len());
-    let at = |off: u64| unsafe { work.add(off as usize / 8) };
-    if d.table != 0 {
-        let ni = d.n_in as usize;
-        let from =
-            unsafe { std::slice::from_raw_parts((d.table as *const u32).add(g0 * ni), ng * ni) };
-        let value = |s: u32| unsafe {
-            match rsdag::tape::input_index(s) {
-                Some(i) => *inputs.add(i as usize),
-                None => *work.add(s as usize),
-            }
+    guarded(|| unsafe {
+        let calls: Vec<Call> = descs.iter().map(|d| call_of(b, d)).collect();
+        let n_inputs = descs.iter().map(|d| d.n_inputs).max().unwrap_or(0);
+        let wide = CallDesc {
+            n_inputs,
+            ..descs[0]
         };
-        if d.places == 0 {
-            let to = unsafe { std::slice::from_raw_parts_mut(at(d.args).add(g0 * na), ng * na) };
-            for (x, &s) in to.iter_mut().zip(from) {
-                *x = value(s);
-            }
-        } else {
-            let places = unsafe {
-                std::slice::from_raw_parts((d.places as *const u32).add(g0 * ni), ng * ni)
-            };
-            let to = at(d.args);
-            for (&p, &s) in places.iter().zip(from) {
-                unsafe { *to.add(p as usize) = value(s) };
-            }
-        }
-    }
-    let args = unsafe { std::slice::from_raw_parts(at(d.args).add(g0 * na), ng * na) };
-    let out = unsafe { std::slice::from_raw_parts_mut(at(d.out).add(g0 * no), ng * no) };
-    match d.kind {
-        0 => {
-            assert_eq!(
-                b.n_outputs(),
-                no,
-                "bundle output count changed since compile"
-            );
-            if d.batch != 0 {
-                b.call_batch(args, ng, na, out);
-            } else {
-                for g in 0..ng {
-                    let (a, o) = (&args[g * na..(g + 1) * na], &mut out[g * no..(g + 1) * no]);
-                    b.call_into(a, scratch, o);
-                }
-            }
-        }
-        1 => {
-            assert_eq!(
-                b.n_outputs(),
-                no,
-                "bundle output count changed since compile"
-            );
-            assert_eq!(
-                b.state_len(),
-                sl,
-                "bundle state length changed since compile"
-            );
-            let states = unsafe { std::slice::from_raw_parts(at(d.state).add(g0 * sl), ng * sl) };
-            if ng >= 2 {
-                b.main_batch(args, states, ng, na, out);
-                return;
-            }
-            for g in 0..ng {
-                let (a, o) = (&args[g * na..(g + 1) * na], &mut out[g * no..(g + 1) * no]);
-                b.main_into(a, &states[g * sl..(g + 1) * sl], scratch, o);
-            }
-        }
-        _ => {
-            assert_eq!(
-                b.state_len(),
-                sl,
-                "bundle state length changed since compile"
-            );
-            if ng >= 2 {
-                b.prolog_batch(args, ng, na, out);
-                return;
-            }
-            for g in 0..ng {
-                let (a, st) = (&args[g * na..(g + 1) * na], &mut out[g * sl..(g + 1) * sl]);
-                b.prolog_into(a, scratch, st);
-            }
-        }
-    }
+        let (slots, gather, inputs) = regions(&wide, work, inputs);
+        // SAFETY: the calls of a stage read nothing another one writes
+        // (`rsdag`'s stage planning), their arguments apart.
+        run_stage(&calls, slots, gather, inputs)
+    });
 }
 
 /// Where a kernel operand is: a byte offset into the work array or into

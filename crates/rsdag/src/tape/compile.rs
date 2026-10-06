@@ -2117,6 +2117,7 @@ impl Program {
                         reads,
                         n_out: inst.n_out / n_groups,
                         state,
+                        args: 0,
                     }
                 }
                 Kind::CallProlog {
@@ -2130,6 +2131,7 @@ impl Program {
                         start,
                         n_groups,
                         n_pure,
+                        args: 0,
                     }
                 }
                 Kind::Gemv {
@@ -2212,6 +2214,31 @@ impl Program {
             .max()
             .unwrap_or(0);
         let stages = super::plan_stages(&ops, &dst, &arg_pool, &self.bundles, prolog_ops);
+        // The calls of a stage gather their arguments apart, one after the
+        // other in the gather area.
+        for st in &stages {
+            let mut at = 0u32;
+            for op in &mut ops[st.lo as usize..st.hi as usize] {
+                let (args, width) = match op {
+                    Op::Call {
+                        args,
+                        n_groups,
+                        n_args,
+                        ..
+                    } => (args, *n_groups * *n_args),
+                    Op::CallProlog {
+                        args,
+                        n_groups,
+                        n_pure,
+                        ..
+                    } => (args, *n_groups * *n_pure),
+                    _ => unreachable!("a stage holds calls only"),
+                };
+                *args = at;
+                at += width;
+            }
+            max_args = max_args.max(at as usize);
+        }
         Tape {
             stages,
             lent,
