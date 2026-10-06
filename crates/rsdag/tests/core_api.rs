@@ -48,6 +48,43 @@ fn roles_select_jacobian_blocks() {
 }
 
 #[test]
+fn charge_form_rows_select_by_role() {
+    // One row in charge form: i(x) = x/r, q(x) = c x (an RC node), so
+    // dF/dx' = dq/dx is the Jacobian of the charge outputs.
+    let mut g: Graph<F64> = Graph::new();
+    let (x, r, c) = (g.sym("x"), g.sym("r"), g.sym("c"));
+    let i = g.div(x, r);
+    let q = g.mul(c, x);
+    let f = g.close("rc", vec![i, q]);
+    for (k, s) in g.func(f).params().to_vec().into_iter().enumerate() {
+        let role = match g.symbol_name(s) {
+            "x" => ParamRole::State { id: 0 },
+            _ => ParamRole::Param,
+        };
+        g.set_param_role(f, k as u32, role);
+    }
+    g.set_output_role(f, 0, OutputRole::Residual { id: 0 });
+    g.set_output_role(f, 1, OutputRole::Charge { id: 0 });
+    assert_eq!(
+        g.func(f)
+            .outputs_with_role(|o| matches!(o, OutputRole::Charge { .. })),
+        vec![1]
+    );
+    let jq = g.jacobian_by_role(
+        f,
+        |o| matches!(o, OutputRole::Charge { .. }),
+        |p| matches!(p, ParamRole::State { .. }),
+    );
+    assert_eq!(jq.len(), 1);
+    let (of, wrt, k) = jq[0];
+    assert_eq!((of, wrt), (1, 0));
+    match g.func(f).outputs()[k as usize] {
+        Output::Expr(e) => assert_eq!(e, c),
+        _ => panic!("dq/dx is an expression"),
+    }
+}
+
+#[test]
 fn f64_field_builds_folds_and_evaluates() {
     let mut g: Graph<F64> = Graph::new();
     let x = g.sym("x");
