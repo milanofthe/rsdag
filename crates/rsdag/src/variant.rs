@@ -31,7 +31,7 @@
 //! full body, which computes the same values, until its variant is ready:
 //! a prolog never waits on a compilation.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use rustc_hash::FxHashMap as HashMap;
@@ -106,6 +106,9 @@ struct Shared {
     index: Mutex<HashMap<Box<[bool]>, Slot>>,
     /// Whether a pattern found no room left (reported once).
     exhausted: AtomicBool,
+    /// Moves when background work lands (see
+    /// [`ExternBundle::forms_epoch`]).
+    epoch: AtomicU64,
 }
 
 impl Shared {
@@ -221,6 +224,7 @@ impl VariantBody {
             bodies: RwLock::new(vec![Arc::new(full)]),
             index: Mutex::new(HashMap::default()),
             exhausted: AtomicBool::new(false),
+            epoch: AtomicU64::new(0),
         });
         VariantBody::over(shared, BodyBackend::default(), VariantPolicy::default())
     }
@@ -284,6 +288,7 @@ impl VariantBody {
                         let shared = shared.clone();
                         submit(Box::new(move || {
                             let _ = shared.found.set(shared.find());
+                            shared.epoch.fetch_add(1, Ordering::Release);
                         }));
                     }
                     return 0;
@@ -316,6 +321,7 @@ impl VariantBody {
                     let found = shared.found.get().and_then(Option::as_ref);
                     let v = found.map_or(0, |f| shared.build(&f.selects, &pattern, max));
                     shared.index.lock().unwrap().insert(pattern, Slot::Ready(v));
+                    shared.epoch.fetch_add(1, Ordering::Release);
                 }));
                 return 0;
             }
@@ -353,7 +359,13 @@ impl VariantBody {
     /// else there.
     fn run(&self, now: bool, job: impl FnOnce() + Send + 'static) {
         match (&self.backend.submit, now) {
-            (Some(submit), false) => submit(Box::new(job)),
+            (Some(submit), false) => {
+                let shared = self.shared.clone();
+                submit(Box::new(move || {
+                    job();
+                    shared.epoch.fetch_add(1, Ordering::Release);
+                }))
+            }
             _ => job(),
         }
     }
@@ -543,5 +555,8 @@ impl ExternBundle for VariantBody {
         let policy = backend.variants.unwrap_or(self.policy);
         let v = VariantBody::over(self.shared.clone(), backend.clone(), policy);
         Some(Arc::new(v))
+    }
+    fn forms_epoch(&self) -> u64 {
+        self.shared.epoch.load(Ordering::Acquire)
     }
 }
