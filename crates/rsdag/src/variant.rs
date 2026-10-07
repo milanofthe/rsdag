@@ -46,6 +46,10 @@ use crate::tape::{ParamSelects, Tape};
 pub struct VariantPolicy {
     /// Specialize at all; off, every body runs whole.
     pub enabled: bool,
+    /// Whether a form that interprets its bodies specializes them too. Off
+    /// where a compiler takes the program over: the interpreted phase then
+    /// spends nothing on variants the compiled form builds anyway.
+    pub interpreted: bool,
     /// The bodies a function keeps, the full one included: a binding whose
     /// pattern turns up past them runs the full body.
     pub max_variants: usize,
@@ -59,6 +63,7 @@ impl Default for VariantPolicy {
     fn default() -> Self {
         VariantPolicy {
             enabled: true,
+            interpreted: true,
             max_variants: 64,
             min_shrink_pct: 10,
         }
@@ -244,7 +249,16 @@ impl VariantBody {
         // An instance runs the full body until its variant is ready: this
         // form of it from the start.
         let _ = v.interp[0].set(v.full.clone());
-        v.make(0);
+        // Making a form of the body makes what it runs: the full body, the
+        // variants built so far and the conditions' tape, here; a variant
+        // built later is made where the backend puts background work.
+        let built = v.shared.bodies.read().unwrap().len().min(n);
+        for k in 0..built {
+            v.make(k, true);
+        }
+        if let Some(Some(_)) = v.shared.found.get() {
+            v.make_conds(true);
+        }
         v
     }
 
@@ -254,9 +268,10 @@ impl VariantBody {
     }
 
     /// The variant to run for the pure arguments `pure`: its pattern's,
-    /// once built, else the full body.
+    /// once built and made, else the full body.
     fn variant(&self, pure: &[f64]) -> u32 {
-        if !self.policy.enabled {
+        let compiles = self.backend.compile.is_some();
+        if !self.policy.enabled || !(compiles || self.policy.interpreted) {
             return 0;
         }
         let shared = &self.shared;
@@ -306,43 +321,67 @@ impl VariantBody {
             }
         };
         drop(index);
-        if v as usize >= self.interp.len() {
+        let v = v as usize;
+        if v >= self.interp.len() {
             return 0; // past what this form keeps
         }
-        v
+        // A variant runs once this form has it at its best: where the
+        // backend compiles, its compiled form, else the full body's
+        // compiled one runs meanwhile (faster than the variant
+        // interpreted).
+        if compiles && self.made[v].get().is_none() {
+            self.interp[v].get_or_init(|| shared.body(v as u32));
+            self.make(v, false);
+            if self.made[v].get().is_none() {
+                return 0;
+            }
+        }
+        v as u32
     }
 
-    /// The backend's form of the conditions' tape, where it compiles:
-    /// made now without a place for background work, else there on the
-    /// first ask.
+    /// The backend's form of the conditions' tape, where it compiles one,
+    /// once made (asked for here the first time).
     fn conds(&self) -> Option<&Arc<dyn ExternBundle>> {
-        let compile = self.backend.compile.as_ref()?;
-        if let Some(b) = self.conds.get() {
-            return Some(b);
-        }
-        if !self.conds_making.swap(true, Ordering::AcqRel) {
-            let (shared, conds, compile) =
-                (self.shared.clone(), self.conds.clone(), compile.clone());
-            let job = move || {
-                let Some(Some(f)) = shared.found.get() else {
-                    return;
-                };
-                if let Some(b) = compile(f.selects.tape(), &[], f.selects.n_conds()) {
-                    let _ = conds.set(b);
-                }
-            };
-            match &self.backend.submit {
-                Some(submit) => submit(Box::new(job)),
-                None => job(),
-            }
+        self.backend.compile.as_ref()?;
+        if self.conds.get().is_none() {
+            self.make_conds(false);
         }
         self.conds.get()
     }
 
-    /// Have the backend's form of variant `v` made: now without a place
-    /// for background work, else there. It is kept with the variant's body
-    /// under the backend's key, so every program of the backend shares it.
-    fn make(&self, v: usize) {
+    /// Run `job`: `now`, or where there is no place for background work;
+    /// else there.
+    fn run(&self, now: bool, job: impl FnOnce() + Send + 'static) {
+        match (&self.backend.submit, now) {
+            (Some(submit), false) => submit(Box::new(job)),
+            _ => job(),
+        }
+    }
+
+    /// Have the backend's form of the conditions' tape made (see
+    /// [`run`](Self::run)), once the selects are found.
+    fn make_conds(&self, now: bool) {
+        let Some(compile) = self.backend.compile.clone() else {
+            return;
+        };
+        if self.conds_making.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let (shared, conds) = (self.shared.clone(), self.conds.clone());
+        self.run(now, move || {
+            let Some(Some(f)) = shared.found.get() else {
+                return;
+            };
+            if let Some(b) = compile(f.selects.tape(), &[], f.selects.n_conds()) {
+                let _ = conds.set(b);
+            }
+        });
+    }
+
+    /// Have the backend's form of variant `v` made (see [`run`](Self::run)).
+    /// It is kept with the variant's body under the backend's key, so every
+    /// program of the backend shares it.
+    fn make(&self, v: usize, now: bool) {
         let Some(compile) = self.backend.compile.clone() else {
             return;
         };
@@ -363,10 +402,7 @@ impl VariantBody {
                 let _ = made[v].set(form);
             }
         };
-        match &self.backend.submit {
-            Some(submit) => submit(Box::new(job)),
-            None => job(),
-        }
+        self.run(now, job);
     }
 
     /// What runs variant `v` in this form: the backend's form once made,
@@ -382,7 +418,7 @@ impl VariantBody {
             return b.as_ref();
         }
         let b = self.interp[v].get_or_init(|| self.shared.body(v as u32));
-        self.make(v);
+        self.make(v, false);
         b.as_ref()
     }
 

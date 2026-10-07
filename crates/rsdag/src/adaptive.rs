@@ -72,9 +72,10 @@ pub struct Policy {
     /// `spec_thrash_evals` evaluations.
     pub spec_thrash_flips: u64,
     pub spec_thrash_evals: u64,
-    /// How the program's bodies specialize per parameter binding; their
-    /// variants are built on the compiler's background queue where there
-    /// is one.
+    /// How the program's bodies specialize per parameter binding. Where
+    /// the program is compiled, the compiled form builds the variants (on
+    /// the compiler's background queue) and the interpreted one runs its
+    /// bodies whole meanwhile; without, the interpreter specializes.
     pub variants: crate::variant::VariantPolicy,
 }
 
@@ -175,9 +176,13 @@ impl Adaptive {
         let submit = compiler.clone().map(|c| -> crate::Submit {
             Arc::new(move |job: Box<dyn FnOnce() + Send>| c.submit(job))
         });
+        let compiled = policy.jit && compiler.is_some();
         tape.with_backend(&crate::BodyBackend {
             submit,
-            variants: Some(policy.variants),
+            variants: Some(crate::variant::VariantPolicy {
+                interpreted: policy.variants.interpreted && !compiled,
+                ..policy.variants
+            }),
             ..crate::BodyBackend::default()
         });
         let spec = (policy.specialize && tape.n_selects() >= policy.spec_min_selects)
