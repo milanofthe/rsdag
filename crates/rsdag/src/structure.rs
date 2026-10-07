@@ -33,7 +33,8 @@
 //!
 //! Which states may go is the consumer's to say ([`System::eliminable`]):
 //! one it limits, reports in a way the reduction cannot, or feeds a delay
-//! with stays.
+//! with stays. Rows pair with states by index, and a step drops only the
+//! row of an eliminable state: a state that stays keeps its own row.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
@@ -57,7 +58,8 @@ pub struct System {
     pub params: Vec<SymbolId>,
     pub currents: Vec<ExprId>,
     pub charges: Vec<ExprId>,
-    /// Per state, whether a reduction may eliminate it.
+    /// Per state, whether a reduction may eliminate it, and drop its row
+    /// (row `k` is state `k`'s).
     pub eliminable: Vec<bool>,
 }
 
@@ -513,7 +515,7 @@ fn plan_of(mut f: Facts, eliminable: &[bool], n: usize) -> Plan {
     loop {
         // Aliases, row by row.
         let mut found = None;
-        for r in (0..f.cur.len()).filter(|&r| alive_row[r]) {
+        for r in (0..f.cur.len()).filter(|&r| alive_row[r] && eliminable[r]) {
             let cur = &f.cur[r];
             if !f.chg[r].is_empty() || cur.contains(&time) || cur.is_empty() || cur.len() > 2 {
                 continue;
@@ -588,7 +590,7 @@ fn plan_of(mut f: Facts, eliminable: &[bool], n: usize) -> Plan {
             }
             let count = |set: &BTreeSet<u32>| set.iter().filter(|&&c| c != time).count() as i64;
             for &r in &rows {
-                if !usable(f.gi[r][&i].1) {
+                if !eliminable[r] || !usable(f.gi[r][&i].1) {
                     continue;
                 }
                 let added: i64 = (rows.iter().filter(|&&s| s != r))

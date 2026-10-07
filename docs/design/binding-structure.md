@@ -59,7 +59,10 @@ Two exact rules, applied to a fixpoint; a [`Plan`] lists the steps.
    adds no more entries (current and charge) than it removes, so a
    reduction never makes the system denser.
 
-Which states may go is the consumer's (`System::eliminable`). A state that
+Which states may go is the consumer's (`System::eliminable`), and rows
+pair with states by index: a step drops only the row of an eliminable
+state, so a state that stays keeps its own row (a solver's shunt, a
+homotopy's companion stamp, stay on it). A state that
 a stored pivot charge reads is not cut later: a cut state's value carries
 that charge's rate, which would otherwise need second derivatives.
 
