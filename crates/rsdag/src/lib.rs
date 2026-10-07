@@ -24,7 +24,6 @@ pub mod scope;
 pub mod scratch;
 pub mod semantics;
 mod simd;
-pub mod structure;
 #[cfg(any(test, feature = "synth"))]
 pub mod synth;
 pub mod tape;
