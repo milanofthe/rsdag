@@ -124,6 +124,17 @@ pub struct InterpretedBody {
 }
 
 impl InterpretedBody {
+    /// `tape` as a body of `n_out` outputs, split over the inputs `pure`
+    /// flags (empty when none is).
+    pub(crate) fn new(tape: crate::tape::Tape, n_out: usize, pure: Vec<bool>) -> InterpretedBody {
+        InterpretedBody {
+            tape,
+            n_out,
+            pure,
+            backends: Default::default(),
+        }
+    }
+
     /// The work layout: the tape's buffer, its outputs, then the arguments
     /// a prolog is run on.
     fn parts<'w>(&self, work: &'w mut [f64]) -> (&'w mut [f64], &'w mut [f64], &'w mut [f64]) {
@@ -415,15 +426,18 @@ impl Function {
         } else {
             (crate::tape::Tape::compile(ctx, &roots, &inputs), Vec::new())
         };
-        let body = Body {
-            bundle: Arc::new(InterpretedBody {
-                tape,
-                n_out: roots.len(),
-                pure,
-                backends: Default::default(),
-            }),
-            slot_of,
-        };
+        // A body whose selects a binding decides runs each binding's
+        // variant (see `crate::variant`).
+        let selects = (crate::variant::enabled() && !pure.is_empty())
+            .then(|| tape.param_selects(&pure))
+            .flatten();
+        let full = InterpretedBody::new(tape, roots.len(), pure);
+        let bundle: Arc<dyn ExternBundle> =
+            match selects.filter(|s| crate::variant::VariantBody::pays(&full, s)) {
+                Some(s) => Arc::new(crate::variant::VariantBody::new(full, s)),
+                None => Arc::new(full),
+            };
+        let body = Body { bundle, slot_of };
         self.interpreted.lock().unwrap().push(body.clone());
         body
     }

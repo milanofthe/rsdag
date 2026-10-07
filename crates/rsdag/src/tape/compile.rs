@@ -2199,6 +2199,15 @@ impl Program {
 
     /// Pass 4: lifetimes, slots and the instruction stream.
     pub(super) fn emit(&self, order: &[u32], split: bool) -> Tape {
+        self.emit_padded(order, split, 0)
+    }
+
+    /// [`emit`](Self::emit) with a state of at least `state_len` values:
+    /// the tape neither writes nor reads the ones past its own, so a block
+    /// of that length can carry something else there (see
+    /// [`Tape::decide`]).
+    pub(super) fn emit_padded(&self, order: &[u32], split: bool, state_len: usize) -> Tape {
+        let floor = state_len;
         let m = self.insts.len();
         let mut pos = vec![0usize; m];
         for (k, &i) in order.iter().enumerate() {
@@ -2263,7 +2272,8 @@ impl Program {
                 next += self.insts[i as usize].n_out;
             }
         }
-        let state_len = next as usize;
+        let state_len = (next as usize).max(floor);
+        next = state_len as u32;
         let mut reserved = vec![u32::MAX; m];
         for &i in order {
             let inst = &self.insts[i as usize];

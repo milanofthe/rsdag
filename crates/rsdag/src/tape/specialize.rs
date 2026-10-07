@@ -189,3 +189,116 @@ impl SpecializedTape {
         ok
     }
 }
+
+/// The main-phase `Select`s of a tape split over its parameters whose
+/// condition is parameter-pure (a prolog value, or a pure input): the
+/// choices a parameter binding makes once for every evaluation after it
+/// (see [`Tape::param_selects`]).
+pub struct ParamSelects {
+    /// The distinct conditions, one output each, over the tape's inputs.
+    conds: Tape,
+    /// Per decided select, its instruction in the tape's program and the
+    /// output of `conds` that is its condition.
+    of: Vec<(u32, u32)>,
+}
+
+impl ParamSelects {
+    /// The number of distinct conditions, the length of a pattern.
+    pub fn n_conds(&self) -> usize {
+        self.conds.outputs.len()
+    }
+
+    /// The pattern of the conditions at the inputs `args` (the tape's
+    /// inputs; only the pure ones are read): one truth per condition.
+    pub fn pattern(&self, args: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) -> Vec<bool> {
+        self.conds.eval(args, work, out);
+        out.iter().map(|&c| c != 0.0).collect()
+    }
+}
+
+impl Tape {
+    /// The selects a parameter binding decides: those of the main phase
+    /// whose condition is computed in the prolog or is a pure input
+    /// (`pure_inputs`, one flag per input). `None` for a tape without a
+    /// prolog split or without such a select.
+    pub fn param_selects(&self, pure_inputs: &[bool]) -> Option<ParamSelects> {
+        if self.prolog_ops == 0 && !pure_inputs.iter().any(|&p| p) {
+            return None;
+        }
+        let mut p = self.lift();
+        let pure = |r: Ref, p: &super::compile::Program| match r {
+            Ref::Input(k) => pure_inputs.get(k as usize).copied().unwrap_or(false),
+            Ref::Value(j, _) => p.insts[j as usize].pure,
+        };
+        let mut conds: Vec<Ref> = Vec::new();
+        let mut of = Vec::new();
+        for i in 0..p.insts.len() {
+            let inst = &p.insts[i];
+            if !matches!(inst.kind, Kind::Select) || inst.pure {
+                continue;
+            }
+            let c = p.ins(i)[0];
+            if !pure(c, &p) {
+                continue;
+            }
+            let k = match conds.iter().position(|&d| d == c) {
+                Some(k) => k,
+                None => {
+                    conds.push(c);
+                    conds.len() - 1
+                }
+            };
+            of.push((i as u32, k as u32));
+        }
+        if of.is_empty() {
+            return None;
+        }
+        p.roots = conds;
+        p.retain_reachable();
+        let order = p.schedule();
+        let mut tape = p.emit(&order, false);
+        tape.n_inputs = self.n_inputs;
+        Some(ParamSelects { conds: tape, of })
+    }
+
+    /// This tape with the selects of `ps` decided by `pattern` (one truth
+    /// per condition, see [`ParamSelects::pattern`]; `None` decides none):
+    /// each the arm its condition picks, what only the other arms read
+    /// dropped. Bit for bit the tape's outputs wherever the conditions take
+    /// `pattern`; the prolog split kept, its state at least `state_len`
+    /// values long, so every variant of one body can share a state layout.
+    /// No guards: the caller computes the pattern.
+    pub fn decide(&self, ps: &ParamSelects, pattern: Option<&[bool]>, state_len: usize) -> Tape {
+        let mut p = self.lift();
+        let Some(pattern) = pattern else {
+            let order = p.schedule();
+            let mut tape = p.emit_padded(&order, self.prolog_ops > 0, state_len);
+            tape.n_inputs = self.n_inputs;
+            return tape;
+        };
+        assert_eq!(pattern.len(), ps.n_conds(), "pattern length mismatch");
+        let mut arm: Vec<Option<Ref>> = vec![None; p.insts.len()];
+        for &(i, c) in &ps.of {
+            let ins = p.ins(i as usize);
+            arm[i as usize] = Some(if pattern[c as usize] { ins[1] } else { ins[2] });
+        }
+        let resolve = |r: Ref| -> Ref {
+            let mut r = r;
+            while let Ref::Value(i, _) = r {
+                match arm[i as usize] {
+                    Some(a) => r = a,
+                    None => break,
+                }
+            }
+            r
+        };
+        for r in p.pool.iter_mut().chain(p.roots.iter_mut()) {
+            *r = resolve(*r);
+        }
+        p.retain_reachable();
+        let order = p.schedule();
+        let mut tape = p.emit_padded(&order, self.prolog_ops > 0, state_len);
+        tape.n_inputs = self.n_inputs;
+        tape
+    }
+}

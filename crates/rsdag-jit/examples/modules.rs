@@ -18,13 +18,16 @@
 //! with its subcircuit functions inlined and the device bodies functions,
 //! the form the other tools are given.
 //!
+//! `--no-variants` runs every device body whole, its parameter branches
+//! both computed (see `rsdag::variant`), for comparing against.
+//!
 //! `--threads <n>` runs the residual and the Jacobian with a pool of `n`
 //! threads installed, their independent calls (the device instances) in
 //! parallel (`rsdag::parallel`, rsdag's `Workers`). `--lanes
 //! auto|always|never` sets the device bodies' lane
 //! code (`rsdag_jit::Lanes`, `auto` by default).
 //!
-//!     cargo run --release -p rsdag-jit --example modules -- [--values <dir>] [--composed <dir>] [--threads <n>] [--lanes <mode>] <module.json>...
+//!     cargo run --release -p rsdag-jit --example modules -- [--values <dir>] [--composed <dir>] [--threads <n>] [--lanes <mode>] [--no-variants] <module.json>...
 
 use std::time::Instant;
 
@@ -145,6 +148,10 @@ fn main() {
     };
     LANES.set(lanes).ok();
     let threads: usize = option("--threads").map_or(1, |t| t.parse().expect("--threads <n>"));
+    if let Some(i) = args.iter().position(|a| a == "--no-variants") {
+        args.remove(i);
+        rsdag::variant::set_enabled(false);
+    }
     let pool = (threads > 1).then(|| {
         rsdag::parallel::Parallel::new(std::sync::Arc::new(rsdag::parallel::Workers::new(threads)))
     });

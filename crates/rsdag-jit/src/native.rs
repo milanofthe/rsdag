@@ -521,6 +521,45 @@ impl ExternBundle for NativeBody {
 
 /// The options a native body was emitted under, as a key of the body's
 /// backend cache.
+/// `body` as native code behind the bundle interface ([`NativeBody`]), with
+/// its lane form where that pays.
+fn native_body(
+    body: &Tape,
+    pure: &[bool],
+    no: usize,
+    opts: &Options,
+) -> Result<Arc<dyn ExternBundle>, JitError> {
+    let sl = body.state_len();
+    let lanes = match opts.lanes {
+        Lanes::Never => Vec::new(),
+        _ => NativeTape::compile_lanes(body),
+    };
+    // Forced, the scalar code is never the cheaper way.
+    let mut scalar = [usize::MAX / 16; 3];
+    let lanes: Vec<LaneCode> = lanes
+        .into_iter()
+        .map(|lt| {
+            let (block, one) = lane_costs(&lt, sl, no);
+            if opts.lanes == Lanes::Auto {
+                scalar = one;
+            }
+            LaneCode { tape: lt, block }
+        })
+        .collect();
+    let lanes = lanes
+        .into_iter()
+        .filter(|lc| (0..3).any(|k| lc.pays(k, scalar[k])))
+        .collect();
+    Ok(Arc::new(NativeBody {
+        tape: NativeTape::compile_opts(body, opts, &[])?,
+        lanes,
+        scalar,
+        n_out: no,
+        pure: pure.to_vec(),
+        batch: opts.batch,
+    }))
+}
+
 fn options_key(opts: &Options) -> u64 {
     let batch = match opts.batch {
         Batch::Serial => 0,
@@ -621,52 +660,32 @@ impl NativeTape {
         {
             return Err(JitError::Unsupported);
         }
-        // Function bodies that are tapes become native bodies of their own.
+        // Function bodies that are tapes become native bodies of their own,
+        // emitted once per body and options and shared by every program that
+        // calls it; a body with tapes of its own (per-binding variants) has
+        // them compiled the same way.
+        let o = *opts;
+        let compiler: Arc<rsdag::BodyCompiler> =
+            Arc::new(move |t: &Tape, pure: &[bool], n_out: usize| {
+                native_body(t, pure, n_out, &o).ok()
+            });
         let bundles: Result<Bundles, JitError> = tape
             .bundles()
             .iter()
-            .map(|b| match b.body() {
-                Some(body) => {
-                    // Emitted once per body and options, shared by every
-                    // program that calls it; with its lane form when it has
-                    // one.
-                    let make = || -> Result<Arc<dyn ExternBundle>, JitError> {
-                        let (sl, no) = (body.state_len(), b.n_outputs());
-                        let lanes = match opts.lanes {
-                            Lanes::Never => Vec::new(),
-                            _ => NativeTape::compile_lanes(body),
-                        };
-                        // Forced, the scalar code is never the cheaper way.
-                        let mut scalar = [usize::MAX / 16; 3];
-                        let lanes: Vec<LaneCode> = lanes
-                            .into_iter()
-                            .map(|lt| {
-                                let (block, one) = lane_costs(&lt, sl, no);
-                                if opts.lanes == Lanes::Auto {
-                                    scalar = one;
-                                }
-                                LaneCode { tape: lt, block }
-                            })
-                            .collect();
-                        let lanes = lanes
-                            .into_iter()
-                            .filter(|lc| (0..3).any(|k| lc.pays(k, scalar[k])))
-                            .collect();
-                        Ok(Arc::new(NativeBody {
-                            tape: NativeTape::compile_opts(body, opts, &[])?,
-                            lanes,
-                            scalar,
-                            n_out: no,
-                            pure: b.pure_args().to_vec(),
-                            batch: opts.batch,
-                        }))
-                    };
-                    match b.backend_cache() {
-                        Some(cache) => cache.get_or_try_insert(options_key(opts), make),
-                        None => make(),
+            .map(|b| {
+                let make = || -> Result<Arc<dyn ExternBundle>, JitError> {
+                    if let Some(v) = b.with_compiler(compiler.clone()) {
+                        return Ok(v);
                     }
+                    match b.body() {
+                        Some(body) => native_body(body, b.pure_args(), b.n_outputs(), opts),
+                        None => Ok(b.clone()),
+                    }
+                };
+                match b.backend_cache() {
+                    Some(cache) => cache.get_or_try_insert(options_key(opts), make),
+                    None => make(),
                 }
-                None => Ok(b.clone()),
             })
             .collect();
         let bundles = bundles?;
