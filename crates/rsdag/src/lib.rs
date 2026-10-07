@@ -37,7 +37,7 @@ pub use autodiff::{differentiate, gradient, sparse_jacobian, SparseRows};
 pub use builder::{Builder, Numeric};
 pub use display::to_string;
 pub use eval::eval;
-pub use extern_fn::{BackendCache, BodyBackend, BodyCompiler, ExternBundle};
+pub use extern_fn::{BackendCache, BodyBackend, BodyCompiler, ExternBundle, Instances, Submit};
 pub use field::{Field, F64};
 pub use func::{Body, FuncId, Function, Output, OutputId};
 pub use graph::{Bound, Graph};

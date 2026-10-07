@@ -174,15 +174,13 @@ impl ExternBundle for InterpretedBody {
             };
         }
         self.tape.eval_prolog_into(args, w);
-        let own = self.tape.state_own();
-        state[..own].copy_from_slice(&w[..own]);
-        state[own..].fill(0.0);
+        let sl = self.tape.state_len();
+        state[..sl].copy_from_slice(&w[..sl]);
     }
     fn main_into(&self, args: &[f64], state: &[f64], work: &mut [f64], out: &mut [f64]) {
         let (w, o, _) = self.parts(work);
-        // Only the state the tape wrote: the rest is a caller's padding.
-        let own = self.tape.state_own();
-        w[..own].copy_from_slice(&state[..own]);
+        let sl = self.tape.state_len();
+        w[..sl].copy_from_slice(&state[..sl]);
         self.tape.eval_main_into(args, w, o);
         out.copy_from_slice(&o[..self.n_out]);
     }
@@ -422,13 +420,9 @@ impl Function {
             .map(|r| matches!(r, ParamRole::Param))
             .chain(globals.iter().map(|_| true))
             .collect();
-        // A split body keeps a spare state value for its variants' index
-        // (see `crate::variant`): one more value per instance, no second
-        // compilation where the body turns out to have variants.
-        let spare = usize::from(crate::variant::enabled());
         let (tape, pure) = if pure.iter().any(|&p| p) {
             (
-                crate::tape::Tape::compile_split_spare(ctx, &roots, &inputs, &pure, spare),
+                crate::tape::Tape::compile_split(ctx, &roots, &inputs, &pure),
                 pure,
             )
         } else {
@@ -436,7 +430,7 @@ impl Function {
         };
         // A body whose selects a binding decides runs each binding's
         // variant (see `crate::variant`).
-        let variants = spare == 1 && !pure.is_empty() && tape.has_param_selects(&pure);
+        let variants = !pure.is_empty() && tape.has_param_selects(&pure);
         let full = InterpretedBody::new(tape, roots.len(), pure);
         let bundle: Arc<dyn ExternBundle> = match variants {
             true => Arc::new(crate::variant::VariantBody::new(full)),

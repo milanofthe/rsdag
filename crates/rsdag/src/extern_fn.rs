@@ -11,14 +11,6 @@
 //! compiled body survives `Graph` mutation and crosses thread boundaries with
 //! the per-thread tapes the solver clones.
 
-/// A multi-output compiled body shared by several opaque operators.
-///
-/// A compiled multi-output body typically produces many correlated outputs at
-/// once: a device's terminal currents *and* the entries of its Jacobian.
-/// Computing them in one call (the shared interior runs once) is the whole
-/// point of compilation, so the outputs of one extern function are slots of a
-/// single `ExternBundle`. The compiled tape calls the bundle once per distinct
-/// argument list and scatters its outputs to every call that reads one.
 /// The forms a backend compiled of a bundle, kept with the bundle so every
 /// program that calls it shares them (a native body is emitted once, not
 /// once per calling program). Keyed by the backend's options.
@@ -56,14 +48,93 @@ pub type BodyCompiler = dyn Fn(&crate::tape::Tape, &[bool], usize) -> Option<std
     + Send
     + Sync;
 
-/// A backend that compiles tapes (see [`ExternBundle::with_backend`]): what
-/// it makes of one, and where it runs work it does not wait for.
-#[derive(Clone)]
+/// Where work runs that its caller does not wait for: a function taking a
+/// job, which it runs later, in order with the jobs before it.
+pub type Submit = std::sync::Arc<dyn Fn(Box<dyn FnOnce() + Send>) + Send + Sync>;
+
+/// How a program runs the tapes its bundles carry of their own (see
+/// [`ExternBundle::with_backend`]): what compiles them, where work runs
+/// that nothing waits for, and how bodies specialize per binding.
+#[derive(Clone, Default)]
 pub struct BodyBackend {
-    pub compile: std::sync::Arc<BodyCompiler>,
-    pub submit: std::sync::Arc<dyn Fn(Box<dyn FnOnce() + Send>) + Send + Sync>,
+    /// What a tape becomes; `None` interprets it.
+    pub compile: Option<std::sync::Arc<BodyCompiler>>,
+    /// Identifies what `compile` makes (its options), so the form it made
+    /// of a tape is kept with the tape's bundle and shared by every program
+    /// (see [`BackendCache`]).
+    pub key: u64,
+    /// Where compiles and other work go that an evaluation need not wait
+    /// for; `None` does it in the evaluation that asks, so what runs is a
+    /// function of the calls made alone.
+    pub submit: Option<Submit>,
+    /// How bodies specialize per binding; `None` keeps what the bundle has
+    /// (a backend compiling a program its owner configured).
+    pub variants: Option<crate::variant::VariantPolicy>,
 }
 
+/// Instances of a bundle a batch runs, in group-major arrays: instance `g`
+/// has its arguments at `g * n_args`, its state at `g * stride` and its
+/// outputs at `g * n_outputs`. The batch runs the instances `index` lists,
+/// in its order, else the first `n`.
+#[derive(Clone, Copy, Debug)]
+pub struct Instances<'a> {
+    pub n: usize,
+    pub index: Option<&'a [u32]>,
+    pub n_args: usize,
+    /// Values from one instance's state to the next's, at least the
+    /// bundle's [`state_len`](ExternBundle::state_len).
+    pub stride: usize,
+}
+
+impl<'a> Instances<'a> {
+    /// The first `n` instances, `n_args` arguments and `stride` state
+    /// values apart.
+    pub fn first(n: usize, n_args: usize, stride: usize) -> Self {
+        Instances {
+            n,
+            index: None,
+            n_args,
+            stride,
+        }
+    }
+
+    /// The instances `index` lists, in the arrays of these.
+    pub fn listed(self, index: &'a [u32]) -> Self {
+        Instances {
+            n: index.len(),
+            index: Some(index),
+            ..self
+        }
+    }
+
+    /// How many instances run.
+    pub fn len(&self) -> usize {
+        self.index.map_or(self.n, <[u32]>::len)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The `k`th instance that runs.
+    pub fn at(&self, k: usize) -> usize {
+        self.index.map_or(k, |ix| ix[k] as usize)
+    }
+
+    /// The instances that run, in order.
+    pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..self.len()).map(|k| self.at(k))
+    }
+}
+
+/// A multi-output compiled body shared by several opaque operators.
+///
+/// A compiled multi-output body typically produces many correlated outputs at
+/// once: a device's terminal currents *and* the entries of its Jacobian.
+/// Computing them in one call (the shared interior runs once) is the whole
+/// point of compilation, so the outputs of one extern function are slots of a
+/// single `ExternBundle`. The compiled tape calls the bundle once per distinct
+/// argument list and scatters its outputs to every call that reads one.
 pub trait ExternBundle: Send + Sync {
     /// Number of outputs this bundle writes.
     fn n_outputs(&self) -> usize;
@@ -120,41 +191,31 @@ pub trait ExternBundle: Send + Sync {
         self.call_into(args, work, out);
     }
 
-    /// [`prolog_into`](Self::prolog_into) for `n_groups` instances: `pure`
-    /// group-major (`n_pure` values each), `states` likewise
-    /// ([`state_len`](Self::state_len) each). The default loops;
-    /// implementations may run instances side by side, the states bit for
-    /// bit the loop's.
-    fn prolog_batch(&self, pure: &[f64], n_groups: usize, n_pure: usize, states: &mut [f64]) {
-        let sl = self.state_len();
+    /// [`prolog_into`](Self::prolog_into) for the instances `at`: their
+    /// pure arguments in `pure` (`at.n_args` each), their states in
+    /// `states`. The default loops; implementations may run instances side
+    /// by side, the states bit for bit the loop's.
+    fn prolog_batch(&self, pure: &[f64], states: &mut [f64], at: &Instances) {
+        let (na, sl, st) = (at.n_args, self.state_len(), at.stride);
         crate::scratch::with_len(self.work_len(), 0.0, |w| {
-            for g in 0..n_groups {
-                let (p, st) = (
-                    &pure[g * n_pure..(g + 1) * n_pure],
-                    &mut states[g * sl..(g + 1) * sl],
-                );
-                self.prolog_into(p, w, st);
+            for g in at.iter() {
+                let p = &pure[g * na..(g + 1) * na];
+                self.prolog_into(p, w, &mut states[g * st..g * st + sl]);
             }
         });
     }
 
-    /// [`main_into`](Self::main_into) for `n_groups` instances: `args`,
-    /// `states` and `out` group-major. The default loops; implementations
-    /// may run instances side by side, the outputs bit for bit the loop's.
-    fn main_batch(
-        &self,
-        args: &[f64],
-        states: &[f64],
-        n_groups: usize,
-        n_args: usize,
-        out: &mut [f64],
-    ) {
-        let (sl, no) = (self.state_len(), self.n_outputs());
+    /// [`main_into`](Self::main_into) for the instances `at`: their
+    /// arguments in `args`, their states in `states`, their outputs into
+    /// `out`. The default loops; implementations may run instances side by
+    /// side, the outputs bit for bit the loop's.
+    fn main_batch(&self, args: &[f64], states: &[f64], out: &mut [f64], at: &Instances) {
+        let (na, sl, st, no) = (at.n_args, self.state_len(), at.stride, self.n_outputs());
         crate::scratch::with_len(self.work_len(), 0.0, |w| {
-            for g in 0..n_groups {
-                let a = &args[g * n_args..(g + 1) * n_args];
-                let st = &states[g * sl..(g + 1) * sl];
-                self.main_into(a, st, w, &mut out[g * no..(g + 1) * no]);
+            for g in at.iter() {
+                let a = &args[g * na..(g + 1) * na];
+                let s = &states[g * st..g * st + sl];
+                self.main_into(a, s, w, &mut out[g * no..(g + 1) * no]);
             }
         });
     }
@@ -194,9 +255,10 @@ pub trait ExternBundle: Send + Sync {
     }
     /// For a bundle that runs tapes of its own besides its
     /// [`body`](Self::body) (a body's per-binding variants, see
-    /// [`crate::variant`]): the same bundle with each of them run by what
-    /// `backend` makes of it. A backend that compiles tapes asks this
-    /// before compiling the body; `None` for a bundle without such tapes.
+    /// [`crate::variant`]): the same bundle with each of them run as
+    /// `backend` says. A program's owner and a backend that compiles tapes
+    /// ask this before anything else of the bundle; `None` for a bundle
+    /// without such tapes.
     fn with_backend(&self, _backend: &BodyBackend) -> Option<std::sync::Arc<dyn ExternBundle>> {
         None
     }

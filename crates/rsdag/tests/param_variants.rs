@@ -3,7 +3,8 @@
 //! derivatives bit for bit the full body's, through bindings that flip the
 //! branches.
 
-use rsdag::{CmpOp, ExprId, FuncId, Graph, Node, ParamRole, SymbolId, Tape, F64};
+use rsdag::variant::VariantPolicy;
+use rsdag::{BodyBackend, CmpOp, ExprId, FuncId, Graph, Node, ParamRole, SymbolId, Tape, F64};
 
 fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
     let e = g.sym(name);
@@ -107,11 +108,16 @@ pub fn inputs(n: usize, t: f64, binding: u32) -> Vec<f64> {
 /// Whether `body` runs per-binding variants: only such a body has tapes
 /// of its own for a backend to make.
 pub fn runs_variants(body: &std::sync::Arc<dyn rsdag::ExternBundle>) -> bool {
-    let backend = rsdag::BodyBackend {
-        compile: std::sync::Arc::new(|_: &Tape, _: &[bool], _: usize| None),
-        submit: std::sync::Arc::new(|job: Box<dyn FnOnce() + Send>| job()),
-    };
-    body.with_backend(&backend).is_some()
+    body.with_backend(&BodyBackend::default()).is_some()
+}
+
+/// The variant an instance of `body` runs once its prolog ran on `pure`:
+/// the last value of its state.
+pub fn variant_of(body: &dyn rsdag::ExternBundle, pure: &[f64]) -> f64 {
+    let mut state = vec![f64::NAN; body.state_len()];
+    let mut work = vec![0.0; body.work_len()];
+    body.prolog_into(pure, &mut work, &mut state);
+    state[body.state_len() - 1]
 }
 
 pub fn same(a: &[f64], b: &[f64]) -> bool {
@@ -137,6 +143,30 @@ fn a_parameter_branching_body_runs_its_variants() {
                 assert!(same(&got, &want), "{n} at {binding:#x}, t = {t}");
             }
         }
+    }
+}
+
+/// Without a place for background work a prolog builds its instance's
+/// variant itself, and the instance runs on it at once; off by policy,
+/// every instance runs the full body.
+#[test]
+fn a_prolog_builds_its_variant_where_nothing_runs_in_the_background() {
+    let c = circuit(1);
+    let tape = Tape::compile_split(&c.g, &c.roots, &c.syms, &c.pure);
+    let body = tape.bundles()[0].clone();
+    let off = body
+        .with_backend(&BodyBackend {
+            variants: Some(VariantPolicy {
+                enabled: false,
+                ..VariantPolicy::default()
+            }),
+            ..BodyBackend::default()
+        })
+        .expect("a body with variants");
+    // `p` and `q`, the pure arguments of `f(v, p, q)`.
+    for pure in [[0.4, 2.0], [-0.7, 0.5]] {
+        assert_ne!(variant_of(body.as_ref(), &pure), 0.0, "built at once");
+        assert_eq!(variant_of(off.as_ref(), &pure), 0.0, "off, the full body");
     }
 }
 

@@ -167,7 +167,11 @@ every instance that takes it; a binding that flips a condition moves its
 instances to another variant at their next prolog. The outputs and the
 derivatives are bit for bit the full body's, so a frontend lowers every
 branch exactly and leaves the specialization here
-(`rsdag-jit/examples/variants.rs`).
+(`rsdag-jit/examples/variants.rs`). How bodies specialize is the
+program's to say (`VariantPolicy`, set through `Tape::with_backend` or
+`Policy::variants`), and whether the variants are built in the background
+or by the prolog that first needs them is the backend's
+(`rsdag_jit::Options::background`).
 
 ## Composition
 

@@ -1,13 +1,14 @@
 //! Per-binding variants natively: the variants compiled like the full body,
-//! bit for bit the interpreter through bindings that flip the branches, and
-//! a state one backend's prolog left read alike by the other's main phase.
+//! bit for bit the interpreter through bindings that flip the branches,
+//! built in the background or by the prolog that needs them, and a state
+//! one backend's prolog left read alike by the other's main phase.
 
 #[path = "../../rsdag/tests/param_variants.rs"]
 mod variants;
 
 use rsdag::Tape;
-use rsdag_jit::NativeTape;
-use variants::{circuit, inputs, same};
+use rsdag_jit::{NativeTape, Options};
+use variants::{circuit, inputs, same, variant_of};
 
 #[test]
 fn variants_run_natively() {
@@ -20,7 +21,8 @@ fn variants_run_natively() {
         for binding in [0u32, 0b1010_0101, 0xff, 0] {
             // The first prolog runs the full body and finds the selects in
             // the background, the next one builds the pattern's variant
-            // there; once built, a prolog takes it. Each is checked.
+            // there, the one after has it compiled; an instance runs on the
+            // interpreted variant meanwhile. Each is checked.
             native.eval_prolog(&inputs(n, 0.0, binding), &mut nw);
             for t in [0.0, 0.5] {
                 let ins = inputs(n, t, binding);
@@ -28,7 +30,7 @@ fn variants_run_natively() {
                 native.eval_main(&ins, &mut nw, &mut got);
                 assert!(same(&got, &want), "{n} at {binding:#x}, t = {t}, full body");
             }
-            for _ in 0..2 {
+            for _ in 0..3 {
                 rsdag_jit::background::drain();
                 native.eval_prolog(&inputs(n, 0.0, binding), &mut nw);
             }
@@ -39,6 +41,31 @@ fn variants_run_natively() {
                 assert!(same(&got, &want), "{n} at {binding:#x}, t = {t}");
             }
         }
+    }
+}
+
+/// Without the background, the native prolog builds and compiles its
+/// instance's variant itself: the first one runs on it.
+#[test]
+fn a_native_prolog_builds_its_variant_without_the_background() {
+    let n = 12;
+    let c = circuit(n);
+    let tape = Tape::compile_split(&c.g, &c.roots, &c.syms, &c.pure);
+    let opts = Options {
+        background: false,
+        ..Options::default()
+    };
+    let native = NativeTape::compile_opts(&tape, &opts, &[]).expect("native");
+    let body = native.bundles()[0].clone();
+    assert_ne!(variant_of(body.as_ref(), &[0.4, 2.0]), 0.0);
+    let (mut w, mut want) = (Vec::new(), Vec::new());
+    let (mut nw, mut got) = (Vec::new(), Vec::new());
+    for binding in [0u32, 0b0110_1001] {
+        native.eval_prolog(&inputs(n, 0.0, binding), &mut nw);
+        let ins = inputs(n, 0.5, binding);
+        tape.eval(&ins, &mut w, &mut want);
+        native.eval_main(&ins, &mut nw, &mut got);
+        assert!(same(&got, &want), "at {binding:#x}");
     }
 }
 

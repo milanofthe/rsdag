@@ -90,10 +90,22 @@ fn per_call(mut f: impl FnMut()) -> f64 {
 }
 
 fn main_us(n: usize, arm: usize, variants: bool) -> f64 {
-    rsdag::variant::set_enabled(variants);
     let (g, roots, syms, pure) = circuit(n, arm);
-    let tape = Tape::compile_split(&g, &roots, &syms, &pure);
-    let native = NativeTape::compile(&tape).expect("native");
+    let mut tape = Tape::compile_split(&g, &roots, &syms, &pure);
+    tape.with_backend(&rsdag::BodyBackend {
+        variants: Some(rsdag::variant::VariantPolicy {
+            enabled: variants,
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    // The variants built and compiled by the first prolog, so the one
+    // measured runs on them.
+    let opts = rsdag_jit::Options {
+        background: false,
+        ..Default::default()
+    };
+    let native = NativeTape::compile_opts(&tape, &opts, &[]).expect("native");
     // Half the instances one polarity, a third on the higher level.
     let ins: Vec<f64> = (0..n)
         .flat_map(|i| {

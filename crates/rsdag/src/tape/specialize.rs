@@ -352,10 +352,9 @@ impl Tape {
     /// per condition, see [`ParamSelects::pattern`]):
     /// each the arm its condition picks, what only the other arms read
     /// dropped. Bit for bit the tape's outputs wherever the conditions take
-    /// `pattern`; the prolog split kept, its state at least `state_len`
-    /// values long, so every variant of one body can share a state layout.
-    /// No guards: the caller computes the pattern.
-    pub fn decide(&self, ps: &ParamSelects, pattern: &[bool], state_len: usize) -> Tape {
+    /// `pattern`; the prolog split kept, its state laid out anew. No guards:
+    /// the caller computes the pattern.
+    pub fn decide(&self, ps: &ParamSelects, pattern: &[bool]) -> Tape {
         let mut p = self.lift();
         assert_eq!(pattern.len(), ps.n_conds(), "pattern length mismatch");
         let mut arm: Vec<Option<Ref>> = vec![None; p.insts.len()];
@@ -378,7 +377,7 @@ impl Tape {
         }
         p.retain_reachable();
         let order = p.schedule();
-        let mut tape = p.emit_padded(&order, self.prolog_ops > 0, state_len, 0);
+        let mut tape = p.emit(&order, self.prolog_ops > 0);
         tape.n_inputs = self.n_inputs;
         tape
     }

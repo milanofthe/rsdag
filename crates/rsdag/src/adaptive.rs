@@ -72,6 +72,10 @@ pub struct Policy {
     /// `spec_thrash_evals` evaluations.
     pub spec_thrash_flips: u64,
     pub spec_thrash_evals: u64,
+    /// How the program's bodies specialize per parameter binding; their
+    /// variants are built on the compiler's background queue where there
+    /// is one.
+    pub variants: crate::variant::VariantPolicy,
 }
 
 impl Default for Policy {
@@ -88,6 +92,7 @@ impl Default for Policy {
             spec_interp_cost: 4,
             spec_thrash_flips: 8,
             spec_thrash_evals: 8,
+            variants: crate::variant::VariantPolicy::default(),
         }
     }
 }
@@ -166,7 +171,15 @@ pub struct Adaptive {
 impl Adaptive {
     /// `compiler` supplies the native code; without it the interpreter and
     /// its specialization serve.
-    pub fn new(tape: Tape, policy: Policy, compiler: Option<Arc<dyn Compiler>>) -> Adaptive {
+    pub fn new(mut tape: Tape, policy: Policy, compiler: Option<Arc<dyn Compiler>>) -> Adaptive {
+        let submit = compiler.clone().map(|c| -> crate::Submit {
+            Arc::new(move |job: Box<dyn FnOnce() + Send>| c.submit(job))
+        });
+        tape.with_backend(&crate::BodyBackend {
+            submit,
+            variants: Some(policy.variants),
+            ..crate::BodyBackend::default()
+        });
         let spec = (policy.specialize && tape.n_selects() >= policy.spec_min_selects)
             .then(|| Arc::new(Mutex::new(Spec::default())));
         Adaptive {
