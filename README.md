@@ -157,6 +157,22 @@ Three instances of a `diode(a, b, is, n)` body in a ring, `is` and `n`
 with the `Param` role: the prolog runs the body's parameter part for all
 three instances, the main phase one batched call.
 
+A body that branches on its parameters (a polarity, a model level, a
+switch that shorts a resistance) runs per binding: the conditions of the
+selects a binding decides are prolog values, and each instance's main
+phase runs the body those conditions decide, the untaken arms dropped
+(`rsdag::variant`, `Tape::decide`). A variant is built when its pattern of
+conditions first turns up, natively like the full body, and is shared by
+every instance that takes it; a binding that flips a condition moves its
+instances to another variant at their next prolog. The outputs and the
+derivatives are bit for bit the full body's, so a frontend lowers every
+branch exactly and leaves the specialization here
+(`rsdag-jit/examples/variants.rs`). How bodies specialize is the
+program's to say (`VariantPolicy`, set through `Tape::with_backend` or
+`Policy::variants`), and whether the variants are built in the background
+or by the prolog that first needs them is the backend's
+(`rsdag_jit::Options::background`).
+
 ## Composition
 
 Programs built apart compose. A function of one graph comes into another

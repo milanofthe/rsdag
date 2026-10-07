@@ -18,13 +18,16 @@
 //! with its subcircuit functions inlined and the device bodies functions,
 //! the form the other tools are given.
 //!
+//! `--no-variants` runs every device body whole, its parameter branches
+//! both computed (see `rsdag::variant`), for comparing against.
+//!
 //! `--threads <n>` runs the residual and the Jacobian with a pool of `n`
 //! threads installed, their independent calls (the device instances) in
 //! parallel (`rsdag::parallel`, rsdag's `Workers`). `--lanes
 //! auto|always|never` sets the device bodies' lane
 //! code (`rsdag_jit::Lanes`, `auto` by default).
 //!
-//!     cargo run --release -p rsdag-jit --example modules -- [--values <dir>] [--composed <dir>] [--threads <n>] [--lanes <mode>] <module.json>...
+//!     cargo run --release -p rsdag-jit --example modules -- [--values <dir>] [--composed <dir>] [--threads <n>] [--lanes <mode>] [--no-variants] <module.json>...
 
 use std::time::Instant;
 
@@ -72,6 +75,9 @@ static POOL: std::sync::OnceLock<Option<rsdag::parallel::Parallel>> = std::sync:
 /// The lane code `--lanes` asks for.
 static LANES: std::sync::OnceLock<Lanes> = std::sync::OnceLock::new();
 
+/// Whether device bodies run their per-binding variants (`--no-variants`).
+static VARIANTS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
 /// `f` with the `--threads` pool installed, if any.
 fn on_pool<R: Send>(f: impl FnOnce() -> R + Send) -> R {
     match POOL.get().cloned().flatten() {
@@ -90,9 +96,19 @@ fn measure(
     vals: &[f64],
     check: &[f64],
 ) -> ([f64; 4], Vec<f64>) {
-    let (tape, s_tape) = timed(|| Tape::compile_split(g, roots, syms, pure));
+    let (mut tape, s_tape) = timed(|| Tape::compile_split(g, roots, syms, pure));
+    tape.with_backend(&rsdag::BodyBackend {
+        variants: Some(rsdag::variant::VariantPolicy {
+            enabled: VARIANTS.get().copied().unwrap_or(true),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    // Variants built by the first prolog, so the main phases measured run
+    // on them.
     let opts = Options {
         lanes: LANES.get().copied().unwrap_or_default(),
+        background: false,
         ..Options::default()
     };
     let (native, s_native) =
@@ -145,6 +161,10 @@ fn main() {
     };
     LANES.set(lanes).ok();
     let threads: usize = option("--threads").map_or(1, |t| t.parse().expect("--threads <n>"));
+    if let Some(i) = args.iter().position(|a| a == "--no-variants") {
+        args.remove(i);
+        VARIANTS.set(false).ok();
+    }
     let pool = (threads > 1).then(|| {
         rsdag::parallel::Parallel::new(std::sync::Arc::new(rsdag::parallel::Workers::new(threads)))
     });
