@@ -190,10 +190,10 @@ impl SpecializedTape {
     }
 }
 
-/// The main-phase `Select`s of a tape split over its parameters whose
-/// condition is parameter-pure (a prolog value, or a pure input): the
-/// choices a parameter binding makes once for every evaluation after it
-/// (see [`Tape::param_selects`]).
+/// The `Select`s of a tape split over its parameters whose condition is
+/// parameter-pure (a prolog value, or a pure input): the choices a
+/// parameter binding makes once for every evaluation after it (see
+/// [`Tape::param_selects`]).
 pub struct ParamSelects {
     /// The distinct conditions, one output each, over the tape's inputs.
     conds: Tape,
@@ -214,15 +214,23 @@ impl ParamSelects {
         self.conds.eval(args, work, out);
         out.iter().map(|&c| c != 0.0).collect()
     }
+
+    /// The tape of the conditions, an output each, over the tape's inputs:
+    /// what a backend compiles to compute [`pattern`](Self::pattern).
+    pub fn tape(&self) -> &Tape {
+        &self.conds
+    }
 }
 
 impl Tape {
-    /// Whether the main phase has a select whose condition is a prolog value
-    /// or a pure input (`pure_inputs`): one a parameter binding decides. A
-    /// scan of the ops, for deciding cheaply whether
-    /// [`param_selects`](Self::param_selects) has anything to find.
+    /// Whether the tape has a select a parameter binding decides: any of the
+    /// prolog's, or one of the main phase whose condition is a prolog value
+    /// or a pure input (`pure_inputs`). A scan of the ops, for deciding
+    /// cheaply whether [`param_selects`](Self::param_selects) has anything
+    /// to find.
     pub fn has_param_selects(&self, pure_inputs: &[bool]) -> bool {
-        self.ops[self.prolog_ops..].iter().any(|op| match *op {
+        self.ops.iter().enumerate().any(|(k, op)| match *op {
+            super::Op::Select(_, _, _) if k < self.prolog_ops => true,
             super::Op::Select(c, _, _) => match input_index(c) {
                 Some(i) => pure_inputs.get(i as usize).copied().unwrap_or(false),
                 None => (c as usize) < self.state_len,
@@ -231,10 +239,10 @@ impl Tape {
         })
     }
 
-    /// The selects a parameter binding decides: those of the main phase
-    /// whose condition is computed in the prolog or is a pure input
-    /// (`pure_inputs`, one flag per input). `None` for a tape without a
-    /// prolog split or without such a select.
+    /// The selects a parameter binding decides: those whose condition is
+    /// computed in the prolog or is a pure input (`pure_inputs`, one flag
+    /// per input), in the prolog or the main phase. `None` for a tape
+    /// without a prolog split or without such a select.
     pub fn param_selects(&self, pure_inputs: &[bool]) -> Option<ParamSelects> {
         if self.prolog_ops == 0 && !pure_inputs.iter().any(|&p| p) {
             return None;
@@ -248,7 +256,7 @@ impl Tape {
         let mut of = Vec::new();
         for i in 0..p.insts.len() {
             let inst = &p.insts[i];
-            if !matches!(inst.kind, Kind::Select) || inst.pure {
+            if !matches!(inst.kind, Kind::Select) {
                 continue;
             }
             let c = p.ins(i)[0];
@@ -275,14 +283,10 @@ impl Tape {
         Some(ParamSelects { conds: tape, of })
     }
 
-    /// The instructions of the main phase, undecided and decided by each of
-    /// `patterns` (see [`decide`](Self::decide)), counted on the tape's
-    /// program without compiling it again: what deciding would remove.
-    pub fn main_ops_decided(
-        &self,
-        ps: &ParamSelects,
-        patterns: &[Vec<bool>],
-    ) -> (usize, Vec<usize>) {
+    /// The instructions, undecided and decided by each of `patterns` (see
+    /// [`decide`](Self::decide)), counted on the tape's program without
+    /// compiling it again: what deciding would remove.
+    pub fn ops_decided(&self, ps: &ParamSelects, patterns: &[Vec<bool>]) -> (usize, Vec<usize>) {
         let p = self.lift();
         let count = |pattern: Option<&[bool]>| -> usize {
             let mut arm: Vec<Option<Ref>> = vec![None; p.insts.len()];
@@ -310,7 +314,7 @@ impl Tape {
                 if std::mem::replace(&mut seen[i as usize], true) {
                     continue;
                 }
-                n += usize::from(!p.insts[i as usize].pure);
+                n += 1;
                 stack.extend(p.ins(i as usize).iter().map(|&r| resolve(r)));
             }
             n

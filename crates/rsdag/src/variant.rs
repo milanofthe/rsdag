@@ -5,9 +5,9 @@
 //! `Select`, and a tape computes both of its arms at every evaluation. Its
 //! condition, though, is fixed once the parameters are bound: a prolog
 //! value. A [`VariantBody`] reads those conditions in each instance's
-//! prolog, the pattern they take, and runs the instance's main phase on the
-//! body that pattern decides ([`Tape::decide`]): the untaken arms gone, the
-//! outputs bit for bit the full body's. A variant is built when its pattern
+//! prolog, the pattern they take, and runs the instance on the body that
+//! pattern decides ([`Tape::decide`]), its prolog and its main phase: the
+//! untaken arms gone, the outputs bit for bit the full body's. A variant is built when its pattern
 //! first turns up and is shared by every instance that takes it; a new
 //! binding that flips a condition moves its instances to another variant
 //! at their next prolog, so nothing is ever invalidated. A derivative body
@@ -20,8 +20,8 @@
 //! backend's prolog reads alike in another's main phase.
 //!
 //! Nothing of this is on the way of a first evaluation. Building the body
-//! costs a scan of its tape (does any select of the main phase have a
-//! condition a binding decides?) and, where one does, the tape compiled
+//! costs a scan of its tape (does any select have a condition a binding
+//! decides?) and, where one does, the tape compiled
 //! with one more state value. Finding the selects, whether deciding them
 //! pays and the variants themselves are built at the first prolog: in the
 //! background where a backend runs work there ([`BodyBackend`]), in the
@@ -41,9 +41,9 @@ use crate::tape::{ParamSelects, Tape};
 /// Variants a body builds at most; a pattern beyond them runs the full body.
 const MAX_VARIANTS: usize = 64;
 
-/// The share of the main phase the decided selects must be able to remove
-/// (deciding them all one way or all the other) for a body to run variants,
-/// in percent.
+/// The share of the body the decided selects must be able to remove
+/// (deciding them all one way or all the other) for it to run variants, in
+/// percent.
 const MIN_SHRINK_PCT: usize = 10;
 
 static ENABLED: AtomicBool = AtomicBool::new(true);
@@ -89,8 +89,8 @@ struct Shared {
     selects: OnceLock<Option<ParamSelects>>,
     /// Whether finding them is on its way.
     finding: AtomicBool,
-    /// The full body's main ops, what a variant must undercut.
-    main_ops: usize,
+    /// The full body's ops, what a variant must undercut.
+    ops: usize,
     /// The state block of every variant, its index the last value.
     state_len: usize,
     /// The full body (`0`) and every variant built, the bodies interpreted
@@ -106,13 +106,13 @@ impl Shared {
     }
 
     /// The selects a binding decides, if deciding them all one way or all
-    /// the other removes at least [`MIN_SHRINK_PCT`] of the main phase.
+    /// the other removes at least [`MIN_SHRINK_PCT`] of the body.
     fn find(&self) -> Option<ParamSelects> {
         let full = self.full();
         let t = full.body().expect("an interpreted body is a tape");
         let ps = t.param_selects(full.pure_args())?;
         let n = ps.n_conds();
-        let (all, decided) = t.main_ops_decided(&ps, &[vec![true; n], vec![false; n]]);
+        let (all, decided) = t.ops_decided(&ps, &[vec![true; n], vec![false; n]]);
         let least = decided.into_iter().min().unwrap_or(all);
         ((all - least.min(all)) * 100 >= MIN_SHRINK_PCT * all).then_some(ps)
     }
@@ -126,8 +126,7 @@ impl Shared {
             return 0;
         }
         let decided = t.decide(ps, pattern, self.state_len);
-        let main = decided.n_ops() - decided.prolog_len();
-        if main >= self.main_ops || decided.state_len() != self.state_len {
+        if decided.n_ops() >= self.ops || decided.state_len() != self.state_len {
             return 0;
         }
         let (pure, n_out) = (full.pure_args().to_vec(), full.n_outputs());
@@ -136,8 +135,15 @@ impl Shared {
         bodies.len() as u32 - 1
     }
 
-    /// The pattern the selects `ps` take at the pure arguments `pure`.
-    fn pattern(&self, ps: &ParamSelects, pure: &[f64]) -> Vec<bool> {
+    /// The pattern the selects `ps` take at the pure arguments `pure`, by
+    /// `conds` (a backend's form of their tape) where given, else
+    /// interpreted.
+    fn pattern(
+        &self,
+        ps: &ParamSelects,
+        pure: &[f64],
+        conds: Option<&Arc<dyn ExternBundle>>,
+    ) -> Vec<bool> {
         let full = self.full();
         let mask = full.pure_args();
         // The conditions read the pure arguments only; the others are NaN.
@@ -148,8 +154,13 @@ impl Shared {
                 true => *p.next().expect("one value per pure argument"),
                 false => f64::NAN,
             }));
-            crate::scratch::with(|w: &mut Vec<f64>| {
-                crate::scratch::with(|o: &mut Vec<f64>| ps.pattern(args, w, o))
+            crate::scratch::with(|o: &mut Vec<f64>| match conds {
+                Some(b) => {
+                    o.resize(ps.n_conds(), 0.0);
+                    crate::scratch::with_len(b.work_len(), 0.0, |w| b.call_into(args, w, o));
+                    o.iter().map(|&c| c != 0.0).collect()
+                }
+                None => crate::scratch::with(|w: &mut Vec<f64>| ps.pattern(args, w, o)),
             })
         })
     }
@@ -165,23 +176,26 @@ pub struct VariantBody {
     run: Arc<[OnceLock<Arc<dyn ExternBundle>>]>,
     /// Per variant, whether this backend's form of it is on its way.
     pending: Arc<[AtomicBool]>,
+    /// This backend's form of the conditions' tape, made in the background.
+    conds: Arc<OnceLock<Arc<dyn ExternBundle>>>,
+    conds_pending: AtomicBool,
     /// The backend the variants are made by; `None` interprets them.
     backend: Option<BodyBackend>,
     backends: BackendCache,
 }
 
 impl VariantBody {
-    /// `full`, a body whose main phase has a select a binding decides (see
+    /// `full`, a body with a select a binding decides (see
     /// [`Tape::has_param_selects`]), compiled with one spare state value
     /// ([`Tape::compile_split_spare`]), running each binding's variant.
     pub(crate) fn new(full: InterpretedBody) -> VariantBody {
         let t = full.body().expect("an interpreted body is a tape");
         let state_len = t.state_len();
-        let main_ops = t.n_ops() - t.prolog_len();
+        let ops = t.n_ops();
         let shared = Arc::new(Shared {
             selects: OnceLock::new(),
             finding: AtomicBool::new(false),
-            main_ops,
+            ops,
             state_len,
             bodies: RwLock::new(vec![Arc::new(full)]),
             index: Mutex::new(HashMap::default()),
@@ -195,6 +209,8 @@ impl VariantBody {
             shared,
             run: (0..MAX_VARIANTS).map(|_| OnceLock::new()).collect(),
             pending: (0..MAX_VARIANTS).map(|_| AtomicBool::new(false)).collect(),
+            conds: Arc::default(),
+            conds_pending: AtomicBool::new(false),
             backend,
             backends: BackendCache::default(),
         };
@@ -221,7 +237,7 @@ impl VariantBody {
             let Some(ps) = shared.selects.get_or_init(|| shared.find()) else {
                 return 0;
             };
-            let pattern = shared.pattern(ps, pure);
+            let pattern = shared.pattern(ps, pure, None);
             let mut index = shared.index.lock().unwrap();
             return match index.get(pattern.as_slice()) {
                 Some(Slot::Ready(v)) => *v,
@@ -245,7 +261,7 @@ impl VariantBody {
         let Some(ps) = selects else {
             return 0;
         };
-        let pattern = self.shared.pattern(ps, pure);
+        let pattern = self.shared.pattern(ps, pure, self.conds_soon(&backend));
         let slot = self
             .shared
             .index
@@ -283,6 +299,30 @@ impl VariantBody {
                 0
             }
         }
+    }
+
+    /// This backend's form of the conditions' tape when made; made in the
+    /// background on first ask.
+    fn conds_soon(&self, backend: &BodyBackend) -> Option<&Arc<dyn ExternBundle>> {
+        if let Some(b) = self.conds.get() {
+            return Some(b);
+        }
+        if !self.conds_pending.swap(true, Ordering::AcqRel) {
+            let (shared, conds, compile) = (
+                self.shared.clone(),
+                self.conds.clone(),
+                backend.compile.clone(),
+            );
+            (backend.submit)(Box::new(move || {
+                let Some(Some(ps)) = shared.selects.get() else {
+                    return;
+                };
+                if let Some(b) = compile(ps.tape(), &[], ps.n_conds()) {
+                    let _ = conds.set(b);
+                }
+            }));
+        }
+        None
     }
 
     /// Have this backend's form of variant `v` made in the background.
