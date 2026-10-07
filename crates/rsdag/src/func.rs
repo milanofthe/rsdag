@@ -428,15 +428,12 @@ impl Function {
         };
         // A body whose selects a binding decides runs each binding's
         // variant (see `crate::variant`).
-        let selects = (crate::variant::enabled() && !pure.is_empty())
-            .then(|| tape.param_selects(&pure))
-            .flatten();
+        let variants = crate::variant::enabled() && tape.has_param_selects(&pure);
         let full = InterpretedBody::new(tape, roots.len(), pure);
-        let bundle: Arc<dyn ExternBundle> =
-            match selects.filter(|s| crate::variant::VariantBody::pays(&full, s)) {
-                Some(s) => Arc::new(crate::variant::VariantBody::new(full, s)),
-                None => Arc::new(full),
-            };
+        let bundle: Arc<dyn ExternBundle> = match variants {
+            true => Arc::new(crate::variant::VariantBody::new(full)),
+            false => Arc::new(full),
+        };
         let body = Body { bundle, slot_of };
         self.interpreted.lock().unwrap().push(body.clone());
         body

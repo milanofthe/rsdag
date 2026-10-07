@@ -104,6 +104,16 @@ pub fn inputs(n: usize, t: f64, binding: u32) -> Vec<f64> {
         .collect()
 }
 
+/// Whether `body` runs per-binding variants: only such a body has tapes
+/// of its own for a backend to make.
+pub fn runs_variants(body: &std::sync::Arc<dyn rsdag::ExternBundle>) -> bool {
+    let backend = rsdag::BodyBackend {
+        compile: std::sync::Arc::new(|_: &Tape, _: &[bool], _: usize| None),
+        submit: std::sync::Arc::new(|job: Box<dyn FnOnce() + Send>| job()),
+    };
+    body.with_backend(&backend).is_some()
+}
+
 pub fn same(a: &[f64], b: &[f64]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
 }
@@ -114,9 +124,7 @@ fn a_parameter_branching_body_runs_its_variants() {
         let c = circuit(n);
         let split = Tape::compile_split(&c.g, &c.roots, &c.syms, &c.pure);
         let whole = Tape::compile(&c.g, &c.roots, &c.syms);
-        let body = &split.bundles()[0];
-        let full_state = body.body().expect("a tape").state_len();
-        assert_eq!(body.state_len(), 1 + full_state, "the body runs variants");
+        assert!(runs_variants(&split.bundles()[0]), "the body runs variants");
         let mut w = vec![0.0; split.work_len()];
         let mut got = vec![0.0; split.out_len()];
         let (mut ww, mut want) = (Vec::new(), Vec::new());

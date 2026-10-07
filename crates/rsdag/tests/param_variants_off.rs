@@ -27,6 +27,9 @@ fn variants_off_runs_the_full_body() {
     g.set_param_role(f, 1, ParamRole::Param);
     let root = g.call(f, 0, &[x, q]);
     let tape = Tape::compile_split(&g, &[root], &[xs, qs], &[false, true]);
-    let body = &tape.bundles()[0];
-    assert_eq!(body.state_len(), body.body().expect("a tape").state_len());
+    let backend = rsdag::BodyBackend {
+        compile: std::sync::Arc::new(|_: &Tape, _: &[bool], _: usize| None),
+        submit: std::sync::Arc::new(|job: Box<dyn FnOnce() + Send>| job()),
+    };
+    assert!(tape.bundles()[0].with_backend(&backend).is_none());
 }

@@ -18,9 +18,9 @@ fn variants_run_natively() {
         let (mut w, mut want) = (Vec::new(), Vec::new());
         let (mut nw, mut got) = (Vec::new(), Vec::new());
         for binding in [0u32, 0b1010_0101, 0xff, 0] {
-            // The first prolog of a pattern runs the full body and builds
-            // its variant in the background; once built, the next prolog
-            // takes it. Both are checked.
+            // The first prolog runs the full body and finds the selects in
+            // the background, the next one builds the pattern's variant
+            // there; once built, a prolog takes it. Each is checked.
             native.eval_prolog(&inputs(n, 0.0, binding), &mut nw);
             for t in [0.0, 0.5] {
                 let ins = inputs(n, t, binding);
@@ -28,8 +28,10 @@ fn variants_run_natively() {
                 native.eval_main(&ins, &mut nw, &mut got);
                 assert!(same(&got, &want), "{n} at {binding:#x}, t = {t}, full body");
             }
-            rsdag_jit::background::drain();
-            native.eval_prolog(&inputs(n, 0.0, binding), &mut nw);
+            for _ in 0..2 {
+                rsdag_jit::background::drain();
+                native.eval_prolog(&inputs(n, 0.0, binding), &mut nw);
+            }
             for t in [0.0, 0.5, -1.25] {
                 let ins = inputs(n, t, binding);
                 tape.eval(&ins, &mut w, &mut want);
