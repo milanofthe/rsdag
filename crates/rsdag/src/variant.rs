@@ -201,9 +201,8 @@ pub struct VariantBody {
     /// The backend's form of the conditions' tape, once made.
     conds: Arc<OnceLock<Arc<dyn ExternBundle>>>,
     conds_making: AtomicBool,
-    /// What any variant's main phase reads: the full body's reads and the
-    /// inputs an arm of a decided select reads (see
-    /// [`Tape::param_select_input_arms`]).
+    /// What any variant's main phase reads: the full body's reads (see
+    /// [`Tape::decide`]).
     reads: Arc<[u32]>,
     backend: BodyBackend,
     policy: VariantPolicy,
@@ -232,10 +231,7 @@ impl VariantBody {
     fn over(shared: Arc<Shared>, backend: BodyBackend, policy: VariantPolicy) -> VariantBody {
         let full = shared.body(0);
         let t = full.body().expect("an interpreted body is a tape");
-        let mut reads = t.main_reads();
-        reads.extend(t.param_select_input_arms(full.pure_args()));
-        reads.sort_unstable();
-        reads.dedup();
+        let reads = t.main_reads();
         let n = policy.max_variants.max(1);
         let v = VariantBody {
             reads: reads.into(),

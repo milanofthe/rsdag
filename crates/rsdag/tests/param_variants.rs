@@ -190,11 +190,11 @@ fn derivatives_through_the_variants_are_the_full_bodys() {
     }
 }
 
-/// A select of the prolog between parameters: decided, the main phase reads
-/// the parameter it picks itself, where the full body reads the select's
-/// value. The caller passes it all the same.
+/// A select of the prolog between parameters stays the prolog's for the
+/// main phase: its value in the state, the parameters read once per
+/// binding, not passed on every evaluation.
 #[test]
-fn a_decided_prolog_select_reads_its_arm() {
+fn a_decided_prolog_select_stays_in_the_state() {
     let mut g: Graph<F64> = Graph::new();
     let (v, vs) = sym(&mut g, "dev.v");
     let (p, ps) = sym(&mut g, "dev.p");
@@ -219,9 +219,18 @@ fn a_decided_prolog_select_reads_its_arm() {
     }
     let split = Tape::compile_split(&g, &roots, &syms, &pure);
     let whole = Tape::compile(&g, &roots, &syms);
-    // The body asks for `q` (argument 2) per evaluation: its variants read it.
+    // The body asks for the state `v` alone per evaluation, its variants
+    // too: neither `p` nor `q` (arguments 1, 2).
     let reads = split.bundles()[0].main_reads().expect("reads some");
-    assert!(reads.contains(&2), "{reads:?}");
+    assert_eq!(reads, vec![0]);
+    let body = split.bundles()[0].body().expect("a tape body");
+    let ps = body
+        .param_selects(&[false, true, true])
+        .expect("a decided select");
+    for pattern in [[true], [false]] {
+        let variant = body.decide(&ps, &pattern);
+        assert_eq!(variant.main_reads(), vec![0], "{pattern:?}");
+    }
     let ins = |t: f64| -> Vec<f64> {
         (0..4)
             .flat_map(|i| {
