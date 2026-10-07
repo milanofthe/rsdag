@@ -1,12 +1,13 @@
 //! Per-binding variants natively: the variants compiled like the full body,
 //! bit for bit the interpreter through bindings that flip the branches,
-//! built in the background or by the prolog that needs them, and a state
-//! one backend's prolog left read alike by the other's main phase.
+//! built in the background or by the prolog that needs them, taken up by
+//! an episode already running, and a state one backend's prolog left read
+//! alike by the other's main phase.
 
 #[path = "../../rsdag/tests/param_variants.rs"]
 mod variants;
 
-use rsdag::Tape;
+use rsdag::{Adaptive, Policy, Tape};
 use rsdag_jit::{NativeTape, Options};
 use variants::{circuit, inputs, same, variant_of};
 
@@ -42,6 +43,44 @@ fn variants_run_natively() {
             }
         }
     }
+}
+
+/// An episode takes what lands after its prolog: one prolog, then main
+/// passes only (as a Newton loop runs), and the native code and the
+/// bodies' variants still take over, bit for bit the interpreter all
+/// along.
+#[test]
+fn an_episode_takes_the_variants_that_land_after_its_prolog() {
+    let n = 12;
+    let c = circuit(n);
+    let reference = Tape::compile_split(&c.g, &c.roots, &c.syms, &c.pure);
+    let tape = Tape::compile_split(&c.g, &c.roots, &c.syms, &c.pure);
+    let s = tape.state_len();
+    let policy = Policy {
+        jit: true,
+        kick_after: 1,
+        specialize: false,
+        ..Policy::default()
+    };
+    let program = Adaptive::new(tape, policy, Some(rsdag_jit::compiler()));
+    let binding = 0b1010_0101;
+    let (mut w, mut want) = (Vec::new(), Vec::new());
+    let (mut aw, mut got) = (Vec::new(), Vec::new());
+    let mut ep = program.eval_prolog(&inputs(n, 0.0, binding), &mut aw);
+    let full = aw[..s].to_vec();
+    for k in 0..8 {
+        rsdag_jit::background::drain();
+        let ins = inputs(n, 0.25 * k as f64, binding);
+        reference.eval(&ins, &mut w, &mut want);
+        program.eval_main(&mut ep, &ins, &mut aw, &mut got);
+        assert!(same(&got, &want), "pass {k}");
+    }
+    assert!(program.native().is_some(), "the native code landed");
+    assert!(program.tape().forms_epoch() > 0, "the variants landed");
+    assert!(
+        !same(&aw[..s], &full),
+        "the episode laid its state out again, on the variants"
+    );
 }
 
 /// Without the background, the native prolog builds and compiles its

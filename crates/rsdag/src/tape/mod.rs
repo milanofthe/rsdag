@@ -1018,6 +1018,15 @@ impl Tape {
         &self.bundles
     }
 
+    /// The bundles' [`forms_epoch`](ExternBundle::forms_epoch) together:
+    /// when it moved since a prolog, running the prolog again may give a
+    /// faster state (a function body's variant landed in the background).
+    pub fn forms_epoch(&self) -> u64 {
+        self.bundles
+            .iter()
+            .fold(0, |e, b| e.wrapping_add(b.forms_epoch()))
+    }
+
     /// Run the tapes the bundles carry of their own as `backend` says (see
     /// [`ExternBundle::with_backend`]). A program calls leaf bodies only
     /// (a composite function is compiled into it as a template), so this

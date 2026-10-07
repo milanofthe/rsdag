@@ -262,4 +262,12 @@ pub trait ExternBundle: Send + Sync {
     fn with_backend(&self, _backend: &BodyBackend) -> Option<std::sync::Arc<dyn ExternBundle>> {
         None
     }
+    /// A count that moves whenever background work lands that a prolog
+    /// would now run on (a body's variant found, built or compiled, see
+    /// [`crate::variant`]): states laid out before it moved stay correct,
+    /// a prolog run again may lay out faster ones. `0` for a bundle without
+    /// such work.
+    fn forms_epoch(&self) -> u64 {
+        0
+    }
 }
