@@ -59,6 +59,19 @@ pub fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
 
+/// Where work goes in the background, a function taking a job.
+pub type Submit = Arc<dyn Fn(Box<dyn FnOnce() + Send>) + Send + Sync>;
+
+static BACKGROUND: OnceLock<Submit> = OnceLock::new();
+
+/// Run the variants of interpreted bodies in the background through
+/// `submit` too (a backend that compiles registers its queue), instead of
+/// building them in the prolog that finds them. The first registration
+/// stands.
+pub fn set_background(submit: Submit) {
+    let _ = BACKGROUND.set(submit);
+}
+
 /// Where a pattern's variant stands.
 #[derive(Clone, Copy)]
 enum Slot {
@@ -159,19 +172,18 @@ pub struct VariantBody {
 
 impl VariantBody {
     /// `full`, a body whose main phase has a select a binding decides (see
-    /// [`Tape::has_param_selects`]), running each binding's variant.
+    /// [`Tape::has_param_selects`]), compiled with one spare state value
+    /// ([`Tape::compile_split_spare`]), running each binding's variant.
     pub(crate) fn new(full: InterpretedBody) -> VariantBody {
         let t = full.body().expect("an interpreted body is a tape");
-        let state_len = 1 + t.state_len();
+        let state_len = t.state_len();
         let main_ops = t.n_ops() - t.prolog_len();
-        let padded = t.with_state(state_len);
-        let (pure, n_out) = (full.pure_args().to_vec(), full.n_outputs());
         let shared = Arc::new(Shared {
             selects: OnceLock::new(),
             finding: AtomicBool::new(false),
             main_ops,
             state_len,
-            bodies: RwLock::new(vec![Arc::new(InterpretedBody::new(padded, n_out, pure))]),
+            bodies: RwLock::new(vec![Arc::new(full)]),
             index: Mutex::new(HashMap::default()),
         });
         VariantBody::over(shared, None)
@@ -196,7 +208,15 @@ impl VariantBody {
 
     /// The variant this backend runs now for the pure arguments `pure`.
     fn variant(&self, pure: &[f64]) -> u32 {
-        let Some(backend) = &self.backend else {
+        // An interpreted body takes the registered background, its variants
+        // interpreted.
+        let interpreted = || {
+            BACKGROUND.get().map(|submit| BodyBackend {
+                compile: Arc::new(|_: &Tape, _: &[bool], _: usize| None),
+                submit: submit.clone(),
+            })
+        };
+        let Some(backend) = self.backend.clone().or_else(interpreted) else {
             let shared = &self.shared;
             let Some(ps) = shared.selects.get_or_init(|| shared.find()) else {
                 return 0;
@@ -236,7 +256,7 @@ impl VariantBody {
         match slot {
             Some(Slot::Ready(v)) if self.run[v as usize].get().is_some() => v,
             Some(Slot::Ready(v)) => {
-                self.make_soon(v as usize, backend);
+                self.make_soon(v as usize, &backend);
                 0
             }
             Some(Slot::Building) => 0,

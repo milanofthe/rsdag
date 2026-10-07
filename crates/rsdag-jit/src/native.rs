@@ -71,6 +71,8 @@ pub struct NativeTape {
     /// The tape's state prefix (see [`Tape::state_len`]); the slot layout
     /// is the tape's, so an interpreter's state serves here and back.
     state_len: usize,
+    /// The prefix of it the prolog writes (see [`Tape::state_own`]).
+    state_own: usize,
     /// Instances per run: `1`, or the lane code's width (see
     /// [`compile_lanes`](NativeTape::compile_lanes)).
     lanes: usize,
@@ -356,7 +358,8 @@ impl NativeBody {
                     let g = c + lane;
                     if let Some(st) = states_out.as_deref_mut() {
                         for s in 0..sl {
-                            st[g * sl + s] = work[s * l + lane];
+                            let own = s < lt.state_own;
+                            st[g * sl + s] = if own { work[s * l + lane] } else { 0.0 };
                         }
                     }
                     if let Some(o) = out.as_deref_mut() {
@@ -406,7 +409,9 @@ impl ExternBundle for NativeBody {
             };
         }
         self.tape.run(0..self.tape.prolog_chunks, a, w);
-        state.copy_from_slice(&w[..state.len()]);
+        let own = self.tape.state_own;
+        state[..own].copy_from_slice(&w[..own]);
+        state[own..].fill(0.0);
     }
     fn main_into(&self, args: &[f64], state: &[f64], work: &mut [f64], out: &mut [f64]) {
         let w = &mut work[..self.tape.layout.total];
@@ -671,6 +676,7 @@ impl NativeTape {
             }),
             submit: Arc::new(crate::background::submit),
         };
+        rsdag::variant::set_background(backend.submit.clone());
         let bundles: Result<Bundles, JitError> = tape
             .bundles()
             .iter()
@@ -843,6 +849,7 @@ impl NativeTape {
             n_inputs,
             n_ops: tape.n_ops(),
             state_len: tape.state_len(),
+            state_own: tape.state_own(),
             lanes,
             reads,
             phase_ops,

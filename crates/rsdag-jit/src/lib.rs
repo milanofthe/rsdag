@@ -122,6 +122,8 @@ impl rsdag::Compiler for Jit {
 pub fn compiler() -> std::sync::Arc<dyn rsdag::Compiler> {
     static C: std::sync::OnceLock<std::sync::Arc<dyn rsdag::Compiler>> = std::sync::OnceLock::new();
     C.get_or_init(|| {
+        // Interpreted bodies build their variants on this queue too.
+        rsdag::variant::set_background(std::sync::Arc::new(background::submit));
         std::sync::Arc::new(Jit {
             options: Options::default(),
         })

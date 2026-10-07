@@ -66,7 +66,7 @@ impl Tape {
     /// Differentiate and specialize on the hierarchy first: that work stays
     /// on its functions.
     pub fn compile<K: Field>(ctx: &Graph<K>, roots: &[ExprId], input_syms: &[SymbolId]) -> Tape {
-        Self::compile_inner(ctx, roots, input_syms, None)
+        Self::compile_inner(ctx, roots, input_syms, None, 0)
     }
 
     /// [`compile`](Self::compile) with a prolog split: `pure_inputs[k]` marks
@@ -84,7 +84,21 @@ impl Tape {
         input_syms: &[SymbolId],
         pure_inputs: &[bool],
     ) -> Tape {
-        Self::compile_inner(ctx, roots, input_syms, Some(pure_inputs))
+        Self::compile_inner(ctx, roots, input_syms, Some(pure_inputs), 0)
+    }
+
+    /// [`compile_split`](Self::compile_split) with `spare` values at the end
+    /// of the state that the tape neither writes nor reads, for a caller to
+    /// keep something of its own with an instance's state (see
+    /// [`crate::variant`]).
+    pub fn compile_split_spare<K: Field>(
+        ctx: &Graph<K>,
+        roots: &[ExprId],
+        input_syms: &[SymbolId],
+        pure_inputs: &[bool],
+        spare: usize,
+    ) -> Tape {
+        Self::compile_inner(ctx, roots, input_syms, Some(pure_inputs), spare)
     }
 
     fn compile_inner<K: Field>(
@@ -92,6 +106,7 @@ impl Tape {
         roots: &[ExprId],
         input_syms: &[SymbolId],
         pure_inputs: Option<&[bool]>,
+        spare: usize,
     ) -> Tape {
         use crate::hooks::timed;
         let forest = timed("tape analyze", || {
@@ -104,7 +119,8 @@ impl Tape {
         }
         timed("tape fuse", || program.fuse_accumulators(pure_inputs));
         let order = timed("tape schedule", || program.schedule());
-        let mut tape = timed("tape emit", || program.emit(&order, pure_inputs.is_some()));
+        let split = pure_inputs.is_some();
+        let mut tape = timed("tape emit", || program.emit_padded(&order, split, 0, spare));
         tape.n_inputs = input_syms.len();
         tape
     }
@@ -2199,15 +2215,20 @@ impl Program {
 
     /// Pass 4: lifetimes, slots and the instruction stream.
     pub(super) fn emit(&self, order: &[u32], split: bool) -> Tape {
-        self.emit_padded(order, split, 0)
+        self.emit_padded(order, split, 0, 0)
     }
 
-    /// [`emit`](Self::emit) with a state of at least `state_len` values:
-    /// the tape neither writes nor reads the ones past its own, so a block
-    /// of that length can carry something else there (see
-    /// [`Tape::decide`]).
-    pub(super) fn emit_padded(&self, order: &[u32], split: bool, state_len: usize) -> Tape {
-        let floor = state_len;
+    /// [`emit`](Self::emit) with a state of at least `floor` values and
+    /// `spare` more: the tape neither writes nor reads the ones past its
+    /// own, so a block of that length can carry something else there (see
+    /// [`crate::variant`]).
+    pub(super) fn emit_padded(
+        &self,
+        order: &[u32],
+        split: bool,
+        floor: usize,
+        spare: usize,
+    ) -> Tape {
         let m = self.insts.len();
         let mut pos = vec![0usize; m];
         for (k, &i) in order.iter().enumerate() {
@@ -2272,7 +2293,8 @@ impl Program {
                 next += self.insts[i as usize].n_out;
             }
         }
-        let state_len = (next as usize).max(floor);
+        let state_own = next as usize;
+        let state_len = state_own.max(floor) + spare;
         next = state_len as u32;
         let mut reserved = vec![u32::MAX; m];
         for &i in order {
@@ -2604,6 +2626,7 @@ impl Program {
             bundles: self.bundles.clone(),
             prolog_ops,
             state_len,
+            state_own,
             n_inputs: 0,
         }
     }

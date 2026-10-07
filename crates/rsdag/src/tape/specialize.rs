@@ -231,16 +231,6 @@ impl Tape {
         })
     }
 
-    /// This tape compiled again with a state of at least `state_len` values
-    /// (see [`decide`](Self::decide)).
-    pub fn with_state(&self, state_len: usize) -> Tape {
-        let p = self.lift();
-        let order = p.schedule();
-        let mut tape = p.emit_padded(&order, self.prolog_ops > 0, state_len);
-        tape.n_inputs = self.n_inputs;
-        tape
-    }
-
     /// The selects a parameter binding decides: those of the main phase
     /// whose condition is computed in the prolog or is a pure input
     /// (`pure_inputs`, one flag per input). `None` for a tape without a
@@ -359,7 +349,7 @@ impl Tape {
         }
         p.retain_reachable();
         let order = p.schedule();
-        let mut tape = p.emit_padded(&order, self.prolog_ops > 0, state_len);
+        let mut tape = p.emit_padded(&order, self.prolog_ops > 0, state_len, 0);
         tape.n_inputs = self.n_inputs;
         tape
     }

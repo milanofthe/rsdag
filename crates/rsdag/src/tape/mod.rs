@@ -384,6 +384,10 @@ pub struct Tape {
     /// The prolog's results the main phase reads: `work[..state_len]`
     /// (see [`state_len`](Self::state_len)).
     state_len: usize,
+    /// The state values the prolog writes, a prefix of the state; the rest
+    /// is padding a caller keeps something of its own in (see
+    /// [`Tape::compile_split_spare`]), zero in a state a body leaves.
+    state_own: usize,
     /// The inputs it was compiled over (`input_syms.len()`).
     n_inputs: usize,
     /// Its independent calls, by op range (see [`Stage`]).
@@ -688,6 +692,12 @@ impl Tape {
     /// without a split.
     pub fn state_len(&self) -> usize {
         self.state_len
+    }
+
+    /// The prefix of the state the prolog writes (see [`state_len`](Self::state_len));
+    /// a body zeroes the rest of the state it leaves.
+    pub fn state_own(&self) -> usize {
+        self.state_own
     }
 
     /// Instruction count of the parameter-pure prolog (0 when compiled without

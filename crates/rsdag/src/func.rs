@@ -174,7 +174,9 @@ impl ExternBundle for InterpretedBody {
             };
         }
         self.tape.eval_prolog_into(args, w);
-        state.copy_from_slice(&w[..state.len()]);
+        let own = self.tape.state_own();
+        state[..own].copy_from_slice(&w[..own]);
+        state[own..].fill(0.0);
     }
     fn main_into(&self, args: &[f64], state: &[f64], work: &mut [f64], out: &mut [f64]) {
         let (w, o, _) = self.parts(work);
@@ -418,9 +420,13 @@ impl Function {
             .map(|r| matches!(r, ParamRole::Param))
             .chain(globals.iter().map(|_| true))
             .collect();
+        // A split body keeps a spare state value for its variants' index
+        // (see `crate::variant`): one more value per instance, no second
+        // compilation where the body turns out to have variants.
+        let spare = usize::from(crate::variant::enabled());
         let (tape, pure) = if pure.iter().any(|&p| p) {
             (
-                crate::tape::Tape::compile_split(ctx, &roots, &inputs, &pure),
+                crate::tape::Tape::compile_split_spare(ctx, &roots, &inputs, &pure, spare),
                 pure,
             )
         } else {
@@ -428,7 +434,7 @@ impl Function {
         };
         // A body whose selects a binding decides runs each binding's
         // variant (see `crate::variant`).
-        let variants = crate::variant::enabled() && tape.has_param_selects(&pure);
+        let variants = spare == 1 && !pure.is_empty() && tape.has_param_selects(&pure);
         let full = InterpretedBody::new(tape, roots.len(), pure);
         let bundle: Arc<dyn ExternBundle> = match variants {
             true => Arc::new(crate::variant::VariantBody::new(full)),
