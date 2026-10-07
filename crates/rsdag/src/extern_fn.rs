@@ -173,6 +173,13 @@ pub trait ExternBundle: Send + Sync {
             );
         }
     }
+    /// The arguments [`main_into`](Self::main_into) reads, ascending, when
+    /// it reads only some: the others need not be passed per evaluation
+    /// once the prolog ran. `None` for all. The default is what the
+    /// [`body`](Self::body)'s main phase reads ([`crate::Tape::main_reads`]).
+    fn main_reads(&self) -> Option<Vec<u32>> {
+        self.body().map(|t| t.main_reads())
+    }
     /// The tape this bundle evaluates, when its body is one: a native
     /// backend compiles it and substitutes its own bundle, so a function
     /// body is emitted once and called per instance instead of being

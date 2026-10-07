@@ -1755,7 +1755,7 @@ impl Forest {
         // others (a model card bound to every instance) are not gathered
         // per evaluation.
         let reads: Option<Arc<[u32]>> = stateful
-            .then(|| b.body().map(|t| t.main_reads()))
+            .then(|| b.main_reads())
             .flatten()
             .filter(|r| r.len() < n_args as usize)
             .map(Into::into);

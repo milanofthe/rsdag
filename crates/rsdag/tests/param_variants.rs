@@ -159,3 +159,57 @@ fn derivatives_through_the_variants_are_the_full_bodys() {
         assert!(same(&got, &want), "at {binding:#x}");
     }
 }
+
+/// A select of the prolog between parameters: decided, the main phase reads
+/// the parameter it picks itself, where the full body reads the select's
+/// value. The caller passes it all the same.
+#[test]
+fn a_decided_prolog_select_reads_its_arm() {
+    let mut g: Graph<F64> = Graph::new();
+    let (v, vs) = sym(&mut g, "dev.v");
+    let (p, ps) = sym(&mut g, "dev.p");
+    let (q, qs) = sym(&mut g, "dev.q");
+    let zero = g.zero();
+    let pos = g.cmp(CmpOp::Gt, p, zero);
+    let s = g.select(pos, q, p);
+    let heavy = chain(&mut g, v, 40, 0.9);
+    let o = g.mul(heavy, s);
+    let f = g.define_func("dev", vec![vs, ps, qs], vec![o]);
+    g.set_param_role(f, 0, ParamRole::State { id: 0 });
+    g.set_param_role(f, 1, ParamRole::Param);
+    g.set_param_role(f, 2, ParamRole::Param);
+    let (mut roots, mut syms, mut pure) = (Vec::new(), Vec::new(), Vec::new());
+    for i in 0..4 {
+        let (x, xs) = sym(&mut g, &format!("x{i}"));
+        let (pp, pps) = sym(&mut g, &format!("p{i}"));
+        let (qq, qqs) = sym(&mut g, &format!("q{i}"));
+        syms.extend([xs, pps, qqs]);
+        pure.extend([false, true, true]);
+        roots.push(g.call(f, 0, &[x, pp, qq]));
+    }
+    let split = Tape::compile_split(&g, &roots, &syms, &pure);
+    let whole = Tape::compile(&g, &roots, &syms);
+    // The body asks for `q` (argument 2) per evaluation: its variants read it.
+    let reads = split.bundles()[0].main_reads().expect("reads some");
+    assert!(reads.contains(&2), "{reads:?}");
+    let ins = |t: f64| -> Vec<f64> {
+        (0..4)
+            .flat_map(|i| {
+                [
+                    t + 0.1 * i as f64,
+                    if i % 2 == 0 { 0.5 } else { -0.5 },
+                    2.0 + i as f64,
+                ]
+            })
+            .collect()
+    };
+    let mut w = vec![0.0; split.work_len()];
+    let mut got = vec![0.0; split.out_len()];
+    let (mut ww, mut want) = (Vec::new(), Vec::new());
+    split.eval_prolog_into(&ins(0.0), &mut w);
+    for t in [0.0, 0.3] {
+        split.eval_main_into(&ins(t), &mut w, &mut got);
+        whole.eval(&ins(t), &mut ww, &mut want);
+        assert!(same(&got, &want), "t = {t}: {got:?} vs {want:?}");
+    }
+}

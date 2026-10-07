@@ -239,6 +239,31 @@ impl Tape {
         })
     }
 
+    /// The inputs an arm of a select a binding decides reads directly (see
+    /// [`has_param_selects`](Self::has_param_selects)): what the main phase
+    /// of this tape decided may read beyond what its own does
+    /// ([`main_reads`](Self::main_reads)), an arm taking the place of a
+    /// select the prolog computed.
+    pub fn param_select_input_arms(&self, pure_inputs: &[bool]) -> Vec<u32> {
+        let mut arms: Vec<u32> = Vec::new();
+        for (k, op) in self.ops.iter().enumerate() {
+            let super::Op::Select(c, t, e) = *op else {
+                continue;
+            };
+            let decided = k < self.prolog_ops
+                || match input_index(c) {
+                    Some(i) => pure_inputs.get(i as usize).copied().unwrap_or(false),
+                    None => (c as usize) < self.state_len,
+                };
+            if decided {
+                arms.extend([t, e].into_iter().filter_map(input_index));
+            }
+        }
+        arms.sort_unstable();
+        arms.dedup();
+        arms
+    }
+
     /// The selects a parameter binding decides: those whose condition is
     /// computed in the prolog or is a pure input (`pure_inputs`, one flag
     /// per input), in the prolog or the main phase. `None` for a tape

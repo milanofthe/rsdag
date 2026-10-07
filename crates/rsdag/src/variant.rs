@@ -179,6 +179,10 @@ pub struct VariantBody {
     /// This backend's form of the conditions' tape, made in the background.
     conds: Arc<OnceLock<Arc<dyn ExternBundle>>>,
     conds_pending: AtomicBool,
+    /// What any variant's main phase reads: the full body's reads and the
+    /// inputs an arm of a decided select reads (see
+    /// [`Tape::param_select_input_arms`]).
+    reads: Arc<[u32]>,
     /// The backend the variants are made by; `None` interprets them.
     backend: Option<BodyBackend>,
     backends: BackendCache,
@@ -204,8 +208,15 @@ impl VariantBody {
     }
 
     fn over(shared: Arc<Shared>, backend: Option<BodyBackend>) -> VariantBody {
+        let full = shared.full();
+        let t = full.body().expect("an interpreted body is a tape");
+        let mut reads = t.main_reads();
+        reads.extend(t.param_select_input_arms(full.pure_args()));
+        reads.sort_unstable();
+        reads.dedup();
         let v = VariantBody {
-            full: shared.full(),
+            reads: reads.into(),
+            full,
             shared,
             run: (0..MAX_VARIANTS).map(|_| OnceLock::new()).collect(),
             pending: (0..MAX_VARIANTS).map(|_| AtomicBool::new(false)).collect(),
@@ -423,6 +434,9 @@ impl ExternBundle for VariantBody {
     }
     fn body(&self) -> Option<&Tape> {
         self.full.body()
+    }
+    fn main_reads(&self) -> Option<Vec<u32>> {
+        Some(self.reads.to_vec())
     }
     fn backend_cache(&self) -> Option<&BackendCache> {
         Some(&self.backends)
