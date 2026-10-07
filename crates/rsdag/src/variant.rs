@@ -414,23 +414,75 @@ impl ExternBundle for VariantBody {
         n_args: usize,
         out: &mut [f64],
     ) {
-        // Runs of instances on one variant, each a batch of its own.
+        // The instances of each variant as one batch: a run of them in
+        // place, the others packed, so a variant's lanes fill however the
+        // instances interleave (a polarity alternating along a ring).
         let (sl, no) = (self.shared.state_len, self.n_outputs());
-        let mut g = 0;
-        while g < n_groups {
-            let v = self.of(&states[g * sl..]);
-            let h = (g + 1..n_groups)
-                .find(|&k| self.of(&states[k * sl..]) != v)
-                .unwrap_or(n_groups);
-            self.bundle(v).main_batch(
-                &args[g * n_args..h * n_args],
-                &states[g * sl..h * sl],
-                h - g,
-                n_args,
-                &mut out[g * no..h * no],
-            );
-            g = h;
+        let first = self.of(states);
+        if (1..n_groups).all(|g| self.of(&states[g * sl..]) == first) {
+            self.bundle(first)
+                .main_batch(args, states, n_groups, n_args, out);
+            return;
         }
+        crate::scratch::with(|members: &mut Vec<usize>| {
+            crate::scratch::with(|done: &mut Vec<bool>| {
+                done.clear();
+                done.resize(n_groups, false);
+                for g0 in 0..n_groups {
+                    if done[g0] {
+                        continue;
+                    }
+                    let v = self.of(&states[g0 * sl..]);
+                    members.clear();
+                    members.extend(
+                        (g0..n_groups).filter(|&g| !done[g] && self.of(&states[g * sl..]) == v),
+                    );
+                    members.iter().for_each(|&g| done[g] = true);
+                    let (m, b) = (members.len(), self.bundle(v));
+                    let last = members[m - 1];
+                    if last - g0 + 1 == m {
+                        b.main_batch(
+                            &args[g0 * n_args..(last + 1) * n_args],
+                            &states[g0 * sl..(last + 1) * sl],
+                            m,
+                            n_args,
+                            &mut out[g0 * no..(last + 1) * no],
+                        );
+                        continue;
+                    }
+                    // What the variant reads: the arguments it is passed per
+                    // evaluation and the state its prolog wrote, nothing else.
+                    let own = self.shared.bodies.read().unwrap()[v]
+                        .body()
+                        .expect("an interpreted body is a tape")
+                        .state_own();
+                    crate::scratch::with(|a: &mut Vec<f64>| {
+                        crate::scratch::with(|st: &mut Vec<f64>| {
+                            crate::scratch::with(|o: &mut Vec<f64>| {
+                                a.resize(m * n_args, 0.0);
+                                st.resize(m * sl, 0.0);
+                                for (k, &g) in members.iter().enumerate() {
+                                    let (to, from) = (k * n_args, g * n_args);
+                                    for &r in self.reads.iter().filter(|&&r| (r as usize) < n_args)
+                                    {
+                                        a[to + r as usize] = args[from + r as usize];
+                                    }
+                                    st[k * sl..k * sl + own]
+                                        .copy_from_slice(&states[g * sl..g * sl + own]);
+                                    st[k * sl + sl - 1] = v as f64;
+                                }
+                                o.resize(m * no, 0.0);
+                                b.main_batch(a, st, m, n_args, o);
+                                for (k, &g) in members.iter().enumerate() {
+                                    out[g * no..(g + 1) * no]
+                                        .copy_from_slice(&o[k * no..(k + 1) * no]);
+                                }
+                            })
+                        })
+                    });
+                }
+            })
+        });
     }
     fn body(&self) -> Option<&Tape> {
         self.full.body()

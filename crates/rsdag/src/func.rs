@@ -180,7 +180,9 @@ impl ExternBundle for InterpretedBody {
     }
     fn main_into(&self, args: &[f64], state: &[f64], work: &mut [f64], out: &mut [f64]) {
         let (w, o, _) = self.parts(work);
-        w[..state.len()].copy_from_slice(state);
+        // Only the state the tape wrote: the rest is a caller's padding.
+        let own = self.tape.state_own();
+        w[..own].copy_from_slice(&state[..own]);
         self.tape.eval_main_into(args, w, o);
         out.copy_from_slice(&o[..self.n_out]);
     }

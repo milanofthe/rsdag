@@ -343,7 +343,7 @@ impl NativeBody {
                         };
                     }
                     if let Some(st) = states {
-                        for s in 0..sl {
+                        for s in 0..lt.state_own {
                             work[s * l + lane] = st[g * sl + s];
                         }
                     }
@@ -415,7 +415,9 @@ impl ExternBundle for NativeBody {
     }
     fn main_into(&self, args: &[f64], state: &[f64], work: &mut [f64], out: &mut [f64]) {
         let w = &mut work[..self.tape.layout.total];
-        w[..state.len()].copy_from_slice(state);
+        // Only the state the tape wrote: the rest is a caller's padding.
+        let own = self.tape.state_own;
+        w[..own].copy_from_slice(&state[..own]);
         self.tape
             .run(self.tape.prolog_chunks..self.tape.chunks.len(), args, w);
         for (k, &slot) in self.tape.outputs[..self.n_out].iter().enumerate() {
