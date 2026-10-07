@@ -51,10 +51,18 @@ impl BackendCache {
 
 /// What a backend makes of a tape: a bundle evaluating it, given the
 /// tape's pure-argument flags and its number of outputs; `None` where it
-/// cannot (see [`ExternBundle::with_compiler`]).
+/// cannot.
 pub type BodyCompiler = dyn Fn(&crate::tape::Tape, &[bool], usize) -> Option<std::sync::Arc<dyn ExternBundle>>
     + Send
     + Sync;
+
+/// A backend that compiles tapes (see [`ExternBundle::with_backend`]): what
+/// it makes of one, and where it runs work it does not wait for.
+#[derive(Clone)]
+pub struct BodyBackend {
+    pub compile: std::sync::Arc<BodyCompiler>,
+    pub submit: std::sync::Arc<dyn Fn(Box<dyn FnOnce() + Send>) + Send + Sync>,
+}
 
 pub trait ExternBundle: Send + Sync {
     /// Number of outputs this bundle writes.
@@ -180,12 +188,9 @@ pub trait ExternBundle: Send + Sync {
     /// For a bundle that runs tapes of its own besides its
     /// [`body`](Self::body) (a body's per-binding variants, see
     /// [`crate::variant`]): the same bundle with each of them run by what
-    /// `compile` makes of it. A backend that compiles tapes asks this
+    /// `backend` makes of it. A backend that compiles tapes asks this
     /// before compiling the body; `None` for a bundle without such tapes.
-    fn with_compiler(
-        &self,
-        _compile: std::sync::Arc<BodyCompiler>,
-    ) -> Option<std::sync::Arc<dyn ExternBundle>> {
+    fn with_backend(&self, _backend: &BodyBackend) -> Option<std::sync::Arc<dyn ExternBundle>> {
         None
     }
 }

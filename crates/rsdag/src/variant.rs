@@ -18,13 +18,19 @@
 //! last value of which is the variant's index: a batch of instances on one
 //! variant runs straight over the caller's states, and a state left by one
 //! backend's prolog reads alike in another's main phase.
+//!
+//! A backend that compiles ([`BodyBackend`]) gets the full body compiled up
+//! front and builds each variant in the background: an instance whose
+//! variant is not ready yet runs the full body, which computes the same
+//! values, and takes its variant at a later prolog. A prolog never waits on
+//! a compilation.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use rustc_hash::FxHashMap as HashMap;
 
-use crate::extern_fn::{BackendCache, BodyCompiler, ExternBundle};
+use crate::extern_fn::{BackendCache, BodyBackend, ExternBundle};
 use crate::func::InterpretedBody;
 use crate::tape::{ParamSelects, Tape};
 
@@ -54,9 +60,20 @@ fn main_ops(t: &Tape) -> usize {
     t.n_ops() - t.prolog_len()
 }
 
+/// Where a pattern's variant stands.
+#[derive(Clone, Copy)]
+enum Slot {
+    /// Being built in the background.
+    Building,
+    /// Built: its index (`0`, the full body, where deciding shortens nothing).
+    Ready(u32),
+}
+
 /// What every backend's form of one body shares: the variants, by index.
 struct Shared {
     selects: ParamSelects,
+    /// The full body's tape as built, deciding works on.
+    full: Arc<InterpretedBody>,
     /// The full body's main ops, what a variant must undercut.
     main_ops: usize,
     /// The state block of every variant, its index the last value.
@@ -65,33 +82,39 @@ struct Shared {
     /// over the common state layout.
     bodies: RwLock<Vec<Arc<InterpretedBody>>>,
     /// The variant of each pattern seen.
-    index: Mutex<HashMap<Box<[bool]>, u32>>,
+    index: Mutex<HashMap<Box<[bool]>, Slot>>,
 }
 
 impl Shared {
-    /// The variant of `pattern`, built on its first turn: the full body
-    /// when deciding shortens nothing, or past [`MAX_VARIANTS`].
-    fn variant(&self, full: &InterpretedBody, pattern: &[bool]) -> u32 {
-        let mut index = self.index.lock().unwrap();
-        if let Some(&v) = index.get(pattern) {
-            return v;
+    /// Build the variant of `pattern`: the full body when deciding shortens
+    /// nothing, or past [`MAX_VARIANTS`].
+    fn build(&self, pattern: &[bool]) -> u32 {
+        let t = self.full.body().expect("an interpreted body is a tape");
+        if self.bodies.read().unwrap().len() >= MAX_VARIANTS {
+            return 0;
         }
-        let t = full.body().expect("an interpreted body is a tape");
-        let v = if self.bodies.read().unwrap().len() >= MAX_VARIANTS {
-            0
-        } else {
-            let decided = t.decide(&self.selects, Some(pattern), self.state_len);
-            if main_ops(&decided) >= self.main_ops || decided.state_len() != self.state_len {
-                0
-            } else {
-                let (pure, n_out) = (full.pure_args().to_vec(), full.n_outputs());
-                let mut bodies = self.bodies.write().unwrap();
-                bodies.push(Arc::new(InterpretedBody::new(decided, n_out, pure)));
-                bodies.len() as u32 - 1
+        let decided = t.decide(&self.selects, Some(pattern), self.state_len);
+        if main_ops(&decided) >= self.main_ops || decided.state_len() != self.state_len {
+            return 0;
+        }
+        let (pure, n_out) = (self.full.pure_args().to_vec(), self.full.n_outputs());
+        let mut bodies = self.bodies.write().unwrap();
+        bodies.push(Arc::new(InterpretedBody::new(decided, n_out, pure)));
+        bodies.len() as u32 - 1
+    }
+
+    /// The variant of `pattern`, built here on its first turn.
+    fn variant_now(&self, pattern: &[bool]) -> u32 {
+        let mut index = self.index.lock().unwrap();
+        match index.get(pattern) {
+            Some(Slot::Ready(v)) => *v,
+            Some(Slot::Building) => 0,
+            None => {
+                let v = self.build(pattern);
+                index.insert(pattern.into(), Slot::Ready(v));
+                v
             }
-        };
-        index.insert(pattern.into(), v);
-        v
+        }
     }
 }
 
@@ -99,12 +122,12 @@ impl Shared {
 /// docs).
 pub struct VariantBody {
     shared: Arc<Shared>,
-    /// The full body as built, for whole calls and as the body's tape.
-    full: Arc<InterpretedBody>,
     /// This backend's form of each variant, made on first use.
-    run: Box<[OnceLock<Arc<dyn ExternBundle>>]>,
+    run: Arc<[OnceLock<Arc<dyn ExternBundle>>]>,
+    /// Per variant, whether this backend's form of it is on its way.
+    pending: Arc<[AtomicBool]>,
     /// The backend the variants are made by; `None` interprets them.
-    compile: Option<Arc<BodyCompiler>>,
+    backend: Option<BodyBackend>,
     backends: BackendCache,
 }
 
@@ -129,43 +152,103 @@ impl VariantBody {
     pub(crate) fn new(full: InterpretedBody, selects: ParamSelects) -> VariantBody {
         let t = full.body().expect("an interpreted body is a tape");
         let state_len = 1 + t.state_len();
-        let all = main_ops(t);
+        let main_ops = main_ops(t);
         let padded = t.decide(&selects, None, state_len);
         let (pure, n_out) = (full.pure_args().to_vec(), full.n_outputs());
         let shared = Arc::new(Shared {
             selects,
-            main_ops: all,
+            full: Arc::new(full),
+            main_ops,
             state_len,
             bodies: RwLock::new(vec![Arc::new(InterpretedBody::new(padded, n_out, pure))]),
             index: Mutex::new(HashMap::default()),
         });
-        VariantBody::over(shared, Arc::new(full), None)
+        VariantBody::over(shared, None)
     }
 
-    fn over(
-        shared: Arc<Shared>,
-        full: Arc<InterpretedBody>,
-        compile: Option<Arc<BodyCompiler>>,
-    ) -> VariantBody {
-        VariantBody {
+    fn over(shared: Arc<Shared>, backend: Option<BodyBackend>) -> VariantBody {
+        let v = VariantBody {
             shared,
-            full,
             run: (0..MAX_VARIANTS).map(|_| OnceLock::new()).collect(),
-            compile,
+            pending: (0..MAX_VARIANTS).map(|_| AtomicBool::new(false)).collect(),
+            backend,
             backends: BackendCache::default(),
+        };
+        // The full body is what an instance runs until its variant is
+        // ready: this backend's form of it from the start.
+        if let Some(b) = &v.backend {
+            let full = v.shared.bodies.read().unwrap()[0].clone();
+            let made = made_by(&b.compile, &full);
+            let _ = v.run[0].set(made);
+        }
+        v
+    }
+
+    /// The variant of `pattern` this backend runs now: a ready one, else
+    /// the full body while it is built in the background.
+    fn variant_soon(&self, pattern: &[bool], backend: &BodyBackend) -> u32 {
+        let slot = self.shared.index.lock().unwrap().get(pattern).copied();
+        match slot {
+            Some(Slot::Ready(v)) if self.run[v as usize].get().is_some() => v,
+            Some(Slot::Ready(v)) => {
+                self.make_soon(v as usize, backend);
+                0
+            }
+            Some(Slot::Building) => 0,
+            None => {
+                let mut index = self.shared.index.lock().unwrap();
+                if index.contains_key(pattern) {
+                    return 0;
+                }
+                index.insert(pattern.into(), Slot::Building);
+                drop(index);
+                let (shared, run, pending) =
+                    (self.shared.clone(), self.run.clone(), self.pending.clone());
+                let (compile, pattern): (_, Box<[bool]>) =
+                    (backend.compile.clone(), pattern.into());
+                (backend.submit)(Box::new(move || {
+                    let v = shared.build(&pattern);
+                    shared.index.lock().unwrap().insert(pattern, Slot::Ready(v));
+                    if !pending[v as usize].swap(true, Ordering::AcqRel) {
+                        let body = shared.bodies.read().unwrap()[v as usize].clone();
+                        let _ = run[v as usize].set(made_by(&compile, &body));
+                    }
+                }));
+                0
+            }
         }
     }
 
-    /// This backend's form of variant `v`.
-    fn bundle(&self, v: usize) -> &Arc<dyn ExternBundle> {
-        self.run[v].get_or_init(|| {
-            let body = self.shared.bodies.read().unwrap()[v].clone();
-            let made = self.compile.as_ref().and_then(|c| {
-                let t = body.body().expect("an interpreted body is a tape");
-                c(t, body.pure_args(), body.n_outputs())
-            });
-            made.unwrap_or(body)
-        })
+    /// Have this backend's form of variant `v` made in the background.
+    fn make_soon(&self, v: usize, backend: &BodyBackend) {
+        if self.pending[v].swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let (shared, run, compile) = (
+            self.shared.clone(),
+            self.run.clone(),
+            backend.compile.clone(),
+        );
+        (backend.submit)(Box::new(move || {
+            let body = shared.bodies.read().unwrap()[v].clone();
+            let _ = run[v].set(made_by(&compile, &body));
+        }));
+    }
+
+    /// This backend's form of variant `v`, else its interpreted form (the
+    /// same state layout) while this backend's is on its way.
+    fn bundle(&self, v: usize) -> Arc<dyn ExternBundle> {
+        if let Some(b) = self.run[v].get() {
+            return b.clone();
+        }
+        let body: Arc<dyn ExternBundle> = self.shared.bodies.read().unwrap()[v].clone();
+        match &self.backend {
+            Some(b) => {
+                self.make_soon(v, b);
+                body
+            }
+            None => self.run[v].get_or_init(|| body).clone(),
+        }
     }
 
     /// The variant of the instance whose state starts `state`.
@@ -174,21 +257,30 @@ impl VariantBody {
     }
 }
 
+/// What `compile` makes of `body`, else `body` itself.
+fn made_by(
+    compile: &Arc<crate::extern_fn::BodyCompiler>,
+    body: &Arc<InterpretedBody>,
+) -> Arc<dyn ExternBundle> {
+    let t = body.body().expect("an interpreted body is a tape");
+    compile(t, body.pure_args(), body.n_outputs()).unwrap_or_else(|| body.clone())
+}
+
 impl ExternBundle for VariantBody {
     fn n_outputs(&self) -> usize {
-        self.full.n_outputs()
+        self.shared.full.n_outputs()
     }
     fn work_len(&self) -> usize {
-        self.full.work_len()
+        self.shared.full.work_len()
     }
     fn call_into(&self, args: &[f64], work: &mut [f64], out: &mut [f64]) {
-        self.full.call_into(args, work, out);
+        self.shared.full.call_into(args, work, out);
     }
     fn state_len(&self) -> usize {
         self.shared.state_len
     }
     fn pure_args(&self) -> &[bool] {
-        self.full.pure_args()
+        self.shared.full.pure_args()
     }
     fn prolog_into(&self, pure: &[f64], _work: &mut [f64], state: &mut [f64]) {
         let mask = self.pure_args();
@@ -204,7 +296,10 @@ impl ExternBundle for VariantBody {
                 crate::scratch::with(|o: &mut Vec<f64>| self.shared.selects.pattern(args, w, o))
             })
         });
-        let v = self.shared.variant(&self.full, &pattern);
+        let v = match &self.backend {
+            Some(b) => self.variant_soon(&pattern, b),
+            None => self.shared.variant_now(&pattern),
+        };
         let b = self.bundle(v as usize);
         crate::scratch::with_len(b.work_len(), 0.0, |w| b.prolog_into(pure, w, state));
         state[self.shared.state_len - 1] = v as f64;
@@ -240,13 +335,13 @@ impl ExternBundle for VariantBody {
         }
     }
     fn body(&self) -> Option<&Tape> {
-        self.full.body()
+        self.shared.full.body()
     }
     fn backend_cache(&self) -> Option<&BackendCache> {
         Some(&self.backends)
     }
-    fn with_compiler(&self, compile: Arc<BodyCompiler>) -> Option<Arc<dyn ExternBundle>> {
-        let v = VariantBody::over(self.shared.clone(), self.full.clone(), Some(compile));
+    fn with_backend(&self, backend: &BodyBackend) -> Option<Arc<dyn ExternBundle>> {
+        let v = VariantBody::over(self.shared.clone(), Some(backend.clone()));
         Some(Arc::new(v))
     }
 }

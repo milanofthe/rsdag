@@ -665,16 +665,18 @@ impl NativeTape {
         // calls it; a body with tapes of its own (per-binding variants) has
         // them compiled the same way.
         let o = *opts;
-        let compiler: Arc<rsdag::BodyCompiler> =
-            Arc::new(move |t: &Tape, pure: &[bool], n_out: usize| {
+        let backend = rsdag::BodyBackend {
+            compile: Arc::new(move |t: &Tape, pure: &[bool], n_out: usize| {
                 native_body(t, pure, n_out, &o).ok()
-            });
+            }),
+            submit: Arc::new(crate::background::submit),
+        };
         let bundles: Result<Bundles, JitError> = tape
             .bundles()
             .iter()
             .map(|b| {
                 let make = || -> Result<Arc<dyn ExternBundle>, JitError> {
-                    if let Some(v) = b.with_compiler(compiler.clone()) {
+                    if let Some(v) = b.with_backend(&backend) {
                         return Ok(v);
                     }
                     match b.body() {
