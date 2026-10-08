@@ -14,7 +14,9 @@ fn sym(g: &mut Graph<F64>, name: &str) -> SymbolId {
 #[test]
 fn the_signature_orders_by_role_and_index() {
     let mut g: Graph<F64> = Graph::new();
-    let names = ["p1", "x1", "n1", "t", "xd0", "h0", "x0", "n0", "p0", "u", "f"];
+    let names = [
+        "p1", "x1", "n1", "t", "xd0", "h0", "x0", "n0", "p0", "u", "f",
+    ];
     let s: Vec<SymbolId> = names.iter().map(|n| sym(&mut g, n)).collect();
     let roles = [
         ParamRole::Param,
@@ -38,7 +40,10 @@ fn the_signature_orders_by_role_and_index() {
     let order: Vec<&str> = sig.syms.iter().map(|&s| g.symbol_name(s)).collect();
     // States by id, derivatives, inputs, parameters in declaration order,
     // time, histories, noise generators by id, the rest.
-    assert_eq!(order, ["x0", "x1", "xd0", "u", "p1", "p0", "t", "h0", "n0", "n1", "f"]);
+    assert_eq!(
+        order,
+        ["x0", "x1", "xd0", "u", "p1", "p0", "t", "h0", "n0", "n1", "f"]
+    );
     assert_eq!(sig.range(|r| matches!(r, ParamRole::Noise { .. })), 8..10);
     assert_eq!(sig.range(|r| matches!(r, ParamRole::State { .. })), 0..2);
     assert_eq!(sig.range(|r| matches!(r, ParamRole::Param)), 4..6);
