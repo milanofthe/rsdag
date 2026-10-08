@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "rsdag"
-version = "4.0.1"
+version = "4.1.0"
 dependencies = [
  "libm",
  "num-bigint",
@@ -233,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "rsdag-jit"
-version = "4.0.1"
+version = "4.1.0"
 dependencies = [
  "libc",
  "rayon",
@@ -244,7 +244,7 @@ dependencies = [
 
 [[package]]
 name = "rsdag-py"
-version = "4.0.1"
+version = "4.1.0"
 dependencies = [
  "pyo3",
  "rsdag",
