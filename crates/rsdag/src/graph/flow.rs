@@ -88,6 +88,15 @@ impl Set {
         }
     }
 
+    /// Whether `k` is a member.
+    pub(crate) fn contains(&self, k: u32) -> bool {
+        match &self.0 {
+            None => false,
+            Some(Ids::Bits(w)) => w.get(k as usize / 64).is_some_and(|&b| b >> (k % 64) & 1 == 1),
+            Some(Ids::Sorted(v)) => v.binary_search(&k).is_ok(),
+        }
+    }
+
     /// The members, ascending.
     pub(crate) fn iter(&self) -> impl Iterator<Item = u32> + '_ {
         let (bits, sorted): (&[u64], &[u32]) = match &self.0 {
