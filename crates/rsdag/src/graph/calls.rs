@@ -653,8 +653,7 @@ impl<K: Field> Graph<K> {
         let func = &self.funcs[f.0 as usize];
         if let Output::Expr(e) = func.outputs()[out as usize] {
             let missing: Vec<u32> = (params.iter().copied())
-                .filter(|&p| (p as usize) < func.params().len())
-                .filter(|&p| matches!(func.param_roles()[p as usize], ParamRole::Param))
+                .filter(|&p| self.is_model_param(f, p))
                 .filter(|&p| func.derivative(out, p).is_none())
                 .collect();
             if missing.len() >= crate::autodiff::REVERSE_MIN_TOUCHED {
@@ -671,6 +670,14 @@ impl<K: Field> Graph<K> {
             .iter()
             .map(|&p| self.derivative_output(f, out, p))
             .collect()
+    }
+
+    /// Whether operand `p` of `f` is a model parameter: a `Param`-role
+    /// parameter or a global past the parameters. Its derivatives are asked
+    /// for selectively and are not swept (see [`derive`](Self::derive)).
+    fn is_model_param(&self, f: FuncId, p: u32) -> bool {
+        let roles = self.funcs[f.0 as usize].param_roles();
+        (roles.get(p as usize)).is_none_or(|r| matches!(r, ParamRole::Param))
     }
 
     /// An expression as an output: zero as no expression.
@@ -697,9 +704,7 @@ impl<K: Field> Graph<K> {
             func.output_roles()[out as usize],
             OutputRole::Derivative { .. }
         );
-        let model = (param as usize) >= func.params().len()
-            || matches!(func.param_roles()[param as usize], ParamRole::Param);
-        if derived || model {
+        if derived || self.is_model_param(f, param) {
             return;
         }
         let deps = self.deps(f);
