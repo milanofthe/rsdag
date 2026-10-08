@@ -192,7 +192,7 @@ impl<K: Field> Graph<K> {
     /// binds none of them. One copy per function and binding; the copy
     /// keeps `f`'s parameters, roles and output indices, and the derivative
     /// roles with respect to its parameters.
-    pub(crate) fn rebound(&mut self, f: FuncId, map: &HashMap<SymbolId, ExprId>) -> Option<FuncId> {
+    pub fn rebound(&mut self, f: FuncId, map: &HashMap<SymbolId, ExprId>) -> Option<FuncId> {
         let globals = self.globals(f);
         let mut binding: Vec<(SymbolId, ExprId)> = globals
             .iter()
