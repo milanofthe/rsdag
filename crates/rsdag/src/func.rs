@@ -84,6 +84,11 @@ pub struct Function {
     /// graph that calls a subset of one takes it, so a body is compiled once
     /// per function rather than once per program.
     interpreted: std::sync::Mutex<Vec<Body>>,
+    /// The program the interpreted bodies are views of (see
+    /// [`crate::tape::Lowered`]): the outputs they computed so far lowered
+    /// once, so the bodies of several output sets (a residual; with its
+    /// partials; a charge) share it.
+    lowered: std::sync::Mutex<Option<Arc<crate::tape::Lowered>>>,
     /// Derivative output `d outputs[out] / d params[param]`, by index: the
     /// outputs whose role is [`OutputRole::Derivative`].
     deriv_index: HashMap<(u32, u32), u32>,
@@ -210,6 +215,7 @@ impl Function {
             output_roles: Vec::new(),
             extern_body,
             interpreted: Default::default(),
+            lowered: Default::default(),
             deriv_index: HashMap::default(),
             support: Default::default(),
             deps: Default::default(),
@@ -435,14 +441,12 @@ impl Function {
             .map(|r| matches!(r, ParamRole::Param))
             .chain(globals.iter().map(|_| true))
             .collect();
-        let (tape, pure) = if pure.iter().any(|&p| p) {
-            (
-                crate::tape::Tape::compile_split(ctx, &roots, &inputs, &pure),
-                pure,
-            )
+        let pure = if pure.iter().any(|&p| p) {
+            pure
         } else {
-            (crate::tape::Tape::compile(ctx, &roots, &inputs), Vec::new())
+            Vec::new()
         };
+        let tape = self.view(ctx, &roots, &inputs, &pure);
         // A body whose selects a binding decides runs each binding's
         // variant (see `crate::variant`).
         let variants = !pure.is_empty() && tape.has_param_selects(&pure);
@@ -454,6 +458,35 @@ impl Function {
         let body = Body { bundle, slot_of };
         self.interpreted.lock().unwrap().push(body.clone());
         body
+    }
+
+    /// The tape of `roots` (outputs of this function) over `inputs`, split
+    /// by `pure` when it is not empty: a view of the program lowered for
+    /// the bodies so far, lowered anew over these roots too where it does
+    /// not hold them.
+    fn view<K: crate::field::Field>(
+        &self,
+        ctx: &crate::graph::Graph<K>,
+        roots: &[ExprId],
+        inputs: &[crate::node::SymbolId],
+        pure: &[bool],
+    ) -> crate::tape::Tape {
+        let split = (!pure.is_empty()).then_some(pure);
+        let held = self.lowered.lock().unwrap().clone();
+        let lowered = match held {
+            Some(l) if l.serves(roots, inputs, split) => l,
+            held => {
+                let mut all: Vec<ExprId> = (held.iter())
+                    .filter(|l| l.signature(inputs, split))
+                    .flat_map(|l| l.roots().to_vec())
+                    .collect();
+                all.extend_from_slice(roots);
+                let l = Arc::new(crate::tape::Lowered::new(ctx, &all, inputs, split));
+                *self.lowered.lock().unwrap() = Some(l.clone());
+                l
+            }
+        };
+        lowered.tape(ctx, roots)
     }
 
     /// [`body_for`](Self::body_for) exactly: a body carrying the outputs

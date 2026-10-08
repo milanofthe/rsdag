@@ -143,10 +143,11 @@ fn finish(mut program: Program, pure_inputs: Option<&[bool]>, n_inputs: usize) -
 /// [`Tape::compile`] of its roots computes, value for value.
 pub struct Lowered {
     program: Program,
-    /// The root each expression is, by its first place among the roots.
+    /// The roots, and the place of each among them (its first).
+    roots: Vec<ExprId>,
     at: HashMap<ExprId, u32>,
+    inputs: Vec<SymbolId>,
     pure_inputs: Option<Vec<bool>>,
-    n_inputs: usize,
 }
 
 impl Lowered {
@@ -165,10 +166,32 @@ impl Lowered {
         }
         Lowered {
             program,
+            roots: roots.to_vec(),
             at,
+            inputs: input_syms.to_vec(),
             pure_inputs: pure_inputs.map(<[bool]>::to_vec),
-            n_inputs: input_syms.len(),
         }
+    }
+
+    /// The roots it was lowered for.
+    pub fn roots(&self) -> &[ExprId] {
+        &self.roots
+    }
+
+    /// Whether it was lowered over the inputs `input_syms`, split by
+    /// `pure_inputs`.
+    pub fn signature(&self, input_syms: &[SymbolId], pure_inputs: Option<&[bool]>) -> bool {
+        self.inputs == input_syms && self.pure_inputs.as_deref() == pure_inputs
+    }
+
+    /// Whether a tape of `roots` over that signature is a view of it.
+    pub fn serves(
+        &self,
+        roots: &[ExprId],
+        input_syms: &[SymbolId],
+        pure_inputs: Option<&[bool]>,
+    ) -> bool {
+        self.signature(input_syms, pure_inputs) && roots.iter().all(|r| self.at.contains_key(r))
     }
 
     /// The tape computing `roots`, each one of the lowered roots.
@@ -183,7 +206,7 @@ impl Lowered {
             p.retain_reachable();
             p.narrow_calls(ctx, pure);
         });
-        finish(p, pure, self.n_inputs)
+        finish(p, pure, self.inputs.len())
     }
 }
 
