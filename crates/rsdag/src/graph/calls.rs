@@ -1022,7 +1022,8 @@ impl Instance {
                 // call over the list may not share
                 if let Node::Call(o, l) = node {
                     if self.lists.contains_key(&l) {
-                        if let c @ 0..NO_CONTEXT = g.context_of(o) {
+                        let c = g.context_of(o);
+                        if c != NO_CONTEXT {
                             stack.extend(
                                 (g.args(g.context_list(c)).iter().rev())
                                     .filter(|c| !self.memo.contains_key(c))
