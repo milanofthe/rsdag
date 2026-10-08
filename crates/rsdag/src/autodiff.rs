@@ -342,7 +342,7 @@ fn cone<K: Field>(ctx: &Graph<K>, root: ExprId, seen: &mut Memo) -> Vec<ExprId> 
 /// the call stack. Only operands `moves` admits are walked, the others'
 /// derivative is zero: given the support, a sweep visits only what depends
 /// on `wrt`, not the roots' whole cones.
-fn forward<K: Field>(
+pub(crate) fn forward<K: Field>(
     ctx: &mut Graph<K>,
     roots: &[ExprId],
     wrt: SymbolId,
@@ -585,7 +585,9 @@ pub fn sparse_jacobian<K: Field>(
         memo.begin(ctx.len());
         let roots: Vec<ExprId> = members.iter().map(|&i| residuals[i]).collect();
         // through the nodes whose support holds the column only
-        let col = forward(ctx, &roots, wrt[j], &mut memo, &|c| flow.get(c).contains(j as u32));
+        let col = forward(ctx, &roots, wrt[j], &mut memo, &|c| {
+            flow.get(c).contains(j as u32)
+        });
         for (&i, d) in members.iter().zip(col) {
             rows[i].push((j, d));
         }

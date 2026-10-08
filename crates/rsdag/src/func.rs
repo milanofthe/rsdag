@@ -91,6 +91,10 @@ pub struct Function {
     /// [`Graph::output_support`](crate::Graph::output_support)). An output
     /// never changes once pushed, so neither does its support.
     support: std::sync::Mutex<Vec<Option<Arc<[u32]>>>>,
+    /// Per kind of parameter (the others, the `Param`-role ones), what each
+    /// node of the outputs' cone depends on, once asked for (see
+    /// `Graph::derive`).
+    pub(crate) deps: std::sync::Mutex<[Option<Arc<crate::graph::Deps>>; 2]>,
     /// What each output reads, per way through and set of moving
     /// parameters (see `Graph::reads`).
     reads: std::sync::Mutex<HashMap<ReadsKey, Arc<[Arc<[u32]>]>>>,
@@ -209,6 +213,7 @@ impl Function {
             interpreted: Default::default(),
             deriv_index: HashMap::default(),
             support: Default::default(),
+            deps: Default::default(),
             reads: Default::default(),
             globals: Default::default(),
             composite: Default::default(),
@@ -222,6 +227,7 @@ impl Function {
         if !matches!(role, OutputRole::Derivative { .. }) {
             self.globals = Default::default();
             self.composite = Default::default();
+            self.deps = Default::default();
         }
         let k = self.outputs.len() as u32;
         self.outputs.push(output);

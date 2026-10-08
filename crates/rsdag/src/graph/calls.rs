@@ -619,11 +619,14 @@ impl<K: Field> Graph<K> {
     /// differentiating the body on first demand (symbolic functions) or
     /// looking up the declared slot (extern functions; zero if undeclared).
     pub fn derivative_output(&mut self, f: FuncId, out: u32, param: u32) -> u32 {
-        let func = &self.funcs[f.0 as usize];
-        if let Some(k) = func.derivative(out, param) {
+        if let Some(k) = self.funcs[f.0 as usize].derivative(out, param) {
             return k;
         }
-        let output = func.outputs()[out as usize];
+        self.derive(f, out, param);
+        if let Some(k) = self.funcs[f.0 as usize].derivative(out, param) {
+            return k;
+        }
+        let output = self.funcs[f.0 as usize].outputs()[out as usize];
         let d = match output {
             Output::Expr(e) => {
                 let wrt = self.operand_symbol(f, param);
@@ -646,33 +649,110 @@ impl<K: Field> Graph<K> {
         )
     }
 
+    /// Derive, w.r.t. parameter `param` of `f`, every output of `f` that
+    /// depends on it, in one forward sweep through the nodes that do (see
+    /// [`Deps`]): a chain rule through the calls of a body asks for one
+    /// output at a time, and derived one at a time each would walk its whole
+    /// cone again, the work on the parameters only (a compact model's
+    /// preprocessing) included. Not for a derivative output (a second
+    /// derivative goes the plain way) nor a parameter beyond the list.
+    fn derive(&mut self, f: FuncId, out: u32, param: u32) {
+        let func = &self.funcs[f.0 as usize];
+        let original = |r: &OutputRole| !matches!(r, OutputRole::Derivative { .. });
+        if (param as usize) >= func.params().len() || !original(&func.output_roles()[out as usize])
+        {
+            return;
+        }
+        let kind = matches!(func.param_roles()[param as usize], ParamRole::Param);
+        let deps = self.deps(f, kind);
+        let Some(&j) = deps.col.get(&param) else {
+            return;
+        };
+        let func = &self.funcs[f.0 as usize];
+        let roots: Vec<(u32, ExprId)> = (deps.outs[j as usize].iter())
+            .filter(|&&o| func.derivative(o, param).is_none())
+            .filter_map(|&o| match func.outputs()[o as usize] {
+                Output::Expr(e) => Some((o, e)),
+                _ => None,
+            })
+            .collect();
+        if roots.is_empty() {
+            return;
+        }
+        let wrt = self.operand_symbol(f, param);
+        let exprs: Vec<ExprId> = roots.iter().map(|&(_, e)| e).collect();
+        let mut memo = self.take_memo();
+        memo.begin(self.len());
+        let moves = |c: ExprId| {
+            deps.sets
+                .get(&c)
+                .is_some_and(|s| s.binary_search(&j).is_ok())
+        };
+        let ds = crate::autodiff::forward(self, &exprs, wrt, &mut memo, &moves);
+        self.put_memo(memo);
+        for (&(o, _), d) in roots.iter().zip(ds) {
+            let d = if self.is_zero(d) {
+                Output::Zero
+            } else {
+                Output::Expr(d)
+            };
+            self.push_output(f, d, OutputRole::Derivative { of: o, wrt: param });
+        }
+    }
+
+    /// The dependence of `f`'s outputs on its parameters of one kind (the
+    /// `Param`-role ones, or the others), found once (see [`Deps`]).
+    fn deps(&self, f: FuncId, kind: bool) -> Arc<Deps> {
+        let func = &self.funcs[f.0 as usize];
+        if let Some(d) = &func.deps.lock().unwrap()[kind as usize] {
+            return d.clone();
+        }
+        let params: Vec<u32> = (0..func.params().len() as u32)
+            .filter(|&p| matches!(func.param_roles()[p as usize], ParamRole::Param) == kind)
+            .collect();
+        let col: HashMap<SymbolId, u32> = (params.iter().enumerate())
+            .map(|(c, &p)| (func.params()[p as usize], c as u32))
+            .collect();
+        let outs: Vec<(u32, ExprId)> = (func.outputs().iter().enumerate())
+            .filter(|&(k, _)| !matches!(func.output_roles()[k], OutputRole::Derivative { .. }))
+            .filter_map(|(k, o)| match *o {
+                Output::Expr(e) => Some((k as u32, e)),
+                _ => None,
+            })
+            .collect();
+        let roots: Vec<ExprId> = outs.iter().map(|&(_, e)| e).collect();
+        let n = params.len();
+        let flow = self.flow(&roots, Through::Carries, |node| match *node {
+            Node::Symbol(s) => col.get(&s).map_or(Set::bottom(), |&c| Set::one(c, n)),
+            _ => Set::bottom(),
+        });
+        let mut by_col = vec![Vec::new(); n];
+        for &(k, e) in &outs {
+            for c in flow.get(e).iter() {
+                by_col[c as usize].push(k);
+            }
+        }
+        let deps = Arc::new(Deps {
+            col: (params.iter().enumerate())
+                .map(|(c, &p)| (p, c as u32))
+                .collect(),
+            sets: flow
+                .iter()
+                .filter(|(_, v)| !v.is_bottom())
+                .map(|(e, v)| (e, v.iter().collect()))
+                .collect(),
+            outs: by_col,
+        });
+        func.deps.lock().unwrap()[kind as usize] = Some(deps.clone());
+        deps
+    }
+
     /// [`derivative_output`](Self::derivative_output) for several parameters
     /// of one output. The missing derivatives of a symbolic function are
     /// derived in one reverse sweep over the body when they are
     /// [`REVERSE_MIN_TOUCHED`](crate::autodiff::REVERSE_MIN_TOUCHED) or more
     /// (a device's parameters), in one forward sweep each otherwise.
     pub fn derivative_outputs(&mut self, f: FuncId, out: u32, params: &[u32]) -> Vec<u32> {
-        let func = &self.funcs[f.0 as usize];
-        if let Output::Expr(e) = func.outputs()[out as usize] {
-            let missing: Vec<u32> = params
-                .iter()
-                .copied()
-                .filter(|&p| func.derivative(out, p).is_none())
-                .collect();
-            if missing.len() >= crate::autodiff::REVERSE_MIN_TOUCHED {
-                let wrt: Vec<SymbolId> =
-                    missing.iter().map(|&p| self.operand_symbol(f, p)).collect();
-                let grad = crate::autodiff::gradient(self, e, &wrt);
-                for (&p, d) in missing.iter().zip(grad) {
-                    let d = if self.is_zero(d) {
-                        Output::Zero
-                    } else {
-                        Output::Expr(d)
-                    };
-                    self.push_output(f, d, OutputRole::Derivative { of: out, wrt: p });
-                }
-            }
-        }
         params
             .iter()
             .map(|&p| self.derivative_output(f, out, p))
@@ -963,4 +1043,18 @@ impl Instance {
         }
         self.memo[&root]
     }
+}
+
+/// What the outputs of a function depend on among its parameters of one
+/// kind: per node of their cone, the parameters' columns it reads; per
+/// column, the outputs that read it. Found once per function; a derivative
+/// w.r.t. a parameter then sweeps only the nodes that depend on it, for
+/// every output at once.
+pub(crate) struct Deps {
+    /// The column of each parameter of the kind, by parameter index.
+    col: HashMap<u32, u32>,
+    /// Per node that depends on any of them, which, ascending.
+    sets: HashMap<ExprId, Box<[u32]>>,
+    /// Per column, the outputs that depend on it.
+    outs: Vec<Vec<u32>>,
 }
