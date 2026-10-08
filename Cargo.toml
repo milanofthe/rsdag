@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/rsdag", "crates/rsdag-jit", "crates/rsdag-py"]
 
 [workspace.package]
-version = "4.1.0"
+version = "4.2.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 authors = ["Milan Rother"]
