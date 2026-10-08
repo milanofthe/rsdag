@@ -1018,8 +1018,17 @@ impl Instance {
             let node = *g.node(e);
             if !expanded {
                 stack.push((e, true));
-                if let Node::Call(_, l) = node {
+                // a list rewritten before: only the binding, which another
+                // call over the list may not share
+                if let Node::Call(o, l) = node {
                     if self.lists.contains_key(&l) {
+                        if let c @ 0..NO_CONTEXT = g.context_of(o) {
+                            stack.extend(
+                                (g.args(g.context_list(c)).iter().rev())
+                                    .filter(|c| !self.memo.contains_key(c))
+                                    .map(|&c| (c, false)),
+                            );
+                        }
                         continue;
                     }
                 }
