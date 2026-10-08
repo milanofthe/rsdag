@@ -936,27 +936,38 @@ impl Program {
             });
             let n_in = own.len() / n_groups as usize;
             let n_pure = mask.iter().filter(|&&p| p).count();
-            let args: Vec<Ref> = (0..n_groups as usize)
-                .flat_map(|g| {
-                    let list = &own[g * n_in..(g + 1) * n_in];
-                    let pro = prolog.map(|p| {
-                        let ins = self.ins(p as usize);
-                        ins[g * n_pure..(g + 1) * n_pure].to_vec()
+            // per argument: where the call's list holds it, else its place
+            // among the prolog's
+            let mut from: Vec<Result<usize, usize>> = Vec::with_capacity(n_args as usize);
+            let mut rank = 0;
+            let mut at_read: Vec<Option<usize>> = vec![None; n_args as usize];
+            if let Some(r) = &reads {
+                for (k, &q) in r.iter().enumerate() {
+                    at_read[q as usize] = Some(k);
+                }
+            }
+            for p in 0..n_args as usize {
+                from.push(match (&reads, at_read[p]) {
+                    (None, _) => Ok(p),
+                    (Some(_), Some(k)) => Ok(k),
+                    (Some(_), None) => Err(rank),
+                });
+                rank += usize::from(mask.get(p) == Some(&true));
+            }
+            let pro_ins: Option<Vec<Ref>> = prolog.map(|p| self.ins(p as usize).to_vec());
+            let mut args: Vec<Ref> = Vec::with_capacity(n_groups as usize * n_args as usize);
+            for g in 0..n_groups as usize {
+                let list = &own[g * n_in..(g + 1) * n_in];
+                for f in &from {
+                    args.push(match *f {
+                        Ok(k) => list[k],
+                        Err(k) => {
+                            let pro = pro_ins.as_ref().expect("an argument not read is pure");
+                            pro[g * n_pure + k]
+                        }
                     });
-                    (0..n_args as usize)
-                        .map(|p| match &reads {
-                            None => list[p],
-                            Some(r) => match r.iter().position(|&q| q as usize == p) {
-                                Some(at) => list[at],
-                                None => {
-                                    let rank = mask[..p].iter().filter(|&&x| x).count();
-                                    pro.as_ref().expect("an argument not read is pure")[rank]
-                                }
-                            },
-                        })
-                        .collect::<Vec<Ref>>()
-                })
-                .collect();
+                }
+            }
             if let Some(p) = prolog {
                 dead[p as usize] = true;
             }

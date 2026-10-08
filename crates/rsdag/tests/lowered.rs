@@ -16,13 +16,18 @@ fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
 }
 
 /// `d(va, vb, k, w)`: a current and a charge over a card parameter and an
-/// instance parameter.
-fn device(g: &mut Graph<F64>) -> FuncId {
+/// instance parameter, those pure with `roles` (a body with a prolog).
+fn device(g: &mut Graph<F64>, roles: bool) -> FuncId {
     let mut s = Scope::new(g, "d");
     let va = s.param_with_role("va", ParamRole::State { id: 0 });
     let vb = s.param_with_role("vb", ParamRole::State { id: 1 });
-    let k = s.param_with_role("k", ParamRole::Param);
-    let w = s.param_with_role("w", ParamRole::Param);
+    let role = if roles {
+        ParamRole::Param
+    } else {
+        ParamRole::State { id: 2 }
+    };
+    let k = s.param_with_role("k", role);
+    let w = s.param_with_role("w", role);
     let dv = s.sub(va, vb);
     let kw = s.mul(k, w);
     let th = s.tanh(dv);
@@ -47,9 +52,9 @@ struct System {
 /// A ring of `n` cells, each a composite function calling the device twice
 /// (so its calls are expanded from a template and merged), with the
 /// Jacobians of its currents and charges.
-fn ring(n: usize) -> System {
+fn ring(n: usize, roles: bool) -> System {
     let mut g: Graph<F64> = Graph::new();
-    let d = device(&mut g);
+    let d = device(&mut g, roles);
     let (a, sa) = sym(&mut g, "cell.a");
     let (b, sb) = sym(&mut g, "cell.b");
     let (w, sw) = sym(&mut g, "cell.w");
@@ -128,7 +133,12 @@ fn call_widths(tape: &Tape) -> Vec<u32> {
 
 #[test]
 fn a_view_computes_what_its_own_compilation_does() {
-    let s = ring(7);
+    for roles in [true, false] {
+        views_compute_what_their_own_compilations_do(ring(7, roles));
+    }
+}
+
+fn views_compute_what_their_own_compilations_do(s: System) {
     let values: Vec<f64> = (0..s.inputs.len()).map(|j| 0.1 + 0.07 * j as f64).collect();
     let all: Vec<ExprId> = (s.currents.iter())
         .chain(&s.charges)
@@ -160,7 +170,7 @@ fn a_view_computes_what_its_own_compilation_does() {
 
 #[test]
 fn a_view_of_every_root_is_the_compilation() {
-    let s = ring(5);
+    let s = ring(5, true);
     let all: Vec<ExprId> = s.currents.iter().chain(&s.jac_i).copied().collect();
     let lowered = Lowered::new(&s.g, &all, &s.inputs, Some(&s.pure));
     let view = lowered.tape(&s.g, &all);
