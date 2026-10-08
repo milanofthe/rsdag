@@ -75,8 +75,9 @@ on any platform and in any build order; the terms of a sum or product are
 ordered by it. A function is a
 graph over positional parameters with named outputs; `Call` applies it;
 derivative outputs are derived from the body on first demand. Parameters
-and outputs carry roles (state, input, parameter, time; residual, charge,
-derivative, guard with its crossing direction, state write).
+and outputs carry roles (state, input, parameter, time, delay history,
+noise generator; residual, charge, derivative, guard with its crossing
+direction, state write, delay source and time, noise level, observer).
 
 ![Derivative](docs/diagrams/derivative.svg)
 
