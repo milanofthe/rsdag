@@ -177,3 +177,32 @@ fn a_view_of_every_root_is_the_compilation() {
     let own = Tape::compile_split(&s.g, &all, &s.inputs, &s.pure);
     assert_eq!(view.dump(), own.dump());
 }
+
+#[test]
+fn a_view_narrows_onto_a_body_built_before_its_function_grew() {
+    // the currents compiled while the device has no derivative outputs yet:
+    // the body of its current is built then, and a view of the currents
+    // out of a program with the Jacobian narrows back onto it
+    let mut g: Graph<F64> = Graph::new();
+    let d = device(&mut g, true);
+    let v: Vec<(ExprId, SymbolId)> = (0..3).map(|j| sym(&mut g, &format!("v{j}"))).collect();
+    let (k, sk) = sym(&mut g, "k");
+    let (w, sw) = sym(&mut g, "w");
+    let currents: Vec<ExprId> = (0..3)
+        .map(|j| g.call(d, 0, &[v[j].0, v[(j + 1) % 3].0, k, w]))
+        .collect();
+    let states: Vec<SymbolId> = v.iter().map(|&(_, s)| s).collect();
+    let inputs: Vec<SymbolId> = states.iter().copied().chain([sk, sw]).collect();
+    let pure = [false, false, false, true, true];
+    let first = Tape::compile_split(&g, &currents, &inputs, &pure);
+    let jac: Vec<ExprId> = (sparse_jacobian(&mut g, &currents, &states).into_iter())
+        .flatten()
+        .map(|(_, e)| e)
+        .collect();
+    let all: Vec<ExprId> = currents.iter().chain(&jac).copied().collect();
+    let lowered = Lowered::new(&g, &all, &inputs, Some(&pure));
+    let view = lowered.tape(&g, &currents);
+    let values = [0.3, 0.5, 0.7, 1.1, 1.3];
+    assert_eq!(bits(&view, &values), bits(&first, &values));
+    assert_eq!(call_widths(&view), call_widths(&first));
+}

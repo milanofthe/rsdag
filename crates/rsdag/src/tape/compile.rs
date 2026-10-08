@@ -1025,7 +1025,13 @@ impl Program {
             };
             let at = self.push(kind, ins, n_groups * width, pure);
             let slots: Vec<u32> = (outs.iter())
-                .map(|&k| body.slot_of[k as usize].unwrap_or(u32::MAX))
+                .map(|&k| {
+                    body.slot_of
+                        .get(k as usize)
+                        .copied()
+                        .flatten()
+                        .unwrap_or(u32::MAX)
+                })
                 .collect();
             moved.insert(i, (at, outs.len() as u32, slots));
         }
