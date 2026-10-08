@@ -380,6 +380,16 @@ impl Function {
                 return c.clone();
             }
         }
+        self.build_body(ctx, needed)
+    }
+
+    /// The body of exactly the outputs `needed`, interpreted and kept (an
+    /// extern function's own).
+    fn build_body<K: crate::field::Field>(
+        &self,
+        ctx: &crate::graph::Graph<K>,
+        needed: &[u32],
+    ) -> Body {
         if let Some(b) = &self.extern_body {
             return Body {
                 bundle: b.clone(),
@@ -444,6 +454,46 @@ impl Function {
         let body = Body { bundle, slot_of };
         self.interpreted.lock().unwrap().push(body.clone());
         body
+    }
+
+    /// [`body_for`](Self::body_for) exactly: a body carrying the outputs
+    /// `needed` that are expressions and no other, built if there is none.
+    /// A program that reads fewer outputs than a body it was given computes
+    /// (a view of a program lowered for more, see [`crate::tape::Lowered`])
+    /// takes this one.
+    pub fn body_exact<K: crate::field::Field>(
+        &self,
+        ctx: &crate::graph::Graph<K>,
+        needed: &[u32],
+    ) -> Body {
+        if self.extern_body.is_none() {
+            let mut exprs: Vec<u32> = (needed.iter().copied())
+                .filter(|&k| matches!(self.outputs[k as usize], Output::Expr(_)))
+                .collect();
+            exprs.sort_unstable();
+            exprs.dedup();
+            let built = self.interpreted.lock().unwrap();
+            let exact = (built.iter())
+                .find(|c| self.covers(c, needed) && c.bundle.n_outputs() == exprs.len());
+            if let Some(c) = exact {
+                return c.clone();
+            }
+        }
+        self.build_body(ctx, needed)
+    }
+
+    /// The function output each slot of `bundle` carries, when it is one of
+    /// this function's interpreted bodies.
+    pub(crate) fn slot_outputs(&self, bundle: &Arc<dyn ExternBundle>) -> Option<Vec<u32>> {
+        let built = self.interpreted.lock().unwrap();
+        let body = built.iter().find(|c| Arc::ptr_eq(&c.bundle, bundle))?;
+        let mut outs = vec![u32::MAX; body.bundle.n_outputs()];
+        for (k, s) in body.slot_of.iter().enumerate() {
+            if let Some(s) = s {
+                outs[*s as usize] = k as u32;
+            }
+        }
+        Some(outs)
     }
 
     /// Whether `body` carries every output of `needed` that is an expression.
