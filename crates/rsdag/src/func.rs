@@ -91,10 +91,9 @@ pub struct Function {
     /// [`Graph::output_support`](crate::Graph::output_support)). An output
     /// never changes once pushed, so neither does its support.
     support: std::sync::Mutex<Vec<Option<Arc<[u32]>>>>,
-    /// Per kind of parameter (the others, the `Param`-role ones), what each
-    /// node of the outputs' cone depends on, once asked for (see
-    /// `Graph::derive`).
-    pub(crate) deps: std::sync::Mutex<[Option<Arc<crate::graph::Deps>>; 2]>,
+    /// What each node of the outputs' cone depends on among the parameters
+    /// that are no model parameters, once asked for (see `Graph::derive`).
+    pub(crate) deps: std::sync::Mutex<Option<Arc<crate::graph::Deps>>>,
     /// What each output reads, per way through and set of moving
     /// parameters (see `Graph::reads`).
     reads: std::sync::Mutex<HashMap<ReadsKey, Arc<[Arc<[u32]>]>>>,
