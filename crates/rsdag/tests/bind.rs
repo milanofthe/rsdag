@@ -239,6 +239,81 @@ fn substitution_reaches_into_a_binding() {
     assert!(!bound.1, "the constant replaced the symbol");
 }
 
+#[test]
+fn substitution_reaches_every_binding_of_one_argument_list() {
+    // two devices on the same terminals with the same instance parameter,
+    // each on its own card: one argument list, two bindings
+    let mut g: Graph<F64> = Graph::new();
+    let d = device(&mut g);
+    let (v0, s0) = sym(&mut g, "v0");
+    let (v1, _) = sym(&mut g, "v1");
+    let (v2, _) = sym(&mut g, "v2");
+    let (w, _) = sym(&mut g, "w");
+    let cards: Vec<Vec<ExprId>> = (0..2)
+        .map(|c| {
+            (0..CARD)
+                .map(|k| sym(&mut g, &format!("card{c}.{k}")).0)
+                .collect()
+        })
+        .collect();
+    let mut bound = Vec::new();
+    let mut full = Vec::new();
+    for card in &cards {
+        let pairs: Vec<(u32, ExprId)> = (card.iter().enumerate())
+            .map(|(k, &e)| ((2 + k) as u32, e))
+            .collect();
+        let b = g.bind(d, &pairs);
+        bound.push(g.call_bound(b, 0, &[v0, v1, w]));
+        let args: Vec<ExprId> = [v2, v1]
+            .into_iter()
+            .chain(card.iter().copied())
+            .chain([w])
+            .collect();
+        full.push(g.call(d, 0, &args));
+    }
+    let map: FxHashMap<SymbolId, ExprId> = [(s0, v2)].into_iter().collect();
+    let sub = substitute(&mut g, &bound, &map);
+    let env: HashMap<SymbolId, f64> = (g.free_symbols_in(&full).into_iter().enumerate())
+        .map(|(k, s)| (s, 0.05 + 0.037 * k as f64))
+        .collect();
+    assert_eq!(bits(&eval(&g, &sub, &env)), bits(&eval(&g, &full, &env)));
+}
+
+#[test]
+fn inlining_reaches_every_binding_of_one_argument_list() {
+    // a body of two devices on the same terminals, each on its own card;
+    // the devices stay calls
+    let mut g: Graph<F64> = Graph::new();
+    let d = device(&mut g);
+    let (a, sa) = sym(&mut g, "a");
+    let (b, sb) = sym(&mut g, "b");
+    let (w, sw) = sym(&mut g, "w");
+    let terms: Vec<ExprId> = (0..2)
+        .map(|c| {
+            let pairs: Vec<(u32, ExprId)> = (0..CARD)
+                .map(|k| ((2 + k) as u32, sym(&mut g, &format!("card{c}.{k}")).0))
+                .collect();
+            let bound = g.bind(d, &pairs);
+            g.call_bound(bound, 0, &[a, b, w])
+        })
+        .collect();
+    let body = g.reduce(ReduceOp::Sum, terms);
+    let pair = g.define_func("pair", vec![sa, sb, sw], vec![body]);
+    let args: Vec<ExprId> = ["v0", "v1", "w0"]
+        .iter()
+        .map(|n| sym(&mut g, n).0)
+        .collect();
+    let call = g.call(pair, 0, &args);
+    let inlined = g.inline_composite(&[call]);
+    let env: HashMap<SymbolId, f64> = (g.free_symbols_in(&[call]).into_iter().enumerate())
+        .map(|(k, s)| (s, 0.05 + 0.037 * k as f64))
+        .collect();
+    assert_eq!(
+        bits(&eval(&g, &inlined, &env)),
+        bits(&eval(&g, &[call], &env))
+    );
+}
+
 #[cfg(feature = "serde")]
 #[test]
 fn a_module_keeps_its_bindings() {
