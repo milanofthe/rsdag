@@ -110,3 +110,28 @@ fn without_the_jit_it_stays_interpreted_and_correct() {
     reference.eval(&ins, &mut rw, &mut ro);
     assert!(same(&o, &ro));
 }
+
+#[test]
+fn a_long_pass_kicks_the_compile_at_once() {
+    use std::time::Duration;
+    for (eager, compiled) in [(Some(Duration::ZERO), true), (None, false)] {
+        let (tape, ins, _) = program(11);
+        let policy = Policy {
+            kick_after: u32::MAX,
+            eager_pass: eager,
+            ..Policy::default()
+        };
+        let a = Adaptive::new(tape, policy, Some(rsdag_jit::compiler()));
+        let reference = a.tape();
+        let (mut w, mut o, mut rw, mut ro) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        // The first pass shows the tape large, the second kicks its compile.
+        for _ in 0..2 {
+            a.eval(&ins, &mut w, &mut o);
+        }
+        rsdag_jit::background::drain();
+        assert_eq!(a.native().is_some(), compiled, "eager {eager:?}");
+        a.eval(&ins, &mut w, &mut o);
+        reference.eval(&ins, &mut rw, &mut ro);
+        assert!(same(&o, &ro), "eager {eager:?}");
+    }
+}
