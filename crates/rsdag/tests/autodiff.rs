@@ -384,10 +384,11 @@ fn the_sparse_jacobian_holds_every_nonzero_derivative() {
 }
 
 #[test]
-fn many_moving_call_arguments_derive_the_body_in_one_reverse_sweep() {
-    // A body over 20 parameters, called with 20 symbols: the gradient derives
-    // the body's derivative outputs in one reverse sweep; the values match one
-    // forward sweep per argument on a twin graph.
+fn many_moving_call_arguments_take_one_vector_jacobian_call() {
+    // A body over 20 parameters, called with 20 symbols: the gradient carries
+    // through the call as one call of the body's vector-Jacobian product (a
+    // second function, 20 outputs, the body itself untouched); the values
+    // match one forward sweep per argument on a twin graph.
     fn build(g: &mut Graph) -> (ExprId, Vec<SymbolId>, FuncId) {
         let n = 20;
         let ps: Vec<ExprId> = (0..n).map(|k| g.sym(&format!("p{k}"))).collect();
@@ -410,7 +411,9 @@ fn many_moving_call_arguments_derive_the_body_in_one_reverse_sweep() {
     let (fc, fs, ff) = build(&mut fg);
     let rev = gradient(&mut rg, rc, &rs);
     let fwd: Vec<ExprId> = fs.iter().map(|&s| differentiate(&mut fg, fc, s)).collect();
-    assert_eq!(rg.func(rf).outputs().len(), 21);
+    assert_eq!(rg.func(rf).outputs().len(), 1);
+    assert_eq!(rg.n_funcs(), 2);
+    assert_eq!(rg.func(rsdag::FuncId(1)).outputs().len(), 20);
     assert_eq!(fg.func(ff).outputs().len(), 21);
     let env = |ids: &[SymbolId]| -> HashMap<SymbolId, f64> {
         ids.iter()
@@ -533,4 +536,75 @@ fn a_jacobian_through_wide_calls_makes_only_its_entries() {
             "entry {k}: {p} vs {q}"
         );
     }
+}
+
+/// The pull's shape: a gradient of a weighted sum of a body's outputs and of
+/// its derivative outputs (second derivatives), the body calling another
+/// function, its many operands moving: one call of the vector-Jacobian
+/// product per call site, the values those of forward sweeps on a twin.
+#[test]
+fn a_call_site_with_several_outputs_and_their_derivatives_takes_one_vjp() {
+    fn build(g: &mut Graph) -> (ExprId, Vec<SymbolId>) {
+        let n = 20;
+        // inner(q) = q * exp(q)
+        let q = g.sym("q");
+        let qs = sid(g, "q");
+        let eq = g.exp(q);
+        let qe = g.mul(q, eq);
+        let inner = g.define_func("inner", vec![qs], vec![qe]);
+        // dev(p) = [sum_k p_k inner(p_{k+1}), prod-ish second output]
+        let ps: Vec<ExprId> = (0..n).map(|k| g.sym(&format!("p{k}"))).collect();
+        let pids: Vec<SymbolId> = (0..n).map(|k| sid(g, &format!("p{k}"))).collect();
+        let mut acc = g.zero();
+        let mut sq = g.zero();
+        for k in 0..n {
+            let c = g.call(inner, 0, &[ps[(k + 1) % n]]);
+            let t = g.mul(ps[k], c);
+            acc = g.add(acc, t);
+            let s = g.sin(ps[k]);
+            let st = g.mul(s, ps[(k + 3) % n]);
+            sq = g.add(sq, st);
+        }
+        let f = g.define_func("dev", pids, vec![acc, sq]);
+        let args: Vec<ExprId> = (0..n)
+            .map(|k| {
+                let a = g.sym(&format!("a{k}"));
+                let h = g.konst_f64(0.5);
+                g.mul(h, a)
+            })
+            .collect();
+        let aids: Vec<SymbolId> = (0..n).map(|k| sid(g, &format!("a{k}"))).collect();
+        // the outputs and a derivative output of one call site, weighted
+        let d0 = g.derivative_output(f, 0, 3);
+        let outs = g.calls(f, &[0, 1, d0], &args);
+        let w = [1.3, -0.7, 2.1];
+        let terms: Vec<ExprId> = (outs.iter().zip(w))
+            .map(|(&o, w)| {
+                let c = g.konst_f64(w);
+                g.mul(c, o)
+            })
+            .collect();
+        (g.reduce(ReduceOp::Sum, terms), aids)
+    }
+    let (mut rg, mut fg): (Graph, Graph) = (Graph::new(), Graph::new());
+    let (rf, rs) = build(&mut rg);
+    let (ff, fs) = build(&mut fg);
+    let rev = gradient(&mut rg, rf, &rs);
+    let fwd: Vec<ExprId> = fs.iter().map(|&s| differentiate(&mut fg, ff, s)).collect();
+    let env = |ids: &[SymbolId]| -> HashMap<SymbolId, f64> {
+        ids.iter()
+            .enumerate()
+            .map(|(k, &s)| (s, 0.03 * (k as f64 + 1.0)))
+            .collect()
+    };
+    let vr: Vec<f64> = eval(&rg, &rev, &env(&rs));
+    let vf: Vec<f64> = eval(&fg, &fwd, &env(&fs));
+    for (a, b) in vr.iter().zip(&vf) {
+        assert!((a - b).abs() <= 1e-12 * b.abs().max(1.0), "{a} vs {b}");
+    }
+    // one vector-Jacobian product of dev made, none of the forward kind
+    let vjps = (0..rg.n_funcs())
+        .filter(|&f| rg.func(FuncId(f as u32)).name().starts_with("dev#vjp"))
+        .count();
+    assert_eq!(vjps, 1);
 }
