@@ -66,6 +66,10 @@ pub struct Graph<K: Field = F64> {
     /// The copies of functions with globals bound (see
     /// [`rebound`](Self::rebound)), by function and binding.
     rebound: HashMap<(FuncId, Vec<(SymbolId, ExprId)>), FuncId>,
+    /// The vector-Jacobian products of functions (see
+    /// [`vjp_function`](Self::vjp_function)), by function, outputs and
+    /// operands.
+    vjps: HashMap<(FuncId, Box<[u32]>, Box<[u32]>), FuncId>,
     /// The templates the tape compiler made of composite functions, by
     /// function, output set and operand purity: shared by every program
     /// compiled over this graph (see [`Tape::compile`](crate::Tape::compile)).
@@ -189,6 +193,7 @@ impl<K: Field> Graph<K> {
             context_dedup: HashMap::default(),
             memos: Vec::new(),
             rebound: HashMap::default(),
+            vjps: HashMap::default(),
             templates: Default::default(),
         };
         ctx.zero = ctx.konst(K::zero());

@@ -7,8 +7,9 @@
 use crate::field::Field;
 use rustc_hash::FxHashMap as HashMap;
 
+use crate::func::{FuncId, OutputId};
 use crate::graph::{Graph, Join, Memo, Set, Through};
-use crate::node::{BinOp, CmpOp, ExprId, Node, ReduceOp, SymbolId, UnaryOp};
+use crate::node::{ArgList, BinOp, CmpOp, ExprId, Node, ReduceOp, SymbolId, UnaryOp};
 
 /// Derivative of `expr` with respect to the symbol `wrt`.
 pub fn differentiate<K: Field>(ctx: &mut Graph<K>, expr: ExprId, wrt: SymbolId) -> ExprId {
@@ -640,21 +641,145 @@ pub fn gradient<K: Field>(ctx: &mut Graph<K>, f: ExprId, wrt: &[SymbolId]) -> Ve
     if act(f) {
         adj[at(f)].push(ctx.one());
     }
-    let push = |adj: &mut Vec<Vec<ExprId>>, child: ExprId, term: ExprId| {
-        adj[at(child)].push(term);
-    };
     let zero = ctx.zero();
     let mut sym_adj: HashMap<SymbolId, ExprId> = HashMap::default();
+    // The outputs of one call site (a function over one argument list in
+    // one context) take their adjoints together, carried through the call
+    // at the site's first node, before any of its operands (see `carry`).
+    let mut flush_at: HashMap<usize, Vec<Site>> = HashMap::default();
+    {
+        let mut first: HashMap<Site, usize> = HashMap::default();
+        for (k, &e) in nodes.iter().enumerate() {
+            if let Node::Call(o, l) = *ctx.node(e) {
+                let site = (ctx.output(o).0, ctx.context_of(o), l);
+                first.entry(site).or_insert(k);
+            }
+        }
+        for (site, k) in first {
+            flush_at.entry(k).or_default().push(site);
+        }
+    }
+    let mut pending: HashMap<Site, Vec<(u32, ExprId, OutputId)>> = HashMap::default();
     for k in (0..nodes.len()).rev() {
-        if adj[k].is_empty() {
-            continue; // no adjoint: inactive, or no value path from f
+        'node: {
+            if adj[k].is_empty() {
+                break 'node; // no adjoint: inactive, or no value path from f
+            }
+            let e = nodes[k];
+            let terms = std::mem::take(&mut adj[k]);
+            let a_bar = ctx.reduce(ReduceOp::Sum, terms);
+            if a_bar == zero {
+                break 'node;
+            }
+            let sweep = Sweep {
+                act: &act,
+                at: &at,
+                pos: &pos,
+            };
+            sweep_node(ctx, e, a_bar, &sweep, &mut adj, &mut sym_adj, &mut pending);
         }
-        let e = nodes[k];
-        let terms = std::mem::take(&mut adj[k]);
-        let a_bar = ctx.reduce(ReduceOp::Sum, terms);
-        if a_bar == zero {
-            continue;
+        for site in flush_at.remove(&k).unwrap_or_default() {
+            if let Some(calls) = pending.remove(&site) {
+                carry(ctx, site, calls, &act, &mut adj, &at);
+            }
         }
+    }
+    ctx.put_memo(pos);
+    wrt.iter()
+        .map(|s| sym_adj.get(s).copied().unwrap_or(zero))
+        .collect()
+}
+
+/// A call site: the function, the context and the argument list of a call.
+type Site = (FuncId, u32, ArgList);
+
+/// The adjoints of a call site's outputs `calls` (`(output, adjoint, its
+/// output id)`) carried to the operands that move: one call of the
+/// function's vector-Jacobian product (see `Graph::vjp_function`) where the
+/// function is symbolic and [`REVERSE_MIN_TOUCHED`] or more operands move,
+/// else the derivative outputs, the forward mode's (an extern function's,
+/// or a few operands' a Jacobian has made already).
+fn carry<K: Field>(
+    ctx: &mut Graph<K>,
+    site: Site,
+    mut calls: Vec<(u32, ExprId, OutputId)>,
+    act: &dyn Fn(ExprId) -> bool,
+    adj: &mut [Vec<ExprId>],
+    at: &dyn Fn(ExprId) -> usize,
+) {
+    let (func, context, l) = site;
+    let o0 = calls[0].2;
+    let mut moving: Vec<u32> = Vec::new();
+    for &(out, _, o) in &calls {
+        for &i in ctx.output_support(func, out).iter() {
+            if act(ctx.call_operand(o, l, i)) {
+                moving.push(i);
+            }
+        }
+    }
+    moving.sort_unstable();
+    moving.dedup();
+    let symbolic = (calls.iter()).all(|&(out, ..)| {
+        !matches!(
+            ctx.func(func).outputs()[out as usize],
+            crate::func::Output::Slot(_)
+        )
+    });
+    if symbolic && moving.len() >= REVERSE_MIN_TOUCHED {
+        calls.sort_unstable_by_key(|c| c.0);
+        let outs: Vec<u32> = calls.iter().map(|c| c.0).collect();
+        let g = ctx.vjp_function(func, &outs, &moving);
+        let mut args = ctx.full_args(o0, l).into_owned();
+        args.extend(calls.iter().map(|c| c.1));
+        let partials = ctx.calls(g, &(0..moving.len() as u32).collect::<Vec<_>>(), &args);
+        for (&i, d) in moving.iter().zip(partials) {
+            let arg = ctx.call_operand(o0, l, i);
+            adj[at(arg)].push(d);
+        }
+        return;
+    }
+    for (out, a_bar, o) in calls {
+        let moving: Vec<(u32, ExprId)> = ctx
+            .output_support(func, out)
+            .iter()
+            .map(|&i| (i, ctx.call_operand(o, l, i)))
+            .filter(|&(_, a)| act(a))
+            .collect();
+        let params: Vec<u32> = moving.iter().map(|&(i, _)| i).collect();
+        let ks = ctx.derivative_outputs(func, out, &params);
+        for (&(_, arg), k) in moving.iter().zip(ks) {
+            let partial = ctx.call_list_in(func, k, context, l);
+            let t = ctx.mul(a_bar, partial);
+            adj[at(arg)].push(t);
+        }
+    }
+}
+
+/// What a reverse sweep reads of its cone: whether a node is active, a
+/// node's place, the places.
+struct Sweep<'s> {
+    act: &'s dyn Fn(ExprId) -> bool,
+    at: &'s dyn Fn(ExprId) -> usize,
+    pos: &'s Memo,
+}
+
+/// One node of the reverse sweep: its adjoint `a_bar` into its operands'
+/// (a call's into its site's pending adjoints, see `carry`).
+fn sweep_node<K: Field>(
+    ctx: &mut Graph<K>,
+    e: ExprId,
+    a_bar: ExprId,
+    sweep: &Sweep<'_>,
+    mut adj: &mut [Vec<ExprId>],
+    sym_adj: &mut HashMap<SymbolId, ExprId>,
+    pending: &mut HashMap<Site, Vec<(u32, ExprId, OutputId)>>,
+) {
+    let (act, at, pos) = (sweep.act, sweep.at, sweep.pos);
+    let zero = ctx.zero();
+    let push = |adj: &mut [Vec<ExprId>], child: ExprId, term: ExprId| {
+        adj[at(child)].push(term);
+    };
+    {
         match *ctx.node(e) {
             // Piecewise-constant or constant: never active.
             Node::Const(_) | Node::Cmp(..) => {}
@@ -822,28 +947,13 @@ pub fn gradient<K: Field>(ctx: &mut Graph<K>, f: ExprId, wrt: &[SymbolId]) -> Ve
                     }
                 }
             }
-            // Chain rule through a call: the same derivative outputs as the
-            // forward mode, for the arguments that move.
+            // A call: its site's, carried through the call with the site's
+            // other outputs (see `carry`).
             Node::Call(o, l) => {
                 let (func, out) = ctx.output(o);
-                let moving: Vec<(u32, ExprId)> = ctx
-                    .output_support(func, out)
-                    .iter()
-                    .map(|&i| (i, ctx.call_operand(o, l, i)))
-                    .filter(|&(_, a)| act(a))
-                    .collect();
-                let params: Vec<u32> = moving.iter().map(|&(i, _)| i).collect();
-                let ks = ctx.derivative_outputs(func, out, &params);
-                for (&(_, arg), k) in moving.iter().zip(ks) {
-                    let partial = ctx.call_list_in(func, k, ctx.context_of(o), l);
-                    let t = ctx.mul(a_bar, partial);
-                    push(&mut adj, arg, t);
-                }
+                let site = (func, ctx.context_of(o), l);
+                pending.entry(site).or_default().push((out, a_bar, o));
             }
         }
     }
-    ctx.put_memo(pos);
-    wrt.iter()
-        .map(|s| sym_adj.get(s).copied().unwrap_or(zero))
-        .collect()
 }

@@ -672,6 +672,53 @@ impl<K: Field> Graph<K> {
             .collect()
     }
 
+    /// The vector-Jacobian product of the outputs `outs` of the symbolic
+    /// function `f` by its operands `params`: a function over `f`'s
+    /// parameters and one cotangent per output, whose output `i` is
+    /// `d (sum_j c_j outs_j) / d params[i]`, made in one reverse sweep over
+    /// the body on first demand and kept. A reverse sweep carries through a
+    /// call as one call of it: its cost does not grow with the operands
+    /// that move, where one derivative output per output and operand would
+    /// (a compact model's hundreds of parameters, its every Jacobian entry).
+    pub(crate) fn vjp_function(&mut self, f: FuncId, outs: &[u32], params: &[u32]) -> FuncId {
+        let key = (f, Box::<[u32]>::from(outs), Box::<[u32]>::from(params));
+        if let Some(&g) = self.vjps.get(&key) {
+            return g;
+        }
+        let func = &self.funcs[f.0 as usize];
+        let name = format!("{}#vjp{}", func.name(), self.vjps.len());
+        let mut formal = func.params().to_vec();
+        let roles = func.param_roles().to_vec();
+        let exprs: Vec<Option<ExprId>> = (outs.iter())
+            .map(|&o| match func.outputs()[o as usize] {
+                Output::Expr(e) => Some(e),
+                Output::Slot(_) | Output::Zero => None,
+            })
+            .collect();
+        let mut cotangents = Vec::with_capacity(outs.len());
+        let mut terms = Vec::with_capacity(outs.len());
+        for (j, e) in exprs.into_iter().enumerate() {
+            let c = self.sym(&format!("{name}$c{j}"));
+            let Node::Symbol(s) = *self.node(c) else {
+                unreachable!("a fresh name is a symbol")
+            };
+            cotangents.push(s);
+            if let Some(e) = e {
+                terms.push(self.mul(c, e));
+            }
+        }
+        let psi = self.reduce(ReduceOp::Sum, terms);
+        let wrt: Vec<SymbolId> = params.iter().map(|&p| self.operand_symbol(f, p)).collect();
+        let grads = crate::autodiff::gradient(self, psi, &wrt);
+        formal.extend(cotangents);
+        let g = self.define_func(&name, formal, grads);
+        for (i, r) in roles.into_iter().enumerate() {
+            self.set_param_role(g, i as u32, r);
+        }
+        self.vjps.insert(key, g);
+        g
+    }
+
     /// Whether operand `p` of `f` is a model parameter: a `Param`-role
     /// parameter or a global past the parameters. Its derivatives are asked
     /// for selectively and are not swept (see [`derive`](Self::derive)).
