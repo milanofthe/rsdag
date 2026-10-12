@@ -28,7 +28,9 @@ NOTICE); for a commercial license contact info@milanrother.com.
   calls and roles, bindings (`Graph::bind`), composition (`Graph::import`,
   hierarchies compiled through templates),
   `Scope`, `Module` (serialization), `differentiate`,
-  `gradient` (reverse mode), `sparse_jacobian`, `substitute`, `Tape`
+  `gradient` (reverse mode), `vjp`, `sparse_jacobian` (and its
+  coordinate form `Coo`), `affine_in`, `substitute`, `Elementary` (the
+  functions a frontend calls by name), `Tape`
   (interpreter, choice specialization, instance batching, `Gemv`, `Gemm`
   and dense `Solve` kernels, prolog/main split), `semantics` (the reference
   arithmetic), `parallel` (a program's independent calls on a pool,
@@ -111,7 +113,9 @@ native code (with a `Compiler`, compiled in the background), chosen per
 call; `Policy` sets the thresholds. `Adaptive::eval_prolog` returns the
 `Episode` its main phases run in; interpreter and native code share the
 state layout, so an episode moves between them, and a specialized one
-falls back to the full tape when a region flips.
+falls back to the full tape when a region flips. A `Session` owns an
+episode with its inputs and work buffer: bound once, evaluated at one
+point or many.
 
 ![Adaptive](docs/diagrams/adaptive.svg)
 

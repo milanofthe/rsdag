@@ -36,7 +36,7 @@ pub(crate) mod transform;
 pub use adaptive::{Adaptive, Compiler, Episode, Policy, Session, Stats};
 pub use autodiff::{affine_in, differentiate, gradient, sparse_jacobian, vjp, SparseRows};
 pub use builder::{Builder, Numeric};
-pub use coo::{transpose, Coo};
+pub use coo::{transpose_rows, Coo};
 pub use display::to_string;
 pub use eval::eval;
 pub use extern_fn::{BackendCache, BodyBackend, BodyCompiler, ExternBundle, Instances, Submit};

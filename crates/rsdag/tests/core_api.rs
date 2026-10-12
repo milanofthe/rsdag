@@ -271,3 +271,20 @@ fn params_for_leave_a_called_bodys_symbols_to_it() {
     let sx = g.as_symbol(x).unwrap();
     assert_eq!(g.params_for(&[call], &[], |_| true), vec![sx]);
 }
+
+/// Symbols by name and by node, and the terms of a sum.
+#[test]
+fn symbols_and_summands() {
+    let mut g: Graph<F64> = Graph::new();
+    assert_eq!(g.find_symbol("a"), None);
+    let a = g.symbol_id("a");
+    assert_eq!(g.find_symbol("a"), Some(a));
+    let (ea, b) = (g.symbol_expr(a), g.sym("b"));
+    let s = g.reduce(ReduceOp::Sum, vec![ea, b]);
+    assert_eq!(g.summands(s).len(), 2);
+    let zero = g.zero();
+    assert!(g.summands(zero).is_empty());
+    assert_eq!(g.summands(ea), vec![ea]);
+    assert_eq!(g.as_symbol(s), None);
+    assert_eq!(g.as_symbol(ea), Some(a));
+}

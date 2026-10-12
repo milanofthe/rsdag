@@ -643,10 +643,19 @@ impl<K: Field> Graph<K> {
     /// reference math.
     /// The elementary function `f` of `args` (as many as its arity).
     pub fn elementary(&mut self, f: Elementary, args: &[ExprId]) -> ExprId {
+        debug_assert_eq!(
+            args.len(),
+            f.arity(),
+            "{} takes {} arguments",
+            f.name(),
+            f.arity()
+        );
         match f {
             Elementary::Unary(op) => self.unary(op, args[0]),
             Elementary::Binary(op) => self.binary(op, args[0], args[1]),
-            Elementary::Extremum(op) => self.reduce(op, args[..2].to_vec()),
+            Elementary::Min | Elementary::Max => {
+                self.reduce(f.reduction().expect("an extremum"), args[..2].to_vec())
+            }
         }
     }
 

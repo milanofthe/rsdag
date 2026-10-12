@@ -194,8 +194,8 @@ const NUMPY_NAMES: &[(&str, Elementary)] = &[
     ("arctan2", Elementary::Binary(BinOp::Atan2)),
     ("fmod", Elementary::Binary(BinOp::Mod)),
     ("power", Elementary::Binary(BinOp::Powf)),
-    ("maximum", Elementary::Extremum(ReduceOp::Max)),
-    ("minimum", Elementary::Extremum(ReduceOp::Min)),
+    ("maximum", Elementary::Max),
+    ("minimum", Elementary::Min),
 ];
 
 fn ufunc(name: &str) -> Option<Elementary> {
@@ -224,9 +224,9 @@ impl Method {
             (Elementary::Binary(op), 1) => {
                 t.binary(&args.get_item(0)?, false, |g, x, y| g.binary(op, x, y))?
             }
-            (Elementary::Extremum(op), 1) => {
+            (f @ (Elementary::Min | Elementary::Max), 1) => {
                 let o = t.operand(&args.get_item(0)?)?;
-                let id = t.g.graph.borrow_mut().reduce(op, vec![t.id, o]);
+                let id = t.g.graph.borrow_mut().elementary(f, &[t.id, o]);
                 BinOut::Value(t.wrap(id))
             }
             (_, n) => {

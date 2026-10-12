@@ -451,9 +451,10 @@ impl BinOp {
 pub enum Elementary {
     Unary(UnaryOp),
     Binary(BinOp),
-    /// `min` or `max` ([`ReduceOp::Min`], [`ReduceOp::Max`]) of two
-    /// arguments.
-    Extremum(ReduceOp),
+    /// The smaller of two arguments ([`ReduceOp::Min`]).
+    Min,
+    /// The larger of two arguments ([`ReduceOp::Max`]).
+    Max,
 }
 
 impl Elementary {
@@ -462,8 +463,8 @@ impl Elementary {
     /// [`BinOp::Powf`].
     pub fn from_name(name: &str) -> Option<Elementary> {
         match name {
-            "min" => Some(Elementary::Extremum(ReduceOp::Min)),
-            "max" => Some(Elementary::Extremum(ReduceOp::Max)),
+            "min" => Some(Elementary::Min),
+            "max" => Some(Elementary::Max),
             "pow" => Some(Elementary::Binary(BinOp::Powf)),
             _ => (UnaryOp::from_name(name).map(Elementary::Unary))
                 .or_else(|| BinOp::from_name(name).map(Elementary::Binary)),
@@ -475,7 +476,17 @@ impl Elementary {
         match self {
             Elementary::Unary(op) => op.name(),
             Elementary::Binary(op) => op.name(),
-            Elementary::Extremum(op) => op.name(),
+            Elementary::Min => ReduceOp::Min.name(),
+            Elementary::Max => ReduceOp::Max.name(),
+        }
+    }
+
+    /// The reduction an extremum is, `None` for an op.
+    pub fn reduction(self) -> Option<ReduceOp> {
+        match self {
+            Elementary::Min => Some(ReduceOp::Min),
+            Elementary::Max => Some(ReduceOp::Max),
+            _ => None,
         }
     }
 
@@ -483,7 +494,7 @@ impl Elementary {
     pub fn arity(self) -> usize {
         match self {
             Elementary::Unary(_) => 1,
-            Elementary::Binary(_) | Elementary::Extremum(_) => 2,
+            Elementary::Binary(_) | Elementary::Min | Elementary::Max => 2,
         }
     }
 }

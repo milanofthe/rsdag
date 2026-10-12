@@ -69,14 +69,6 @@ impl Coo {
             .collect()
     }
 
-    /// The columns relabelled by `f`.
-    pub fn map_cols(mut self, f: impl Fn(usize) -> usize) -> Self {
-        for c in &mut self.cols {
-            *c = f(*c);
-        }
-        self
-    }
-
     /// The matrix cut into row blocks at the ascending row indices `at`:
     /// block `b` holds the rows from `at[b - 1]` (from `0` for the first) up
     /// to `at[b]` (to the end for the last), counted from its first. The
@@ -94,7 +86,7 @@ impl Coo {
 
 /// The rows of the transpose of `rows`, a matrix of `n_cols` columns: row
 /// `j` lists `(i, e)` for each entry `e` of `rows[i]` in column `j`, by `i`.
-pub fn transpose(rows: &SparseRows, n_cols: usize) -> SparseRows {
+pub fn transpose_rows(rows: &SparseRows, n_cols: usize) -> SparseRows {
     let mut out: SparseRows = vec![Vec::new(); n_cols];
     for (i, row) in rows.iter().enumerate() {
         for &(j, e) in row {
@@ -107,10 +99,6 @@ pub fn transpose(rows: &SparseRows, n_cols: usize) -> SparseRows {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn coo_of(g: &mut Graph, roots: &[ExprId], wrt: &[SymbolId]) -> Coo {
-        Coo::jacobian(g, roots, wrt)
-    }
 
     #[test]
     fn coo_blocks_and_transpose() {
@@ -127,35 +115,18 @@ mod tests {
         assert_eq!(blocks[0].rows, vec![0, 0]);
         assert_eq!(blocks[1].rows, vec![0, 1]);
         assert_eq!(blocks[1].cols, vec![1, 0]);
-        let shifted = coo.map_cols(|c| c + 10);
-        assert_eq!(shifted.cols, vec![10, 11, 11, 10]);
         let mut whole = Coo::default();
         whole.append(&blocks[1], 1, 0);
         assert_eq!(whole.rows, vec![1, 2]);
         // [y x; 0 1; 2x 0] (1, 2)
         let one = g.one();
         let two = g.konst_f64(2.0);
-        let p = coo_of(&mut g, &[xy, y, x2], &[sx, sy]).matvec(&mut g, &[one, two], 3);
+        let p = coo.matvec(&mut g, &[one, two], 3);
         let env = [(sx, 3.0), (sy, 5.0)].into_iter().collect();
         assert_eq!(crate::eval::eval(&g, &p, &env), vec![5.0 + 6.0, 2.0, 6.0]);
         let rows = sparse_jacobian(&mut g, &[xy, y, x2], &[sx, sy]);
-        let t = transpose(&rows, 2);
+        let t = transpose_rows(&rows, 2);
         assert_eq!(t[0].iter().map(|&(i, _)| i).collect::<Vec<_>>(), vec![0, 2]);
         assert_eq!(t[1].iter().map(|&(i, _)| i).collect::<Vec<_>>(), vec![0, 1]);
-    }
-
-    #[test]
-    fn symbols_and_summands() {
-        let mut g: Graph = Graph::new();
-        assert_eq!(g.find_symbol("a"), None);
-        let a = g.symbol_id("a");
-        assert_eq!(g.find_symbol("a"), Some(a));
-        let (ea, b) = (g.symbol_expr(a), g.sym("b"));
-        let s = g.reduce(crate::node::ReduceOp::Sum, vec![ea, b]);
-        assert_eq!(g.summands(s).len(), 2);
-        let zero = g.zero();
-        assert!(g.summands(zero).is_empty());
-        assert_eq!(g.summands(ea), vec![ea]);
-        assert_eq!(g.as_symbol(s), None);
     }
 }
