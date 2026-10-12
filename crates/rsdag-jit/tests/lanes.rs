@@ -44,7 +44,13 @@ const UNARY: [UnaryOp; 26] = [
     UnaryOp::Atanh,
     UnaryOp::Erf,
 ];
-const BINARY: [BinOp; 4] = [BinOp::Powf, BinOp::Mod, BinOp::Atan2, BinOp::Hypot];
+const BINARY: [BinOp; 5] = [
+    BinOp::Powf,
+    BinOp::Mod,
+    BinOp::Atan2,
+    BinOp::Hypot,
+    BinOp::RandStream,
+];
 const CMP: [CmpOp; 6] = [
     CmpOp::Lt,
     CmpOp::Le,

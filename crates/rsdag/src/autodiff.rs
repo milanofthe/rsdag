@@ -242,6 +242,8 @@ fn binary_partials<K: Field>(
             let db = if want[1] { ctx.mul(b, r) } else { zero };
             [da, db]
         }
+        // Noise draws are constant between their counters.
+        BinOp::RandStream => [zero, zero],
     }
 }
 
