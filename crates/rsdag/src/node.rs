@@ -159,6 +159,11 @@ pub enum BinOp {
     Atan2,
     /// `sqrt(a^2 + b^2)` without overflow.
     Hypot,
+    /// Counter-based uniform noise in `[0, 1)`: stream `a` at counter `b`,
+    /// keyed by both arguments' bits. A pure function of the pair, so a
+    /// stream's draws are independent of every other stream's and of the
+    /// order they are evaluated in.
+    RandStream,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -410,6 +415,11 @@ pub const BINARY_OPS: &[BinarySpec] = &[
         op: BinOp::Hypot,
         name: "hypot",
         smooth: true,
+    },
+    BinarySpec {
+        op: BinOp::RandStream,
+        name: "rand_stream",
+        smooth: false,
     },
 ];
 

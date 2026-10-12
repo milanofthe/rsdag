@@ -447,6 +447,7 @@ fn binary_form<K: Field>(g: &mut Graph<K>, op: BinOp, a: ExprId, b: ExprId) -> E
             let m = g.ratio(3, 2);
             g.binary(op, a, m)
         }
+        BinOp::RandStream => g.binary(op, a, b),
     }
 }
 

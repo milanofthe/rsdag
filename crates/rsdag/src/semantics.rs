@@ -117,6 +117,7 @@ pub fn binary_f64(op: BinOp, x: f64, y: f64) -> f64 {
         BinOp::Mod => libm::fmod(x, y),
         BinOp::Atan2 => libm::atan2(x, y),
         BinOp::Hypot => libm::hypot(x, y),
+        BinOp::RandStream => rand_stream(x, y),
     }
 }
 
@@ -173,14 +174,33 @@ pub fn trigamma(x: f64) -> f64 {
         + inv * inv2 * (1.0 / 6.0 - inv2 * (1.0 / 30.0 - inv2 * (1.0 / 42.0 - inv2 / 30.0)))
 }
 
+/// The splitmix64 finalizer of `z`.
+fn splitmix64(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// `[0, 1)` from the top 53 bits of `z`.
+fn unit(z: u64) -> f64 {
+    ((z >> 11) as f64) * (1.0 / ((1u64 << 53) as f64))
+}
+
 /// Counter-based uniform noise in `[0, 1)` from the bits of `key`
 /// (splitmix64 finalizer; the top 53 bits become the mantissa).
 pub fn rand_uniform(key: f64) -> f64 {
-    let mut z = key.to_bits().wrapping_add(0x9E37_79B9_7F4A_7C15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^= z >> 31;
-    ((z >> 11) as f64) * (1.0 / ((1u64 << 53) as f64))
+    unit(splitmix64(key.to_bits()))
+}
+
+/// Counter-based uniform noise in `[0, 1)` of stream `key` at `counter`:
+/// the stream's own key (the mixed bits of `key`) combined with the
+/// counter's bits, mixed again. Distinct pairs draw independently.
+pub fn rand_stream(key: f64, counter: f64) -> f64 {
+    let k = splitmix64(key.to_bits());
+    unit(splitmix64(
+        k ^ counter.to_bits().wrapping_mul(0xD1B5_4A32_D192_ED03),
+    ))
 }
 
 /// Argument above which `exp` is linearly extrapolated (a "limited exponential",
