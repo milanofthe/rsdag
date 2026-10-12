@@ -634,3 +634,22 @@ fn vjp_is_the_weighted_gradient() {
     let f = ctx.fresh_symbol("vjp$w");
     assert!(!w.contains(&f) && ctx.symbol_name(f) != taken);
 }
+
+/// An affine split: the rest at the symbols zero and their coefficients;
+/// a root nonlinear in them is reported.
+#[test]
+fn affine_split_and_its_refusal() {
+    let mut ctx: Graph = Graph::new();
+    let (x, m, n) = (ctx.sym("x"), ctx.sym("m"), ctx.sym("n"));
+    let (sm, sn) = (sid(&mut ctx, "m"), sid(&mut ctx, "n"));
+    let xm = ctx.mul(x, m);
+    let ex = ctx.exp(x);
+    let r0 = ctx.add(xm, ex);
+    let r1 = ctx.add(n, x);
+    let (rest, coefs) = affine_in(&mut ctx, &[r0, r1], &[sm, sn]).unwrap();
+    assert_eq!(rest, vec![ex, x]);
+    assert_eq!(coefs[0], vec![(0, x)]);
+    assert_eq!(coefs[1].len(), 1);
+    let mm = ctx.mul(m, m);
+    assert_eq!(affine_in(&mut ctx, &[r1, mm], &[sm, sn]), Err(1));
+}
