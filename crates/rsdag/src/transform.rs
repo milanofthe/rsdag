@@ -150,6 +150,34 @@ pub(crate) fn rewrite<K: Field>(
     out
 }
 
+/// [`substitute`] of every free symbol of `roots` by what `f` maps it to,
+/// `None` keeping it: a renaming into another frame, say, where the map is
+/// a rule rather than a table.
+pub fn substitute_with<K: Field>(
+    ctx: &mut Graph<K>,
+    roots: &[ExprId],
+    mut f: impl FnMut(&mut Graph<K>, SymbolId) -> Option<ExprId>,
+) -> Vec<ExprId> {
+    let free: Vec<SymbolId> = ctx.free_symbols_in(roots).into_iter().collect();
+    let map: HashMap<SymbolId, ExprId> = (free.into_iter())
+        .filter_map(|s| f(ctx, s).map(|e| (s, e)))
+        .collect();
+    substitute(ctx, roots, &map)
+}
+
+/// [`substitute`] where `map` pins symbols to what every evaluation reads
+/// them at (a constant, mostly), the calls that pass one specialized to it
+/// (see [`Graph::specialize_calls`]): what remains of `roots` once the
+/// symbols are no inputs.
+pub fn pin<K: Field>(
+    ctx: &mut Graph<K>,
+    roots: &[ExprId],
+    map: &HashMap<SymbolId, ExprId>,
+) -> Vec<ExprId> {
+    let roots = substitute(ctx, roots, map);
+    ctx.specialize_calls(&roots)
+}
+
 /// Replace every symbol in `map` with its expression, in every root, in
 /// one pass: a subexpression reachable from several roots is rebuilt once.
 /// Rebuilt through the smart constructors, so the result is re-folded and

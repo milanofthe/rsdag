@@ -59,4 +59,4 @@ pub use semantics::{
 };
 pub use tape::{Lowered, NoTrace, ParamSelects, Program, SpecializedTape, Tape, TraceSink};
 
-pub use transform::substitute;
+pub use transform::{pin, substitute, substitute_with};

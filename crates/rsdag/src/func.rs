@@ -544,6 +544,18 @@ impl Function {
             .collect()
     }
 
+    /// The expression outputs carrying `role`, and their roles, in output
+    /// order.
+    pub fn exprs_with_role(&self, role: impl Fn(&OutputRole) -> bool) -> Vec<(ExprId, OutputRole)> {
+        (self.outputs.iter().zip(&self.output_roles))
+            .filter(|(_, r)| role(r))
+            .filter_map(|(o, r)| match *o {
+                Output::Expr(e) => Some((e, *r)),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn is_extern(&self) -> bool {
         self.extern_body.is_some()
     }

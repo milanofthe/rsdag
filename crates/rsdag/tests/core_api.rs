@@ -138,3 +138,53 @@ fn printing_a_shared_or_deep_dag_stays_linear() {
         .join()
         .unwrap();
 }
+
+/// A rule substitution renames every free symbol it maps and keeps the
+/// rest; a pin substitutes and specializes the calls it makes constant.
+#[test]
+fn substitute_with_a_rule_and_pin_to_constants() {
+    let mut g: Graph<F64> = Graph::new();
+    let (a, b) = (g.sym("a"), g.sym("b"));
+    let f = g.mul(a, b);
+    let out = substitute_with(&mut g, &[f], |g, s| {
+        let name = format!("X.{}", g.symbol_name(s));
+        (name != "X.b").then(|| g.sym(&name))
+    });
+    let xa = g.sym("X.a");
+    assert_eq!(out[0], g.mul(xa, b));
+    // a function of (p, q) called with q pinned to 2
+    let (p, q) = (g.symbol_id("p"), g.symbol_id("q"));
+    let (pe, qe) = (g.symbol_expr(p), g.symbol_expr(q));
+    let body = g.mul(pe, qe);
+    let func = g.define_func("f", vec![p, q], vec![body]);
+    let call = g.call(func, 0, &[a, b]);
+    let two = g.konst_f64(2.0);
+    let sb = g.as_symbol(b).unwrap();
+    let map = [(sb, two)].into_iter().collect();
+    let pinned = pin(&mut g, &[call], &map)[0];
+    let sa = g.as_symbol(a).unwrap();
+    let env = [(sa, 3.0)].into_iter().collect();
+    assert_eq!(eval(&g, &[pinned], &env), vec![6.0]);
+    assert!(!g.free_symbols(pinned).contains(&sb));
+}
+
+/// A signature without some roles keeps the others in order; a function
+/// lists its expression outputs of a role.
+#[test]
+fn signature_without_and_outputs_of_a_role() {
+    let mut g: Graph<F64> = Graph::new();
+    let (x, n) = (g.symbol_id("x"), g.symbol_id("n"));
+    let (xe, ne) = (g.symbol_expr(x), g.symbol_expr(n));
+    let i = g.add(xe, ne);
+    let f = g.define_func("rows", vec![x, n], vec![i, xe]);
+    g.set_param_role(f, 0, ParamRole::State { id: 0 });
+    g.set_param_role(f, 1, ParamRole::Noise { id: 0 });
+    g.set_output_role(f, 0, OutputRole::Residual { id: 0 });
+    let sig = Signature::of(g.func(f)).without(|r| matches!(r, ParamRole::Noise { .. }));
+    assert_eq!(sig.syms, vec![x]);
+    let rows = g
+        .func(f)
+        .exprs_with_role(|r| matches!(r, OutputRole::Residual { .. }));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, i);
+}

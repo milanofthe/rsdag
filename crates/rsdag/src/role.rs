@@ -103,6 +103,16 @@ impl Signature {
         first..first + len
     }
 
+    /// The signature without the inputs whose role satisfies `role`: those
+    /// no program over it reads.
+    pub fn without(mut self, role: impl Fn(&ParamRole) -> bool) -> Signature {
+        let keep: Vec<bool> = self.roles.iter().map(|r| !role(r)).collect();
+        let mut k = keep.iter();
+        self.syms.retain(|_| *k.next().expect("one per input"));
+        self.roles.retain(|r| !role(r));
+        self
+    }
+
     /// The prolog split a program over the signature takes: the `Param`
     /// inputs are pure.
     pub fn pure_mask(&self) -> Vec<bool> {
