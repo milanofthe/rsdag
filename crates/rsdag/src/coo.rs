@@ -4,7 +4,7 @@
 use crate::autodiff::{sparse_jacobian, SparseRows};
 use crate::field::Field;
 use crate::graph::Graph;
-use crate::node::{ExprId, SymbolId};
+use crate::node::{ExprId, ReduceOp, SymbolId};
 
 /// A sparse matrix of expressions: entry `k` is `vals[k]` at row `rows[k]`
 /// and column `cols[k]`.
@@ -57,6 +57,18 @@ impl Coo {
         self.vals.extend_from_slice(&other.vals);
     }
 
+    /// The product with the column of expressions `x`: `n_rows` sums, row
+    /// `i` that of `vals[k] * x[cols[k]]` over its entries.
+    pub fn matvec<K: Field>(&self, ctx: &mut Graph<K>, x: &[ExprId], n_rows: usize) -> Vec<ExprId> {
+        let mut terms: Vec<Vec<ExprId>> = vec![Vec::new(); n_rows];
+        for ((&r, &c), &v) in self.rows.iter().zip(&self.cols).zip(&self.vals) {
+            terms[r].push(ctx.mul(v, x[c]));
+        }
+        (terms.into_iter())
+            .map(|t| ctx.reduce(ReduceOp::Sum, t))
+            .collect()
+    }
+
     /// The columns relabelled by `f`.
     pub fn map_cols(mut self, f: impl Fn(usize) -> usize) -> Self {
         for c in &mut self.cols {
@@ -96,6 +108,10 @@ pub fn transpose(rows: &SparseRows, n_cols: usize) -> SparseRows {
 mod tests {
     use super::*;
 
+    fn coo_of(g: &mut Graph, roots: &[ExprId], wrt: &[SymbolId]) -> Coo {
+        Coo::jacobian(g, roots, wrt)
+    }
+
     #[test]
     fn coo_blocks_and_transpose() {
         let mut g: Graph = Graph::new();
@@ -116,6 +132,12 @@ mod tests {
         let mut whole = Coo::default();
         whole.append(&blocks[1], 1, 0);
         assert_eq!(whole.rows, vec![1, 2]);
+        // [y x; 0 1; 2x 0] (1, 2)
+        let one = g.one();
+        let two = g.konst_f64(2.0);
+        let p = coo_of(&mut g, &[xy, y, x2], &[sx, sy]).matvec(&mut g, &[one, two], 3);
+        let env = [(sx, 3.0), (sy, 5.0)].into_iter().collect();
+        assert_eq!(crate::eval::eval(&g, &p, &env), vec![5.0 + 6.0, 2.0, 6.0]);
         let rows = sparse_jacobian(&mut g, &[xy, y, x2], &[sx, sy]);
         let t = transpose(&rows, 2);
         assert_eq!(t[0].iter().map(|&(i, _)| i).collect::<Vec<_>>(), vec![0, 2]);
