@@ -688,6 +688,72 @@ impl Adaptive {
     }
 }
 
+/// A program's evaluations at one binding: its inputs, its work buffer and
+/// the episode its prolog prepared, owned together. Binding runs the
+/// parameter-pure prolog once; an evaluation runs the main phase at the
+/// inputs as they are, the ones that vary set through
+/// [`inputs_mut`](Self::inputs_mut). It belongs to one program, which it
+/// does not hold, so a holder may keep the program next to it; clone it per
+/// thread that evaluates the program.
+#[derive(Clone)]
+pub struct Session {
+    episode: Episode,
+    inputs: Vec<f64>,
+    work: Vec<f64>,
+}
+
+impl Session {
+    /// `program` bound at `inputs`, its prolog run there.
+    pub fn new(program: &Adaptive, inputs: Vec<f64>) -> Session {
+        let mut work = Vec::new();
+        let episode = program.eval_prolog(&inputs, &mut work);
+        Session {
+            episode,
+            inputs,
+            work,
+        }
+    }
+
+    /// The inputs the next evaluation runs at.
+    pub fn inputs(&self) -> &[f64] {
+        &self.inputs
+    }
+
+    /// The inputs, to set the ones that vary between evaluations (a pure
+    /// one keeps the value it was bound at).
+    pub fn inputs_mut(&mut self) -> &mut [f64] {
+        &mut self.inputs
+    }
+
+    /// `program` at the inputs into `out`.
+    pub fn eval(&mut self, program: &Adaptive, out: &mut Vec<f64>) {
+        program.eval_main(&mut self.episode, &self.inputs, &mut self.work, out);
+    }
+
+    /// `program` at `n` points into `out`, output-major: output `o` of point
+    /// `k` at `out[o * n + k]`. `set(k, inputs)` sets point `k`'s inputs;
+    /// `row` is the caller's scratch.
+    pub fn eval_points(
+        &mut self,
+        program: &Adaptive,
+        n: usize,
+        mut set: impl FnMut(usize, &mut [f64]),
+        row: &mut Vec<f64>,
+        out: &mut Vec<f64>,
+    ) {
+        let width = program.tape().n_outputs();
+        out.clear();
+        out.resize(width * n, 0.0);
+        for k in 0..n {
+            set(k, &mut self.inputs);
+            self.eval(program, row);
+            for (o, &v) in row.iter().take(width).enumerate() {
+                out[o * n + k] = v;
+            }
+        }
+    }
+}
+
 /// The Vec-buffer forms over a [`Program`]: the buffers grow to its
 /// lengths (never shrink, so a state a prolog left stays in place).
 fn fit(p: &dyn Program, work: &mut Vec<f64>) {

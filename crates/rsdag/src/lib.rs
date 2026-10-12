@@ -33,7 +33,7 @@ pub mod variant;
 // `substitute` re-export below, not as a module path.
 pub(crate) mod transform;
 
-pub use adaptive::{Adaptive, Compiler, Episode, Policy, Stats};
+pub use adaptive::{Adaptive, Compiler, Episode, Policy, Session, Stats};
 pub use autodiff::{differentiate, gradient, sparse_jacobian, SparseRows};
 pub use builder::{Builder, Numeric};
 pub use coo::{transpose, Coo};
