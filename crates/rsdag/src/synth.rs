@@ -290,10 +290,7 @@ fn build_roots<K: Field>(g: &mut Graph<K>, spec: &mut Spec, syms: &[ExprId]) -> 
 
 /// The symbol behind a symbol node (the generator only ever passes its own).
 fn symbol_of<K: Field>(g: &Graph<K>, e: ExprId) -> SymbolId {
-    match g.node(e) {
-        crate::node::Node::Symbol(s) => *s,
-        _ => unreachable!("synth passes only symbol nodes"),
-    }
+    g.as_symbol(e).expect("synth passes only symbol nodes")
 }
 
 /// Pick an operand, biased toward the most recently built nodes.

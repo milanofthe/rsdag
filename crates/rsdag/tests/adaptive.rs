@@ -57,3 +57,42 @@ fn specialization_alone_is_the_interpreter() {
     }
     assert!(flips > 0, "some region flipped");
 }
+
+/// A session binds the pure inputs once and evaluates as the program does
+/// at every point: alone, and point by point into an output-major block.
+#[test]
+fn a_session_evaluates_as_the_program() {
+    use rsdag::Session;
+    let mut g: Graph<F64> = Graph::new();
+    let mut spec = Spec::new(7).steps(400).params(6).outputs(3).width(10);
+    let (roots, syms) = build(&mut g, &mut spec);
+    let pure: Vec<bool> = (0..syms.len()).map(|k| k % 2 == 0).collect();
+    let ins = inputs(&mut spec.rng(), syms.len());
+    let tape = Tape::compile_split(&g, &roots, &syms, &pure);
+    let program = Adaptive::new(tape, Policy::default(), None);
+    let (mut work, mut want) = (Vec::new(), Vec::new());
+    let at = |k: usize| -> Vec<f64> {
+        let mut x = ins.clone();
+        for (j, v) in x.iter_mut().enumerate().filter(|(j, _)| !pure[*j]) {
+            *v += 0.01 * (k * (j + 1)) as f64;
+        }
+        x
+    };
+    let mut session = Session::new(&program, ins.clone());
+    let (mut row, mut block) = (Vec::new(), Vec::new());
+    session.eval_points(
+        &program,
+        4,
+        |k, x| x.copy_from_slice(&at(k)),
+        &mut row,
+        &mut block,
+    );
+    for k in 0..4 {
+        program.eval(&at(k), &mut work, &mut want);
+        let got: Vec<f64> = (0..want.len()).map(|o| block[o * 4 + k]).collect();
+        assert!(same(&got, &want), "point {k}");
+        session.inputs_mut().copy_from_slice(&at(k));
+        session.eval(&program, &mut row);
+        assert!(same(&row, &want), "point {k} alone");
+    }
+}

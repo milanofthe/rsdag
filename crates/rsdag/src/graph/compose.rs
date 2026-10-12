@@ -135,13 +135,4 @@ impl<K: Field> Graph<K> {
         }
         roots.iter().map(|r| map[r]).collect()
     }
-
-    /// The symbol named `name`, made if new.
-    fn symbol_id(&mut self, name: &str) -> SymbolId {
-        let e = self.sym(name);
-        match *self.node(e) {
-            Node::Symbol(s) => s,
-            _ => unreachable!("sym yields a symbol"),
-        }
-    }
 }

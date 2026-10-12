@@ -42,8 +42,47 @@ impl<K: Field> Graph<K> {
     /// function's globals stay globals. The `Scope` idiom: build with named
     /// symbols, then close.
     pub fn close(&mut self, name: &str, outputs: Vec<ExprId>) -> FuncId {
-        let params: Vec<SymbolId> = self.mentioned_symbols_in(&outputs).into_iter().collect();
+        let params = self.params_for(&outputs, &[], |_| true);
         self.define_func(name, params, outputs)
+    }
+
+    /// The parameters a function of `outputs` takes: the `leading` symbols
+    /// the outputs mention, in order, then every other symbol they mention
+    /// that `more` admits, by symbol (see [`close`](Self::close)). A
+    /// symbol they mention that is neither the function closes over; one a
+    /// called function reads is that function's (its parameter, or what it
+    /// closes over).
+    pub fn params_for(
+        &self,
+        outputs: &[ExprId],
+        leading: &[SymbolId],
+        more: impl Fn(SymbolId) -> bool,
+    ) -> Vec<SymbolId> {
+        let free = self.mentioned_symbols_in(outputs);
+        let mut seen: FxHashSet<SymbolId> = FxHashSet::default();
+        (leading.iter().copied())
+            .chain(free.iter().copied().filter(|&s| more(s)))
+            .filter(|s| free.contains(s) && seen.insert(*s))
+            .collect()
+    }
+
+    /// [`define_func`](Self::define_func), each parameter taking the role
+    /// `role` gives it (none keeps [`ParamRole::Free`]).
+    pub fn define_func_with(
+        &mut self,
+        name: &str,
+        params: Vec<SymbolId>,
+        outputs: Vec<ExprId>,
+        role: impl Fn(&Self, SymbolId) -> Option<ParamRole>,
+    ) -> FuncId {
+        let roles: Vec<(u32, ParamRole)> = (params.iter().enumerate())
+            .filter_map(|(k, &s)| role(self, s).map(|r| (k as u32, r)))
+            .collect();
+        let f = self.define_func(name, params, outputs);
+        for (k, r) in roles {
+            self.set_param_role(f, k, r);
+        }
+        f
     }
 
     /// Set the role of parameter `param` of function `f`.
@@ -313,13 +352,7 @@ impl<K: Field> Graph<K> {
         outputs: Vec<Output>,
     ) -> FuncId {
         let params: Vec<SymbolId> = (0..arity)
-            .map(|i| {
-                let e = self.sym(&format!("{name}.${i}"));
-                match *self.node(e) {
-                    Node::Symbol(s) => s,
-                    _ => unreachable!("sym yields a symbol"),
-                }
-            })
+            .map(|i| self.symbol_id(&format!("{name}.${i}")))
             .collect();
         self.define_extern_func_with_params(name, params, body, outputs)
     }
@@ -409,6 +442,25 @@ impl<K: Field> Graph<K> {
     /// The context id of output `o` (`NO_CONTEXT` for none).
     pub(crate) fn context_of(&self, o: OutputId) -> u32 {
         self.output_ctx[o.0 as usize]
+    }
+
+    /// `f` partially applied: each parameter `arg` binds bound (see
+    /// [`bind`](Self::bind)), and the arguments a call through the binding
+    /// passes, the parameters `arg` passes, in their order.
+    pub fn partial(
+        &mut self,
+        f: FuncId,
+        mut arg: impl FnMut(&mut Self, SymbolId) -> Arg,
+    ) -> (Bound, Vec<ExprId>) {
+        let params = self.func(f).params().to_vec();
+        let (mut bound, mut args) = (Vec::new(), Vec::new());
+        for (k, s) in params.into_iter().enumerate() {
+            match arg(self, s) {
+                Arg::Bind(e) => bound.push((k as u32, e)),
+                Arg::Pass(e) => args.push(e),
+            }
+        }
+        (self.bind(f, &bound), args)
     }
 
     /// `f` with the parameters at the given positions bound to expressions:
@@ -580,11 +632,11 @@ impl<K: Field> Graph<K> {
 
     /// [`call_list`](Self::call_list) in context `ctx`.
     pub(crate) fn call_list_in(&mut self, f: FuncId, out: u32, ctx: u32, l: ArgList) -> ExprId {
-        if matches!(
-            self.funcs[f.0 as usize].outputs()[out as usize],
-            Output::Zero
-        ) {
-            return self.zero;
+        // an output no argument moves is its value
+        match self.funcs[f.0 as usize].outputs()[out as usize] {
+            Output::Zero => return self.zero,
+            Output::Expr(e) if matches!(self.node(e), Node::Const(_)) => return e,
+            _ => {}
         }
         let o = self.output_in(f, out, ctx);
         if ctx != NO_CONTEXT && !self.list_shape.contains_key(&(ctx, l)) {
@@ -698,10 +750,8 @@ impl<K: Field> Graph<K> {
         let mut cotangents = Vec::with_capacity(outs.len());
         let mut terms = Vec::with_capacity(outs.len());
         for (j, e) in exprs.into_iter().enumerate() {
-            let c = self.sym(&format!("{name}$c{j}"));
-            let Node::Symbol(s) = *self.node(c) else {
-                unreachable!("a fresh name is a symbol")
-            };
+            let s = self.symbol_id(&format!("{name}$c{j}"));
+            let c = self.symbol_expr(s);
             cotangents.push(s);
             if let Some(e) = e {
                 terms.push(self.mul(c, e));
@@ -865,10 +915,7 @@ impl<K: Field> Graph<K> {
     fn symbols_of(&self, nodes: Vec<ExprId>) -> std::collections::BTreeSet<SymbolId> {
         nodes
             .into_iter()
-            .filter_map(|e| match *self.node(e) {
-                Node::Symbol(s) => Some(s),
-                _ => None,
-            })
+            .filter_map(|e| self.as_symbol(e))
             .collect()
     }
 }

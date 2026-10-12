@@ -152,6 +152,11 @@ impl Dense {
     }
 }
 
+/// A min or max over at most this many terms is a chain of instructions
+/// where the ISA has one (`Isa::MINMAX`); longer ones go through the host
+/// routine, whose call costs about as much as this many terms.
+pub(crate) const INLINE_MINMAX_MAX: usize = 16;
+
 impl ROp {
     /// Every operand the op reads: slots, and the tagged inputs a scalar
     /// op or a list names (a kernel's input run is read by address).
@@ -207,8 +212,18 @@ impl ROp {
         };
         dst..dst + n
     }
-    /// The host routine the op calls, if any.
-    pub(crate) fn host(&self) -> Option<*const ()> {
+    /// Whether the op is a min or max the ISA `I` runs as a chain of its
+    /// instructions (see [`INLINE_MINMAX_MAX`]), calling no host routine.
+    pub(crate) fn minmax_inline<I: crate::isa::Isa>(&self) -> bool {
+        matches!(self, ROp::Reduce(_, ReduceOp::Min | ReduceOp::Max, args)
+            if I::MINMAX && !args.is_empty() && args.len() <= INLINE_MINMAX_MAX)
+    }
+
+    /// The host routine the op calls on the ISA `I`, if any.
+    pub(crate) fn host<I: crate::isa::Isa>(&self) -> Option<*const ()> {
+        if self.minmax_inline::<I>() {
+            return None;
+        }
         Some(match self {
             ROp::Unary(_, op, _) => match op {
                 UnaryOp::Sqrt
@@ -227,9 +242,12 @@ impl ROp {
             _ => return None,
         })
     }
-    /// How many values the op hands to a host routine through the gather
-    /// area of the work array.
-    pub(crate) fn gather_len(&self) -> usize {
+    /// How many values the op hands to a host routine on the ISA `I`
+    /// through the gather area of the work array.
+    pub(crate) fn gather_len<I: crate::isa::Isa>(&self) -> usize {
+        if self.minmax_inline::<I>() {
+            return 0;
+        }
         match self {
             ROp::Reduce(_, ReduceOp::Min | ReduceOp::Max, args) => args.len(),
             ROp::Call(c) => c.gather_at + (c.n_groups * c.n_args) as usize,

@@ -600,6 +600,49 @@ pub fn sparse_jacobian<K: Field>(
     rows
 }
 
+/// `roots` as affine functions of `syms`: per root its value at `syms` all
+/// zero and its coefficients, `(column, d root / d syms[column])` by
+/// column, so `root = rest + sum coef * sym`. `Err(i)` where root `i` is not
+/// affine in them (a coefficient reads one of `syms`).
+pub fn affine_in<K: Field>(
+    ctx: &mut Graph<K>,
+    roots: &[ExprId],
+    syms: &[SymbolId],
+) -> Result<(Vec<ExprId>, SparseRows), usize> {
+    let coefs = sparse_jacobian(ctx, roots, syms);
+    let all: Vec<ExprId> = coefs.iter().flatten().map(|&(_, c)| c).collect();
+    let mut nonaffine = ctx.depends_on(&all, syms).into_iter();
+    for (i, row) in coefs.iter().enumerate() {
+        if nonaffine.by_ref().take(row.len()).any(|d| d) {
+            return Err(i);
+        }
+    }
+    let zero = ctx.zero();
+    let at_zero: HashMap<SymbolId, ExprId> = syms.iter().map(|&s| (s, zero)).collect();
+    Ok((crate::transform::substitute(ctx, roots, &at_zero), coefs))
+}
+
+/// The vector-Jacobian product of `outputs` by `wrt`, over weights of its
+/// own: the gradient of `sum_k w_k outputs[k]` by `wrt` (one reverse sweep),
+/// and the weights `w_k`, fresh symbols (see [`Graph::fresh_symbol`]) an
+/// evaluation binds. Every entry is linear in the weights.
+pub fn vjp<K: Field>(
+    ctx: &mut Graph<K>,
+    outputs: &[ExprId],
+    wrt: &[SymbolId],
+) -> (Vec<SymbolId>, Vec<ExprId>) {
+    let mut weights = Vec::with_capacity(outputs.len());
+    let mut terms = Vec::with_capacity(outputs.len());
+    for &e in outputs {
+        let w = ctx.fresh_symbol("vjp$w");
+        weights.push(w);
+        let we = ctx.symbol_expr(w);
+        terms.push(ctx.mul(we, e));
+    }
+    let f = ctx.reduce(ReduceOp::Sum, terms);
+    (weights, gradient(ctx, f, wrt))
+}
+
 /// Reverse-mode symbolic gradient: `d(f)/d(wrt[j])` for every `j`, built in ONE
 /// adjoint sweep over the reachable sub-DAG instead of one forward sweep per
 /// symbol -- the right shape for a scalar objective over many leaves (a

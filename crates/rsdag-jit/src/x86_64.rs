@@ -475,11 +475,24 @@ impl<const L: usize> Isa for X64<L> {
         self.b(Self::arith_op(op));
         self.modrm_mem(d, base, off);
     }
-    const MINMAX: bool = false;
-    fn minmax(&mut self, _op: ReduceOp, _d: u8, _a: u8, _b: u8) {
-        // minsd / maxsd return the second operand on a NaN or a tie of
-        // signed zeros, not the reference's rule; the host routine it is.
-        unreachable!("no min/max instruction with the reference's NaN rule")
+    const MINMAX: bool = true;
+    fn minmax(&mut self, op: ReduceOp, d: u8, a: u8, b: u8) {
+        // `minsd a, b` (`maxsd`) is `a` where it is the smaller (larger),
+        // else `b`: on a tie and wherever either is a NaN. A NaN `b` then
+        // takes `a`: the reference's rule (`f64::min`, `f64::max` as LLVM
+        // lowers them), a tie the second operand's.
+        let opc = match op {
+            ReduceOp::Min => 0x5D,
+            _ => 0x5F,
+        };
+        if self.avx {
+            self.vex_rr(Self::PP, opc, 1, a, b);
+        } else {
+            self.mov(1, a);
+            self.sse(Self::PFX, opc, 1, b);
+        }
+        self.cmp_mask(b, b, 0); // ordered: false where b is a NaN
+        self.blend(1, a, d);
     }
     fn neg(&mut self, d: u8, a: u8) {
         self.op_const(0x66, 1, 0x57, d, a, 0x8000_0000_0000_0000); // xorpd

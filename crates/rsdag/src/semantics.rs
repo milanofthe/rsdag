@@ -9,7 +9,7 @@
 //! platform library, and the fold orders of reductions and dot products. A
 //! backend that reproduces these bit for bit reproduces every program.
 
-use crate::node::{BinOp, CmpOp, ReduceOp, UnaryOp};
+use crate::node::{BinOp, CmpOp, Elementary, ReduceOp, UnaryOp};
 use crate::scalar::Scalar;
 use crate::tape::Fold;
 
@@ -89,6 +89,25 @@ pub fn reduce_slice(op: ReduceOp, xs: &[f64]) -> f64 {
 /// [`dot_slice_t`] in `f64`: the vector twin (AVX or two-lane), bit-identical.
 pub fn dot_slice(a: &[f64], b: &[f64]) -> f64 {
     <f64 as Scalar>::dot_slice(a, b)
+}
+
+/// Canonical evaluation of an [`Elementary`] at `args` (as many as its
+/// arity).
+pub fn elementary_f64(f: Elementary, args: &[f64]) -> f64 {
+    debug_assert_eq!(
+        args.len(),
+        f.arity(),
+        "{} takes {} arguments",
+        f.name(),
+        f.arity()
+    );
+    match f {
+        Elementary::Unary(op) => unary_f64(op, args[0]),
+        Elementary::Binary(op) => binary_f64(op, args[0], args[1]),
+        Elementary::Min | Elementary::Max => {
+            reduce_slice(f.reduction().expect("an extremum"), &args[..2])
+        }
+    }
 }
 
 /// Canonical evaluation of a [`BinOp`], the one reference for every backend.

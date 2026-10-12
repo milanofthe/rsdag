@@ -443,6 +443,62 @@ impl BinOp {
     }
 }
 
+/// An elementary function as an expression frontend calls it by name: a
+/// unary op, a binary op beyond the ring, or the extremum of its arguments.
+/// One vocabulary, so every frontend builds a function the same way.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Elementary {
+    Unary(UnaryOp),
+    Binary(BinOp),
+    /// The smaller of two arguments ([`ReduceOp::Min`]).
+    Min,
+    /// The larger of two arguments ([`ReduceOp::Max`]).
+    Max,
+}
+
+impl Elementary {
+    /// The function a name denotes: an op's name ([`UnaryOp::from_name`],
+    /// [`BinOp::from_name`]), `min`, `max`, and `pow` for
+    /// [`BinOp::Powf`].
+    pub fn from_name(name: &str) -> Option<Elementary> {
+        match name {
+            "min" => Some(Elementary::Min),
+            "max" => Some(Elementary::Max),
+            "pow" => Some(Elementary::Binary(BinOp::Powf)),
+            _ => (UnaryOp::from_name(name).map(Elementary::Unary))
+                .or_else(|| BinOp::from_name(name).map(Elementary::Binary)),
+        }
+    }
+
+    /// Its name (see [`from_name`](Self::from_name)).
+    pub fn name(self) -> &'static str {
+        match self {
+            Elementary::Unary(op) => op.name(),
+            Elementary::Binary(op) => op.name(),
+            Elementary::Min => ReduceOp::Min.name(),
+            Elementary::Max => ReduceOp::Max.name(),
+        }
+    }
+
+    /// The reduction an extremum is, `None` for an op.
+    pub fn reduction(self) -> Option<ReduceOp> {
+        match self {
+            Elementary::Min => Some(ReduceOp::Min),
+            Elementary::Max => Some(ReduceOp::Max),
+            _ => None,
+        }
+    }
+
+    /// How many arguments it takes.
+    pub fn arity(self) -> usize {
+        match self {
+            Elementary::Unary(_) => 1,
+            Elementary::Binary(_) | Elementary::Min | Elementary::Max => 2,
+        }
+    }
+}
+
 /// A node in the symbolic DAG.
 ///
 /// Leaves are exact rational constants or free symbols. Inner nodes are the

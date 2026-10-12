@@ -3,14 +3,6 @@ use rsdag::BigRational;
 use rsdag::*;
 use std::collections::HashMap;
 
-fn sid<K: Field>(ctx: &mut Graph<K>, name: &str) -> SymbolId {
-    let id = ctx.sym(name);
-    match ctx.node(id) {
-        Node::Symbol(s) => *s,
-        _ => unreachable!(),
-    }
-}
-
 #[test]
 fn derivative_matches_finite_difference() {
     let mut ctx: Graph<BigRational> = Graph::new();
@@ -28,17 +20,17 @@ fn derivative_matches_finite_difference() {
     let gv2 = ctx.mul(g, v2);
     let f = ctx.add(diode, gv2);
 
-    let v_id = sid(&mut ctx, "v");
+    let v_id = ctx.symbol_id("v");
     let df = differentiate(&mut ctx, f, v_id);
 
     // Derivative wrt an absent symbol is structurally zero.
-    let w_id = sid(&mut ctx, "w");
+    let w_id = ctx.symbol_id("w");
     let dfw = differentiate(&mut ctx, f, w_id);
     assert!(ctx.is_zero(dfw));
 
-    let vt_id = sid(&mut ctx, "Vt");
-    let is_id = sid(&mut ctx, "Is");
-    let g_id = sid(&mut ctx, "g");
+    let vt_id = ctx.symbol_id("Vt");
+    let is_id = ctx.symbol_id("Is");
+    let g_id = ctx.symbol_id("g");
 
     let mut env: HashMap<SymbolId, f64> = HashMap::new();
     env.insert(vt_id, 0.05);
@@ -67,7 +59,7 @@ fn exp_derivative_shares_primal_and_matches_limexp_tail() {
     let mut ctx: Graph<BigRational> = Graph::new();
     let x = ctx.sym("x");
     let e = ctx.exp(x);
-    let xid = sid(&mut ctx, "x");
+    let xid = ctx.symbol_id("x");
     let de = differentiate(&mut ctx, e, xid);
     // The derivative reuses the primal exp node (no second exp in the DAG).
     let n_exp = (0..ctx.len())
@@ -98,7 +90,7 @@ fn select_and_opaque_autodiff() {
     let x2 = ctx.mul(x, x);
     let negx = ctx.neg(x);
     let f = ctx.select(cond, x2, negx);
-    let xid = sid(&mut ctx, "x");
+    let xid = ctx.symbol_id("x");
     let df = differentiate(&mut ctx, f, xid);
 
     let eval_at = |ctx: &Graph<BigRational>, e: ExprId, xv: f64| {
@@ -115,7 +107,7 @@ fn select_and_opaque_autodiff() {
     let two = ctx.konst_int(2);
     let two_x = ctx.mul(two, x);
     let p = ctx.sym("p");
-    let ps = sid(&mut ctx, "p");
+    let ps = ctx.symbol_id("p");
     let p3 = ctx.pow_i(p, 3);
     let f = ctx.define_func("cube", vec![ps], vec![p3]);
     let g = ctx.call(f, 0, &[two_x]);
@@ -149,7 +141,7 @@ fn gradient_matches_forward_mode() {
     let s2 = ctx.add(mn, dot);
     let f = ctx.add(s1, s2);
 
-    let (xs, ys, zs) = (sid(&mut ctx, "x"), sid(&mut ctx, "y"), sid(&mut ctx, "z"));
+    let (xs, ys, zs) = (ctx.symbol_id("x"), ctx.symbol_id("y"), ctx.symbol_id("z"));
     let grad = gradient(&mut ctx, f, &[xs, ys, zs]);
     let fwd: Vec<ExprId> = [xs, ys, zs]
         .iter()
@@ -185,12 +177,12 @@ fn gradient_handles_calls_and_absent_symbols() {
     let two = ctx.konst_int(2);
     let two_x = ctx.mul(two, x);
     let p = ctx.sym("p");
-    let ps = sid(&mut ctx, "p");
+    let ps = ctx.symbol_id("p");
     let p3 = ctx.pow_i(p, 3);
     let f = ctx.define_func("cube", vec![ps], vec![p3]);
     let g = ctx.call(f, 0, &[two_x]);
-    let xs = sid(&mut ctx, "x");
-    let ws = sid(&mut ctx, "w");
+    let xs = ctx.symbol_id("x");
+    let ws = ctx.symbol_id("w");
     let grad = gradient(&mut ctx, g, &[xs, ws]);
     assert!(!ctx.is_zero(grad[0]));
     assert!(rsdag::to_string(&ctx, grad[0]).contains("cube#1"));
@@ -211,8 +203,8 @@ fn the_jacobian_is_sparse() {
     let r0 = ctx.add(ax, by);
     let r1 = x;
 
-    let x_id = sid(&mut ctx, "x");
-    let y_id = sid(&mut ctx, "y");
+    let x_id = ctx.symbol_id("x");
+    let y_id = ctx.symbol_id("y");
     let jac = sparse_jacobian(&mut ctx, &[r0, r1], &[x_id, y_id]);
     let pattern: Vec<Vec<usize>> = jac
         .iter()
@@ -293,7 +285,7 @@ fn deep_chains_differentiate_on_a_small_stack() {
         .spawn(|| {
             let mut g: Graph = Graph::new();
             let x = g.sym("x");
-            let xs = sid(&mut g, "x");
+            let xs = g.symbol_id("x");
             let (mut sines, mut sum) = (x, x);
             for _ in 0..100_000 {
                 sines = g.sin(sines);
@@ -324,7 +316,7 @@ fn derivatives_skip_what_does_not_move() {
     let mut g: Graph = Graph::new();
     let x = g.sym("x");
     let z = g.sym("z");
-    let (xs, zs) = (sid(&mut g, "x"), sid(&mut g, "z"));
+    let (xs, zs) = (g.symbol_id("x"), g.symbol_id("z"));
     let mut deep = z;
     for _ in 0..1000 {
         deep = g.tanh(deep);
@@ -337,7 +329,7 @@ fn derivatives_skip_what_does_not_move() {
 
     let p = g.sym("p");
     let q = g.sym("q");
-    let (ps, qs) = (sid(&mut g, "p"), sid(&mut g, "q"));
+    let (ps, qs) = (g.symbol_id("p"), g.symbol_id("q"));
     let pq = g.mul(p, q);
     let body = g.sin(pq);
     let h = g.define_func("h", vec![ps, qs], vec![body]);
@@ -356,7 +348,7 @@ fn the_sparse_jacobian_holds_every_nonzero_derivative() {
     let mut g: Graph<F64> = Graph::new();
     let n = 40;
     let xs: Vec<ExprId> = (0..n).map(|i| g.sym(&format!("x{i}"))).collect();
-    let syms: Vec<SymbolId> = (0..n).map(|i| sid(&mut g, &format!("x{i}"))).collect();
+    let syms: Vec<SymbolId> = (0..n).map(|i| g.symbol_id(&format!("x{i}"))).collect();
     let f: Vec<ExprId> = (0..n)
         .map(|i| {
             let (l, c, r) = (xs[(i + n - 1) % n], xs[i], xs[(i + 1) % n]);
@@ -392,7 +384,7 @@ fn many_moving_call_arguments_take_one_vector_jacobian_call() {
     fn build(g: &mut Graph) -> (ExprId, Vec<SymbolId>, FuncId) {
         let n = 20;
         let ps: Vec<ExprId> = (0..n).map(|k| g.sym(&format!("p{k}"))).collect();
-        let pids: Vec<SymbolId> = (0..n).map(|k| sid(g, &format!("p{k}"))).collect();
+        let pids: Vec<SymbolId> = (0..n).map(|k| g.symbol_id(&format!("p{k}"))).collect();
         let mut acc = g.zero();
         for k in 0..n {
             let e = g.exp(ps[(k + 1) % n]);
@@ -403,7 +395,7 @@ fn many_moving_call_arguments_take_one_vector_jacobian_call() {
         let f = g.define_func("dev", pids, vec![body]);
         let args: Vec<ExprId> = (0..n).map(|k| g.sym(&format!("a{k}"))).collect();
         let call = g.call(f, 0, &args);
-        let aids = (0..n).map(|k| sid(g, &format!("a{k}"))).collect();
+        let aids = (0..n).map(|k| g.symbol_id(&format!("a{k}"))).collect();
         (call, aids, f)
     }
     let (mut rg, mut fg): (Graph, Graph) = (Graph::new(), Graph::new());
@@ -464,7 +456,7 @@ fn the_support_reads_through_nested_calls() {
         .collect();
     assert_eq!(names, ["r", "t"]);
     // the value reads the selector's condition too
-    let (p, q) = (sid(&mut g, "p"), sid(&mut g, "q"));
+    let (p, q) = (g.symbol_id("p"), g.symbol_id("q"));
     let g0 = g.call(gf, 0, &args);
     assert_eq!(g.depends_on(&[call, g0], &[p]), [true, true]);
     assert_eq!(g.depends_on(&[call, g0], &[q]), [false, true]);
@@ -499,7 +491,7 @@ fn a_jacobian_through_wide_calls_makes_only_its_entries() {
         .collect();
     let h = s.close(outs);
     let us: Vec<ExprId> = (0..N).map(|k| g.sym(&format!("u{k}"))).collect();
-    let wrt: Vec<SymbolId> = (0..N).map(|k| sid(&mut g, &format!("u{k}"))).collect();
+    let wrt: Vec<SymbolId> = (0..N).map(|k| g.symbol_id(&format!("u{k}"))).collect();
     let rows: Vec<ExprId> = (0..N).map(|k| g.call(h, k as u32, &us)).collect();
 
     let jac = sparse_jacobian(&mut g, &rows, &wrt);
@@ -548,13 +540,13 @@ fn a_call_site_with_several_outputs_and_their_derivatives_takes_one_vjp() {
         let n = 20;
         // inner(q) = q * exp(q)
         let q = g.sym("q");
-        let qs = sid(g, "q");
+        let qs = g.symbol_id("q");
         let eq = g.exp(q);
         let qe = g.mul(q, eq);
         let inner = g.define_func("inner", vec![qs], vec![qe]);
         // dev(p) = [sum_k p_k inner(p_{k+1}), prod-ish second output]
         let ps: Vec<ExprId> = (0..n).map(|k| g.sym(&format!("p{k}"))).collect();
-        let pids: Vec<SymbolId> = (0..n).map(|k| sid(g, &format!("p{k}"))).collect();
+        let pids: Vec<SymbolId> = (0..n).map(|k| g.symbol_id(&format!("p{k}"))).collect();
         let mut acc = g.zero();
         let mut sq = g.zero();
         for k in 0..n {
@@ -573,7 +565,7 @@ fn a_call_site_with_several_outputs_and_their_derivatives_takes_one_vjp() {
                 g.mul(h, a)
             })
             .collect();
-        let aids: Vec<SymbolId> = (0..n).map(|k| sid(g, &format!("a{k}"))).collect();
+        let aids: Vec<SymbolId> = (0..n).map(|k| g.symbol_id(&format!("a{k}"))).collect();
         // the outputs and a derivative output of one call site, weighted
         let d0 = g.derivative_output(f, 0, 3);
         let outs = g.calls(f, &[0, 1, d0], &args);
@@ -607,4 +599,49 @@ fn a_call_site_with_several_outputs_and_their_derivatives_takes_one_vjp() {
         .filter(|&f| rg.func(FuncId(f as u32)).name().starts_with("dev#vjp"))
         .count();
     assert_eq!(vjps, 1);
+}
+
+/// A vector-Jacobian product: the weights fresh symbols, the entries the
+/// gradient of the weighted sum at any weights.
+#[test]
+fn vjp_is_the_weighted_gradient() {
+    let mut ctx: Graph = Graph::new();
+    let (x, y) = (ctx.sym("x"), ctx.sym("y"));
+    let (sx, sy) = (ctx.symbol_id("x"), ctx.symbol_id("y"));
+    let xy = ctx.mul(x, y);
+    let sx2 = ctx.sin(x);
+    let (w, g) = vjp(&mut ctx, &[xy, sx2], &[sx, sy]);
+    assert_eq!(w.len(), 2);
+    assert_ne!(w[0], w[1]);
+    assert!(![sx, sy].contains(&w[0]) && ![sx, sy].contains(&w[1]));
+    let env: HashMap<SymbolId, f64> = [(sx, 0.3), (sy, 2.0), (w[0], 1.5), (w[1], -0.5)]
+        .into_iter()
+        .collect();
+    let got = eval(&ctx, &g, &env);
+    let want = [1.5 * 2.0 - 0.5 * 0.3f64.cos(), 1.5 * 0.3];
+    assert!((got[0] - want[0]).abs() < 1e-15 && (got[1] - want[1]).abs() < 1e-15);
+    // a fresh symbol never takes a name the graph has
+    let taken = format!("vjp$w{}", ctx.symbol_name(w[1]).len());
+    ctx.sym(&taken);
+    let f = ctx.fresh_symbol("vjp$w");
+    assert!(!w.contains(&f) && ctx.symbol_name(f) != taken);
+}
+
+/// An affine split: the rest at the symbols zero and their coefficients;
+/// a root nonlinear in them is reported.
+#[test]
+fn affine_split_and_its_refusal() {
+    let mut ctx: Graph = Graph::new();
+    let (x, m, n) = (ctx.sym("x"), ctx.sym("m"), ctx.sym("n"));
+    let (sm, sn) = (ctx.symbol_id("m"), ctx.symbol_id("n"));
+    let xm = ctx.mul(x, m);
+    let ex = ctx.exp(x);
+    let r0 = ctx.add(xm, ex);
+    let r1 = ctx.add(n, x);
+    let (rest, coefs) = affine_in(&mut ctx, &[r0, r1], &[sm, sn]).unwrap();
+    assert_eq!(rest, vec![ex, x]);
+    assert_eq!(coefs[0], vec![(0, x)]);
+    assert_eq!(coefs[1].len(), 1);
+    let mm = ctx.mul(m, m);
+    assert_eq!(affine_in(&mut ctx, &[r1, mm], &[sm, sn]), Err(1));
 }

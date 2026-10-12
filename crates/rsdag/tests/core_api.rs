@@ -138,3 +138,153 @@ fn printing_a_shared_or_deep_dag_stays_linear() {
         .join()
         .unwrap();
 }
+
+/// A rule substitution renames every free symbol it maps and keeps the
+/// rest; a pin substitutes and specializes the calls it makes constant.
+#[test]
+fn substitute_with_a_rule_and_pin_to_constants() {
+    let mut g: Graph<F64> = Graph::new();
+    let (a, b) = (g.sym("a"), g.sym("b"));
+    let f = g.mul(a, b);
+    let out = substitute_with(&mut g, &[f], |g, s| {
+        let name = format!("X.{}", g.symbol_name(s));
+        (name != "X.b").then(|| g.sym(&name))
+    });
+    let xa = g.sym("X.a");
+    assert_eq!(out[0], g.mul(xa, b));
+    // a function of (p, q) called with q pinned to 2
+    let (p, q) = (g.symbol_id("p"), g.symbol_id("q"));
+    let (pe, qe) = (g.symbol_expr(p), g.symbol_expr(q));
+    let body = g.mul(pe, qe);
+    let func = g.define_func("f", vec![p, q], vec![body]);
+    let call = g.call(func, 0, &[a, b]);
+    let two = g.konst_f64(2.0);
+    let sb = g.as_symbol(b).unwrap();
+    let map = [(sb, two)].into_iter().collect();
+    let pinned = pin(&mut g, &[call], &map)[0];
+    let sa = g.as_symbol(a).unwrap();
+    let env = [(sa, 3.0)].into_iter().collect();
+    assert_eq!(eval(&g, &[pinned], &env), vec![6.0]);
+    assert!(!g.free_symbols(pinned).contains(&sb));
+}
+
+/// A signature without some roles keeps the others in order; a function
+/// lists its expression outputs of a role.
+#[test]
+fn signature_without_and_outputs_of_a_role() {
+    let mut g: Graph<F64> = Graph::new();
+    let (x, n) = (g.symbol_id("x"), g.symbol_id("n"));
+    let (xe, ne) = (g.symbol_expr(x), g.symbol_expr(n));
+    let i = g.add(xe, ne);
+    let f = g.define_func("rows", vec![x, n], vec![i, xe]);
+    g.set_param_role(f, 0, ParamRole::State { id: 0 });
+    g.set_param_role(f, 1, ParamRole::Noise { id: 0 });
+    g.set_output_role(f, 0, OutputRole::Residual { id: 0 });
+    let sig = Signature::of(g.func(f)).without(|r| matches!(r, ParamRole::Noise { .. }));
+    assert_eq!(sig.syms, vec![x]);
+    let rows = g
+        .func(f)
+        .exprs_with_role(|r| matches!(r, OutputRole::Residual { .. }));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, i);
+}
+
+/// A function's parameters: the leading ones its outputs read, in order,
+/// then the admitted others by symbol; roles by rule.
+#[test]
+fn params_in_order_and_roles_by_rule() {
+    let mut g: Graph<F64> = Graph::new();
+    let (a, b, c, d) = (g.sym("a"), g.sym("b"), g.sym("ns.c"), g.sym("glob"));
+    let ab = g.mul(a, b);
+    let cd = g.add(c, d);
+    let out = g.add(ab, cd);
+    let [sa, sb, sc, unread] = ["a", "b", "ns.c", "unread"].map(|n| g.symbol_id(n));
+    let params = g.params_for(&[out], &[sb, unread, sa], |s| {
+        g.symbol_name(s).starts_with("ns.")
+    });
+    assert_eq!(params, vec![sb, sa, sc]);
+    let f = g.define_func_with("f", params, vec![out], |g, s| {
+        (g.symbol_name(s) == "a").then_some(ParamRole::Param)
+    });
+    assert_eq!(
+        g.func(f).param_roles(),
+        &[ParamRole::Free, ParamRole::Param, ParamRole::Free]
+    );
+}
+
+/// A partial application binds what the rule binds and passes the rest in
+/// order: a call through it is the call with every argument.
+#[test]
+fn partial_binds_and_passes_in_order() {
+    let mut g: Graph<F64> = Graph::new();
+    let [p, q, r] = ["p", "q", "r"].map(|n| g.symbol_id(n));
+    let [pe, qe, re] = [p, q, r].map(|s| g.symbol_expr(s));
+    let pq = g.mul(pe, qe);
+    let body = g.sub(pq, re);
+    let f = g.define_func("f", vec![p, q, r], vec![body]);
+    let (two, x, y) = (g.konst_f64(2.0), g.sym("x"), g.sym("y"));
+    let (b, args) = g.partial(f, |_, s| {
+        if s == q {
+            Arg::Bind(two)
+        } else if s == p {
+            Arg::Pass(x)
+        } else {
+            Arg::Pass(y)
+        }
+    });
+    assert_eq!(args, vec![x, y]);
+    let call = g.calls_bound(b, &[0], &args)[0];
+    let env = [
+        (g.as_symbol(x).unwrap(), 3.0),
+        (g.as_symbol(y).unwrap(), 1.0),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(eval(&g, &[call], &env), vec![5.0]);
+}
+
+/// A call of an output no argument moves is the output's value.
+#[test]
+fn a_constant_output_calls_as_its_value() {
+    let mut g: Graph<F64> = Graph::new();
+    let p = g.symbol_id("p");
+    let pe = g.symbol_expr(p);
+    let three = g.konst_f64(3.0);
+    let f = g.define_func("f", vec![p], vec![pe, three]);
+    let x = g.sym("x");
+    let calls = g.calls(f, &[0, 1], &[x]);
+    assert!(matches!(g.node(calls[0]), Node::Call(..)));
+    assert_eq!(calls[1], three);
+}
+
+/// A symbol only a called function reads is that function's: no parameter
+/// of a function over the call.
+#[test]
+fn params_for_leave_a_called_bodys_symbols_to_it() {
+    let mut g: Graph<F64> = Graph::new();
+    let (p, glob) = (g.symbol_id("p"), g.sym("glob"));
+    let pe = g.symbol_expr(p);
+    let body = g.mul(pe, glob);
+    let inner = g.define_func("inner", vec![p], vec![body]);
+    let x = g.sym("x");
+    let call = g.call(inner, 0, &[x]);
+    let sx = g.as_symbol(x).unwrap();
+    assert_eq!(g.params_for(&[call], &[], |_| true), vec![sx]);
+}
+
+/// Symbols by name and by node, and the terms of a sum.
+#[test]
+fn symbols_and_summands() {
+    let mut g: Graph<F64> = Graph::new();
+    assert_eq!(g.find_symbol("a"), None);
+    let a = g.symbol_id("a");
+    assert_eq!(g.find_symbol("a"), Some(a));
+    let (ea, b) = (g.symbol_expr(a), g.sym("b"));
+    let s = g.reduce(ReduceOp::Sum, vec![ea, b]);
+    assert_eq!(g.summands(s).len(), 2);
+    let zero = g.zero();
+    assert!(g.summands(zero).is_empty());
+    assert_eq!(g.summands(ea), vec![ea]);
+    assert_eq!(g.as_symbol(s), None);
+    assert_eq!(g.as_symbol(ea), Some(a));
+}

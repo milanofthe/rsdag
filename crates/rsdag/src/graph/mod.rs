@@ -7,7 +7,7 @@ use crate::field::{Field, F64};
 use crate::extern_fn::ExternBundle;
 use crate::func::{FuncId, Function, Output, OutputId};
 use crate::node::{
-    ArgList, BinOp, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp, SymbolId, UnaryOp,
+    ArgList, BinOp, CmpOp, ConstId, Elementary, ExprId, Node, Operands, ReduceOp, SymbolId, UnaryOp,
 };
 use crate::role::{OutputRole, ParamRole};
 use crate::semantics::{binary_f64, unary_f64};
@@ -98,6 +98,14 @@ pub(crate) struct Context {
 
 /// Marks a bound parameter in [`Context::slot`].
 pub(crate) const BOUND: u32 = 1 << 31;
+
+/// What [`Graph::partial`] does with a parameter: bind it to an
+/// expression in the function, or pass one per call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arg {
+    Bind(ExprId),
+    Pass(ExprId),
+}
 
 /// A function with parameters bound (see [`Graph::bind`]): what a call
 /// through it runs, its arguments the parameters left.
@@ -435,6 +443,51 @@ impl<K: Field> Graph<K> {
         self.intern(Node::Symbol(s))
     }
 
+    /// The symbol named `name`, made if new.
+    pub fn symbol_id(&mut self, name: &str) -> SymbolId {
+        let e = self.sym(name);
+        match *self.node(e) {
+            Node::Symbol(s) => s,
+            _ => unreachable!("sym yields a symbol"),
+        }
+    }
+
+    /// A symbol of its own: named `prefix` and a number, a name no symbol of
+    /// the graph has.
+    pub fn fresh_symbol(&mut self, prefix: &str) -> SymbolId {
+        let mut k = self.symbol_names.len();
+        loop {
+            let name = format!("{prefix}{k}");
+            if !self.symbol_ids.contains_key(name.as_str()) {
+                return self.symbol_id(&name);
+            }
+            k += 1;
+        }
+    }
+
+    /// The symbol named `name`, if the graph has one.
+    pub fn find_symbol(&self, name: &str) -> Option<SymbolId> {
+        self.symbol_ids.get(name).copied()
+    }
+
+    /// The symbol `e` is, if it is one.
+    pub fn as_symbol(&self, e: ExprId) -> Option<SymbolId> {
+        match *self.node(e) {
+            Node::Symbol(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The terms `e` sums: the operands of a sum, none for zero, else `e`
+    /// itself.
+    pub fn summands(&self, e: ExprId) -> Vec<ExprId> {
+        match *self.node(e) {
+            Node::Reduce(ReduceOp::Sum, l) => self.args(l).to_vec(),
+            _ if self.is_zero(e) => Vec::new(),
+            _ => vec![e],
+        }
+    }
+
     /// Look up or create a free symbol by name.
     pub fn sym(&mut self, name: &str) -> ExprId {
         let sid = if let Some(&sid) = self.symbol_ids.get(name) {
@@ -588,6 +641,24 @@ impl<K: Field> Graph<K> {
     /// Binary function node (`Powf`, `Mod`, `Atan2`, `Hypot`): the powers of
     /// zero and one resolve; a floating field folds constants through the
     /// reference math.
+    /// The elementary function `f` of `args` (as many as its arity).
+    pub fn elementary(&mut self, f: Elementary, args: &[ExprId]) -> ExprId {
+        debug_assert_eq!(
+            args.len(),
+            f.arity(),
+            "{} takes {} arguments",
+            f.name(),
+            f.arity()
+        );
+        match f {
+            Elementary::Unary(op) => self.unary(op, args[0]),
+            Elementary::Binary(op) => self.binary(op, args[0], args[1]),
+            Elementary::Min | Elementary::Max => {
+                self.reduce(f.reduction().expect("an extremum"), args[..2].to_vec())
+            }
+        }
+    }
+
     pub fn binary(&mut self, op: BinOp, a: ExprId, b: ExprId) -> ExprId {
         if op == BinOp::Powf {
             if self.is_zero(b) {

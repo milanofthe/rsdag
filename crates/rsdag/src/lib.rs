@@ -6,6 +6,7 @@
 pub mod adaptive;
 pub mod autodiff;
 pub mod builder;
+pub mod coo;
 pub mod display;
 pub mod dot;
 pub mod eval;
@@ -32,18 +33,19 @@ pub mod variant;
 // `substitute` re-export below, not as a module path.
 pub(crate) mod transform;
 
-pub use adaptive::{Adaptive, Compiler, Episode, Policy, Stats};
-pub use autodiff::{differentiate, gradient, sparse_jacobian, SparseRows};
+pub use adaptive::{Adaptive, Compiler, Episode, Policy, Session, Stats};
+pub use autodiff::{affine_in, differentiate, gradient, sparse_jacobian, vjp, SparseRows};
 pub use builder::{Builder, Numeric};
+pub use coo::{transpose_rows, Coo};
 pub use display::to_string;
 pub use eval::eval;
 pub use extern_fn::{BackendCache, BodyBackend, BodyCompiler, ExternBundle, Instances, Submit};
 pub use field::{Field, F64};
 pub use func::{Body, FuncId, Function, Output, OutputId};
-pub use graph::{Bound, Graph};
+pub use graph::{Arg, Bound, Graph};
 pub use module::{IdMap, Module, ModuleError, MODULE_VERSION};
 pub use node::{
-    ArgList, BinOp, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp, SymbolId, UnaryOp,
+    ArgList, BinOp, CmpOp, ConstId, Elementary, ExprId, Node, Operands, ReduceOp, SymbolId, UnaryOp,
 };
 pub use nonlinearity::{nonlinearity, nonlinearity_of, Degree, Nonlinearity, UnarySet};
 /// The exact constant field (feature `exact`).
@@ -57,4 +59,4 @@ pub use semantics::{
 };
 pub use tape::{Lowered, NoTrace, ParamSelects, Program, SpecializedTape, Tape, TraceSink};
 
-pub use transform::substitute;
+pub use transform::{pin, substitute, substitute_with};

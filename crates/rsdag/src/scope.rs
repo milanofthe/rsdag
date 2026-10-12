@@ -60,11 +60,8 @@ impl<'g, K: Field> Scope<'g, K> {
     /// As [`Scope::param`], with the role the consumer's system layer needs
     /// (a state, an input port element, a mutable parameter).
     pub fn param_with_role(&mut self, name: &str, role: ParamRole) -> ExprId {
-        let e = self.graph.sym(name);
-        let s = match self.graph.node(e) {
-            Node::Symbol(s) => *s,
-            _ => unreachable!("sym returns a symbol node"),
-        };
+        let s = self.graph.symbol_id(name);
+        let e = self.graph.symbol_expr(s);
         match self.params.iter().position(|&p| p == s) {
             Some(k) => self.roles[k] = role,
             None => {

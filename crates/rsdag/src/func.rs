@@ -424,10 +424,7 @@ impl Function {
         let globals: Vec<crate::node::SymbolId> = self
             .globals_in(ctx)
             .iter()
-            .map(|&g| match *ctx.node(g) {
-                crate::node::Node::Symbol(s) => s,
-                _ => unreachable!("a global is a symbol"),
-            })
+            .map(|&g| ctx.as_symbol(g).expect("a global is a symbol"))
             .collect();
         let inputs: Vec<crate::node::SymbolId> = self
             .params
@@ -541,6 +538,18 @@ impl Function {
     pub fn outputs_with_role(&self, role: impl Fn(&OutputRole) -> bool) -> Vec<u32> {
         (0..self.outputs.len() as u32)
             .filter(|&i| role(&self.output_roles[i as usize]))
+            .collect()
+    }
+
+    /// The expression outputs carrying `role`, and their roles, in output
+    /// order.
+    pub fn exprs_with_role(&self, role: impl Fn(&OutputRole) -> bool) -> Vec<(ExprId, OutputRole)> {
+        (self.outputs.iter().zip(&self.output_roles))
+            .filter(|(_, r)| role(r))
+            .filter_map(|(o, r)| match *o {
+                Output::Expr(e) => Some((e, *r)),
+                _ => None,
+            })
             .collect()
     }
 

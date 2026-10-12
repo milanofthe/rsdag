@@ -82,15 +82,17 @@ pub struct NativeTape {
     phase_ops: [(usize, usize); 2],
 }
 
-/// The gather area lane code needs for `op`: a host call's float
-/// arguments and results lane by lane, or a min/max's terms, one lane's
-/// row of them and the results.
-fn lane_gather_len(op: &ROp, l: usize) -> usize {
+/// The gather area lane code on the ISA `I` needs for `op`: a host call's
+/// float arguments and results lane by lane, or a min/max's terms, one
+/// lane's row of them and the results (none where it runs inline).
+fn lane_gather_len<I: Isa>(op: &ROp) -> usize {
+    let l = I::LANES;
     match op {
+        _ if op.minmax_inline::<I>() => 0,
         ROp::Reduce(_, rsdag::node::ReduceOp::Min | rsdag::node::ReduceOp::Max, a) => {
             a.len() * l + a.len() + l
         }
-        _ if op.host().is_some() => 3 * l,
+        _ if op.host::<I>().is_some() => 3 * l,
         _ => 0,
     }
 }
@@ -116,11 +118,6 @@ struct NativeBody {
     rank: Vec<Option<usize>>,
     batch: Batch,
 }
-
-/// A min or max over at most this many terms is a chain of instructions
-/// where the ISA has one; longer ones go through the host routine, whose
-/// call costs about as much as this many terms.
-const INLINE_MINMAX_MAX: usize = 16;
 
 impl NativeBody {
     /// The instances `groups` of a batch, one after the other on one work
@@ -746,15 +743,15 @@ impl NativeTape {
         for (k, op) in ops.iter().enumerate() {
             let p = &mut phase_ops[usize::from(k >= split)];
             p.0 += 1;
-            p.1 += usize::from(op.host().is_some());
+            p.1 += usize::from(op.host::<A>().is_some());
         }
         let gather_len = ops
             .iter()
             .map(|op| {
                 if lanes == 1 {
-                    op.gather_len()
+                    op.gather_len::<A>()
                 } else {
-                    lane_gather_len(op, lanes)
+                    lane_gather_len::<A>(op)
                 }
             })
             .max()
@@ -1411,9 +1408,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
                     let r = self.fold(Arith::Mul, 1.0, args, None);
                     self.put(dst, r);
                 }
-                ReduceOp::Min | ReduceOp::Max
-                    if I::MINMAX && !args.is_empty() && args.len() <= INLINE_MINMAX_MAX =>
-                {
+                ReduceOp::Min | ReduceOp::Max if op.minmax_inline::<I>() => {
                     // The reference's left fold, one instruction per term.
                     let first = self.get(args[0]);
                     let mut acc = self.fresh();
@@ -1747,11 +1742,11 @@ impl<'a, I: Isa> Emitter<'a, I> {
     }
 }
 
-/// The host routines a chunk calls, most frequent first.
-fn hot_routines(ops: &[ROp]) -> Vec<*const ()> {
+/// The host routines a chunk calls on the ISA `I`, most frequent first.
+fn hot_routines<I: Isa>(ops: &[ROp]) -> Vec<*const ()> {
     let mut count: Vec<(*const (), usize)> = Vec::new();
     for op in ops {
-        if let Some(h) = op.host() {
+        if let Some(h) = op.host::<I>() {
             match count.iter_mut().find(|(a, _)| *a == h) {
                 Some(c) => c.1 += 1,
                 None => count.push((h, 1)),
@@ -1765,11 +1760,11 @@ fn hot_routines(ops: &[ROp]) -> Vec<*const ()> {
 }
 
 fn emit_chunk<A: Isa>(ops: &[ROp], start: usize, layout: Layout, live: &Liveness) -> Emitted {
-    let hot = hot_routines(ops);
+    let hot = hot_routines::<A>(ops);
     // For each op, the next op at or after it that calls out.
     let mut next_call = vec![u32::MAX; ops.len() + 1];
     for k in (0..ops.len()).rev() {
-        next_call[k] = if ops[k].host().is_some() {
+        next_call[k] = if ops[k].host::<A>().is_some() {
             (start + k) as u32
         } else {
             next_call[k + 1]

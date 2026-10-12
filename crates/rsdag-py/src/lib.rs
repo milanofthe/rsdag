@@ -30,7 +30,9 @@ use pyo3::exceptions::{PyAttributeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyFloat, PyList, PyTuple};
 
-use rsdag::{BinOp, CmpOp, ExprId, FuncId, Graph, Node, ReduceOp, SymbolId, Tape, UnaryOp, F64};
+use rsdag::{
+    BinOp, CmpOp, Elementary, ExprId, FuncId, Graph, ReduceOp, SymbolId, Tape, UnaryOp, F64,
+};
 
 /// A trace's graph, and the programs called in it by program id, as the
 /// functions of the graph they were imported as.
@@ -172,53 +174,43 @@ fn fits(g: &Graph<F64>, id: ExprId, budget: &mut usize) -> bool {
     g.operands(id).iter().all(|&c| fits(g, c, budget))
 }
 
-/// An elementwise function a tracer answers to by name: numpy's ufuncs
-/// call it on each element of an object array (`np.sin(a)` calls
+/// numpy's names of the elementwise functions a tracer answers to, where
+/// they differ from rsdag's ([`Elementary::from_name`]): numpy's ufuncs
+/// call them on each element of an object array (`np.sin(a)` calls
 /// `a[i].sin()`, `np.arctan2(a, b)` calls `a[i].arctan2(b[i])`).
-#[derive(Clone, Copy)]
-enum Ufunc {
-    Unary(UnaryOp),
-    Binary(BinOp),
-    Reduce(ReduceOp),
-}
-
-/// numpy's names where they differ from rsdag's; every other name of
-/// [`rsdag::node::UNARY_OPS`] and [`rsdag::node::BINARY_OPS`] resolves as
-/// it is.
-const NUMPY_NAMES: &[(&str, Ufunc)] = &[
-    ("arcsin", Ufunc::Unary(UnaryOp::Asin)),
-    ("arccos", Ufunc::Unary(UnaryOp::Acos)),
-    ("arctan", Ufunc::Unary(UnaryOp::Atan)),
-    ("arcsinh", Ufunc::Unary(UnaryOp::Asinh)),
-    ("arccosh", Ufunc::Unary(UnaryOp::Acosh)),
-    ("arctanh", Ufunc::Unary(UnaryOp::Atanh)),
-    ("log", Ufunc::Unary(UnaryOp::Ln)),
-    ("fabs", Ufunc::Unary(UnaryOp::Abs)),
-    ("absolute", Ufunc::Unary(UnaryOp::Abs)),
-    ("rint", Ufunc::Unary(UnaryOp::Round)),
-    ("gammaln", Ufunc::Unary(UnaryOp::Lgamma)),
-    ("gamma", Ufunc::Unary(UnaryOp::Tgamma)),
-    ("arctan2", Ufunc::Binary(BinOp::Atan2)),
-    ("fmod", Ufunc::Binary(BinOp::Mod)),
-    ("power", Ufunc::Binary(BinOp::Powf)),
-    ("maximum", Ufunc::Reduce(ReduceOp::Max)),
-    ("minimum", Ufunc::Reduce(ReduceOp::Min)),
+const NUMPY_NAMES: &[(&str, Elementary)] = &[
+    ("arcsin", Elementary::Unary(UnaryOp::Asin)),
+    ("arccos", Elementary::Unary(UnaryOp::Acos)),
+    ("arctan", Elementary::Unary(UnaryOp::Atan)),
+    ("arcsinh", Elementary::Unary(UnaryOp::Asinh)),
+    ("arccosh", Elementary::Unary(UnaryOp::Acosh)),
+    ("arctanh", Elementary::Unary(UnaryOp::Atanh)),
+    ("log", Elementary::Unary(UnaryOp::Ln)),
+    ("fabs", Elementary::Unary(UnaryOp::Abs)),
+    ("absolute", Elementary::Unary(UnaryOp::Abs)),
+    ("rint", Elementary::Unary(UnaryOp::Round)),
+    ("gammaln", Elementary::Unary(UnaryOp::Lgamma)),
+    ("gamma", Elementary::Unary(UnaryOp::Tgamma)),
+    ("arctan2", Elementary::Binary(BinOp::Atan2)),
+    ("fmod", Elementary::Binary(BinOp::Mod)),
+    ("power", Elementary::Binary(BinOp::Powf)),
+    ("maximum", Elementary::Max),
+    ("minimum", Elementary::Min),
 ];
 
-fn ufunc(name: &str) -> Option<Ufunc> {
+fn ufunc(name: &str) -> Option<Elementary> {
     NUMPY_NAMES
         .iter()
         .find(|(n, _)| *n == name)
         .map(|&(_, f)| f)
-        .or_else(|| UnaryOp::from_name(name).map(Ufunc::Unary))
-        .or_else(|| BinOp::from_name(name).map(Ufunc::Binary))
+        .or_else(|| Elementary::from_name(name))
 }
 
 /// A tracer's elementwise function, bound to it (`t.sin`, `t.arctan2`).
 #[pyclass(unsendable)]
 struct Method {
     t: Tracer,
-    f: Ufunc,
+    f: Elementary,
 }
 
 #[pymethods]
@@ -227,14 +219,14 @@ impl Method {
     fn __call__(&self, args: &Bound<'_, PyTuple>) -> PyResult<Tracer> {
         let t = &self.t;
         let out = match (self.f, args.len()) {
-            (Ufunc::Unary(op), 0) => return Ok(t.unary(op)),
-            (Ufunc::Binary(BinOp::Powf), 1) => t.__pow__(&args.get_item(0)?, None)?,
-            (Ufunc::Binary(op), 1) => {
+            (Elementary::Unary(op), 0) => return Ok(t.unary(op)),
+            (Elementary::Binary(BinOp::Powf), 1) => t.__pow__(&args.get_item(0)?, None)?,
+            (Elementary::Binary(op), 1) => {
                 t.binary(&args.get_item(0)?, false, |g, x, y| g.binary(op, x, y))?
             }
-            (Ufunc::Reduce(op), 1) => {
+            (f @ (Elementary::Min | Elementary::Max), 1) => {
                 let o = t.operand(&args.get_item(0)?)?;
-                let id = t.g.graph.borrow_mut().reduce(op, vec![t.id, o]);
+                let id = t.g.graph.borrow_mut().elementary(f, &[t.id, o]);
                 BinOut::Value(t.wrap(id))
             }
             (_, n) => {
@@ -405,11 +397,8 @@ impl Scope {
         let name = name
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("in{k}"));
-        let e = g.sym(&name);
-        let s = match *g.node(e) {
-            Node::Symbol(s) => s,
-            _ => unreachable!(),
-        };
+        let s = g.symbol_id(&name);
+        let e = g.symbol_expr(s);
         self.inputs.push(s);
         drop(g);
         Tracer {
@@ -462,21 +451,9 @@ impl Scope {
     fn sparse_jacobian(&self, outputs: &Bound<'_, PyList>, wrt: Vec<usize>) -> PyResult<Program> {
         let ids = self.output_ids(outputs)?;
         let wrt = self.wrt_symbols(&wrt)?;
-        let mut g = self.g.graph.borrow_mut();
-        let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
-        for (i, row) in rsdag::sparse_jacobian(&mut g, &ids, &wrt)
-            .into_iter()
-            .enumerate()
-        {
-            for (j, e) in row {
-                rows.push(i);
-                cols.push(j);
-                vals.push(e);
-            }
-        }
-        drop(g);
-        let mut p = self.program(&vals);
-        p.pattern = Some((rows, cols));
+        let jac = rsdag::Coo::jacobian(&mut self.g.graph.borrow_mut(), &ids, &wrt);
+        let mut p = self.program(&jac.vals);
+        p.pattern = Some((jac.rows, jac.cols));
         Ok(p)
     }
     /// The gradient of one scalar output with respect to `inputs[wrt]`

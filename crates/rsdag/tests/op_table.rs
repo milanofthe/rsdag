@@ -52,3 +52,39 @@ fn roughness_is_recorded() {
         assert!(op.is_smooth(), "{op:?} is differentiable");
     }
 }
+
+/// An elementary function by name builds the op it names and evaluates as
+/// the graph does: every op name, `pow`, `min` and `max`.
+#[test]
+fn elementary_functions_by_name() {
+    use rsdag::semantics::elementary_f64;
+    let names = UNARY_OPS
+        .iter()
+        .map(|s| s.name)
+        .chain(BINARY_OPS.iter().map(|s| s.name));
+    for name in names.chain(["pow", "min", "max"]) {
+        let f = Elementary::from_name(name).expect("a known name");
+        let mut g: Graph = Graph::new();
+        let args: Vec<ExprId> = (0..f.arity()).map(|k| g.sym(&format!("a{k}"))).collect();
+        let e = g.elementary(f, &args);
+        let at = [0.7, 0.3];
+        let env = (0..f.arity())
+            .map(|k| (g.as_symbol(args[k]).unwrap(), at[k]))
+            .collect();
+        let want = elementary_f64(f, &at[..f.arity()]);
+        let got = eval(&g, &[e], &env)[0];
+        assert!(
+            got == want || (got.is_nan() && want.is_nan()),
+            "{name}: {got} vs {want}"
+        );
+    }
+    assert_eq!(
+        Elementary::from_name("pow"),
+        Some(Elementary::Binary(BinOp::Powf))
+    );
+    assert_eq!(
+        Elementary::from_name("max").map(Elementary::name),
+        Some("max")
+    );
+    assert_eq!(Elementary::from_name("nope"), None);
+}

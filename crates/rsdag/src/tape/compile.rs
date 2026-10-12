@@ -2339,10 +2339,7 @@ impl Templates {
         syms.extend(
             ctx.globals_of(FuncId(f))
                 .iter()
-                .map(|&e| match *ctx.node(e) {
-                    Node::Symbol(s) => s,
-                    _ => unreachable!("a global is a symbol"),
-                }),
+                .map(|&e| ctx.as_symbol(e).expect("a global is a symbol")),
         );
         let exprs: Vec<ExprId> = outs
             .iter()

@@ -36,10 +36,7 @@ fn lorenz(g: &mut Graph<F64>) -> (Vec<ExprId>, Vec<SymbolId>) {
     };
     let syms = [x, y, z]
         .iter()
-        .map(|&e| match *g.node(e) {
-            rsdag::Node::Symbol(s) => s,
-            _ => unreachable!(),
-        })
+        .map(|&e| g.as_symbol(e).expect("a symbol"))
         .collect();
     (vec![dx, dy, dz], syms)
 }
