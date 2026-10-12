@@ -6,6 +6,7 @@
 pub mod adaptive;
 pub mod autodiff;
 pub mod builder;
+pub mod coo;
 pub mod display;
 pub mod dot;
 pub mod eval;
@@ -35,6 +36,7 @@ pub(crate) mod transform;
 pub use adaptive::{Adaptive, Compiler, Episode, Policy, Stats};
 pub use autodiff::{differentiate, gradient, sparse_jacobian, SparseRows};
 pub use builder::{Builder, Numeric};
+pub use coo::{transpose, Coo};
 pub use display::to_string;
 pub use eval::eval;
 pub use extern_fn::{BackendCache, BodyBackend, BodyCompiler, ExternBundle, Instances, Submit};

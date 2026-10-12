@@ -435,6 +435,38 @@ impl<K: Field> Graph<K> {
         self.intern(Node::Symbol(s))
     }
 
+    /// The symbol named `name`, made if new.
+    pub fn symbol_id(&mut self, name: &str) -> SymbolId {
+        let e = self.sym(name);
+        match *self.node(e) {
+            Node::Symbol(s) => s,
+            _ => unreachable!("sym yields a symbol"),
+        }
+    }
+
+    /// The symbol named `name`, if the graph has one.
+    pub fn find_symbol(&self, name: &str) -> Option<SymbolId> {
+        self.symbol_ids.get(name).copied()
+    }
+
+    /// The symbol `e` is, if it is one.
+    pub fn as_symbol(&self, e: ExprId) -> Option<SymbolId> {
+        match *self.node(e) {
+            Node::Symbol(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The terms `e` sums: the operands of a sum, none for zero, else `e`
+    /// itself.
+    pub fn summands(&self, e: ExprId) -> Vec<ExprId> {
+        match *self.node(e) {
+            Node::Reduce(ReduceOp::Sum, l) => self.args(l).to_vec(),
+            _ if self.is_zero(e) => Vec::new(),
+            _ => vec![e],
+        }
+    }
+
     /// Look up or create a free symbol by name.
     pub fn sym(&mut self, name: &str) -> ExprId {
         let sid = if let Some(&sid) = self.symbol_ids.get(name) {
