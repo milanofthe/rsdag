@@ -45,7 +45,7 @@ pub use func::{Body, FuncId, Function, Output, OutputId};
 pub use graph::{Bound, Graph};
 pub use module::{IdMap, Module, ModuleError, MODULE_VERSION};
 pub use node::{
-    ArgList, BinOp, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp, SymbolId, UnaryOp,
+    ArgList, BinOp, CmpOp, ConstId, Elementary, ExprId, Node, Operands, ReduceOp, SymbolId, UnaryOp,
 };
 pub use nonlinearity::{nonlinearity, nonlinearity_of, Degree, Nonlinearity, UnarySet};
 /// The exact constant field (feature `exact`).

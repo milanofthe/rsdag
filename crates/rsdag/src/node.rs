@@ -443,6 +443,51 @@ impl BinOp {
     }
 }
 
+/// An elementary function as an expression frontend calls it by name: a
+/// unary op, a binary op beyond the ring, or the extremum of its arguments.
+/// One vocabulary, so every frontend builds a function the same way.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Elementary {
+    Unary(UnaryOp),
+    Binary(BinOp),
+    /// `min` or `max` ([`ReduceOp::Min`], [`ReduceOp::Max`]) of two
+    /// arguments.
+    Extremum(ReduceOp),
+}
+
+impl Elementary {
+    /// The function a name denotes: an op's name ([`UnaryOp::from_name`],
+    /// [`BinOp::from_name`]), `min`, `max`, and `pow` for
+    /// [`BinOp::Powf`].
+    pub fn from_name(name: &str) -> Option<Elementary> {
+        match name {
+            "min" => Some(Elementary::Extremum(ReduceOp::Min)),
+            "max" => Some(Elementary::Extremum(ReduceOp::Max)),
+            "pow" => Some(Elementary::Binary(BinOp::Powf)),
+            _ => (UnaryOp::from_name(name).map(Elementary::Unary))
+                .or_else(|| BinOp::from_name(name).map(Elementary::Binary)),
+        }
+    }
+
+    /// Its name (see [`from_name`](Self::from_name)).
+    pub fn name(self) -> &'static str {
+        match self {
+            Elementary::Unary(op) => op.name(),
+            Elementary::Binary(op) => op.name(),
+            Elementary::Extremum(op) => op.name(),
+        }
+    }
+
+    /// How many arguments it takes.
+    pub fn arity(self) -> usize {
+        match self {
+            Elementary::Unary(_) => 1,
+            Elementary::Binary(_) | Elementary::Extremum(_) => 2,
+        }
+    }
+}
+
 /// A node in the symbolic DAG.
 ///
 /// Leaves are exact rational constants or free symbols. Inner nodes are the

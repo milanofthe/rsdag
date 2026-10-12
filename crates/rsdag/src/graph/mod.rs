@@ -7,7 +7,7 @@ use crate::field::{Field, F64};
 use crate::extern_fn::ExternBundle;
 use crate::func::{FuncId, Function, Output, OutputId};
 use crate::node::{
-    ArgList, BinOp, CmpOp, ConstId, ExprId, Node, Operands, ReduceOp, SymbolId, UnaryOp,
+    ArgList, BinOp, CmpOp, ConstId, Elementary, ExprId, Node, Operands, ReduceOp, SymbolId, UnaryOp,
 };
 use crate::role::{OutputRole, ParamRole};
 use crate::semantics::{binary_f64, unary_f64};
@@ -620,6 +620,15 @@ impl<K: Field> Graph<K> {
     /// Binary function node (`Powf`, `Mod`, `Atan2`, `Hypot`): the powers of
     /// zero and one resolve; a floating field folds constants through the
     /// reference math.
+    /// The elementary function `f` of `args` (as many as its arity).
+    pub fn elementary(&mut self, f: Elementary, args: &[ExprId]) -> ExprId {
+        match f {
+            Elementary::Unary(op) => self.unary(op, args[0]),
+            Elementary::Binary(op) => self.binary(op, args[0], args[1]),
+            Elementary::Extremum(op) => self.reduce(op, args[..2].to_vec()),
+        }
+    }
+
     pub fn binary(&mut self, op: BinOp, a: ExprId, b: ExprId) -> ExprId {
         if op == BinOp::Powf {
             if self.is_zero(b) {
