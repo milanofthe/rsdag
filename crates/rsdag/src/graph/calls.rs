@@ -448,6 +448,25 @@ impl<K: Field> Graph<K> {
         self.output_ctx[o.0 as usize]
     }
 
+    /// `f` partially applied: each parameter `arg` binds bound (see
+    /// [`bind`](Self::bind)), and the arguments a call through the binding
+    /// passes, the parameters `arg` passes, in their order.
+    pub fn partial(
+        &mut self,
+        f: FuncId,
+        mut arg: impl FnMut(&mut Self, SymbolId) -> Arg,
+    ) -> (Bound, Vec<ExprId>) {
+        let params = self.func(f).params().to_vec();
+        let (mut bound, mut args) = (Vec::new(), Vec::new());
+        for (k, s) in params.into_iter().enumerate() {
+            match arg(self, s) {
+                Arg::Bind(e) => bound.push((k as u32, e)),
+                Arg::Pass(e) => args.push(e),
+            }
+        }
+        (self.bind(f, &bound), args)
+    }
+
     /// `f` with the parameters at the given positions bound to expressions:
     /// a call through it passes the others, in their order, and runs `f`'s
     /// body with the bound ones taken from the binding. A model card is a

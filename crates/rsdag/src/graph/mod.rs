@@ -99,6 +99,14 @@ pub(crate) struct Context {
 /// Marks a bound parameter in [`Context::slot`].
 pub(crate) const BOUND: u32 = 1 << 31;
 
+/// What [`Graph::partial`] does with a parameter: bind it to an
+/// expression in the function, or pass one per call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arg {
+    Bind(ExprId),
+    Pass(ExprId),
+}
+
 /// A function with parameters bound (see [`Graph::bind`]): what a call
 /// through it runs, its arguments the parameters left.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

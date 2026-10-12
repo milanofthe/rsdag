@@ -211,3 +211,34 @@ fn params_in_order_and_roles_by_rule() {
         &[ParamRole::Free, ParamRole::Param, ParamRole::Free]
     );
 }
+
+/// A partial application binds what the rule binds and passes the rest in
+/// order: a call through it is the call with every argument.
+#[test]
+fn partial_binds_and_passes_in_order() {
+    let mut g: Graph<F64> = Graph::new();
+    let [p, q, r] = ["p", "q", "r"].map(|n| g.symbol_id(n));
+    let [pe, qe, re] = [p, q, r].map(|s| g.symbol_expr(s));
+    let pq = g.mul(pe, qe);
+    let body = g.sub(pq, re);
+    let f = g.define_func("f", vec![p, q, r], vec![body]);
+    let (two, x, y) = (g.konst_f64(2.0), g.sym("x"), g.sym("y"));
+    let (b, args) = g.partial(f, |_, s| {
+        if s == q {
+            Arg::Bind(two)
+        } else if s == p {
+            Arg::Pass(x)
+        } else {
+            Arg::Pass(y)
+        }
+    });
+    assert_eq!(args, vec![x, y]);
+    let call = g.calls_bound(b, &[0], &args)[0];
+    let env = [
+        (g.as_symbol(x).unwrap(), 3.0),
+        (g.as_symbol(y).unwrap(), 1.0),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(eval(&g, &[call], &env), vec![5.0]);
+}
