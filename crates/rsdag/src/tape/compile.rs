@@ -762,7 +762,7 @@ impl Program {
                     let p = prolog_of(c);
                     (
                         self.ins(p as usize),
-                        self.insts[p as usize].n_out as usize / ng,
+                        self.bundles[bundle as usize].state_len(),
                     )
                 });
                 out_g = self.insts[c as usize].n_out / ng as u32;
@@ -803,7 +803,12 @@ impl Program {
                     n_groups,
                     n_pure,
                 };
-                let p = self.push(kind, pure_ins, n_groups * state_g, true);
+                let p = self.push(
+                    kind,
+                    pure_ins,
+                    super::calls::state_block(n_groups, state_g),
+                    true,
+                );
                 ins.push(Ref::Value(p, 0));
             }
             let kind = Kind::Call {
@@ -1034,7 +1039,8 @@ impl Program {
                     n_groups,
                     n_pure: mask.iter().filter(|&&p| p).count() as u32,
                 };
-                let p = self.push(kind, pure_args, n_groups * b.state_len() as u32, true);
+                let width = super::calls::state_block(n_groups, b.state_len() as u32);
+                let p = self.push(kind, pure_args, width, true);
                 ins.push(Ref::Value(p, 0));
             }
             let width = b.n_outputs() as u32;
@@ -2102,7 +2108,8 @@ impl Forest {
                 n_groups,
                 n_pure,
             };
-            let prolog = lw.push(kind, pure_args, n_groups * b.state_len() as u32, true);
+            let width = super::calls::state_block(n_groups, b.state_len() as u32);
+            let prolog = lw.push(kind, pure_args, width, true);
             ins.push(Ref::Value(prolog, 0));
         }
         let kind = Kind::Call {

@@ -39,7 +39,9 @@ pub use builder::{Builder, Numeric};
 pub use coo::{transpose_rows, Coo};
 pub use display::to_string;
 pub use eval::eval;
-pub use extern_fn::{BackendCache, BodyBackend, BodyCompiler, ExternBundle, Instances, Submit};
+pub use extern_fn::{
+    BackendCache, BodyBackend, BodyCompiler, ExternBundle, Instances, Rows, Submit,
+};
 pub use field::{Field, F64};
 pub use func::{Body, FuncId, Function, Output, OutputId};
 pub use graph::{Arg, Bound, Graph};

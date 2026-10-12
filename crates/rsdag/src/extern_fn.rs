@@ -73,17 +73,30 @@ pub struct BodyBackend {
 }
 
 /// Instances of a bundle a batch runs, in group-major arrays: instance `g`
-/// has its arguments at `g * n_args`, its state at `g * stride` and its
-/// outputs at `g * n_outputs`. The batch runs the instances `index` lists,
-/// in its order, else the first `n`.
+/// has its arguments at `g * n_args`, its state at `row(g) * stride` and
+/// its outputs at `g * n_outputs`. The batch runs the instances `index`
+/// lists, in its order, else the first `n`.
 #[derive(Clone, Copy, Debug)]
 pub struct Instances<'a> {
     pub n: usize,
     pub index: Option<&'a [u32]>,
     pub n_args: usize,
-    /// Values from one instance's state to the next's, at least the
-    /// bundle's [`state_len`](ExternBundle::state_len).
+    /// Values from one state row to the next, at least the bundle's
+    /// [`state_len`](ExternBundle::state_len).
     pub stride: usize,
+    /// The state row of each instance (see [`Rows`]).
+    pub rows: Rows<'a>,
+}
+
+/// Which state row an instance has: instances whose pure arguments are the
+/// same, bit for bit, share one (the prolog computes it once, every main
+/// phase reads it).
+#[derive(Clone, Copy, Debug)]
+pub enum Rows<'a> {
+    /// Instance `g` its own, row `base + g`.
+    Own(usize),
+    /// Instance `g` row `rows[g]`.
+    At(&'a [f64]),
 }
 
 impl<'a> Instances<'a> {
@@ -95,6 +108,21 @@ impl<'a> Instances<'a> {
             index: None,
             n_args,
             stride,
+            rows: Rows::Own(0),
+        }
+    }
+
+    /// These, their state rows `rows`.
+    pub fn with_rows(self, rows: Rows<'a>) -> Self {
+        Instances { rows, ..self }
+    }
+
+    /// The state row of instance `g`.
+    #[inline]
+    pub fn row(&self, g: usize) -> usize {
+        match self.rows {
+            Rows::Own(base) => base + g,
+            Rows::At(r) => r[g] as usize,
         }
     }
 
@@ -199,8 +227,8 @@ pub trait ExternBundle: Send + Sync {
         let (na, sl, st) = (at.n_args, self.state_len(), at.stride);
         crate::scratch::with_len(self.work_len(), 0.0, |w| {
             for g in at.iter() {
-                let p = &pure[g * na..(g + 1) * na];
-                self.prolog_into(p, w, &mut states[g * st..g * st + sl]);
+                let (p, r) = (&pure[g * na..(g + 1) * na], at.row(g));
+                self.prolog_into(p, w, &mut states[r * st..r * st + sl]);
             }
         });
     }
@@ -213,8 +241,8 @@ pub trait ExternBundle: Send + Sync {
         let (na, sl, st, no) = (at.n_args, self.state_len(), at.stride, self.n_outputs());
         crate::scratch::with_len(self.work_len(), 0.0, |w| {
             for g in at.iter() {
-                let a = &args[g * na..(g + 1) * na];
-                let s = &states[g * st..g * st + sl];
+                let (a, r) = (&args[g * na..(g + 1) * na], at.row(g));
+                let s = &states[r * st..r * st + sl];
                 self.main_into(a, s, w, &mut out[g * no..(g + 1) * no]);
             }
         });

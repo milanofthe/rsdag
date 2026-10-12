@@ -34,6 +34,12 @@ pub trait Scalar: Copy + Send + Sync + std::fmt::Debug + 'static {
     /// The value as the real number a bundle takes; a bundle is a real
     /// function, so a scalar without a real value refuses.
     fn to_f64(self) -> f64;
+    /// The value's bits, when two values with the same bits are the same
+    /// value: instances whose pure arguments are the same, bit for bit,
+    /// share their state (see [`crate::tape::calls`]). `None` shares none.
+    fn bits(self) -> Option<u64> {
+        None
+    }
     /// The dot of two slices in the reference fold
     /// ([`crate::semantics::dot_slice_t`]); `f64` runs its vector twin.
     fn dot_slice(a: &[Self], b: &[Self]) -> Self {
@@ -155,22 +161,29 @@ pub trait Scalar: Copy + Send + Sync + std::fmt::Debug + 'static {
     /// phases; another scalar runs every call whole
     /// ([`call_bundle_main_batch`](Self::call_bundle_main_batch)), so its
     /// states are never read.
+    /// `own` lists the instances whose state row is their own; the others
+    /// read another's and are left alone.
+    #[allow(clippy::too_many_arguments)]
     fn call_bundle_prolog_batch(
         _b: &dyn crate::extern_fn::ExternBundle,
         _pure: &[Self],
         _n_groups: usize,
         _n_pure: usize,
+        _own: &[u32],
         _work: &mut [Self],
         states: &mut [Self],
     ) {
         states.fill(Self::nan());
     }
-    /// The main phase of `n_groups` stateful calls over their states; see
+    /// The main phase of `n_groups` stateful calls over the state rows
+    /// `rows` names in `states`; see
     /// [`call_bundle_prolog_batch`](Self::call_bundle_prolog_batch).
+    #[allow(clippy::too_many_arguments)]
     fn call_bundle_main_batch(
         b: &dyn crate::extern_fn::ExternBundle,
         args: &[Self],
         _states: &[Self],
+        _rows: &[Self],
         n_groups: usize,
         n_args: usize,
         _work: &mut [Self],
@@ -291,18 +304,25 @@ impl Scalar for f64 {
     ) {
         b.call_into(args, work, out);
     }
+    fn bits(self) -> Option<u64> {
+        Some(self.to_bits())
+    }
     fn call_bundle_prolog_batch(
         b: &dyn crate::extern_fn::ExternBundle,
         pure: &[f64],
         n_groups: usize,
         n_pure: usize,
+        own: &[u32],
         work: &mut [f64],
         states: &mut [f64],
     ) {
         if n_groups >= 2 {
             let at = crate::Instances::first(n_groups, n_pure, b.state_len());
-            b.prolog_batch(pure, states, &at);
-        } else if n_groups == 1 {
+            match own.len() == n_groups {
+                true => b.prolog_batch(pure, states, &at),
+                false => b.prolog_batch(pure, states, &at.listed(own)),
+            }
+        } else if n_groups == 1 && !own.is_empty() {
             b.prolog_into(pure, work, states);
         }
     }
@@ -310,16 +330,20 @@ impl Scalar for f64 {
         b: &dyn crate::extern_fn::ExternBundle,
         args: &[f64],
         states: &[f64],
+        rows: &[f64],
         n_groups: usize,
         n_args: usize,
         work: &mut [f64],
         out: &mut [f64],
     ) {
+        let sl = b.state_len();
         if n_groups >= 2 {
-            let at = crate::Instances::first(n_groups, n_args, b.state_len());
+            let at = crate::Instances::first(n_groups, n_args, sl)
+                .with_rows(crate::extern_fn::Rows::At(rows));
             b.main_batch(args, states, out, &at);
         } else if n_groups == 1 {
-            b.main_into(args, states, work, out);
+            let r = rows[0] as usize;
+            b.main_into(args, &states[r * sl..(r + 1) * sl], work, out);
         }
     }
     fn call_bundle_batch(

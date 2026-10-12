@@ -7,6 +7,18 @@
 //! (its operands, outputs and instance states), the gather area (its
 //! arguments, group-major at the offset the tape gave it, apart from the
 //! other calls of its stage) and the scratch its bundle works in.
+//!
+//! A stateful call's states are a block of the slots ([`state_block`]): a
+//! row per instance, then the row each instance reads. Instances whose pure
+//! arguments are the same, bit for bit, read one row: the prolog computes
+//! it once and the main phases share it, so a circuit of many instances of
+//! one model card and geometry keeps one state per kind of device in its
+//! caches instead of one per instance. The results are those of every
+//! instance on its own row: a prolog is a function of the pure arguments.
+
+use std::hash::Hasher;
+
+use rustc_hash::{FxHashMap as HashMap, FxHasher};
 
 use crate::extern_fn::ExternBundle;
 use crate::scalar::Scalar;
@@ -22,6 +34,13 @@ pub enum Phase {
     Main,
     /// The instances' states from their pure arguments.
     Prolog,
+}
+
+/// Slots of the state block of a stateful call over `n_groups` instances of
+/// `state_len` state values: a row per instance, then each instance's row
+/// (see the module docs).
+pub fn state_block(n_groups: u32, state_len: u32) -> u32 {
+    n_groups * (state_len + 1)
 }
 
 /// A call over `n_groups` instances of `bundle`.
@@ -103,13 +122,76 @@ impl<T: Copy> Shared<T> {
 
 /// Instances `groups` of `c`: their operands gathered into their arguments,
 /// then its bundle's phase over them, batched for two or more. `scratch`
-/// holds the bundle's [`work_len`](ExternBundle::work_len).
+/// holds the bundle's [`work_len`](ExternBundle::work_len). A prolog over
+/// all its instances first finds the rows they share ([`share_rows`]); a
+/// part of one runs on the rows found before.
 ///
 /// # Safety
 /// `slots` and `gather` are the program's regions; nothing else accesses
 /// the instances' arguments, outputs and states while this runs, and
 /// nothing writes what they read.
 pub unsafe fn run_call<T: Scalar>(
+    c: &Call,
+    slots: Shared<T>,
+    gather: Shared<T>,
+    inputs: &[T],
+    groups: std::ops::Range<usize>,
+    scratch: &mut [T],
+) {
+    if c.phase == Phase::Prolog && groups == (0..c.n_groups) {
+        unsafe { share_rows(c, slots, gather, inputs) };
+    }
+    unsafe { run_part(c, slots, gather, inputs, groups, scratch) }
+}
+
+/// The row of every instance of the prolog `c`, after its rows: the first
+/// instance with its pure arguments, bit for bit (see the module docs). A
+/// scalar without a value's bits ([`Scalar::bits`]) keeps every instance
+/// on its own row.
+///
+/// # Safety
+/// As [`run_call`]; the pure arguments are the operands, or gathered
+/// already where the call has none.
+pub unsafe fn share_rows<T: Scalar>(c: &Call, slots: Shared<T>, gather: Shared<T>, inputs: &[T]) {
+    let (n, na) = (c.n_groups, c.n_args);
+    let at = c.out + n * c.n_out;
+    let arg = |g: usize, j: usize| match c.operands {
+        Some(ops) => match input_index(ops[g * na + j]) {
+            Some(i) => inputs.get(i as usize).copied().unwrap_or(T::nan()),
+            None => unsafe { slots.get(ops[g * na + j] as usize) },
+        },
+        None => unsafe { gather.get(c.args + g * na + j) },
+    };
+    let same = |a: usize, b: usize| (0..na).all(|j| arg(a, j).bits() == arg(b, j).bits());
+    let mut first: HashMap<u64, usize> = HashMap::default();
+    for g in 0..n {
+        let mut h = FxHasher::default();
+        let mut identified = true;
+        for j in 0..na {
+            match arg(g, j).bits() {
+                Some(b) => h.write_u64(b),
+                None => identified = false,
+            }
+        }
+        let row = match identified {
+            // a hash both rows give, their values compared: a collision
+            // keeps its own row
+            true => match first.entry(h.finish()) {
+                std::collections::hash_map::Entry::Occupied(e) if same(*e.get(), g) => *e.get(),
+                std::collections::hash_map::Entry::Occupied(_) => g,
+                std::collections::hash_map::Entry::Vacant(e) => *e.insert(g),
+            },
+            false => g,
+        };
+        unsafe { slots.set(at + g, T::from_f64(row as f64)) };
+    }
+}
+
+/// [`run_call`] on the rows [`share_rows`] found.
+///
+/// # Safety
+/// As [`run_call`].
+unsafe fn run_part<T: Scalar>(
     c: &Call,
     slots: Shared<T>,
     gather: Shared<T>,
@@ -150,11 +232,24 @@ pub unsafe fn run_call<T: Scalar>(
         Phase::Whole if ng >= 2 => T::call_bundle_batch(b, args, ng, na, out),
         Phase::Whole => T::call_bundle_whole(b, args, scratch, out),
         Phase::Main => {
-            let sl = b.state_len();
-            let states = unsafe { slots.slice(c.state + g0 * sl, ng * sl) };
-            T::call_bundle_main_batch(b, args, states, ng, na, scratch, out);
+            let (n, sl) = (c.n_groups, b.state_len());
+            let states = unsafe { slots.slice(c.state, n * sl) };
+            let rows = unsafe { slots.slice(c.state + n * sl + g0, ng) };
+            T::call_bundle_main_batch(b, args, states, rows, ng, na, scratch, out);
         }
-        Phase::Prolog => T::call_bundle_prolog_batch(b, args, ng, na, scratch, out),
+        Phase::Prolog => {
+            // the instances whose row is their own: the others read theirs
+            let rows = unsafe { slots.slice(c.out + c.n_groups * no + g0, ng) };
+            crate::scratch::with(|own: &mut Vec<u32>| {
+                own.clear();
+                own.extend(
+                    (0..ng)
+                        .filter(|&k| rows[k].to_f64() as usize == g0 + k)
+                        .map(|k| k as u32),
+                );
+                T::call_bundle_prolog_batch(b, args, ng, na, own, scratch, out)
+            })
+        }
     }
 }
 
@@ -174,9 +269,16 @@ pub unsafe fn run_stage<'a, T: Scalar>(
     inputs: &[T],
 ) {
     let ops: u64 = (0..n).map(|k| call(k).ops).sum();
+    // the rows the prologs' instances share, before any part of them runs
+    for k in 0..n {
+        let c = call(k);
+        if c.phase == Phase::Prolog {
+            unsafe { share_rows(&c, slots, gather, inputs) };
+        }
+    }
     let run_groups = |c: &Call, groups: std::ops::Range<usize>| {
         crate::scratch::with_len(c.bundle.work_len(), T::zero(), |s| unsafe {
-            run_call(c, slots, gather, inputs, groups, s)
+            run_part(c, slots, gather, inputs, groups, s)
         })
     };
     if !crate::parallel::worth(ops as usize) {

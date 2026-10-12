@@ -207,7 +207,13 @@ impl ROp {
             | ROp::Select(d, ..)
             | ROp::Reduce(d, ..)
             | ROp::Dot(d, ..) => (d, 1),
-            ROp::Call(ref c) => (c.dst, c.n_groups * c.n_out),
+            ROp::Call(ref c) => (
+                c.dst,
+                match c.kind {
+                    CallKind::Prolog => rsdag::tape::calls::state_block(c.n_groups, c.n_out),
+                    _ => c.n_groups * c.n_out,
+                },
+            ),
             ROp::Kernel(ref k) => (k.dst, k.width()),
         };
         dst..dst + n

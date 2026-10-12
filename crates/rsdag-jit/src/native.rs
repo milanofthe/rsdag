@@ -327,8 +327,9 @@ impl NativeBody {
                             };
                         }
                         if let Some(st) = states {
-                            for s in 0..sl {
-                                work[s * l + lane] = st[g * stride + s];
+                            let row = &st[at.row(g) * stride..][..sl];
+                            for (s, &v) in row.iter().enumerate() {
+                                work[s * l + lane] = v;
                             }
                         }
                     }
@@ -336,8 +337,9 @@ impl NativeBody {
                     for lane in 0..l.min(end - c) {
                         let g = at.at(c + lane);
                         if let Some(st) = states_out.as_deref_mut() {
-                            for s in 0..sl {
-                                st[g * stride + s] = work[s * l + lane];
+                            let row = &mut st[at.row(g) * stride..][..sl];
+                            for (s, v) in row.iter_mut().enumerate() {
+                                *v = work[s * l + lane];
                             }
                         }
                         if let Some(o) = out.as_deref_mut() {
@@ -420,8 +422,8 @@ impl ExternBundle for NativeBody {
         let (na, sl, st) = (at.n_args, self.tape.state_len, at.stride);
         rsdag::scratch::with_len(self.work_len(), 0.0, |w| {
             for g in (k0..at.len()).map(|k| at.at(k)) {
-                let p = &pure[g * na..(g + 1) * na];
-                self.prolog_into(p, w, &mut states[g * st..g * st + sl]);
+                let (p, r) = (&pure[g * na..(g + 1) * na], at.row(g));
+                self.prolog_into(p, w, &mut states[r * st..r * st + sl]);
             }
         });
     }
@@ -441,8 +443,8 @@ impl ExternBundle for NativeBody {
         let (na, sl, st, no) = (at.n_args, self.tape.state_len, at.stride, self.n_out);
         rsdag::scratch::with_len(self.work_len(), 0.0, |w| {
             for g in (k0..at.len()).map(|k| at.at(k)) {
-                let a = &args[g * na..(g + 1) * na];
-                let s = &states[g * st..g * st + sl];
+                let (a, r) = (&args[g * na..(g + 1) * na], at.row(g));
+                let s = &states[r * st..r * st + sl];
                 self.main_into(a, s, w, &mut out[g * no..(g + 1) * no]);
             }
         });

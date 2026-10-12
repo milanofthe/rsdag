@@ -292,7 +292,7 @@ fn plan_stages(
                 let mut r = slots(start, n_groups * n_in);
                 if state != NO_STATE {
                     let sl = bundles[bundle as usize].state_len() as u32;
-                    r.push((state, state + n_groups * sl));
+                    r.push((state, state + calls::state_block(n_groups, sl)));
                 }
                 (bundle, r, n_groups * n_out, n_groups)
             }
@@ -307,7 +307,7 @@ fn plan_stages(
                 (
                     bundle,
                     slots(start, n_groups * n_pure),
-                    n_groups * sl,
+                    calls::state_block(n_groups, sl),
                     n_groups,
                 )
             }
@@ -1132,7 +1132,7 @@ impl Tape {
             } => n_groups * n_out,
             Op::CallProlog {
                 bundle, n_groups, ..
-            } => n_groups * self.bundles[bundle as usize].state_len() as u32,
+            } => calls::state_block(n_groups, self.bundles[bundle as usize].state_len() as u32),
             Op::Gemv { m, .. } => m,
             Op::Gemm { m, n, .. } => m * n,
             Op::Solve { n, k, count, .. } => count * n * k,
