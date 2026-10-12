@@ -608,3 +608,29 @@ fn a_call_site_with_several_outputs_and_their_derivatives_takes_one_vjp() {
         .count();
     assert_eq!(vjps, 1);
 }
+
+/// A vector-Jacobian product: the weights fresh symbols, the entries the
+/// gradient of the weighted sum at any weights.
+#[test]
+fn vjp_is_the_weighted_gradient() {
+    let mut ctx: Graph = Graph::new();
+    let (x, y) = (ctx.sym("x"), ctx.sym("y"));
+    let (sx, sy) = (sid(&mut ctx, "x"), sid(&mut ctx, "y"));
+    let xy = ctx.mul(x, y);
+    let sx2 = ctx.sin(x);
+    let (w, g) = vjp(&mut ctx, &[xy, sx2], &[sx, sy]);
+    assert_eq!(w.len(), 2);
+    assert_ne!(w[0], w[1]);
+    assert!(![sx, sy].contains(&w[0]) && ![sx, sy].contains(&w[1]));
+    let env: HashMap<SymbolId, f64> = [(sx, 0.3), (sy, 2.0), (w[0], 1.5), (w[1], -0.5)]
+        .into_iter()
+        .collect();
+    let got = eval(&ctx, &g, &env);
+    let want = [1.5 * 2.0 - 0.5 * 0.3f64.cos(), 1.5 * 0.3];
+    assert!((got[0] - want[0]).abs() < 1e-15 && (got[1] - want[1]).abs() < 1e-15);
+    // a fresh symbol never takes a name the graph has
+    let taken = format!("vjp$w{}", ctx.symbol_name(w[1]).len());
+    ctx.sym(&taken);
+    let f = ctx.fresh_symbol("vjp$w");
+    assert!(!w.contains(&f) && ctx.symbol_name(f) != taken);
+}

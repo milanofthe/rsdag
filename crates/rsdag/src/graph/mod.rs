@@ -444,6 +444,19 @@ impl<K: Field> Graph<K> {
         }
     }
 
+    /// A symbol of its own: named `prefix` and a number, a name no symbol of
+    /// the graph has.
+    pub fn fresh_symbol(&mut self, prefix: &str) -> SymbolId {
+        let mut k = self.symbol_names.len();
+        loop {
+            let name = format!("{prefix}{k}");
+            if !self.symbol_ids.contains_key(name.as_str()) {
+                return self.symbol_id(&name);
+            }
+            k += 1;
+        }
+    }
+
     /// The symbol named `name`, if the graph has one.
     pub fn find_symbol(&self, name: &str) -> Option<SymbolId> {
         self.symbol_ids.get(name).copied()

@@ -600,6 +600,27 @@ pub fn sparse_jacobian<K: Field>(
     rows
 }
 
+/// The vector-Jacobian product of `outputs` by `wrt`, over weights of its
+/// own: the gradient of `sum_k w_k outputs[k]` by `wrt` (one reverse sweep),
+/// and the weights `w_k`, fresh symbols (see [`Graph::fresh_symbol`]) an
+/// evaluation binds. Every entry is linear in the weights.
+pub fn vjp<K: Field>(
+    ctx: &mut Graph<K>,
+    outputs: &[ExprId],
+    wrt: &[SymbolId],
+) -> (Vec<SymbolId>, Vec<ExprId>) {
+    let mut weights = Vec::with_capacity(outputs.len());
+    let mut terms = Vec::with_capacity(outputs.len());
+    for &e in outputs {
+        let w = ctx.fresh_symbol("vjp$w");
+        weights.push(w);
+        let we = ctx.symbol_expr(w);
+        terms.push(ctx.mul(we, e));
+    }
+    let f = ctx.reduce(ReduceOp::Sum, terms);
+    (weights, gradient(ctx, f, wrt))
+}
+
 /// Reverse-mode symbolic gradient: `d(f)/d(wrt[j])` for every `j`, built in ONE
 /// adjoint sweep over the reachable sub-DAG instead of one forward sweep per
 /// symbol -- the right shape for a scalar objective over many leaves (a

@@ -34,7 +34,7 @@ pub mod variant;
 pub(crate) mod transform;
 
 pub use adaptive::{Adaptive, Compiler, Episode, Policy, Session, Stats};
-pub use autodiff::{differentiate, gradient, sparse_jacobian, SparseRows};
+pub use autodiff::{differentiate, gradient, sparse_jacobian, vjp, SparseRows};
 pub use builder::{Builder, Numeric};
 pub use coo::{transpose, Coo};
 pub use display::to_string;
