@@ -636,11 +636,11 @@ impl<K: Field> Graph<K> {
 
     /// [`call_list`](Self::call_list) in context `ctx`.
     pub(crate) fn call_list_in(&mut self, f: FuncId, out: u32, ctx: u32, l: ArgList) -> ExprId {
-        if matches!(
-            self.funcs[f.0 as usize].outputs()[out as usize],
-            Output::Zero
-        ) {
-            return self.zero;
+        // an output no argument moves is its value
+        match self.funcs[f.0 as usize].outputs()[out as usize] {
+            Output::Zero => return self.zero,
+            Output::Expr(e) if matches!(self.node(e), Node::Const(_)) => return e,
+            _ => {}
         }
         let o = self.output_in(f, out, ctx);
         if ctx != NO_CONTEXT && !self.list_shape.contains_key(&(ctx, l)) {

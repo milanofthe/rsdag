@@ -242,3 +242,17 @@ fn partial_binds_and_passes_in_order() {
     .collect();
     assert_eq!(eval(&g, &[call], &env), vec![5.0]);
 }
+
+/// A call of an output no argument moves is the output's value.
+#[test]
+fn a_constant_output_calls_as_its_value() {
+    let mut g: Graph<F64> = Graph::new();
+    let p = g.symbol_id("p");
+    let pe = g.symbol_expr(p);
+    let three = g.konst_f64(3.0);
+    let f = g.define_func("f", vec![p], vec![pe, three]);
+    let x = g.sym("x");
+    let calls = g.calls(f, &[0, 1], &[x]);
+    assert!(matches!(g.node(calls[0]), Node::Call(..)));
+    assert_eq!(calls[1], three);
+}
