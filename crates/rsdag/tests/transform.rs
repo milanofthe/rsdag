@@ -1,15 +1,6 @@
-use rsdag::node::Node;
 use rsdag::BigRational;
 use rsdag::*;
 use rustc_hash::FxHashMap as HashMap;
-
-fn sid<K: Field>(ctx: &mut Graph<K>, name: &str) -> SymbolId {
-    let e = ctx.sym(name);
-    match ctx.node(e) {
-        Node::Symbol(s) => *s,
-        _ => unreachable!(),
-    }
-}
 
 #[test]
 fn substitution_is_simultaneous() {
@@ -18,7 +9,7 @@ fn substitution_is_simultaneous() {
     let x = ctx.sym("x");
     let y = ctx.sym("y");
     let f = ctx.sub(x, y);
-    let (xs, ys) = (sid(&mut ctx, "x"), sid(&mut ctx, "y"));
+    let (xs, ys) = (ctx.symbol_id("x"), ctx.symbol_id("y"));
     let mut map: HashMap<SymbolId, ExprId> = HashMap::default();
     map.insert(xs, y);
     map.insert(ys, x);
@@ -42,7 +33,7 @@ fn deep_chains_substitute_and_inline_on_a_small_stack() {
             }
             let f = g.close("f", vec![acc]);
             let y = g.sym("y");
-            let xs = sid(&mut g, "x");
+            let xs = g.symbol_id("x");
             let map: HashMap<SymbolId, ExprId> = [(xs, y)].into_iter().collect();
             let sub = substitute(&mut g, &[acc], &map)[0];
             let call = g.call(f, 0, &[y]);

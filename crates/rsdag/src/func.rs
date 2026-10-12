@@ -424,10 +424,7 @@ impl Function {
         let globals: Vec<crate::node::SymbolId> = self
             .globals_in(ctx)
             .iter()
-            .map(|&g| match *ctx.node(g) {
-                crate::node::Node::Symbol(s) => s,
-                _ => unreachable!("a global is a symbol"),
-            })
+            .map(|&g| ctx.as_symbol(g).expect("a global is a symbol"))
             .collect();
         let inputs: Vec<crate::node::SymbolId> = self
             .params

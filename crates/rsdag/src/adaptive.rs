@@ -465,6 +465,10 @@ impl Adaptive {
     /// input `k` of lane `lane`), one evaluation per lane on the current
     /// backend; `out[o][lane]` is output `o` of lane `lane`. `flat`,
     /// `work` and `row` are the caller's scratch.
+    #[deprecated(
+        since = "4.5.0",
+        note = "Session::eval_points evaluates many points, the prolog once per binding"
+    )]
     pub fn eval_lanes<const L: usize>(
         &self,
         inputs: &[[f64; L]],

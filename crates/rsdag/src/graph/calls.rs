@@ -42,21 +42,23 @@ impl<K: Field> Graph<K> {
     /// function's globals stay globals. The `Scope` idiom: build with named
     /// symbols, then close.
     pub fn close(&mut self, name: &str, outputs: Vec<ExprId>) -> FuncId {
-        let params: Vec<SymbolId> = self.mentioned_symbols_in(&outputs).into_iter().collect();
+        let params = self.params_for(&outputs, &[], |_| true);
         self.define_func(name, params, outputs)
     }
 
     /// The parameters a function of `outputs` takes: the `leading` symbols
-    /// the outputs read (through calls too), in order, then every other
-    /// symbol they read that `more` admits, by symbol. A symbol they read
-    /// that is neither the function closes over.
+    /// the outputs mention, in order, then every other symbol they mention
+    /// that `more` admits, by symbol (see [`close`](Self::close)). A
+    /// symbol they mention that is neither the function closes over; one a
+    /// called function reads is that function's (its parameter, or what it
+    /// closes over).
     pub fn params_for(
         &self,
         outputs: &[ExprId],
         leading: &[SymbolId],
         more: impl Fn(SymbolId) -> bool,
     ) -> Vec<SymbolId> {
-        let free = self.free_symbols_in(outputs);
+        let free = self.mentioned_symbols_in(outputs);
         let mut seen: FxHashSet<SymbolId> = FxHashSet::default();
         (leading.iter().copied())
             .chain(free.iter().copied().filter(|&s| more(s)))
@@ -350,13 +352,7 @@ impl<K: Field> Graph<K> {
         outputs: Vec<Output>,
     ) -> FuncId {
         let params: Vec<SymbolId> = (0..arity)
-            .map(|i| {
-                let e = self.sym(&format!("{name}.${i}"));
-                match *self.node(e) {
-                    Node::Symbol(s) => s,
-                    _ => unreachable!("sym yields a symbol"),
-                }
-            })
+            .map(|i| self.symbol_id(&format!("{name}.${i}")))
             .collect();
         self.define_extern_func_with_params(name, params, body, outputs)
     }
@@ -754,10 +750,8 @@ impl<K: Field> Graph<K> {
         let mut cotangents = Vec::with_capacity(outs.len());
         let mut terms = Vec::with_capacity(outs.len());
         for (j, e) in exprs.into_iter().enumerate() {
-            let c = self.sym(&format!("{name}$c{j}"));
-            let Node::Symbol(s) = *self.node(c) else {
-                unreachable!("a fresh name is a symbol")
-            };
+            let s = self.symbol_id(&format!("{name}$c{j}"));
+            let c = self.symbol_expr(s);
             cotangents.push(s);
             if let Some(e) = e {
                 terms.push(self.mul(c, e));
@@ -921,10 +915,7 @@ impl<K: Field> Graph<K> {
     fn symbols_of(&self, nodes: Vec<ExprId>) -> std::collections::BTreeSet<SymbolId> {
         nodes
             .into_iter()
-            .filter_map(|e| match *self.node(e) {
-                Node::Symbol(s) => Some(s),
-                _ => None,
-            })
+            .filter_map(|e| self.as_symbol(e))
             .collect()
     }
 }

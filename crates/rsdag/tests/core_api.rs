@@ -256,3 +256,18 @@ fn a_constant_output_calls_as_its_value() {
     assert!(matches!(g.node(calls[0]), Node::Call(..)));
     assert_eq!(calls[1], three);
 }
+
+/// A symbol only a called function reads is that function's: no parameter
+/// of a function over the call.
+#[test]
+fn params_for_leave_a_called_bodys_symbols_to_it() {
+    let mut g: Graph<F64> = Graph::new();
+    let (p, glob) = (g.symbol_id("p"), g.sym("glob"));
+    let pe = g.symbol_expr(p);
+    let body = g.mul(pe, glob);
+    let inner = g.define_func("inner", vec![p], vec![body]);
+    let x = g.sym("x");
+    let call = g.call(inner, 0, &[x]);
+    let sx = g.as_symbol(x).unwrap();
+    assert_eq!(g.params_for(&[call], &[], |_| true), vec![sx]);
+}

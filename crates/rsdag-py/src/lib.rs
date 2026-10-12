@@ -31,7 +31,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyFloat, PyList, PyTuple};
 
 use rsdag::{
-    BinOp, CmpOp, Elementary, ExprId, FuncId, Graph, Node, ReduceOp, SymbolId, Tape, UnaryOp, F64,
+    BinOp, CmpOp, Elementary, ExprId, FuncId, Graph, ReduceOp, SymbolId, Tape, UnaryOp, F64,
 };
 
 /// A trace's graph, and the programs called in it by program id, as the
@@ -397,11 +397,8 @@ impl Scope {
         let name = name
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("in{k}"));
-        let e = g.sym(&name);
-        let s = match *g.node(e) {
-            Node::Symbol(s) => s,
-            _ => unreachable!(),
-        };
+        let s = g.symbol_id(&name);
+        let e = g.symbol_expr(s);
         self.inputs.push(s);
         drop(g);
         Tracer {

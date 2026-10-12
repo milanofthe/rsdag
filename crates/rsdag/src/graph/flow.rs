@@ -276,10 +276,8 @@ impl<K: Field> Graph<K> {
         let params = self.funcs[f.0 as usize].params();
         match params.get(p as usize) {
             Some(&s) => s,
-            None => match *self.node(self.globals(f)[p as usize - params.len()]) {
-                Node::Symbol(s) => s,
-                _ => unreachable!("a global is a symbol"),
-            },
+            None => (self.as_symbol(self.globals(f)[p as usize - params.len()]))
+                .expect("a global is a symbol"),
         }
     }
 
