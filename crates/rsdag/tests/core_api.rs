@@ -188,3 +188,26 @@ fn signature_without_and_outputs_of_a_role() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].0, i);
 }
+
+/// A function's parameters: the leading ones its outputs read, in order,
+/// then the admitted others by symbol; roles by rule.
+#[test]
+fn params_in_order_and_roles_by_rule() {
+    let mut g: Graph<F64> = Graph::new();
+    let (a, b, c, d) = (g.sym("a"), g.sym("b"), g.sym("ns.c"), g.sym("glob"));
+    let ab = g.mul(a, b);
+    let cd = g.add(c, d);
+    let out = g.add(ab, cd);
+    let [sa, sb, sc, unread] = ["a", "b", "ns.c", "unread"].map(|n| g.symbol_id(n));
+    let params = g.params_for(&[out], &[sb, unread, sa], |s| {
+        g.symbol_name(s).starts_with("ns.")
+    });
+    assert_eq!(params, vec![sb, sa, sc]);
+    let f = g.define_func_with("f", params, vec![out], |g, s| {
+        (g.symbol_name(s) == "a").then_some(ParamRole::Param)
+    });
+    assert_eq!(
+        g.func(f).param_roles(),
+        &[ParamRole::Free, ParamRole::Param, ParamRole::Free]
+    );
+}

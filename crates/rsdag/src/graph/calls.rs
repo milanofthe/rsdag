@@ -46,6 +46,43 @@ impl<K: Field> Graph<K> {
         self.define_func(name, params, outputs)
     }
 
+    /// The parameters a function of `outputs` takes: the `leading` symbols
+    /// the outputs read (through calls too), in order, then every other
+    /// symbol they read that `more` admits, by symbol. A symbol they read
+    /// that is neither the function closes over.
+    pub fn params_for(
+        &self,
+        outputs: &[ExprId],
+        leading: &[SymbolId],
+        more: impl Fn(SymbolId) -> bool,
+    ) -> Vec<SymbolId> {
+        let free = self.free_symbols_in(outputs);
+        let mut seen: FxHashSet<SymbolId> = FxHashSet::default();
+        (leading.iter().copied())
+            .chain(free.iter().copied().filter(|&s| more(s)))
+            .filter(|s| free.contains(s) && seen.insert(*s))
+            .collect()
+    }
+
+    /// [`define_func`](Self::define_func), each parameter taking the role
+    /// `role` gives it (none keeps [`ParamRole::Free`]).
+    pub fn define_func_with(
+        &mut self,
+        name: &str,
+        params: Vec<SymbolId>,
+        outputs: Vec<ExprId>,
+        role: impl Fn(&Self, SymbolId) -> Option<ParamRole>,
+    ) -> FuncId {
+        let roles: Vec<(u32, ParamRole)> = (params.iter().enumerate())
+            .filter_map(|(k, &s)| role(self, s).map(|r| (k as u32, r)))
+            .collect();
+        let f = self.define_func(name, params, outputs);
+        for (k, r) in roles {
+            self.set_param_role(f, k, r);
+        }
+        f
+    }
+
     /// Set the role of parameter `param` of function `f`.
     pub fn set_param_role(&mut self, f: FuncId, param: u32, role: ParamRole) {
         self.funcs[f.0 as usize].set_param_role(param, role);
