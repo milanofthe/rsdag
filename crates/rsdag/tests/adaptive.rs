@@ -27,8 +27,11 @@ fn specialization_alone_is_the_interpreter() {
         let pure: Vec<bool> = (0..syms.len()).map(|k| k % 3 == 0).collect();
         let mut ins = inputs(&mut spec.rng(), syms.len());
         let policy = Policy {
-            spec_min_selects: 1,
-            spec_min_shrink_pct: 0,
+            choices: rsdag::ChoicePolicy {
+                min_selects: 1,
+                min_shrink_pct: 0,
+                ..Default::default()
+            },
             ..Policy::default()
         };
         let a = Adaptive::new(Tape::compile_split(&g, &roots, &syms, &pure), policy, None);

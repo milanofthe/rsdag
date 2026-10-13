@@ -59,7 +59,10 @@ fn an_episode_takes_the_variants_that_land_after_its_prolog() {
     let policy = Policy {
         jit: true,
         kick_after: 1,
-        specialize: false,
+        choices: rsdag::ChoicePolicy {
+            enabled: false,
+            ..Default::default()
+        },
         ..Policy::default()
     };
     let program = Adaptive::new(tape, policy, Some(rsdag_jit::compiler()));

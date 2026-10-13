@@ -45,8 +45,11 @@ fn every_rung_is_the_interpreter() {
     for seed in 0..6u64 {
         let (tape, mut ins, pure) = program(seed);
         let policy = Policy {
-            spec_min_selects: 1,
-            spec_min_shrink_pct: 0,
+            choices: rsdag::ChoicePolicy {
+                min_selects: 1,
+                min_shrink_pct: 0,
+                ..Default::default()
+            },
             kick_after: 2,
             ..Policy::default()
         };

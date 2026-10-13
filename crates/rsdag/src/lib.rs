@@ -6,6 +6,7 @@
 pub mod adaptive;
 pub mod autodiff;
 pub mod builder;
+pub mod choices;
 pub mod coo;
 pub mod display;
 pub mod dot;
@@ -36,6 +37,7 @@ pub(crate) mod transform;
 pub use adaptive::{Adaptive, Compiler, Episode, Policy, Session, Stats};
 pub use autodiff::{affine_in, differentiate, gradient, sparse_jacobian, vjp, SparseRows};
 pub use builder::{Builder, Numeric};
+pub use choices::ChoicePolicy;
 pub use coo::{transpose_rows, Coo};
 pub use display::to_string;
 pub use eval::eval;

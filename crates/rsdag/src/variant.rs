@@ -57,6 +57,9 @@ pub struct VariantPolicy {
     /// able to remove (all of them one way, or all the other) for the body
     /// to run variants at all.
     pub min_shrink_pct: usize,
+    /// How each variant specializes over the choices its instances take at
+    /// run time (see [`crate::choices`]).
+    pub choices: crate::ChoicePolicy,
 }
 
 impl Default for VariantPolicy {
@@ -66,6 +69,7 @@ impl Default for VariantPolicy {
             interpreted: true,
             max_variants: 64,
             min_shrink_pct: 10,
+            choices: crate::ChoicePolicy::default(),
         }
     }
 }

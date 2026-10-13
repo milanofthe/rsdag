@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::choices::{ChoicePolicy, Choices};
 use crate::hooks::{log, Level};
 use crate::{Program, SpecializedTape, Tape};
 
@@ -61,15 +62,9 @@ pub struct Policy {
     /// saves every pass the compile would otherwise run alongside. `None`
     /// counts evaluations alone.
     pub eager_pass: Option<Duration>,
-    /// Specialize over region choices at all.
-    pub specialize: bool,
-    /// Below this many `Select`s the shortening cannot pay for its guards.
-    pub spec_min_selects: usize,
-    /// A specialization must remove this percentage of the instructions.
-    pub spec_min_shrink_pct: usize,
-    /// Evaluations a tape must run flip-free before a specialization is
-    /// rebuilt (rebuilding is O(tape); a cold Newton cascade hops regions).
-    pub spec_flip_cooldown: u64,
+    /// How the program specializes over its region choices (its bodies'
+    /// are [`VariantPolicy::choices`](crate::variant::VariantPolicy::choices)).
+    pub choices: ChoicePolicy,
     /// Guard-holding evaluations before a specialization is compiled.
     pub spec_compile_after: u32,
     /// Native compiles a specialization may spend across region flips.
@@ -78,11 +73,6 @@ pub struct Policy {
     /// runs only when this many times shorter (an interpreted op costs
     /// about this many native ones).
     pub spec_interp_cost: usize,
-    /// Choices thrash, and specialization goes off, once at least
-    /// `spec_thrash_flips` flips came at one per fewer than
-    /// `spec_thrash_evals` evaluations.
-    pub spec_thrash_flips: u64,
-    pub spec_thrash_evals: u64,
     /// How the program's bodies specialize per parameter binding. Where
     /// the program is compiled, the compiled form builds the variants (on
     /// the compiler's background queue) and the interpreted one runs its
@@ -96,15 +86,10 @@ impl Default for Policy {
             jit: true,
             kick_after: 3,
             eager_pass: Some(Duration::from_millis(10)),
-            specialize: true,
-            spec_min_selects: 16,
-            spec_min_shrink_pct: 15,
-            spec_flip_cooldown: 32,
+            choices: ChoicePolicy::default(),
             spec_compile_after: 16,
             spec_compile_budget: 4,
             spec_interp_cost: 4,
-            spec_thrash_flips: 8,
-            spec_thrash_evals: 8,
             variants: crate::variant::VariantPolicy::default(),
         }
     }
@@ -126,26 +111,16 @@ struct Jit {
 #[derive(Default)]
 struct Spec {
     spec: Option<Arc<SpecializedTape>>,
-    /// The choice trace the current specialization was built from.
-    choices: Vec<u8>,
-    scratch_choices: Vec<u8>,
-    /// Selects seen flipping: unpinned for good, they stay real `Select`s.
-    unpinned: Vec<bool>,
-    evals: u64,
-    flips: u64,
-    /// Choices thrash, or the shrink is too small: the full tape serves.
-    disabled: bool,
-    /// Bumped whenever `spec` is replaced, so a compile of an outdated
+    /// What the evaluations taught of the choices; its version moves
+    /// whenever `spec` is replaced, so a compile of an outdated
     /// specialization is dropped when it lands.
-    version: u64,
+    choices: Choices,
+    scratch_choices: Vec<u8>,
     /// Consecutive guard-holding evaluations (the compile probation).
     stable: u32,
     compiles: u32,
     inflight: bool,
-    /// No specialization is rebuilt before this evaluation count.
-    cooldown_until: u64,
     native: Option<(u64, Native)>,
-    built: u64,
 }
 
 /// What an [`Adaptive`] has done so far (see [`Adaptive::stats`]).
@@ -202,7 +177,7 @@ impl Adaptive {
             }),
             ..crate::BodyBackend::default()
         });
-        let spec = (policy.specialize && tape.n_selects() >= policy.spec_min_selects)
+        let spec = (policy.choices.enabled && tape.n_selects() >= policy.choices.min_selects)
             .then(|| Arc::new(Mutex::new(Spec::default())));
         Adaptive {
             tape: Arc::new(tape),
@@ -231,10 +206,10 @@ impl Adaptive {
             ..Stats::default()
         };
         if let Some(Ok(st)) = self.spec.as_ref().map(|c| c.try_lock()) {
-            s.specializations = st.built;
-            s.flips = st.flips;
+            s.specializations = st.choices.built;
+            s.flips = st.choices.flips;
             s.spec_native = st.native.is_some();
-            s.spec_off = st.disabled;
+            s.spec_off = st.choices.off;
         }
         s
     }
@@ -268,7 +243,7 @@ impl Adaptive {
             // Contention (parallel callers sharing one tape) falls past the
             // specialized rungs rather than serializing on the cache.
             if let Ok(mut st) = cache.try_lock() {
-                if !st.disabled && self.eval_spec(&mut st, cache, inputs, work, out) {
+                if !st.choices.off && self.eval_spec(&mut st, cache, inputs, work, out) {
                     return;
                 }
             }
@@ -288,9 +263,9 @@ impl Adaptive {
         work: &mut Vec<f64>,
         out: &mut Vec<f64>,
     ) -> bool {
-        st.evals += 1;
+        st.choices.ran(1);
         if let (Some((ver, native)), Some(sp)) = (st.native.clone(), st.spec.clone()) {
-            if ver == st.version {
+            if ver == st.choices.version {
                 run(&*native, inputs, work, out);
                 if sp.check_outputs(out) {
                     st.stable = st.stable.saturating_add(1);
@@ -309,14 +284,14 @@ impl Adaptive {
             }
             if sp.eval_checked(inputs, work, out) {
                 st.stable = st.stable.saturating_add(1);
-                let ver = st.version;
+                let ver = st.choices.version;
                 self.maybe_compile_spec(st, cache, &sp, ver);
                 return true;
             }
             self.on_flip(st, inputs, work, out);
             return true;
         }
-        if st.spec.is_none() && st.evals < st.cooldown_until {
+        if st.spec.is_none() && !st.choices.ready() {
             return false; // cooling down: the full tape serves
         }
         // The traced evaluation is this call's correct result either way.
@@ -343,7 +318,7 @@ impl Adaptive {
         let forms = self.forms();
         if let Some(cache) = &self.spec {
             if let Ok(mut st) = cache.try_lock() {
-                if !st.disabled {
+                if !st.choices.off {
                     if let Some(kind) = self.spec_prolog(&mut st, inputs, work) {
                         return Episode(kind, forms);
                     }
@@ -357,18 +332,18 @@ impl Adaptive {
     /// The specialized episode starts, `None` for a full one.
     fn spec_prolog(&self, st: &mut Spec, inputs: &[f64], work: &mut Vec<f64>) -> Option<Kind> {
         // Episode entry advances the clock the flip cooldown runs on.
-        st.evals += 1;
+        st.choices.ran(1);
         if st.spec.is_none() {
-            if st.evals < st.cooldown_until {
+            if !st.choices.ready() {
                 return None;
             }
             let mut tmp = Vec::new();
             self.retrace(st, inputs, work, &mut tmp);
-            st.version += 1;
+            st.choices.version += 1;
             st.stable = 0;
         }
         if let (Some((ver, native)), Some(sp)) = (st.native.clone(), st.spec.clone()) {
-            if ver == st.version {
+            if ver == st.choices.version {
                 prolog(&*native, inputs, work);
                 if sp.check_prolog_guards(inputs, work) {
                     return Some(Kind::SpecNative(native, sp));
@@ -385,7 +360,7 @@ impl Adaptive {
             return None;
         }
         if sp.eval_prolog_checked(inputs, work) {
-            return Some(Kind::SpecInterp(sp, st.version));
+            return Some(Kind::SpecInterp(sp, st.choices.version));
         }
         self.on_flip(st, inputs, work, &mut Vec::new());
         Some(Kind::Full)
@@ -442,7 +417,7 @@ impl Adaptive {
                 if sp.eval_main_checked(inputs, work, out) {
                     if let Some(cache) = &self.spec {
                         if let Ok(mut st) = cache.try_lock() {
-                            st.evals += 1;
+                            st.choices.ran(1);
                             st.stable = st.stable.saturating_add(1);
                             self.maybe_compile_spec(&mut st, cache, sp, *ver);
                         }
@@ -492,23 +467,15 @@ impl Adaptive {
 
     // --- bookkeeping --------------------------------------------------------
 
-    fn flipped(&self, st: &mut Spec) {
-        st.native = None;
-        st.version += 1;
-        st.stable = 0;
-        st.flips += 1;
-        st.cooldown_until = st.evals + self.policy.spec_flip_cooldown;
-    }
-
     fn disable(&self, st: &mut Spec, why: &str) {
-        st.disabled = true;
+        st.choices.off = true;
         st.spec = None;
         st.native = None;
         log(
             Level::Debug,
             &format!(
                 "tape specialization off ({why}): {} flips in {} evals",
-                st.flips, st.evals
+                st.choices.flips, st.choices.evals
             ),
         );
     }
@@ -521,29 +488,21 @@ impl Adaptive {
         let mut fresh = std::mem::take(&mut st.scratch_choices);
         fresh.clear();
         self.tape.eval_with(inputs, work, out, &mut fresh);
-        if st.unpinned.len() != fresh.len() {
-            st.unpinned.resize(fresh.len(), false);
-        }
-        if st.choices.len() == fresh.len() {
-            for (u, (a, b)) in st.unpinned.iter_mut().zip(st.choices.iter().zip(&fresh)) {
-                if a != b {
-                    *u = true;
-                }
-            }
-        }
-        if st.evals >= st.cooldown_until {
-            let pin: Vec<bool> = st.unpinned.iter().map(|&u| !u).collect();
-            let spec = self.tape.specialize(&fresh, &pin);
-            if spec.n_ops() * 100 > self.tape.n_ops() * (100 - self.policy.spec_min_shrink_pct) {
-                self.disable(st, "shrink too small");
-            } else {
+        st.choices.observe(&fresh);
+        if st.choices.ready() {
+            let spec = self.tape.specialize(st.choices.trace(), &st.choices.pin());
+            if st
+                .choices
+                .built(&self.policy.choices, spec.n_ops(), self.tape.n_ops())
+            {
                 st.spec = Some(Arc::new(spec));
-                st.built += 1;
+            } else {
+                self.disable(st, "shrink too small");
             }
         } else {
             st.spec = None;
         }
-        st.scratch_choices = std::mem::replace(&mut st.choices, fresh);
+        st.scratch_choices = fresh;
     }
 
     /// A main-phase flip: learn and respecialize (or disable on thrash),
@@ -560,10 +519,9 @@ impl Adaptive {
     /// tape's state in `work` (an episode continues full); unless flips
     /// come too often, and specialization goes off for this tape.
     fn on_flip(&self, st: &mut Spec, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
-        self.flipped(st);
-        if st.flips >= self.policy.spec_thrash_flips
-            && st.evals < st.flips * self.policy.spec_thrash_evals
-        {
+        st.native = None;
+        st.stable = 0;
+        if st.choices.flipped(&self.policy.choices, 1) {
             self.disable(st, "choices thrash");
             self.tape.eval(inputs, work, out);
         } else {
@@ -582,7 +540,7 @@ impl Adaptive {
     ) {
         if !self.policy.jit
             || st.stable != self.policy.spec_compile_after
-            || st.version != ver
+            || st.choices.version != ver
             || st.inflight
             || st.native.is_some()
             || st.compiles >= self.policy.spec_compile_budget
@@ -602,7 +560,7 @@ impl Adaptive {
             let compiled = compiler.compile(sp.tape(), &guards);
             let mut st = cache.lock().unwrap_or_else(|e| e.into_inner());
             st.inflight = false;
-            if st.version == ver {
+            if st.choices.version == ver {
                 if let Some(native) = compiled {
                     log(
                         Level::Debug,
