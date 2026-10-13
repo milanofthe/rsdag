@@ -195,6 +195,9 @@ fn chunked<'a>(ops: &'a [ROp], chunk_ops: usize, cuts: &[usize]) -> Vec<&'a [ROp
     out
 }
 
+/// Lanes the lane code runs at most (the four of AVX).
+const MAX_LANES: usize = 4;
+
 /// The phase a run of lane code covers, in the order of [`LaneCode::pays`].
 #[derive(Clone, Copy, PartialEq)]
 enum Phase {
@@ -331,7 +334,20 @@ impl NativeBody {
         rsdag::scratch::with_len(lt.layout.total, 0.0, |work: &mut [f64]| {
             rsdag::scratch::with_len(n_in * l, f64::NAN, |ins: &mut [f64]| {
                 let end = block.end;
+                // The state rows the lanes hold: a block whose lanes read the
+                // rows of the block before (instances sharing a row, see
+                // `Rows`) finds them in place, as no phase writes the state
+                // a main phase reads.
+                let mut held: Option<[usize; MAX_LANES]> = None;
                 for c in block.step_by(l) {
+                    let mut rows = [usize::MAX; MAX_LANES];
+                    for (lane, r) in rows.iter_mut().enumerate().take(l) {
+                        *r = at.row(at.at((c + lane).min(end - 1)));
+                    }
+                    let fresh = phase != Phase::Main || held != Some(rows);
+                    if fresh {
+                        held = (phase == Phase::Main).then_some(rows);
+                    }
                     for lane in 0..l {
                         let g = at.at((c + lane).min(end - 1));
                         let a = &args[g * n_args..(g + 1) * n_args];
@@ -347,7 +363,7 @@ impl NativeBody {
                                 a.get(k).copied().unwrap_or(f64::NAN)
                             };
                         }
-                        if let Some(st) = states {
+                        if let Some(st) = states.filter(|_| fresh) {
                             let row = &st[at.row(g) * stride..][..sl];
                             for (s, &v) in row.iter().enumerate() {
                                 work[s * l + lane] = v;
@@ -765,8 +781,9 @@ impl NativeTape {
         let mut phase_ops = [(0usize, 0usize); 2];
         for (k, op) in ops.iter().enumerate() {
             let p = &mut phase_ops[usize::from(k >= split)];
-            // Lane code calls the host once for every lane of an
-            // exponential or a logarithm: one host call's cost per block.
+            // Lane code computes an exponential or a logarithm for every
+            // lane at once, inline or in one host call: about a host call's
+            // cost per block.
             let all_lanes = lanes > 1 && matches!(op, ROp::Unary(_, UnaryOp::Exp | UnaryOp::Ln, _));
             p.0 += if all_lanes { 1 + LANE_CALL } else { 1 };
             p.1 += usize::from(op.host::<A>().is_some() && !all_lanes);
@@ -1739,6 +1756,12 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 self.isa.abs(r, x);
                 Some(r)
             }
+            UnaryOp::Exp | UnaryOp::Ln if I::exp_ln_inline() => {
+                let r = self.fresh_for(dst);
+                let t = [self.fresh(), self.fresh(), self.fresh(), self.fresh()];
+                self.isa.exp_ln(uop == UnaryOp::Ln, r, x, t);
+                Some(r)
+            }
             UnaryOp::Sign => {
                 let r = self.fresh_for(dst);
                 let zero = self.fconst(0.0);
@@ -2039,5 +2062,107 @@ impl rsdag::Program for NativeTape {
     fn eval_main_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]) {
         self.run(self.prolog_chunks..self.chunks.len(), inputs, work);
         self.write(inputs, work, out);
+    }
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+    use crate::x86_64::X64;
+    use rsdag::semantics::{exp_guarded, ln_guarded, EXP_LIMIT, LN_FLOOR};
+    use rsdag::{Graph, Node, F64};
+
+    const N: usize = 64;
+
+    /// `exp` and `ln` of each of `N` inputs, every one an output.
+    fn tape() -> Tape {
+        let mut g: Graph<F64> = Graph::new();
+        let (mut roots, mut syms) = (Vec::new(), Vec::new());
+        for k in 0..N {
+            let x = g.sym(&format!("x{k}"));
+            let Node::Symbol(s) = *g.node(x) else {
+                unreachable!()
+            };
+            roots.extend([g.exp(x), g.ln(x)]);
+            syms.push(s);
+        }
+        Tape::compile(&g, &roots, &syms)
+    }
+
+    /// Both functions' ranges and their edges, any bits at all (every
+    /// exponent, subnormals, negatives, NaNs), and the special values.
+    fn arguments() -> Vec<f64> {
+        let mut v = vec![
+            0.0,
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            -f64::NAN,
+            f64::MIN_POSITIVE,
+            5e-324,
+            f64::MAX,
+            -745.2,
+            -745.1,
+            -745.3,
+            EXP_LIMIT,
+            EXP_LIMIT.next_up(),
+            EXP_LIMIT.next_down(),
+            LN_FLOOR,
+            LN_FLOOR.next_up(),
+            1.0,
+            1.0f64.next_up(),
+            1.0f64.next_down(),
+        ];
+        let mut s = 0x9E37_79B9_7F4A_7C15u64;
+        for k in 0..600_000 {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            let u = (s >> 11) as f64 / (1u64 << 53) as f64;
+            v.push(match k % 3 {
+                0 => -800.0 + 900.0 * u,
+                1 => f64::from_bits(s),
+                _ => 0.5 + 1.5 * u,
+            });
+        }
+        v
+    }
+
+    /// `A`'s code against the reference, lane by lane, to the bit.
+    fn check<A: Isa>() {
+        let t = tape();
+        let code = NativeTape::compile_isa::<A>(&t, &Options::default(), &[]).expect("native code");
+        let l = A::LANES;
+        let mut work = vec![0.0; code.layout.total];
+        let mut ins = vec![0.0; N * l];
+        for block in arguments().chunks(N * l) {
+            // input k's lane j at k l + j, as the slots
+            ins[..block.len()].copy_from_slice(block);
+            code.run(0..code.chunks.len(), &ins, &mut work);
+            for (i, &x) in block.iter().enumerate() {
+                let (k, j) = (i / l, i % l);
+                for (o, name, want) in [
+                    (2 * k, "exp", exp_guarded(x)),
+                    (2 * k + 1, "ln", ln_guarded(x)),
+                ] {
+                    let got = work[code.outputs[o] as usize * l + j];
+                    assert_eq!(
+                        got.to_bits(),
+                        want.to_bits(),
+                        "{l} lanes: {name}({x:e}) = {got:e}, the reference {want:e}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exp_and_ln_inline_are_the_reference_bit_for_bit() {
+        check::<X64<1>>();
+        check::<X64<2>>();
+        if crate::x86_64::features().avx {
+            check::<X64<4>>();
+        }
     }
 }

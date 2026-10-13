@@ -238,6 +238,7 @@ impl ROp {
                 | UnaryOp::Trunc
                 | UnaryOp::Abs
                 | UnaryOp::Sign => return None,
+                UnaryOp::Exp | UnaryOp::Ln if I::exp_ln_inline() => return None,
                 _ => crate::host::unary_addr(*op).0,
             },
             ROp::Binary(..) => crate::host::h_binary as *const (),
