@@ -10,7 +10,7 @@ authors = ["Milan Rother"]
 repository = "https://github.com/milanofthe/rsdag"
 
 [workspace.dependencies]
-rsdag = { path = "crates/rsdag", version = "4.0.0" }
+rsdag = { path = "crates/rsdag", version = "5.0.0" }
 num-bigint = "0.4"
 num-rational = "0.4"
 num-traits = "0.2"
