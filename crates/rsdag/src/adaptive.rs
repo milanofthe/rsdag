@@ -521,6 +521,8 @@ impl Adaptive {
     fn on_flip(&self, st: &mut Spec, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
         st.native = None;
         st.stable = 0;
+        st.choices.version += 1;
+        st.choices.cool(&self.policy.choices);
         if st.choices.flipped(&self.policy.choices, 1) {
             self.disable(st, "choices thrash");
             self.tape.eval(inputs, work, out);

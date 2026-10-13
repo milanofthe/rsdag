@@ -69,20 +69,24 @@ pub(crate) struct Choices {
 
 impl Choices {
     /// A trace seen: the selects it differs in from the one held are
-    /// unpinned for good, and it becomes the one held.
-    pub(crate) fn observe(&mut self, trace: &[u8]) {
+    /// unpinned for good, and it becomes the one held. Returns how many
+    /// selects it unpinned.
+    pub(crate) fn observe(&mut self, trace: &[u8]) -> usize {
         if self.unpinned.len() != trace.len() {
             self.unpinned.resize(trace.len(), false);
         }
+        let mut fresh = 0;
         if self.trace.len() == trace.len() {
             for (u, (a, b)) in self.unpinned.iter_mut().zip(self.trace.iter().zip(trace)) {
-                if a != b {
+                if a != b && !*u {
                     *u = true;
+                    fresh += 1;
                 }
             }
         }
         self.trace.clear();
         self.trace.extend_from_slice(trace);
+        fresh
     }
 
     /// The trace held, the one to specialize against.
@@ -105,17 +109,19 @@ impl Choices {
         self.evals += n;
     }
 
-    /// `n` evaluations flipped a pinned region: counted, the cooldown
-    /// started, and `true` when choices thrash, specialization off from
-    /// here.
+    /// `n` evaluations flipped a pinned region: counted, and `true` when
+    /// choices thrash, specialization off from here.
     pub(crate) fn flipped(&mut self, policy: &ChoicePolicy, n: u64) -> bool {
-        self.version += 1;
         self.flips += n;
-        self.cooldown_until = self.evals + policy.flip_cooldown;
         if self.flips >= policy.thrash_flips && self.evals < self.flips * policy.thrash_evals {
             self.off = true;
         }
         self.off
+    }
+
+    /// No specialization is rebuilt for the policy's cooldown from here.
+    pub(crate) fn cool(&mut self, policy: &ChoicePolicy) {
+        self.cooldown_until = self.evals + policy.flip_cooldown;
     }
 
     /// A specialization of `ops` instructions against a program of `full`

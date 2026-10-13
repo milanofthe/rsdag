@@ -445,8 +445,10 @@ impl Function {
         };
         let tape = self.view(ctx, &roots, &inputs, &pure);
         // A body whose selects a binding decides runs each binding's
-        // variant (see `crate::variant`).
-        let variants = !pure.is_empty() && tape.has_param_selects(&pure);
+        // variant, and one whose main phase selects specializes over the
+        // choices its instances take (see `crate::variant`).
+        let variants =
+            (!pure.is_empty() && tape.has_param_selects(&pure)) || tape.n_main_selects() > 0;
         let full = InterpretedBody::new(tape, roots.len(), pure);
         let bundle: Arc<dyn ExternBundle> = match variants {
             true => Arc::new(crate::variant::VariantBody::new(full)),

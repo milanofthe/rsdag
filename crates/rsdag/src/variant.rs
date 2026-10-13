@@ -30,16 +30,32 @@
 //! made alone. With one, that work goes there, and an instance runs the
 //! full body, which computes the same values, until its variant is ready:
 //! a prolog never waits on a compilation.
+//!
+//! The selects left in a variant are decided at run time, by the state
+//! (an operating region), and each variant specializes over them too
+//! ([`crate::choices`]): a trace of some of its instances pins the arms
+//! they take, the main phase shortened against it over the variant's own
+//! state ([`Tape::specialize_main`], one output counting the guards that
+//! fail). A batch runs on it, and an instance whose guards fail runs again
+//! on the variant's main phase, its result the same either way; a trace of
+//! those instances unpins the selects that flipped, and the main phase is
+//! shortened again without them. Choices that flip too often turn the
+//! specialization off for the variant.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use rustc_hash::FxHashMap as HashMap;
 
+use crate::choices::Choices;
 use crate::extern_fn::{BackendCache, BodyBackend, ExternBundle, Instances};
 use crate::func::InterpretedBody;
 use crate::hooks::{log, Level};
-use crate::tape::{ParamSelects, Tape};
+use crate::tape::{Guards, ParamSelects, Tape};
+
+/// Instances a trace takes of a batch, spread over it: enough to see the
+/// choices most of them take, few enough to cost little next to the batch.
+const TRACED: usize = 16;
 
 /// How bodies specialize per binding (see the module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,6 +122,8 @@ struct Shared {
     state_len: usize,
     /// The full body (`0`) and every variant built.
     bodies: RwLock<Vec<Arc<InterpretedBody>>>,
+    /// Per body, its specialization over the run-time choices.
+    choices: RwLock<Vec<Arc<Choice>>>,
     /// The variant of each pattern seen.
     index: Mutex<HashMap<Box<[bool]>, Slot>>,
     /// Whether a pattern found no room left (reported once).
@@ -115,9 +133,33 @@ struct Shared {
     epoch: AtomicU64,
 }
 
+/// A variant's specialization over the choices its instances take at run
+/// time: what they taught so far, and its main phase shortened against it.
+#[derive(Default)]
+struct Choice {
+    learned: Mutex<Choices>,
+    /// The shortened main phase as a body, its outputs the variant's and
+    /// the count of guards that fail, and the version it was built at.
+    spec: RwLock<Option<(u64, Arc<InterpretedBody>)>>,
+    /// A trace of instances is on its way.
+    tracing: AtomicBool,
+}
+
 impl Shared {
     fn body(&self, v: u32) -> Arc<InterpretedBody> {
         self.bodies.read().unwrap()[v as usize].clone()
+    }
+
+    fn choice(&self, v: usize) -> Arc<Choice> {
+        self.choices.read().unwrap()[v].clone()
+    }
+
+    /// Body `body` kept as a variant: its index.
+    fn keep(&self, body: InterpretedBody) -> u32 {
+        let mut bodies = self.bodies.write().unwrap();
+        bodies.push(Arc::new(body));
+        self.choices.write().unwrap().push(Arc::default());
+        bodies.len() as u32 - 1
     }
 
     fn find(&self) -> Option<Found> {
@@ -153,9 +195,51 @@ impl Shared {
             return 0;
         }
         let (pure, n_out) = (full.pure_args().to_vec(), full.n_outputs());
-        let mut bodies = self.bodies.write().unwrap();
-        bodies.push(Arc::new(InterpretedBody::new(decided, n_out, pure)));
-        bodies.len() as u32 - 1
+        self.keep(InterpretedBody::new(decided, n_out, pure))
+    }
+
+    /// What the traces `traces` of instances of variant `v` teach: the
+    /// selects they disagree in unpinned, and the main phase shortened
+    /// again where that changed the pins (or where there is none yet).
+    fn learn(&self, v: usize, traces: &[Vec<u8>], policy: &crate::ChoicePolicy) {
+        let choice = self.choice(v);
+        let mut learned = choice.learned.lock().unwrap();
+        if learned.off {
+            return;
+        }
+        let first = learned.built == 0;
+        let fresh: usize = traces.iter().map(|t| learned.observe(t)).sum();
+        if !first && fresh == 0 {
+            return;
+        }
+        let body = self.body(v as u32);
+        let t = body.body().expect("an interpreted body is a tape");
+        let spec = t.specialize_main(learned.trace(), &learned.pin(), Guards::Count);
+        let main = |t: &Tape| t.n_ops() - t.prolog_len();
+        if !learned.built(policy, main(spec.tape()), main(t)) {
+            *choice.spec.write().unwrap() = None;
+            log(
+                Level::Debug,
+                &format!(
+                    "rsdag: a body's run-time choices shorten it too little ({} of {} ops)",
+                    main(spec.tape()),
+                    main(t)
+                ),
+            );
+            return;
+        }
+        learned.version += 1;
+        log(
+            Level::Debug,
+            &format!(
+                "rsdag: a body specialized over its run-time choices, {} of {} main ops",
+                main(spec.tape()),
+                main(t)
+            ),
+        );
+        let n_out = body.n_outputs() + 1;
+        let shortened = InterpretedBody::new(spec.into_tape(), n_out, body.pure_args().to_vec());
+        *choice.spec.write().unwrap() = Some((learned.version, Arc::new(shortened)));
     }
 
     /// The pattern the selects `ps` take at the pure arguments `pure` (of
@@ -202,6 +286,10 @@ pub struct VariantBody {
     made: Arc<[OnceLock<Arc<dyn ExternBundle>>]>,
     /// Per variant, whether the backend's form of it is on its way.
     making: Box<[AtomicBool]>,
+    /// Per variant, the backend's form of its shortened main phase and the
+    /// version it was made of, and the version being made.
+    spec_made: Arc<[Mutex<Option<(u64, Arc<dyn ExternBundle>)>>]>,
+    spec_making: Box<[AtomicU64]>,
     /// The backend's form of the conditions' tape, once made.
     conds: Arc<OnceLock<Arc<dyn ExternBundle>>>,
     conds_making: AtomicBool,
@@ -225,6 +313,7 @@ impl VariantBody {
             ops: t.n_ops(),
             state_len: t.state_len(),
             bodies: RwLock::new(vec![Arc::new(full)]),
+            choices: RwLock::new(vec![Arc::default()]),
             index: Mutex::new(HashMap::default()),
             exhausted: AtomicBool::new(false),
             epoch: AtomicU64::new(0),
@@ -242,6 +331,8 @@ impl VariantBody {
             interp: (0..n).map(|_| OnceLock::new()).collect(),
             made: (0..n).map(|_| OnceLock::new()).collect(),
             making: (0..n).map(|_| AtomicBool::new(false)).collect(),
+            spec_made: (0..n).map(|_| Mutex::new(None)).collect(),
+            spec_making: (0..n).map(|_| AtomicU64::new(0)).collect(),
             conds: Arc::default(),
             conds_making: AtomicBool::new(false),
             full,
@@ -434,6 +525,196 @@ impl VariantBody {
         b.as_ref()
     }
 
+    /// Whether this form specializes its variants over their run-time
+    /// choices.
+    fn specializes(&self) -> bool {
+        self.policy.choices.enabled && (self.backend.compile.is_some() || self.policy.interpreted)
+    }
+
+    /// What runs variant `v`'s shortened main phase in this form, and its
+    /// version: the backend's form once made (asked for here), else the
+    /// interpreted body where the form interprets.
+    fn spec_form(&self, v: usize) -> Option<(u64, Arc<dyn ExternBundle>)> {
+        if !self.specializes() {
+            return None;
+        }
+        let (ver, body) = self.shared.choice(v).spec.read().unwrap().clone()?;
+        let Some(compile) = self.backend.compile.clone() else {
+            return Some((ver, body));
+        };
+        if let Some((made, form)) = &*self.spec_made[v].lock().unwrap() {
+            if *made == ver {
+                return Some((ver, form.clone()));
+            }
+        }
+        if self.spec_making[v].swap(ver, Ordering::AcqRel) != ver {
+            let (made, key) = (self.spec_made.clone(), self.backend.key);
+            let job = move || {
+                let cache = body
+                    .backend_cache()
+                    .expect("an interpreted body keeps its forms");
+                let form = cache.get_or_try_insert(key, || {
+                    let t = body.body().expect("an interpreted body is a tape");
+                    compile(t, body.pure_args(), body.n_outputs()).ok_or(())
+                });
+                if let Ok(form) = form {
+                    let mut m = made[v].lock().unwrap();
+                    if m.as_ref().is_none_or(|(at, _)| *at < ver) {
+                        *m = Some((ver, form));
+                    }
+                }
+            };
+            // Nothing a prolog runs on changes: no epoch to move.
+            match &self.backend.submit {
+                Some(submit) => submit(Box::new(job)),
+                None => job(),
+            }
+            if let Some((made, form)) = &*self.spec_made[v].lock().unwrap() {
+                if *made == ver {
+                    return Some((ver, form.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    /// The instances `at` of variant `v`: on its shortened main phase where
+    /// this form has one, an instance whose guards fail again on the
+    /// variant's own; what they show of the choices learned on the way.
+    fn main_variant(
+        &self,
+        v: usize,
+        args: &[f64],
+        states: &[f64],
+        out: &mut [f64],
+        at: &Instances,
+    ) {
+        let full = self.bundle(v);
+        let Some((ver, spec)) = self.spec_form(v) else {
+            full.main_batch(args, states, out, at);
+            if self.specializes() {
+                self.observe(v, args, states, at, None);
+            }
+            return;
+        };
+        let no = full.n_outputs();
+        let ns = no + 1;
+        let n = at.iter().max().map_or(0, |g| g + 1);
+        crate::scratch::with_len(n * ns, 0.0, |so| {
+            spec.main_batch(args, states, so, at);
+            crate::scratch::with(|failed: &mut Vec<u32>| {
+                failed.clear();
+                for g in at.iter() {
+                    let o = &so[g * ns..(g + 1) * ns];
+                    if o[no] == 0.0 {
+                        out[g * no..(g + 1) * no].copy_from_slice(&o[..no]);
+                    } else {
+                        failed.push(g as u32);
+                    }
+                }
+                if !failed.is_empty() {
+                    full.main_batch(args, states, out, &at.listed(failed));
+                }
+                self.observe(v, args, states, at, Some((ver, failed)));
+            });
+        });
+    }
+
+    /// The instances `at` of variant `v` ran: with no shortened main phase
+    /// yet, a trace of some of them builds one; with one of version `ver`,
+    /// the instances whose guards failed (`failed`) count as flips, and a
+    /// trace of some of them unpins what they flipped. One trace at a time,
+    /// where the backend puts background work.
+    fn observe(
+        &self,
+        v: usize,
+        args: &[f64],
+        states: &[f64],
+        at: &Instances,
+        ran: Option<(u64, &[u32])>,
+    ) {
+        let policy = self.policy.choices;
+        let choice = self.shared.choice(v);
+        // Contended: another batch of the variant keeps the count.
+        let Ok(mut learned) = choice.learned.try_lock() else {
+            return;
+        };
+        if learned.off {
+            return;
+        }
+        learned.ran(at.len() as u64);
+        let traced: Vec<u32> = match ran {
+            None => {
+                if learned.built > 0 || choice.spec.read().unwrap().is_some() {
+                    return; // built, this form's form of it on its way
+                }
+                let body = self.shared.body(v as u32);
+                let t = body.body().expect("an interpreted body is a tape");
+                if t.n_main_selects() < policy.min_selects {
+                    learned.off = true;
+                    return;
+                }
+                spread(at.len(), |k| at.at(k) as u32)
+            }
+            Some((ver, failed)) => {
+                if failed.is_empty() || ver != learned.version {
+                    return;
+                }
+                if learned.flipped(&policy, failed.len() as u64) {
+                    *choice.spec.write().unwrap() = None;
+                    log(
+                        Level::Debug,
+                        &format!(
+                            "rsdag: a body's run-time choices thrash ({} flips in {} instances), specialization off",
+                            learned.flips, learned.evals
+                        ),
+                    );
+                    return;
+                }
+                spread(failed.len(), |k| failed[k])
+            }
+        };
+        drop(learned);
+        if choice.tracing.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        // What the trace reads, copied: the batch's buffers are the caller's.
+        let body = self.shared.body(v as u32);
+        let (na, st, sl) = (at.n_args, at.stride, body.state_len());
+        let rows: Vec<(Vec<f64>, Vec<f64>)> = traced
+            .iter()
+            .map(|&g| {
+                let (g, r) = (g as usize, at.row(g as usize));
+                (
+                    args[g * na..(g + 1) * na].to_vec(),
+                    states[r * st..r * st + sl].to_vec(),
+                )
+            })
+            .collect();
+        let shared = self.shared.clone();
+        let job = move || {
+            let t = body.body().expect("an interpreted body is a tape");
+            let mut w = vec![0.0; t.work_len()];
+            let mut o = vec![0.0; t.out_len()];
+            let traces: Vec<Vec<u8>> = rows
+                .iter()
+                .map(|(a, s)| {
+                    w[..s.len()].copy_from_slice(s);
+                    let mut trace = Vec::new();
+                    t.eval_main_with(a, &mut w, &mut o, &mut trace);
+                    trace
+                })
+                .collect();
+            shared.learn(v, &traces, &policy);
+            shared.choice(v).tracing.store(false, Ordering::Release);
+        };
+        // Nothing a prolog runs on changes: no epoch to move.
+        match &self.backend.submit {
+            Some(submit) => submit(Box::new(job)),
+            None => job(),
+        }
+    }
+
     /// `f(v, instances)` for each variant among the instances `at`, given
     /// the variant `vs[k]` of the `k`th: the instances of a variant listed
     /// in their order, the variants ascending.
@@ -504,11 +785,8 @@ impl ExternBundle for VariantBody {
         state[self.tag()] = v as f64;
     }
     fn main_into(&self, args: &[f64], state: &[f64], _work: &mut [f64], out: &mut [f64]) {
-        let b = self.bundle(state[self.tag()] as usize);
-        let sl = b.state_len();
-        crate::scratch::with_len(b.work_len(), 0.0, |w| {
-            b.main_into(args, &state[..sl], w, out)
-        });
+        let at = Instances::first(1, args.len(), state.len());
+        self.main_batch(args, state, out, &at);
     }
     fn prolog_batch(&self, pure: &[f64], states: &mut [f64], at: &Instances) {
         if at.is_empty() {
@@ -539,7 +817,7 @@ impl ExternBundle for VariantBody {
             vs.clear();
             vs.extend(at.iter().map(|g| states[at.row(g) * st + tag] as u32));
             self.by_variant(at, vs, |v, ins| {
-                self.bundle(v).main_batch(args, states, out, ins);
+                self.main_variant(v, args, states, out, ins);
             });
         });
     }
@@ -560,4 +838,10 @@ impl ExternBundle for VariantBody {
     fn forms_epoch(&self) -> u64 {
         self.shared.epoch.load(Ordering::Acquire)
     }
+}
+
+/// Up to [`TRACED`] of `n` items, `item(k)` the `k`th, spread evenly.
+fn spread(n: usize, item: impl Fn(usize) -> u32) -> Vec<u32> {
+    let m = n.min(TRACED);
+    (0..m).map(|j| item(j * n / m.max(1))).collect()
 }

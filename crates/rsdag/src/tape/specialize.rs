@@ -288,6 +288,11 @@ impl SpecializedTape {
         &self.tape
     }
 
+    /// The shortened tape, owned.
+    pub fn into_tape(self) -> Tape {
+        self.tape
+    }
+
     /// The original tape's outputs, the first of the shortened tape's.
     pub fn n_real(&self) -> usize {
         self.n_real
