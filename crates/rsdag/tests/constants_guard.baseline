@@ -1,5 +1,2 @@
 # Literals left from before the guard (tests/constants_guard.rs): `path :: item :: literal`,
 # one line per occurrence. The list may only shrink.
-rsdag-py/src/lib.rs :: DETACH_OPS :: 256
-rsdag-py/src/lib.rs :: Program::compile_native :: 16
-rsdag-py/src/lib.rs :: REPR_NODES :: 200
