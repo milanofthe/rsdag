@@ -32,7 +32,7 @@ use std::sync::Arc;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use super::topo::Topo;
-use super::{input_index, Accum, Fold, Op, Src, Tape, INPUT};
+use super::{input_index, Accum, Fold, Op, Region, Src, Tape, INPUT};
 use crate::extern_fn::ExternBundle;
 use crate::field::Field;
 use crate::func::{Body, FuncId, Output};
@@ -47,6 +47,14 @@ use crate::semantics::{SOLVE_BATCH_MAX_K, SOLVE_BATCH_MAX_N};
 
 /// Row dots against one vector fuse into a `Gemv` from this many rows on.
 const GEMV_MIN_ROWS: usize = 2;
+
+/// A run of ops without a call becomes a region (see [`Region`]) from this
+/// many ops on: two pieces.
+const REGION_MIN_OPS: usize = 2 * PIECE_OPS;
+
+/// Ops a piece of a region takes on, about (whole connected parts of the
+/// run): as many as a native chunk.
+const PIECE_OPS: usize = 1024;
 
 /// A call's operands and the slot of its state block (the last operand of
 /// a stateful call), or [`NO_STATE`](super::NO_STATE).
@@ -2536,13 +2544,127 @@ impl Program {
         order
     }
 
+    /// The regions of the schedule `order` (see [`Region`]): every run of at
+    /// least [`REGION_MIN_OPS`] consecutive ops within the prolog or within
+    /// the main phase that calls nothing, runs no dense kernel and gathers
+    /// nothing (a min or max reduction), its ops in pieces of whole connected
+    /// parts of their dependences, about [`PIECE_OPS`] ops each. The order
+    /// they come back in has each such run's constants first, read by its
+    /// pieces alike, then the pieces one after the other, each in schedule
+    /// order: a topological order still, as no piece reads another's.
+    fn regions(&self, order: &[u32], prolog_ops: usize) -> (Vec<u32>, Vec<Region>) {
+        use crate::node::ReduceOp;
+        let plain = |i: u32| match self.insts[i as usize].kind {
+            Kind::Call { .. }
+            | Kind::CallProlog { .. }
+            | Kind::Gemv { .. }
+            | Kind::Gemm { .. }
+            | Kind::Solve { .. }
+            | Kind::Reduce(ReduceOp::Min | ReduceOp::Max) => false,
+            _ => self.insts[i as usize].n_out == 1,
+        };
+        let is_const = |i: u32| matches!(self.insts[i as usize].kind, Kind::Const(_));
+        let mut out = Vec::with_capacity(order.len());
+        let mut regions = Vec::new();
+        // The run an op is in, by its position in it (u32::MAX: none).
+        let mut local = vec![u32::MAX; self.insts.len()];
+        let mut parent: Vec<u32> = Vec::new();
+        fn root(parent: &mut [u32], mut a: u32) -> u32 {
+            while parent[a as usize] != a {
+                parent[a as usize] = parent[parent[a as usize] as usize];
+                a = parent[a as usize];
+            }
+            a
+        }
+        let mut k = 0;
+        while k < order.len() {
+            let end = if k < prolog_ops {
+                prolog_ops
+            } else {
+                order.len()
+            };
+            let mut e = k;
+            while e < end && plain(order[e]) {
+                e += 1;
+            }
+            if e == k {
+                out.push(order[k]);
+                k += 1;
+                continue;
+            }
+            let run = &order[k..e];
+            k = e;
+            let work = run.iter().filter(|&&i| !is_const(i)).count();
+            if work < REGION_MIN_OPS {
+                out.extend_from_slice(run);
+                continue;
+            }
+            // The connected parts of the run's dependences, constants apart.
+            parent.clear();
+            parent.extend(0..run.len() as u32);
+            for (p, &i) in run.iter().enumerate() {
+                local[i as usize] = p as u32;
+            }
+            for (p, &i) in run.iter().enumerate() {
+                if is_const(i) {
+                    continue;
+                }
+                for r in self.ins(i as usize) {
+                    if let Ref::Value(j, _) = *r {
+                        let q = local[j as usize];
+                        if q != u32::MAX && !is_const(j) {
+                            let (a, b) = (root(&mut parent, p as u32), root(&mut parent, q));
+                            parent[a.max(b) as usize] = a.min(b);
+                        }
+                    }
+                }
+            }
+            // Each part's ops in order; a part's root is its first op.
+            let mut members: Vec<Vec<u32>> = Vec::new();
+            let mut part = vec![u32::MAX; run.len()];
+            let at = out.len();
+            for (p, &i) in run.iter().enumerate() {
+                local[i as usize] = u32::MAX;
+                if is_const(i) {
+                    out.push(i);
+                    continue;
+                }
+                let r = root(&mut parent, p as u32) as usize;
+                if part[r] == u32::MAX {
+                    part[r] = members.len() as u32;
+                    members.push(Vec::new());
+                }
+                members[part[r] as usize].push(i);
+            }
+            // The parts in order of their first op, packed into pieces.
+            let mut starts = Vec::new();
+            let mut size = PIECE_OPS;
+            for m in &members {
+                if size >= PIECE_OPS {
+                    starts.push(out.len() as u32);
+                    size = 0;
+                }
+                out.extend_from_slice(m);
+                size += m.len();
+            }
+            if starts.len() >= 2 {
+                regions.push(Region {
+                    starts,
+                    hi: out.len() as u32,
+                });
+            } else {
+                // One piece: nothing to run alongside, the run as it was.
+                out.truncate(at);
+                out.extend_from_slice(run);
+            }
+        }
+        debug_assert_eq!(out.len(), order.len());
+        (out, regions)
+    }
+
     /// Pass 4: lifetimes, slots and the instruction stream.
     pub(super) fn emit(&self, order: &[u32], split: bool) -> Tape {
         let m = self.insts.len();
-        let mut pos = vec![0usize; m];
-        for (k, &i) in order.iter().enumerate() {
-            pos[i as usize] = k;
-        }
         // The prolog is the pure prefix of the schedule.
         let prolog_ops = if split {
             order
@@ -2552,6 +2674,14 @@ impl Program {
         } else {
             0
         };
+        // The regions reorder their ops (see `regions`), before anything
+        // reads the positions.
+        let (order, regions) = self.regions(order, prolog_ops);
+        let order = &order[..];
+        let mut pos = vec![0usize; m];
+        for (k, &i) in order.iter().enumerate() {
+            pos[i as usize] = k;
+        }
 
         // Last use of each instruction's block (the highest position that
         // reads any of its values); roots and, under a split, prolog values
@@ -2673,7 +2803,20 @@ impl Program {
         }
         // Slots: a LIFO free list for single values, a fresh block for a
         // kernel; an instruction's dying operands are freed first, so it
-        // can reuse one of their slots.
+        // can reuse one of their slots. In a region a slot freed by a piece
+        // serves that piece alone, as the value its own op wrote dies there,
+        // and the region's other pieces once it is over: they may still read
+        // what it held, or write it at the same time.
+        let mut piece_of = vec![u32::MAX; m];
+        for (p, k) in regions
+            .iter()
+            .flat_map(|r| (0..r.starts.len()).map(move |p| r.piece(p)))
+            .enumerate()
+            .flat_map(|(p, ks)| ks.map(move |k| (p, k)))
+        {
+            piece_of[order[k] as usize] = p as u32;
+        }
+        let (mut piece, mut own, mut later) = (u32::MAX, Vec::<u32>::new(), Vec::<u32>::new());
         let mut base = vec![u32::MAX; m];
         let mut free: Vec<u32> = Vec::new();
         let mut ops: Vec<Op> = Vec::with_capacity(m);
@@ -2692,6 +2835,13 @@ impl Program {
         let mut dying: Vec<u32> = Vec::new();
         for (k, &i) in order.iter().enumerate() {
             let inst = &self.insts[i as usize];
+            if piece_of[i as usize] != piece {
+                piece = piece_of[i as usize];
+                later.append(&mut own);
+                if piece == u32::MAX {
+                    free.append(&mut later);
+                }
+            }
             // The operands, before any slot of this step is freed.
             let ins = self.ins(i as usize);
             operands.clear();
@@ -2710,15 +2860,19 @@ impl Program {
             dying.sort_unstable();
             dying.dedup();
             for &j in &dying {
-                let b = base[j as usize];
-                free.extend(b..b + self.insts[j as usize].n_out);
+                let slots = base[j as usize]..base[j as usize] + self.insts[j as usize].n_out;
+                match piece {
+                    u32::MAX => free.extend(slots),
+                    p if piece_of[j as usize] == p => own.extend(slots),
+                    _ => later.extend(slots),
+                }
             }
             let d = if state_base[i as usize] != u32::MAX {
                 state_base[i as usize]
             } else if inst.n_out == 1 && reserved[i as usize] != u32::MAX {
                 reserved[i as usize]
             } else if inst.n_out == 1 {
-                free.pop().unwrap_or_else(|| {
+                own.pop().or_else(|| free.pop()).unwrap_or_else(|| {
                     let s = next;
                     next += 1;
                     s
@@ -2924,6 +3078,7 @@ impl Program {
         }
         Tape {
             stages,
+            regions,
             lent,
             ops,
             dst,

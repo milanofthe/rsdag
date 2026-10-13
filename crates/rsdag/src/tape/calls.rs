@@ -91,14 +91,14 @@ impl<T: Copy> Shared<T> {
 
     /// # Safety
     /// No piece of work writes slot `k` while this runs.
-    unsafe fn get(self, k: usize) -> T {
+    pub(super) unsafe fn get(self, k: usize) -> T {
         assert!(k < self.1);
         unsafe { *self.0.add(k) }
     }
 
     /// # Safety
     /// No piece of work writes `k` while another reads it.
-    unsafe fn set(self, k: usize, v: T) {
+    pub(super) unsafe fn set(self, k: usize, v: T) {
         assert!(k < self.1);
         unsafe { *self.0.add(k) = v }
     }

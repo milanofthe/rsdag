@@ -321,11 +321,11 @@ fn inline_product(
         }
     }
 }
-
 /// The op stream of a tape, its bundles indexed as the tape indexes them,
-/// and where its prolog ends in it (a small product kernel is recorded as
-/// its dots, so the stream is longer than the tape).
-pub(crate) fn record(tape: &Tape) -> (Vec<ROp>, usize) {
+/// where its prolog ends in it and where each op of the tape starts in it,
+/// the end last (a small product kernel is recorded as its dots, so the
+/// stream is longer than the tape).
+pub(crate) fn record(tape: &Tape) -> (Vec<ROp>, usize, Vec<usize>) {
     // A kernel over the dense operands `srcs`, with the folds of `acc`
     // over its `width` outputs.
     let kernel = |dst: u32, kind: KernelKind, srcs: &[(Src, u32)], acc: Option<Accum>| {
@@ -365,7 +365,9 @@ pub(crate) fn record(tape: &Tape) -> (Vec<ROp>, usize) {
     let body_ops = |i: usize, b: u32, ng: u32| {
         ng as u64 * rsdag::tape::call_ops(&*tape.bundles()[b as usize], &tape.ops()[i])
     };
+    let mut at = Vec::with_capacity(tape.n_ops() + 1);
     for i in 0..tape.n_ops() {
+        at.push(ops.len());
         if i == tape.prolog_len() {
             split = ops.len();
         }
@@ -469,7 +471,8 @@ pub(crate) fn record(tape: &Tape) -> (Vec<ROp>, usize) {
     if tape.prolog_len() >= tape.n_ops() {
         split = ops.len();
     }
-    (ops, split)
+    at.push(ops.len());
+    (ops, split, at)
 }
 
 /// When each value dies: per slot, the ops that read it and the ops that

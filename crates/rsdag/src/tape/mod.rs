@@ -239,6 +239,40 @@ pub struct Stage {
     pub ops: u64,
 }
 
+/// Consecutive ops of a tape without a call, a dense kernel or a gather
+/// (a min or max), in pieces that read nothing another piece writes and
+/// write no slot another one reads or writes: each piece runs on its own,
+/// in order, and the pieces together on the installed pool
+/// ([`crate::parallel`]), as the stages run their calls. What a program
+/// assembles from its calls' results (the sums of a circuit's Jacobian
+/// entries, its rows) comes in many small parts no other part reads, and
+/// runs so alongside.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Region {
+    /// Piece `k` is ops `starts[k]..starts[k + 1]`, the last one up to
+    /// `hi`.
+    pub starts: Vec<u32>,
+    pub hi: u32,
+}
+
+impl Region {
+    /// The first op.
+    pub fn lo(&self) -> u32 {
+        self.starts[0]
+    }
+
+    /// Its ops.
+    pub fn ops(&self) -> u64 {
+        u64::from(self.hi - self.lo())
+    }
+
+    /// The ops of piece `k`.
+    pub fn piece(&self, k: usize) -> std::ops::Range<usize> {
+        let end = self.starts.get(k + 1).copied().unwrap_or(self.hi);
+        self.starts[k] as usize..end as usize
+    }
+}
+
 /// Ops a call of a bundle without a body ([`ExternBundle::body`]) counts as,
 /// per instance.
 const OPAQUE_OPS: u64 = 1000;
@@ -389,6 +423,8 @@ pub struct Tape {
     n_inputs: usize,
     /// Its independent calls, by op range (see [`Stage`]).
     stages: Vec<Stage>,
+    /// Its independent pieces of ops without a call (see [`Region`]).
+    regions: Vec<Region>,
 }
 
 /// A compiled program as a solver drives it, whichever backend runs it:
@@ -457,11 +493,15 @@ impl Program for Tape {
 /// nothing, a `Vec<u8>` records one byte per `Select` in op order (`1` =
 /// then-arm taken), the trace [`Tape::specialize`] takes.
 pub trait TraceSink {
+    /// Whether it records anything: a trace is in op order, so a program
+    /// observed so runs its regions' pieces one after the other.
+    const RECORDS: bool = true;
     fn select(&mut self, taken: bool);
 }
 
 pub struct NoTrace;
 impl TraceSink for NoTrace {
+    const RECORDS: bool = false;
     #[inline(always)]
     fn select(&mut self, _taken: bool) {}
 }
@@ -745,17 +785,45 @@ impl Tape {
         hi: usize,
         sink: &mut S,
     ) {
-        use crate::semantics::{reduce_slice_t, solve_batch_into};
+        use crate::semantics::solve_batch_into;
         // The gather scratch at the tail of `work`, so nothing is allocated
         // per call.
         let (work, scratch) = work.split_at_mut(self.n_work);
-        let pool = |start: u32, len: u32| &self.arg_pool[start as usize..(start + len) as usize];
-        // The next stage at or after `lo`, and the op a stage run jumps to.
+        // The next stage and region at or after `lo`, and the op a stage or
+        // region run jumps to.
         let mut next = self.stages.partition_point(|st| (st.lo as usize) < lo);
+        let mut next_region = self.regions.partition_point(|r| (r.lo() as usize) < lo);
         let mut skip = lo;
         for i in lo..hi {
             if i < skip {
                 continue;
+            }
+            if let Some(r) = self
+                .regions
+                .get(next_region)
+                .filter(|r| r.lo() as usize == i)
+            {
+                next_region += 1;
+                if !S::RECORDS && r.hi as usize <= hi && crate::parallel::worth(r.ops() as usize) {
+                    let slots = Shared::new(work);
+                    let piece = |k: usize| {
+                        crate::scratch::with_len(self.max_args, T::zero(), |s| {
+                            for i in r.piece(k) {
+                                // SAFETY: a region's pieces write slots no
+                                // other piece reads or writes (`emit`).
+                                let g = |k: u32| match input_index(k) {
+                                    Some(i) => inputs.get(i as usize).copied().unwrap_or(T::nan()),
+                                    None => unsafe { slots.get(k as usize) },
+                                };
+                                let v = self.scalar(i, g, s, &mut NoTrace);
+                                unsafe { slots.set(self.dst[i] as usize, v) };
+                            }
+                        })
+                    };
+                    crate::parallel::run(r.starts.len(), r.ops() as usize, &piece);
+                    skip = r.hi as usize;
+                    continue;
+                }
             }
             if let Some(st) = self.stages.get(next).filter(|st| st.lo as usize == i) {
                 next += 1;
@@ -775,52 +843,14 @@ impl Tape {
                     continue;
                 }
             }
-            let g = |k: u32| read(inputs, work, k);
             let d = self.dst[i] as usize;
-            let v = match self.ops[i] {
-                Op::Const(v) => T::from_f64(v),
-                Op::Add(a, b) => g(a).add(g(b)),
-                Op::Mul(a, b) => g(a).mul(g(b)),
-                // The product and the sum round separately: a fused
-                // dispatch, not a fused rounding.
-                Op::MulAdd(a, b, c) => g(a).mul(g(b)).add(g(c)),
-                Op::Sub(a, b) => g(a).sub(g(b)),
-                Op::Neg(a) => g(a).neg(),
-                Op::Powi(a, n) => g(a).powi(n),
-                Op::Unary(op, a) => T::unary(op, g(a)),
-                Op::Binary(op, a, b) => T::binary(op, g(a), g(b)),
-                Op::Cmp(op, a, b) => T::cmp(op, g(a), g(b)),
-                Op::Select(c, t, e) => {
-                    let taken = g(c).is_true();
-                    sink.select(taken);
-                    if taken {
-                        g(t)
-                    } else {
-                        g(e)
-                    }
-                }
-                Op::Reduce(op, start, len) => {
-                    for (j, &k) in pool(start, len).iter().enumerate() {
-                        scratch[j] = g(k);
-                    }
-                    reduce_slice_t(op, &scratch[..len as usize])
-                }
-                Op::Dot(start, len) => {
-                    for (j, &k) in pool(start, 2 * len).iter().enumerate() {
-                        scratch[j] = g(k);
-                    }
-                    T::dot_slice(
-                        &scratch[..len as usize],
-                        &scratch[len as usize..2 * len as usize],
-                    )
-                }
+            match self.ops[i] {
                 Op::Call { .. } | Op::CallProlog { .. } => {
                     let c = self.call(i);
                     let (gather, lent) = scratch.split_at_mut(self.max_args);
                     let (slots, gather) = (Shared::new(work), Shared::new(gather));
                     // SAFETY: one call at a time, over its own regions.
                     unsafe { calls::run_call(&c, slots, gather, inputs, 0..c.n_groups, lent) };
-                    continue;
                 }
                 Op::Gemv { a, x, m, n, acc } => {
                     let (m, n) = (m as usize, n as usize);
@@ -853,7 +883,6 @@ impl Tape {
                             T::gemv_fold(av, xv, m, n, cv, codes, out);
                         }
                     }
-                    continue;
                 }
                 Op::Gemm { a, b, m, k, n, acc } => {
                     let (m, k, n) = (m as usize, k as usize, n as usize);
@@ -885,7 +914,6 @@ impl Tape {
                             T::gemm_fold(av, bv, m, k, n, cv, codes, out);
                         }
                     }
-                    continue;
                 }
                 Op::Solve { a, b, n, k, count } => {
                     let (n, k, count) = (n as usize, k as usize, count as usize);
@@ -901,10 +929,67 @@ impl Tape {
                     let reads = [Some((ra, la)), Some((rb, lb)), None];
                     let out = unsafe { out_block(base, work.len(), d, lb, &reads) };
                     solve_batch_into(av, bv, n, k, count, out, lent);
-                    continue;
                 }
-            };
-            work[d] = v;
+                _ => {
+                    let v = self.scalar(i, |k| read(inputs, work, k), scratch, sink);
+                    work[d] = v;
+                }
+            }
+        }
+    }
+
+    /// Op `i`, one of a single value from single values (not a call nor a
+    /// dense kernel), over the operands `g` reads and `scratch` for those a
+    /// list gathers; the one implementation of every such op, serial or in
+    /// a region's piece.
+    #[inline(always)]
+    fn scalar<T: Scalar, S: TraceSink>(
+        &self,
+        i: usize,
+        g: impl Fn(u32) -> T,
+        scratch: &mut [T],
+        sink: &mut S,
+    ) -> T {
+        use crate::semantics::reduce_slice_t;
+        let pool = |start: u32, len: u32| &self.arg_pool[start as usize..(start + len) as usize];
+        match self.ops[i] {
+            Op::Const(v) => T::from_f64(v),
+            Op::Add(a, b) => g(a).add(g(b)),
+            Op::Mul(a, b) => g(a).mul(g(b)),
+            // The product and the sum round separately: a fused dispatch,
+            // not a fused rounding.
+            Op::MulAdd(a, b, c) => g(a).mul(g(b)).add(g(c)),
+            Op::Sub(a, b) => g(a).sub(g(b)),
+            Op::Neg(a) => g(a).neg(),
+            Op::Powi(a, n) => g(a).powi(n),
+            Op::Unary(op, a) => T::unary(op, g(a)),
+            Op::Binary(op, a, b) => T::binary(op, g(a), g(b)),
+            Op::Cmp(op, a, b) => T::cmp(op, g(a), g(b)),
+            Op::Select(c, t, e) => {
+                let taken = g(c).is_true();
+                sink.select(taken);
+                if taken {
+                    g(t)
+                } else {
+                    g(e)
+                }
+            }
+            Op::Reduce(op, start, len) => {
+                for (j, &k) in pool(start, len).iter().enumerate() {
+                    scratch[j] = g(k);
+                }
+                reduce_slice_t(op, &scratch[..len as usize])
+            }
+            Op::Dot(start, len) => {
+                for (j, &k) in pool(start, 2 * len).iter().enumerate() {
+                    scratch[j] = g(k);
+                }
+                T::dot_slice(
+                    &scratch[..len as usize],
+                    &scratch[len as usize..2 * len as usize],
+                )
+            }
+            _ => unreachable!("a call or a dense kernel is no single value"),
         }
     }
 
@@ -1149,6 +1234,11 @@ impl Tape {
     /// Its stages of independent calls, in op order (see [`Stage`]).
     pub fn stages(&self) -> &[Stage] {
         &self.stages
+    }
+
+    /// Its regions of independent pieces, in op order (see [`Region`]).
+    pub fn regions(&self) -> &[Region] {
+        &self.regions
     }
 }
 
