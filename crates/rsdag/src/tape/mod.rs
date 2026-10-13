@@ -717,9 +717,7 @@ impl Tape {
 
     /// [`collect`](Self::collect) into a slice the caller sized.
     fn write<T: Scalar>(&self, inputs: &[T], work: &[T], out: &mut [T]) {
-        for (dst, &k) in out.iter_mut().zip(self.outputs.iter()) {
-            *dst = read(inputs, work, k);
-        }
+        write_outputs(&self.outputs, inputs, work, out);
     }
 
     /// The values the prolog leaves for the main phase are `work[..n]`:
@@ -1240,6 +1238,28 @@ impl Tape {
     pub fn regions(&self) -> &[Region] {
         &self.regions
     }
+}
+
+/// Outputs a block of [`write_outputs`] copies, from which on a large
+/// program copies its outputs in blocks on the installed pool.
+const OUTPUT_BLOCK: usize = 8192;
+
+/// The program's outputs, the operands `outputs` (slots of `work`, or
+/// tagged inputs), into `out`: in blocks on the installed pool
+/// ([`crate::parallel`]) when there are enough of them (a circuit's
+/// Jacobian entries, gathered from all over the slots), one after the other
+/// otherwise. Every backend writes its outputs so.
+pub fn write_outputs<T: Scalar>(outputs: &[u32], inputs: &[T], work: &[T], out: &mut [T]) {
+    let n = outputs.len().min(out.len());
+    let pieces = n.div_ceil(OUTPUT_BLOCK);
+    let dst = Shared::new(out);
+    let block = |k: usize| {
+        for i in k * OUTPUT_BLOCK..((k + 1) * OUTPUT_BLOCK).min(n) {
+            // SAFETY: the blocks write disjoint outputs.
+            unsafe { dst.set(i, read(inputs, work, outputs[i])) };
+        }
+    };
+    crate::parallel::run(pieces, n, &block);
 }
 
 /// The value of an operand: a slot, or an input when tagged (a missing

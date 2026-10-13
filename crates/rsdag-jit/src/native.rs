@@ -997,12 +997,7 @@ impl NativeTape {
             self.outputs.len(),
             "output buffer of the wrong size"
         );
-        for (dst, &s) in out.iter_mut().zip(&self.outputs) {
-            *dst = match input_index(s) {
-                Some(i) => inputs.get(i as usize).copied().unwrap_or(f64::NAN),
-                None => work[s as usize],
-            };
-        }
+        rsdag::tape::write_outputs(&self.outputs, inputs, work, out);
     }
 
     /// Evaluate many instances in parallel: `inputs` holds `n` input
