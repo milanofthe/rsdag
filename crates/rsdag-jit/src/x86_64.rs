@@ -63,6 +63,8 @@ pub(crate) struct Features {
     pub sse41: bool,
     /// Three-operand VEX forms, `vblendvpd` and the 256-bit forms.
     pub avx: bool,
+    /// 256-bit integer forms (the host's four-lane exponential and logarithm).
+    pub avx2: bool,
 }
 
 /// What this CPU has, or the SSE2 baseline when `RSDAG_SSE2` is set.
@@ -73,6 +75,7 @@ pub(crate) fn features() -> Features {
         Features {
             sse41: !baseline && is_x86_feature_detected!("sse4.1"),
             avx: !baseline && is_x86_feature_detected!("avx"),
+            avx2: !baseline && is_x86_feature_detected!("avx2"),
         }
     })
 }
@@ -327,7 +330,7 @@ impl<const L: usize> Isa for X64<L> {
 
     fn new(hot: &[*const ()]) -> X64<L> {
         assert!(matches!(L, 1 | 2 | 4), "one, two or four lanes");
-        let Features { sse41, avx } = features();
+        let Features { sse41, avx, .. } = features();
         assert!(L < 4 || avx, "four lanes need AVX");
         X64 {
             code: Vec::with_capacity(8192),

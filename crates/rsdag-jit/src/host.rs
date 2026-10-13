@@ -30,6 +30,144 @@ unary_trampolines! {
     h_sinh = Sinh, h_cosh = Cosh, h_tanh = Tanh, h_atan = Atan, h_floor = Floor,
 }
 
+/// The exponential (logarithm) of the `n` lanes of a vector at `p`, in
+/// place, each as `unary_f64` computes it: lane code makes one call per op,
+/// not one per lane, four lanes in one vector where AVX2 is.
+pub(crate) extern "C" fn h_exp_lanes(p: *mut f64, n: u64) {
+    // SAFETY: the emitted code passes its gather area, `n` lanes long.
+    let xs = unsafe { std::slice::from_raw_parts_mut(p, n as usize) };
+    #[cfg(target_arch = "x86_64")]
+    if xs.len() == 4 && crate::x86_64::features().avx2 {
+        // SAFETY: AVX2 is there, and four lanes at `p`.
+        return unsafe { lanes4::exp(p) };
+    }
+    for x in xs {
+        *x = rsdag::semantics::exp_guarded(*x);
+    }
+}
+pub(crate) extern "C" fn h_ln_lanes(p: *mut f64, n: u64) {
+    // SAFETY: as for `h_exp_lanes`.
+    let xs = unsafe { std::slice::from_raw_parts_mut(p, n as usize) };
+    #[cfg(target_arch = "x86_64")]
+    if xs.len() == 4 && crate::x86_64::features().avx2 {
+        // SAFETY: AVX2 is there, and four lanes at `p`.
+        return unsafe { lanes4::ln(p) };
+    }
+    for x in xs {
+        *x = rsdag::semantics::ln_guarded(*x);
+    }
+}
+
+/// `rsdag::semantics::exp_guarded` and `ln_guarded` on four lanes at once:
+/// the same IEEE operations, step for step (the tests below hold
+/// them to the bit). AVX2 has no 64-bit arithmetic shift, so `exp`'s `k >>
+/// 1` is `floor(k / 2)` through the rounding constant, the same integer.
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod lanes4 {
+    use rsdag::semantics::exp_ln::*;
+    use std::arch::x86_64::*;
+
+    #[inline(always)]
+    unsafe fn c(v: f64) -> __m256d {
+        _mm256_set1_pd(v)
+    }
+
+    #[inline(always)]
+    unsafe fn ci(v: i64) -> __m256i {
+        _mm256_set1_epi64x(v)
+    }
+
+    /// `2^k` for each lane's `-1022 <= k <= 1023`.
+    #[inline(always)]
+    unsafe fn pow2(k: __m256i) -> __m256d {
+        unsafe { _mm256_castsi256_pd(_mm256_slli_epi64::<52>(_mm256_add_epi64(k, ci(1023)))) }
+    }
+
+    /// # Safety
+    /// AVX2, and four lanes at `p`.
+    #[target_feature(enable = "avx2")]
+    pub(crate) unsafe fn exp(p: *mut f64) {
+        unsafe {
+            let x = _mm256_loadu_pd(p);
+            let t = _mm256_add_pd(_mm256_mul_pd(x, c(INV_LN2)), c(MAGIC));
+            let kf = _mm256_sub_pd(t, c(MAGIC));
+            let magic = ci(MAGIC.to_bits() as i64);
+            let k = _mm256_sub_epi64(_mm256_castpd_si256(t), magic);
+            let hi = _mm256_sub_pd(x, _mm256_mul_pd(kf, c(LN2_HI)));
+            let lo = _mm256_mul_pd(kf, c(LN2_LO));
+            let r = _mm256_sub_pd(hi, lo);
+            let t2 = _mm256_mul_pd(r, r);
+            let mut q = _mm256_add_pd(c(EP4), _mm256_mul_pd(t2, c(EP5)));
+            q = _mm256_add_pd(c(EP3), _mm256_mul_pd(t2, q));
+            q = _mm256_add_pd(c(EP2), _mm256_mul_pd(t2, q));
+            q = _mm256_add_pd(c(EP1), _mm256_mul_pd(t2, q));
+            let cc = _mm256_sub_pd(r, _mm256_mul_pd(t2, q));
+            let frac = _mm256_div_pd(_mm256_mul_pd(r, cc), _mm256_sub_pd(c(2.0), cc));
+            let y = _mm256_sub_pd(c(1.0), _mm256_sub_pd(_mm256_sub_pd(lo, frac), hi));
+            let k1f = _mm256_floor_pd(_mm256_mul_pd(kf, c(0.5)));
+            let k1 = _mm256_sub_epi64(_mm256_castpd_si256(_mm256_add_pd(k1f, c(MAGIC))), magic);
+            let k2 = _mm256_sub_epi64(k, k1);
+            let mut v = _mm256_mul_pd(_mm256_mul_pd(y, pow2(k1)), pow2(k2));
+            let under = _mm256_cmp_pd::<_CMP_LT_OQ>(x, c(-745.2));
+            v = _mm256_blendv_pd(v, c(0.0), under);
+            let nan = _mm256_cmp_pd::<_CMP_UNORD_Q>(x, x);
+            v = _mm256_blendv_pd(v, x, nan);
+            let tail = _mm256_mul_pd(
+                c(EXP_AT_LIMIT),
+                _mm256_add_pd(c(1.0), _mm256_sub_pd(x, c(EXP_LIMIT))),
+            );
+            let above = _mm256_cmp_pd::<_CMP_GT_OQ>(x, c(EXP_LIMIT));
+            _mm256_storeu_pd(p, _mm256_blendv_pd(v, tail, above));
+        }
+    }
+
+    /// # Safety
+    /// AVX2, and four lanes at `p`.
+    #[target_feature(enable = "avx2")]
+    pub(crate) unsafe fn ln(p: *mut f64) {
+        unsafe {
+            let x = _mm256_loadu_pd(p);
+            let bits = _mm256_castpd_si256(x);
+            let high = _mm256_srli_epi64::<32>(bits);
+            let hm = _mm256_and_si256(high, ci(0x000f_ffff));
+            let i = _mm256_and_si256(_mm256_add_epi64(hm, ci(0x9_5f64)), ci(0x10_0000));
+            let e = _mm256_sub_epi64(_mm256_srli_epi64::<20>(high), ci(1023));
+            let k = _mm256_add_epi64(e, _mm256_srli_epi64::<20>(i));
+            let m_hi = _mm256_or_si256(hm, _mm256_xor_si256(i, ci(0x3ff0_0000)));
+            let low = _mm256_and_si256(bits, ci(0xffff_ffff));
+            let m = _mm256_castsi256_pd(_mm256_or_si256(_mm256_slli_epi64::<32>(m_hi), low));
+            let f = _mm256_sub_pd(m, c(1.0));
+            let s = _mm256_div_pd(f, _mm256_add_pd(c(2.0), f));
+            let magic = ci(MAGIC.to_bits() as i64);
+            let dk = _mm256_sub_pd(_mm256_castsi256_pd(_mm256_add_epi64(magic, k)), c(MAGIC));
+            let z = _mm256_mul_pd(s, s);
+            let w = _mm256_mul_pd(z, z);
+            let mut t1 = _mm256_add_pd(c(LG4), _mm256_mul_pd(w, c(LG6)));
+            t1 = _mm256_mul_pd(w, _mm256_add_pd(c(LG2), _mm256_mul_pd(w, t1)));
+            let mut t2 = _mm256_add_pd(c(LG5), _mm256_mul_pd(w, c(LG7)));
+            t2 = _mm256_add_pd(c(LG3), _mm256_mul_pd(w, t2));
+            t2 = _mm256_mul_pd(z, _mm256_add_pd(c(LG1), _mm256_mul_pd(w, t2)));
+            let r = _mm256_add_pd(t2, t1);
+            let hfsq = _mm256_mul_pd(_mm256_mul_pd(c(0.5), f), f);
+            let inner = _mm256_add_pd(
+                _mm256_mul_pd(s, _mm256_add_pd(hfsq, r)),
+                _mm256_mul_pd(dk, c(LN2_LO)),
+            );
+            let v = _mm256_sub_pd(
+                _mm256_mul_pd(dk, c(LN2_HI)),
+                _mm256_sub_pd(_mm256_sub_pd(hfsq, inner), f),
+            );
+            let keep = _mm256_or_pd(
+                _mm256_cmp_pd::<_CMP_UNORD_Q>(x, x),
+                _mm256_cmp_pd::<_CMP_EQ_OQ>(x, c(f64::INFINITY)),
+            );
+            let v = _mm256_blendv_pd(v, x, keep);
+            let floor = _mm256_cmp_pd::<_CMP_LE_OQ>(x, c(LN_FLOOR));
+            _mm256_storeu_pd(p, _mm256_blendv_pd(v, c(LN_AT_FLOOR), floor));
+        }
+    }
+}
+
 pub(crate) extern "C" fn h_unary_ext(op: u32, x: f64) -> f64 {
     unary_f64(UnaryOp::from_code(op), x)
 }
@@ -292,6 +430,78 @@ pub(crate) extern "C" fn h_kernel(work: *mut f64, inputs: *const f64, d: *const 
                 )
             };
             s::solve_batch_into(a, b, n, k, m, out, scratch)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rsdag::semantics::{exp_guarded, ln_guarded};
+
+    /// Values over every range the functions treat apart: the specials, the
+    /// guards' edges, subnormal and huge magnitudes, and a log-uniform stream.
+    fn values() -> Vec<f64> {
+        let mut v = vec![
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MIN_POSITIVE,
+            5e-324,
+            80.0,
+            80.0000001,
+            79.9999999,
+            -745.2,
+            -745.1,
+            -708.4,
+            709.0,
+            1e-30,
+            1e-30 * (1.0 + f64::EPSILON),
+            1e300,
+            f64::MAX,
+        ];
+        let mut s = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..400_000 {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            let u = (s >> 11) as f64 / (1u64 << 53) as f64;
+            let sign = if s & 1 == 0 { 1.0 } else { -1.0 };
+            v.push(sign * 10f64.powf(-320.0 + 640.0 * u));
+            v.push(-800.0 + 900.0 * u);
+        }
+        v
+    }
+
+    #[test]
+    fn four_lanes_are_the_scalar_bit_for_bit() {
+        if !crate::x86_64::features().avx2 {
+            return;
+        }
+        let v = values();
+        for (name, lanes, one) in [
+            (
+                "exp",
+                super::h_exp_lanes as extern "C" fn(*mut f64, u64),
+                exp_guarded as fn(f64) -> f64,
+            ),
+            ("ln", super::h_ln_lanes, ln_guarded),
+        ] {
+            let mut w = v.clone();
+            w.truncate(w.len() / 4 * 4);
+            for c in w.as_chunks_mut::<4>().0 {
+                lanes(c.as_mut_ptr(), 4);
+            }
+            for (x, y) in v.iter().zip(&w) {
+                let r = one(*x);
+                assert!(
+                    r.to_bits() == y.to_bits() || (r.is_nan() && y.is_nan()),
+                    "{name}({x:e}): lanes {y:e}, scalar {r:e}"
+                );
+            }
         }
     }
 }

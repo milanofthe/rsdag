@@ -227,9 +227,12 @@ impl LaneCode {
 /// into and out of the lanes (inputs read, the state, the outputs) and
 /// makes its host calls lane by lane; it costs as much with lanes left
 /// empty.
+/// What a host call costs, in ops, against an op of the code ([`lane_costs`]).
+const LANE_CALL: usize = 6;
+
 fn lane_costs(lt: &NativeTape, n_state: usize, n_out: usize) -> ([usize; 3], [usize; 3]) {
     const MOVE: usize = 2;
-    const HOST: usize = 6;
+    const HOST: usize = LANE_CALL;
     let [(o0, h0), (o1, h1)] = lt.phase_ops;
     let [r0, r1] = [lt.reads[0].len(), lt.reads[1].len()];
     let phases = [
@@ -762,8 +765,11 @@ impl NativeTape {
         let mut phase_ops = [(0usize, 0usize); 2];
         for (k, op) in ops.iter().enumerate() {
             let p = &mut phase_ops[usize::from(k >= split)];
-            p.0 += 1;
-            p.1 += usize::from(op.host::<A>().is_some());
+            // Lane code calls the host once for every lane of an
+            // exponential or a logarithm: one host call's cost per block.
+            let all_lanes = lanes > 1 && matches!(op, ROp::Unary(_, UnaryOp::Exp | UnaryOp::Ln, _));
+            p.0 += if all_lanes { 1 + LANE_CALL } else { 1 };
+            p.1 += usize::from(op.host::<A>().is_some() && !all_lanes);
         }
         let gather_len = ops
             .iter()
@@ -1747,6 +1753,21 @@ impl<'a, I: Isa> Emitter<'a, I> {
         };
         match inline {
             Some(r) => self.put(dst, r),
+            // Lanes: one call computes every lane of the exponential or the
+            // logarithm.
+            None if I::LANES > 1 && matches!(uop, UnaryOp::Exp | UnaryOp::Ln) => {
+                let base = self.layout.gather * 8;
+                self.isa.store(x, Base::Work, base);
+                let addr = match uop {
+                    UnaryOp::Exp => host::h_exp_lanes as *const (),
+                    _ => host::h_ln_lanes as *const (),
+                };
+                let n = Arg::I(IArg::Imm(I::LANES as u64));
+                self.call(addr, &[Arg::I(IArg::WorkAddr(base)), n]);
+                let r = self.fresh_for(dst);
+                self.isa.load(r, Base::Work, base);
+                self.put(dst, r);
+            }
             None => {
                 let (addr, code) = host::unary_addr(uop);
                 // The coded routine takes the op first: `h_unary_ext(op, x)`.

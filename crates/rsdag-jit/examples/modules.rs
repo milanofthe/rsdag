@@ -115,6 +115,7 @@ static POOLS: std::sync::OnceLock<Vec<(usize, Option<rsdag::parallel::Parallel>)
 /// calls go unmeasured (`--native`).
 static ROUNDS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 static NATIVE_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static STATS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// The lane code `--lanes` asks for.
 static LANES: std::sync::OnceLock<Lanes> = std::sync::OnceLock::new();
@@ -127,6 +128,51 @@ fn on_pool<R: Send>(pool: &Option<rsdag::parallel::Parallel>, f: impl FnOnce() -
     match pool.clone() {
         Some(p) => rsdag::parallel::install(p, f),
         None => f(),
+    }
+}
+
+/// `--stats`: per called body, its instances and the ops of its prolog and
+/// main phase, the main phase's by kind.
+fn print_stats(tape: &Tape) {
+    use rsdag::tape::Op;
+    for (b, bundle) in tape.bundles().iter().enumerate() {
+        let Some(body) = bundle.body() else {
+            continue;
+        };
+        let instances: u32 = (tape.ops().iter())
+            .filter_map(|op| match *op {
+                Op::Call {
+                    bundle, n_groups, ..
+                } if bundle as usize == b => Some(n_groups),
+                _ => None,
+            })
+            .sum();
+        let (all, prolog) = (body.n_ops(), body.prolog_len());
+        let mut kinds: std::collections::BTreeMap<String, usize> = Default::default();
+        for op in &body.ops()[prolog..] {
+            let name = match op {
+                Op::Unary(u, _) => format!("Unary::{u:?}"),
+                Op::Binary(b, _, _) => format!("Binary::{b:?}"),
+                Op::Reduce(r, _, _) => format!("Reduce::{r:?}"),
+                other => format!("{other:?}")
+                    .split(['(', ' ', '{'])
+                    .next()
+                    .unwrap_or("")
+                    .to_string(),
+            };
+            *kinds.entry(name).or_default() += 1;
+        }
+        println!(
+            "stats,body {b},instances {instances},ops {all},prolog {prolog},main {},state {},outputs {}",
+            all - prolog,
+            body.state_len(),
+            bundle.n_outputs()
+        );
+        let mut kinds: Vec<_> = kinds.into_iter().collect();
+        kinds.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        for (k, n) in kinds {
+            println!("stats,  {k},{n}");
+        }
     }
 }
 
@@ -147,6 +193,9 @@ fn measure(
     check: &[f64],
 ) -> ([f64; 4], Vec<f64>, Vec<f64>) {
     let (mut tape, s_tape) = timed(|| Tape::compile_split(g, roots, syms, pure));
+    if STATS.get().copied().unwrap_or(false) {
+        print_stats(&tape);
+    }
     tape.with_backend(&rsdag::BodyBackend {
         variants: Some(rsdag::variant::VariantPolicy {
             enabled: VARIANTS.get().copied().unwrap_or(true),
@@ -247,6 +296,10 @@ fn main() {
         }
         None => true,
     };
+    if let Some(i) = args.iter().position(|a| a == "--stats") {
+        args.remove(i);
+        STATS.set(true).ok();
+    }
     if let Some(i) = args.iter().position(|a| a == "--native") {
         args.remove(i);
         NATIVE_ONLY.set(true).ok();
