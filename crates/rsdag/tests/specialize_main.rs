@@ -5,7 +5,7 @@
 //! is the full one, the state the same.
 
 use rsdag::node::CmpOp;
-use rsdag::{ExprId, Graph, Node, SymbolId, Tape, F64};
+use rsdag::{ExprId, Graph, Guards, Node, SymbolId, Tape, F64};
 
 fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
     let e = g.sym(name);
@@ -51,9 +51,12 @@ fn tape() -> Tape {
     let s5 = g.select(c2, inner, s4);
     let o1 = g.add(s2, s3);
     let o2 = g.mul(s4, s5);
+    // a condition that is a value, not a comparison (a NaN takes `then`)
+    let raw = g.add(a, b);
+    let s6 = g.select(raw, s2, e1);
     Tape::compile_split(
         &g,
-        &[o1, o2, s1, x],
+        &[o1, o2, s1, x, s6],
         &[sa, sb, sp, sq],
         &[false, false, true, true],
     )
@@ -97,7 +100,9 @@ fn a_shortened_main_phase_is_the_full_one_where_its_guards_hold() {
         t.eval_prolog(&x0, &mut w);
         let (_, trace) = full(&t, &x0, &mut w);
         assert_eq!(trace.len(), n);
-        let sp = t.specialize_main(&trace, &vec![true; n]);
+        let sp = t.specialize_main(&trace, &vec![true; n], Guards::Each);
+        let counted = t.specialize_main(&trace, &vec![true; n], Guards::Count);
+        assert_eq!(counted.n_guards(), 1);
         let st = sp.tape();
         assert!(sp.n_ops() < t.n_ops(), "the trace shortens the tape");
         assert_eq!(st.state_len(), sl, "the state is kept");
@@ -109,7 +114,10 @@ fn a_shortened_main_phase_is_the_full_one_where_its_guards_hold() {
         // the main phase at other points of the binding, over the full
         // prolog's state
         for _ in 0..20 {
-            let x = [rng(&mut s), rng(&mut s), p, q];
+            let mut x = [rng(&mut s), rng(&mut s), p, q];
+            if rng(&mut s) > 1.8 {
+                x[(s % 2) as usize] = f64::NAN;
+            }
             let (want, now) = full(&t, &x, &mut w);
             ws[..sl].copy_from_slice(&w[..sl]);
             let mut got = vec![0.0; st.out_len()];
@@ -117,6 +125,17 @@ fn a_shortened_main_phase_is_the_full_one_where_its_guards_hold() {
             let (real, guards) = got.split_at(sp.n_real());
             assert_eq!(guards.len(), sp.n_guards());
             let flips: Vec<usize> = sp.flipped(guards).collect();
+            // the counted guard holds where every guard does
+            let ct = counted.tape();
+            let mut wc = vec![0.0; ct.work_len()];
+            wc[..sl].copy_from_slice(&w[..sl]);
+            let mut gc = vec![0.0; ct.out_len()];
+            ct.eval_main_into(&x, &mut wc, &mut gc);
+            let (real_c, count) = gc.split_at(counted.n_real());
+            assert_eq!(counted.holds(count), sp.holds(guards), "count {count:?}");
+            if counted.holds(count) {
+                assert!(same(real_c, &want), "counted guard holds: the full outputs");
+            }
             if sp.holds(guards) {
                 held += 1;
                 assert!(same(real, &want), "guards hold: the full outputs");
@@ -145,7 +164,7 @@ fn unpinned_selects_stay_and_need_no_guard() {
     let mut w = Vec::new();
     t.eval_prolog(&x0, &mut w);
     let (_, trace) = full(&t, &x0, &mut w);
-    let none = t.specialize_main(&trace, &vec![false; n]);
+    let none = t.specialize_main(&trace, &vec![false; n], Guards::Each);
     assert_eq!(none.n_guards(), 0);
     let mut s = 7u64;
     let mut ws = Vec::new();

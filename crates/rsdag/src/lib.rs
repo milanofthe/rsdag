@@ -61,6 +61,8 @@ pub use scope::Scope;
 pub use semantics::{
     binary_f64, cmp_bool, dot_slice, reduce_slice, unary_f64, EXP_LIMIT, LN_FLOOR,
 };
-pub use tape::{Lowered, NoTrace, ParamSelects, Program, Region, SpecializedTape, Tape, TraceSink};
+pub use tape::{
+    Guards, Lowered, NoTrace, ParamSelects, Program, Region, SpecializedTape, Tape, TraceSink,
+};
 
 pub use transform::{pin, substitute, substitute_with};
