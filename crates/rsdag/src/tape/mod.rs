@@ -767,6 +767,25 @@ impl Tape {
         self.write(inputs, work, out);
     }
 
+    /// [`eval_main_into`](Self::eval_main_into), each `Select` of the main
+    /// phase reporting its choice to `sink` in stream order: the trace
+    /// [`specialize_main`](Self::specialize_main) shortens against.
+    pub fn eval_main_with<T: Scalar, S: TraceSink>(
+        &self,
+        inputs: &[T],
+        work: &mut [T],
+        out: &mut [T],
+        sink: &mut S,
+    ) {
+        assert!(
+            work.len() >= self.work_len(),
+            "eval_main requires a work buffer prepared by eval_prolog"
+        );
+        assert_eq!(out.len(), self.out_len(), "output buffer of the wrong size");
+        self.run_range(inputs, work, self.prolog_ops, self.ops.len(), sink);
+        self.write(inputs, work, out);
+    }
+
     /// [`eval_prolog`](Self::eval_prolog) over a buffer the caller sized.
     pub fn eval_prolog_into<T: Scalar>(&self, inputs: &[T], work: &mut [T]) {
         assert!(work.len() >= self.work_len(), "work buffer too short");

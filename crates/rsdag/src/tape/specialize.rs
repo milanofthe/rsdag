@@ -1,10 +1,14 @@
 //! Choice specialization: shorten a tape against a recorded `Select` trace,
-//! keeping guard outputs that detect a region flip. See [`Tape::specialize`].
+//! keeping guard outputs that detect a region flip. See [`Tape::specialize`]
+//! and [`Tape::specialize_main`].
 
-use rustc_hash::FxHashSet;
+use rustc_hash::FxHashMap;
 
-use super::compile::{Kind, Ref};
-use super::{input_index, Tape};
+use super::compile::{Kind, Program, Ref};
+use super::{input_index, Op, Tape};
+
+/// A pinned select: its condition, the arm it took and the choice.
+type Pin = Option<(Ref, Ref, u8)>;
 
 impl Tape {
     /// A shortened tape for the region a choice trace describes: `choices`
@@ -26,13 +30,51 @@ impl Tape {
             "choice trace length mismatch"
         );
         assert_eq!(pin.len(), self.n_selects, "pin mask length mismatch");
+        let p = self.lift();
+        let pins = Self::pins(&p, 0, choices, pin);
+        self.shorten(p, pins, false)
+    }
+
+    /// The main phase shortened for the region a trace of it describes,
+    /// over the state as this tape's prolog lays it out: `choices` one byte
+    /// per `Select` of the main phase, as [`Tape::eval_main_with`] records
+    /// them (`len == n_main_selects()`), `pin` as for
+    /// [`specialize`](Self::specialize). The prolog and the state are this
+    /// tape's, so the shortened main phase and this one run over the same
+    /// prolog result, either of them at any pass: a pass whose guards do
+    /// not hold is run again on this tape's main phase, with nothing else
+    /// to redo.
+    pub fn specialize_main(&self, choices: &[u8], pin: &[bool]) -> SpecializedTape {
+        let n = self.n_main_selects();
+        assert_eq!(choices.len(), n, "choice trace length mismatch");
+        assert_eq!(pin.len(), n, "pin mask length mismatch");
         let mut p = self.lift();
-        let m = p.insts.len();
-        // Per pinned select, its condition and its taken arm, the selects
-        // in stream order as the trace has them.
-        let mut pinned: Vec<Option<(Ref, Ref, u8)>> = vec![None; m];
+        let pins = Self::pins(&p, self.prolog_ops, choices, pin);
+        // The state where this tape's prolog puts it.
+        let mut at = vec![u32::MAX; p.insts.len()];
+        for (i, a) in at.iter_mut().enumerate().take(self.prolog_ops) {
+            if (self.dst[i] as usize) < self.state_len {
+                *a = self.dst[i];
+            }
+        }
+        p.state = Some((at, self.state_len as u32));
+        self.shorten(p, pins, true)
+    }
+
+    /// The selects of the main phase, the length of its trace.
+    pub fn n_main_selects(&self) -> usize {
+        self.ops[self.prolog_ops..]
+            .iter()
+            .filter(|op| matches!(op, Op::Select(..)))
+            .count()
+    }
+
+    /// Per instruction of `p`, its pin when it is one of the selects from
+    /// instruction `from` on that `pin` pins.
+    fn pins(p: &Program, from: usize, choices: &[u8], pin: &[bool]) -> Vec<Pin> {
+        let mut pinned: Vec<Pin> = vec![None; p.insts.len()];
         let mut k = 0usize;
-        for (i, slot) in pinned.iter_mut().enumerate() {
+        for (i, slot) in pinned.iter_mut().enumerate().skip(from) {
             if matches!(p.insts[i].kind, Kind::Select) {
                 if pin[k] {
                     let ins = p.ins(i);
@@ -42,6 +84,14 @@ impl Tape {
                 k += 1;
             }
         }
+        pinned
+    }
+
+    /// `p` with the selects `pinned` pins replaced by their arms and
+    /// guarded, scheduled and emitted again; with `main_only` the trace's
+    /// selects are the main phase's.
+    fn shorten(&self, mut p: Program, pinned: Vec<Pin>, main_only: bool) -> SpecializedTape {
+        let m = p.insts.len();
         // A pinned select is its arm, through chains of them.
         let resolve = |r: Ref| -> Ref {
             let mut r = r;
@@ -67,19 +117,29 @@ impl Tape {
                 None => stack.extend_from_slice(p.ins(i as usize)),
             }
         }
-        let mut seen: FxHashSet<Ref> = FxHashSet::default();
+        // Hash-consing makes shared conditions common; two selects sharing
+        // one traced the same truth, and one guard checks both.
+        let mut guard: FxHashMap<Ref, u32> = FxHashMap::default();
         let mut guards: Vec<Ref> = Vec::new();
         let mut expected: Vec<u8> = Vec::new();
-        for i in 0..m {
-            if let (true, Some((cond, _, choice))) = (live[i], pinned[i]) {
-                // Hash-consing makes shared conditions common; two selects
-                // sharing one traced the same truth.
-                let cond = resolve(cond);
-                if seen.insert(cond) {
-                    guards.push(cond);
-                    expected.push(choice);
-                }
+        let mut guard_of: Vec<u32> = Vec::new();
+        let first = if main_only { self.prolog_ops } else { 0 };
+        for i in first..m {
+            if !matches!(p.insts[i].kind, Kind::Select) {
+                continue;
             }
+            let g = match (live[i], pinned[i]) {
+                (true, Some((cond, _, choice))) => {
+                    let cond = resolve(cond);
+                    *guard.entry(cond).or_insert_with(|| {
+                        guards.push(cond);
+                        expected.push(choice);
+                        guards.len() as u32 - 1
+                    })
+                }
+                _ => u32::MAX,
+            };
+            guard_of.push(g);
         }
         let n_real = p.roots.len();
         p.roots.extend(guards);
@@ -104,6 +164,7 @@ impl Tape {
             n_real,
             expected,
             prolog_guards,
+            guard_of,
         }
     }
 }
@@ -120,6 +181,9 @@ pub struct SpecializedTape {
     /// Guards whose condition lives in the inherited prolog (or is an
     /// input), as `(operand, expected)`, checked right after a prolog pass.
     prolog_guards: Vec<(u32, u8)>,
+    /// Per select of the trace, the guard that checks it (`u32::MAX`: none,
+    /// unpinned or out of the outputs' reach).
+    guard_of: Vec<u32>,
 }
 
 impl SpecializedTape {
@@ -132,6 +196,35 @@ impl SpecializedTape {
     /// real outputs followed by the guards).
     pub fn tape(&self) -> &Tape {
         &self.tape
+    }
+
+    /// The original tape's outputs, the first of the shortened tape's.
+    pub fn n_real(&self) -> usize {
+        self.n_real
+    }
+
+    /// The guard outputs, after the real ones.
+    pub fn n_guards(&self) -> usize {
+        self.expected.len()
+    }
+
+    /// Whether the guard outputs `guards` (the shortened tape's outputs
+    /// after the real ones) hold: the real outputs are then the full
+    /// tape's, bit for bit.
+    pub fn holds(&self, guards: &[f64]) -> bool {
+        guards
+            .iter()
+            .zip(&self.expected)
+            .all(|(&v, &e)| (v != 0.0) == (e != 0))
+    }
+
+    /// The selects of the trace whose guard fails in `guards`: the ones
+    /// that flipped.
+    pub fn flipped<'a>(&'a self, guards: &'a [f64]) -> impl Iterator<Item = usize> + 'a {
+        self.guard_of.iter().enumerate().filter_map(move |(k, &g)| {
+            let g = g as usize;
+            (g < guards.len() && (guards[g] != 0.0) != (self.expected[g] != 0)).then_some(k)
+        })
     }
 
     /// Evaluate the shortened tape. Returns `true` if every pinned choice still
@@ -181,10 +274,7 @@ impl SpecializedTape {
     /// [`tape`](Self::tape) (`out` = real outputs ++ guards); truncates
     /// `out` to the real outputs.
     pub fn check_outputs(&self, out: &mut Vec<f64>) -> bool {
-        let ok = out[self.n_real..]
-            .iter()
-            .zip(&self.expected)
-            .all(|(&v, &e)| (v != 0.0) == (e != 0));
+        let ok = self.holds(&out[self.n_real..]);
         out.truncate(self.n_real);
         ok
     }
