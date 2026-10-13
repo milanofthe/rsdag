@@ -92,8 +92,7 @@ pub struct Parallel {
     pub min_ops: usize,
 }
 
-/// [`Parallel::min_ops`] by default: about ten microseconds of work.
-pub const MIN_OPS: usize = 20_000;
+pub use crate::constants::MIN_OPS;
 
 impl Parallel {
     pub fn new(pool: Arc<dyn Pool>) -> Self {
@@ -184,9 +183,7 @@ pub fn block(n: usize) -> usize {
     (n / (threads * 4)).max(1)
 }
 
-/// How long [`Workers`] keep waiting for work before they sleep: longer
-/// than the serial stretch between a solver's evaluations.
-pub const SPIN: std::time::Duration = std::time::Duration::from_micros(300);
+pub use crate::constants::SPIN;
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};

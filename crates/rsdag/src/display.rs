@@ -4,10 +4,7 @@ use crate::field::Field;
 use crate::graph::Graph;
 use crate::node::{ExprId, Node};
 
-/// Expressions whose infix form stays under this many bytes print as one
-/// infix string; a larger one prints as a listing, one line per node (a DAG
-/// printed as a tree grows exponentially with its sharing).
-const INFIX_MAX: usize = 4096;
+use crate::constants::INFIX_MAX;
 
 /// Render an expression (raw, unsimplified): infix while that stays short,
 /// else a listing `%k = ...` of the nodes it reaches, in dependency order,

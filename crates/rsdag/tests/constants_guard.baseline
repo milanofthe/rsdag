@@ -85,7 +85,6 @@ rsdag/src/adaptive.rs :: Policy::default :: 16
 rsdag/src/adaptive.rs :: Policy::default :: 3
 rsdag/src/adaptive.rs :: Policy::default :: 4
 rsdag/src/adaptive.rs :: Policy::default :: 4
-rsdag/src/autodiff.rs :: REVERSE_MIN_TOUCHED :: 16
 rsdag/src/autodiff.rs :: forward :: 64
 rsdag/src/autodiff.rs :: unary_factor :: 3
 rsdag/src/choices.rs :: ChoicePolicy::default :: 15
@@ -96,14 +95,11 @@ rsdag/src/choices.rs :: ChoicePolicy::default :: 8
 rsdag/src/choices.rs :: Choices::built :: 100
 rsdag/src/choices.rs :: Choices::built :: 100
 rsdag/src/choices.rs :: Choices::built :: 100
-rsdag/src/display.rs :: INFIX_MAX :: 4096
 rsdag/src/display.rs :: to_string :: 8
 rsdag/src/dot.rs :: GraphView::own_style :: 8
 rsdag/src/dot.rs :: number :: 1e-3
 rsdag/src/dot.rs :: number :: 1e15
 rsdag/src/dot.rs :: number :: 1e5
-rsdag/src/field.rs :: EXACT_POWI_MAX :: 1024
-rsdag/src/graph/flow.rs :: BITS_MAX :: 4096
 rsdag/src/graph/flow.rs :: Set::contains :: 64
 rsdag/src/graph/flow.rs :: Set::contains :: 64
 rsdag/src/graph/flow.rs :: Set::iter :: 64
@@ -117,8 +113,6 @@ rsdag/src/node.rs :: Node::operands :: 3
 rsdag/src/node.rs :: Node::operands :: 3
 rsdag/src/node.rs :: _ :: 16
 rsdag/src/nonlinearity.rs :: _ :: 64
-rsdag/src/parallel.rs :: MIN_OPS :: 20_000
-rsdag/src/parallel.rs :: SPIN :: 300
 rsdag/src/parallel.rs :: Shared::wait_until :: 64
 rsdag/src/parallel.rs :: Shared::work :: 64
 rsdag/src/parallel.rs :: block :: 4
@@ -128,14 +122,6 @@ rsdag/src/role.rs :: ParamRole::place :: 5
 rsdag/src/role.rs :: ParamRole::place :: 6
 rsdag/src/role.rs :: ParamRole::place :: 7
 rsdag/src/role.rs :: ParamRole::place :: 8
-rsdag/src/semantics.rs :: EXP_LIMIT :: 80.0
-rsdag/src/semantics.rs :: LN_FLOOR :: 1e-30
-rsdag/src/semantics.rs :: LU_PANEL_LARGE :: 32
-rsdag/src/semantics.rs :: LU_PANEL_SMALL :: 16
-rsdag/src/semantics.rs :: LU_PANEL_SWITCH :: 512
-rsdag/src/semantics.rs :: LU_UNBLOCKED_MAX :: 64
-rsdag/src/semantics.rs :: SOLVE_BATCH_MAX_K :: 4
-rsdag/src/semantics.rs :: SOLVE_BATCH_MAX_N :: 16
 rsdag/src/semantics.rs :: dot_slice_t :: 4
 rsdag/src/semantics.rs :: dot_slice_t :: 4
 rsdag/src/semantics.rs :: dot_slice_t :: 4
@@ -244,7 +230,6 @@ rsdag/src/simd.rs :: solve_q :: 6
 rsdag/src/simd.rs :: solve_q :: 7
 rsdag/src/simd.rs :: solve_q :: 8
 rsdag/src/simd.rs :: solve_q :: 9
-rsdag/src/tape/compile.rs :: PIECE_OPS :: 1024
 rsdag/src/tape/compile.rs :: Program::emit :: 4
 rsdag/src/tape/compile.rs :: Program::fuse_accumulators :: 3
 rsdag/src/tape/compile.rs :: Program::fuse_accumulators :: 4
@@ -255,8 +240,6 @@ rsdag/src/tape/mod.rs :: Fold::is_self :: 4
 rsdag/src/tape/mod.rs :: Fold::reads_operand :: 3
 rsdag/src/tape/mod.rs :: Fold::self_index :: 3
 rsdag/src/tape/mod.rs :: INPUT :: 31
-rsdag/src/tape/mod.rs :: OPAQUE_OPS :: 1000
-rsdag/src/tape/mod.rs :: OUTPUT_BLOCK :: 8192
 rsdag/src/tape/mod.rs :: acc_text :: 3
 rsdag/src/tape/topo.rs :: Order::insert_after :: 3.0
 rsdag/src/tape/topo.rs :: Order::insert_after :: 4.0f64
@@ -264,6 +247,5 @@ rsdag/src/tape/topo.rs :: Order::insert_after :: 64
 rsdag/src/tape/topo.rs :: Order::insert_after :: 64u32
 rsdag/src/tape/topo.rs :: Topo::read :: 4
 rsdag/src/variant.rs :: Shared::find :: 100
-rsdag/src/variant.rs :: TRACED :: 16
 rsdag/src/variant.rs :: VariantPolicy::default :: 10
 rsdag/src/variant.rs :: VariantPolicy::default :: 64

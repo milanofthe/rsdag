@@ -120,10 +120,8 @@ impl Field for BigRational {
     }
 }
 
-/// Largest exponent [`Field::powi`] folds exactly for a rational base
-/// other than `1` or `-1`.
 #[cfg(feature = "exact")]
-pub const EXACT_POWI_MAX: u64 = 1024;
+pub use crate::constants::EXACT_POWI_MAX;
 
 /// Exact integer power of a rational by repeated squaring (negative
 /// exponents invert; the caller excludes zero to a negative power).

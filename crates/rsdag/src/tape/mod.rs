@@ -273,9 +273,7 @@ impl Region {
     }
 }
 
-/// Ops a call of a bundle without a body ([`ExternBundle::body`]) counts as,
-/// per instance.
-const OPAQUE_OPS: u64 = 1000;
+use crate::constants::OPAQUE_OPS;
 
 /// Ops one instance of `call` runs in its bundle's body: the prolog for a
 /// prolog, the main phase for a call over a state, all of it for a call
@@ -1259,9 +1257,7 @@ impl Tape {
     }
 }
 
-/// Outputs a block of [`write_outputs`] copies, from which on a large
-/// program copies its outputs in blocks on the installed pool.
-const OUTPUT_BLOCK: usize = 8192;
+use crate::constants::OUTPUT_BLOCK;
 
 /// The program's outputs, the operands `outputs` (slots of `work`, or
 /// tagged inputs), into `out`: in blocks on the installed pool

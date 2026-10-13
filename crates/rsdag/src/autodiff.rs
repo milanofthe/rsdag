@@ -522,10 +522,7 @@ fn tangent<K: Field>(ctx: &mut Graph<K>, e: ExprId, wrt: SymbolId, memo: &mut Me
 /// pairs that are not the structural zero, in ascending column order.
 pub type SparseRows = Vec<Vec<(usize, ExprId)>>;
 
-/// Rows of this many touched unknowns and more are differentiated in
-/// reverse mode, one adjoint sweep for the whole row; below it, forward
-/// sweeps per unknown, shared by every row that touches it, are cheaper.
-pub const REVERSE_MIN_TOUCHED: usize = 16;
+pub use crate::constants::REVERSE_MIN_TOUCHED;
 
 /// Sparse Jacobian of `residuals` with respect to `wrt`: row `i` lists the
 /// nonzero `(column, d residuals[i] / d wrt[column])`, by column.

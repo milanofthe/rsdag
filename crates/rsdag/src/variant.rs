@@ -53,9 +53,7 @@ use crate::func::InterpretedBody;
 use crate::hooks::{log, Level};
 use crate::tape::{Guards, ParamSelects, Tape};
 
-/// Instances a trace takes of a batch, spread over it: enough to see the
-/// choices most of them take, few enough to cost little next to the batch.
-const TRACED: usize = 16;
+use crate::constants::TRACED;
 
 /// How bodies specialize per binding (see the module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

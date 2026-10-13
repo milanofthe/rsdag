@@ -73,8 +73,7 @@ enum Ids {
     Sorted(Rc<[u32]>),
 }
 
-/// The widest universe a [`Set`] keeps as a bitset.
-pub(crate) const BITS_MAX: usize = 4096;
+use crate::constants::BITS_MAX;
 
 impl Set {
     /// `{k}`, of a universe of `n`.

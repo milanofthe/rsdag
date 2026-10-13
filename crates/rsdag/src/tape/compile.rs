@@ -43,18 +43,9 @@ use crate::node::{ArgList, ExprId, Node, SymbolId};
 /// One instance's calls: the context they run in (see `Graph::bind`) and
 /// their argument list.
 type Site = (u32, ArgList);
-use crate::semantics::{SOLVE_BATCH_MAX_K, SOLVE_BATCH_MAX_N};
-
-/// Row dots against one vector fuse into a `Gemv` from this many rows on.
-const GEMV_MIN_ROWS: usize = 2;
-
-/// A run of ops without a call becomes a region (see [`Region`]) from this
-/// many ops on: two pieces.
-const REGION_MIN_OPS: usize = 2 * PIECE_OPS;
-
-/// Ops a piece of a region takes on, about (whole connected parts of the
-/// run): as many as a native chunk.
-const PIECE_OPS: usize = 1024;
+use crate::constants::{
+    GEMV_MIN_ROWS, PIECE_OPS, REGION_MIN_OPS, SOLVE_BATCH_MAX_K, SOLVE_BATCH_MAX_N,
+};
 
 /// A call's operands and the slot of its state block (the last operand of
 /// a stateful call), or [`NO_STATE`](super::NO_STATE).

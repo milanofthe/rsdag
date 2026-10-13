@@ -203,22 +203,7 @@ pub fn rand_stream(key: f64, counter: f64) -> f64 {
     ))
 }
 
-/// Argument above which `exp` is linearly extrapolated (a "limited exponential",
-/// SPICE `limexp`). `exp` overflows f64 near 709; compact models routinely drive
-/// the argument far past that on intermediate Newton iterates (out-of-range
-/// internal-node guesses), producing `inf`/`NaN` that poison the whole solve.
-/// Linearizing above this threshold keeps the value and its (constant) derivative
-/// finite with ample headroom against overflow, while leaving every physical
-/// evaluation -- exp arguments are O(10) at any real operating point -- bit-for-bit
-/// unchanged. 80 is the classic SPICE `limexp` knee. See [`unary_f64`].
-pub const EXP_LIMIT: f64 = 80.0;
-
-/// Argument at or below which `ln` is clamped (so `ln(x<=0)` returns a finite,
-/// modest `ln(LN_FLOOR)` instead of `-inf`/`NaN` on an out-of-range Newton
-/// iterate). A *clamp*, not a linear extrapolation: a steep extrapolation slope
-/// (`1/LN_FLOOR`) would blow intermediate values up to `~1e30` and wreck
-/// conditioning. In-range arguments are untouched. See [`unary_f64`].
-pub const LN_FLOOR: f64 = 1e-30;
+pub use crate::constants::{EXP_LIMIT, LN_FLOOR};
 
 /// `exp(EXP_LIMIT)`, the slope of the linear tail.
 pub const EXP_AT_LIMIT: f64 = exp_core(EXP_LIMIT);
@@ -687,21 +672,7 @@ pub fn gemv(a: &[f64], x: &[f64], m: usize, n: usize, out: &mut [f64]) {
     <f64 as Scalar>::gemv(a, x, m, n, out)
 }
 
-/// The column-panel widths of the blocked elimination in [`solve_t`]: the
-/// panel's own updates run one element at a time, the trailing update as
-/// a product, and the balance moves with the size (measured: 16 wins
-/// below about five hundred unknowns, 32 above). A width is a constant of
-/// its instantiation so the panel loops unroll.
-pub const LU_PANEL_SMALL: usize = 16;
-/// See [`LU_PANEL_SMALL`].
-pub const LU_PANEL_LARGE: usize = 32;
-/// Systems of fewer unknowns than this use [`LU_PANEL_SMALL`].
-pub const LU_PANEL_SWITCH: usize = 512;
-/// Systems of at most this many unknowns are eliminated right-looking
-/// without panels: each pivot updates the whole trailing matrix and the
-/// right-hand sides row by row (one product and one difference per entry),
-/// which at these sizes beats the panel machinery.
-pub const LU_UNBLOCKED_MAX: usize = 64;
+pub use crate::constants::{LU_PANEL_LARGE, LU_PANEL_SMALL, LU_PANEL_SWITCH, LU_UNBLOCKED_MAX};
 
 pub fn solve_t<T: Scalar>(a: &[T], b: &[T], n: usize, out: &mut [T]) {
     solve_many_t(a, b, n, 1, out)
@@ -731,13 +702,7 @@ pub fn solve_many_into<T: Scalar>(
     T::solve_many(a, b, n, k, out, &mut scratch[..solve_scratch_len(n, k)])
 }
 
-/// Systems of at most this many unknowns and right-hand sides solve side
-/// by side in a batch, four to a vector ([`solve_batch_into`] in `f64`);
-/// the tape batches solves of these shapes only, larger ones gain nothing
-/// from it.
-pub const SOLVE_BATCH_MAX_N: usize = 16;
-/// See [`SOLVE_BATCH_MAX_N`].
-pub const SOLVE_BATCH_MAX_K: usize = 4;
+pub use crate::constants::{SOLVE_BATCH_MAX_K, SOLVE_BATCH_MAX_N};
 
 /// `count` independent systems of one shape: `a` holds their `n` by `n`
 /// matrices back to back, `b` their `k` right-hand sides each (as
