@@ -417,6 +417,11 @@ pub(super) struct Program {
     /// The accumulator operand of the kernels' plain folds (see
     /// [`Program::fuse_accumulators`]): never read, so never part of the state.
     pub(super) placeholder: Option<u32>,
+    /// A state layout to keep (see [`Tape::specialize_main`]): per
+    /// instruction the first slot of its block in the state, or `u32::MAX`,
+    /// and the state's length. Every instruction it places is kept and
+    /// placed there; `None` lays the state out anew.
+    pub(super) state: Option<(Vec<u32>, u32)>,
 }
 
 impl Program {
@@ -671,6 +676,14 @@ impl Program {
             .placeholder
             .filter(|&i| !dead[i as usize])
             .map(|i| renumber[i as usize]);
+        if let Some((at, _)) = &mut self.state {
+            *at = at
+                .iter()
+                .zip(dead)
+                .filter(|(_, &d)| !d)
+                .map(|(&a, _)| a)
+                .collect();
+        }
     }
 
     /// The calls of one bundle the expanded templates left apart, one per
@@ -873,6 +886,10 @@ impl Program {
                 Ref::Input(_) => None,
             })
             .collect();
+        // A kept state is computed whole.
+        if let Some((at, _)) = &self.state {
+            stack.extend((0..m as u32).filter(|&i| at[i as usize] != u32::MAX));
+        }
         while let Some(i) = stack.pop() {
             if !std::mem::replace(&mut dead[i as usize], false) {
                 continue;
@@ -1229,6 +1246,7 @@ impl Tape {
             bundles: self.bundles.clone(),
             roots: self.outputs.iter().map(|&k| value(k, &held)).collect(),
             placeholder: uses_placeholder.then_some(m as u32),
+            state: None,
         }
     }
 }
@@ -1433,6 +1451,7 @@ impl Forest {
                 bundles: Vec::new(),
                 roots: Vec::new(),
                 placeholder: None,
+                state: None,
             },
             value: vec![None; m],
             consts: HashMap::default(),
@@ -2445,7 +2464,10 @@ impl Program {
     /// from its first use, not from the start.
     pub(super) fn schedule(&self) -> Vec<u32> {
         let m = self.insts.len();
-        let is_const = |i: usize| matches!(self.insts[i].kind, Kind::Const(_));
+        // A constant a kept state holds is the prolog's like any pure value,
+        // not placed on demand.
+        let kept = |i: usize| self.state.as_ref().is_some_and(|(at, _)| at[i] != u32::MAX);
+        let is_const = |i: usize| matches!(self.insts[i].kind, Kind::Const(_)) && !kept(i);
         // Distinct value dependencies of each instruction, as instruction
         // indices, in one flat list (`dep_list[dep_start[i]..dep_start[i+1]]`);
         // a constant is placed on demand and counts as no dependency.
@@ -2726,10 +2748,29 @@ impl Program {
         // whatever else the buffer holds, the same in every backend.
         let mut state_base = vec![u32::MAX; m];
         let mut next: u32 = 0;
-        for &i in &order[..prolog_ops] {
-            if pinned[i as usize] {
-                state_base[i as usize] = next;
-                next += self.insts[i as usize].n_out;
+        match &self.state {
+            // A kept layout: its values where they were, read or not.
+            Some((at, len)) => {
+                for i in 0..m {
+                    if at[i] != u32::MAX {
+                        assert!(pos[i] < prolog_ops, "a kept state value is the prolog's");
+                        (state_base[i], pinned[i], last[i]) = (at[i], true, usize::MAX);
+                    } else {
+                        assert!(
+                            !(pinned[i] && pos[i] < prolog_ops && split),
+                            "the main phase reads a value the kept state does not hold"
+                        );
+                    }
+                }
+                next = *len;
+            }
+            None => {
+                for &i in &order[..prolog_ops] {
+                    if pinned[i as usize] {
+                        state_base[i as usize] = next;
+                        next += self.insts[i as usize].n_out;
+                    }
+                }
             }
         }
         let state_len = next as usize;
