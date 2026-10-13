@@ -117,6 +117,19 @@ pub(crate) trait Isa {
     /// `d = (c != 0) ? t : e` (a NaN condition selects `t`).
     fn select_nz(&mut self, c: u8, t: u8, e: u8, d: u8);
 
+    /// Whether this CPU runs [`exp_ln`](Self::exp_ln); without it the
+    /// caller uses the host routine.
+    fn exp_ln_inline() -> bool {
+        false
+    }
+    /// `d = exp(x)`, or `ln(x)` with `ln`, as the reference's guarded
+    /// functions compute them, bit for bit, in the code itself: no call, so
+    /// the cache keeps its values. `t` are four scratch registers, none of
+    /// them `d` or `x`.
+    fn exp_ln(&mut self, _ln: bool, _d: u8, _x: u8, _t: [u8; 4]) {
+        unreachable!("no inline exponential")
+    }
+
     /// Call `addr` with `args` in signature order; an f64 result is in
     /// `RESULT`.
     fn call(&mut self, addr: *const (), args: &[Arg]);

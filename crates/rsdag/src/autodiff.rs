@@ -34,13 +34,13 @@ fn unary_factor<K: Field>(ctx: &mut Graph<K>, op: UnaryOp, a: ExprId) -> ExprId 
             // hash-consing shares the one exp between residual and Jacobian:
             // one transcendental per junction per evaluation instead of two.
             // Values are identical: for a <= EXP_LIMIT `unary_f64` evaluates
-            // the bare `a.exp()`.
+            // the bare exponential.
             // The condition names the out-of-range side, so a NaN `a`
             // takes the exp arm and stays NaN, as the value does.
             let hi = ctx.konst_f64(crate::semantics::EXP_LIMIT);
             let above = ctx.cmp(CmpOp::Gt, a, hi);
             let ea = ctx.exp(a);
-            let slope = ctx.konst_f64(crate::semantics::EXP_LIMIT.exp());
+            let slope = ctx.konst_f64(crate::semantics::EXP_AT_LIMIT);
             ctx.select(above, slope, ea)
         }
         UnaryOp::Ln => {

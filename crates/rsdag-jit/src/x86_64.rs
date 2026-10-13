@@ -20,9 +20,15 @@
 //! halves of the `ymm` registers are not preserved across calls, not even
 //! under Windows, so no value survives a host call there, and `vzeroupper`
 //! precedes every call and the return.
+//!
+//! Where there is AVX (and AVX2 for four lanes) the exponential and the
+//! logarithm are instructions too, rsdag's own algorithm with its integer
+//! steps in the packed integer forms: no call, so the cache keeps its
+//! values across them.
 
 use crate::isa::*;
 use rsdag::node::{CmpOp, ReduceOp};
+use rsdag::semantics::exp_ln::*;
 
 const WORK: u8 = 3; // rbx
 const INPUTS: u8 = 13; // r13
@@ -50,9 +56,10 @@ pub(crate) struct X64<const L: usize> {
     /// Host routines held in `r12` and `r15`.
     hot: Vec<*const ()>,
     /// The chunk's constants, and where their displacements go: the byte
-    /// offset of each `disp32` and the constant it addresses.
+    /// offset of each `disp32`, the constant it addresses and where its
+    /// instruction ends (what the displacement is relative to).
     pool: Vec<u64>,
-    fixups: Vec<(usize, usize)>,
+    fixups: Vec<(usize, usize, usize)>,
 }
 
 const HOT_REGS: [u8; 2] = [12, 15];
@@ -63,6 +70,8 @@ pub(crate) struct Features {
     pub sse41: bool,
     /// Three-operand VEX forms, `vblendvpd` and the 256-bit forms.
     pub avx: bool,
+    /// 256-bit integer forms (the host's four-lane exponential and logarithm).
+    pub avx2: bool,
 }
 
 /// What this CPU has, or the SSE2 baseline when `RSDAG_SSE2` is set.
@@ -73,6 +82,7 @@ pub(crate) fn features() -> Features {
         Features {
             sse41: !baseline && is_x86_feature_detected!("sse4.1"),
             avx: !baseline && is_x86_feature_detected!("avx"),
+            avx2: !baseline && is_x86_feature_detected!("avx2"),
         }
     })
 }
@@ -248,6 +258,11 @@ impl<const L: usize> X64<L> {
     /// ModRM for `[rip + disp32]` addressing the constant `bits` of the
     /// chunk's pool; `finish` writes the displacement.
     fn modrm_const(&mut self, reg: u8, bits: u64) {
+        self.modrm_const_imm(reg, bits, 0);
+    }
+    /// The same for an instruction that ends in `imm` immediate bytes after
+    /// the displacement (rip is the next instruction's address).
+    fn modrm_const_imm(&mut self, reg: u8, bits: u64, imm: usize) {
         self.b(((reg & 7) << 3) | 5);
         let k = match self.pool.iter().position(|&c| c == bits) {
             Some(k) => k,
@@ -256,7 +271,8 @@ impl<const L: usize> X64<L> {
                 self.pool.len() - 1
             }
         };
-        self.fixups.push((self.code.len(), k));
+        let at = self.code.len();
+        self.fixups.push((at, k, at + 4 + imm));
         self.bytes(&[0; 4]);
     }
     /// `d = a op [constant]`: VEX where there is AVX, else a copy and the
@@ -313,7 +329,175 @@ impl<const L: usize> X64<L> {
             Base::Inputs => INPUTS,
         }
     }
+
+    // The inline exponential and logarithm, VEX throughout (AVX, and AVX2
+    // for the integer forms on four lanes).
+
+    /// `d = a op b`.
+    fn f(&mut self, op: Arith, d: u8, a: u8, b: u8) {
+        self.vex_rr(Self::PP, Self::arith_op(op), d, a, b);
+    }
+    /// `d = a op c`, `c` from the pool.
+    fn fc(&mut self, op: Arith, d: u8, a: u8, c: f64) {
+        self.op_const(Self::PFX, Self::PP, Self::arith_op(op), d, a, c.to_bits());
+    }
+    /// `d = a op b` over 64-bit integer lanes, `vpaddq` and the like.
+    fn int(&mut self, op: Int, d: u8, a: u8, b: u8) {
+        self.vex_rr(1, op as u8, d, a, b);
+    }
+    /// `d = a op c` over 64-bit integer lanes, `c` from the pool.
+    fn int_c(&mut self, op: Int, d: u8, a: u8, c: u64) {
+        self.vex(1, 1, d, a, 0);
+        self.b(op as u8);
+        self.modrm_const(d, c);
+    }
+    /// `d = a << n`, or logical `a >> n`, over 64-bit lanes: `vpsllq`
+    /// (`66 0F 73 /6 ib`), `vpsrlq` (`/2`), the result in VEX.vvvv.
+    fn shift(&mut self, left: bool, d: u8, a: u8, n: u8) {
+        let ext = if left { 6 } else { 2 };
+        self.vex(1, 1, ext, d, a);
+        self.b(0x73);
+        self.modrm_reg(ext, a);
+        self.b(n);
+    }
+    /// `xmm0 = (x pred c) ? all ones : 0`, `c` from the pool, `pred` one
+    /// of VEX's 32.
+    fn cmp_c(&mut self, x: u8, c: f64, pred: u8) {
+        self.vex(Self::PP, 1, 0, x, 0);
+        self.b(0xC2);
+        self.modrm_const_imm(0, c.to_bits(), 1);
+        self.b(pred);
+    }
+
+    /// [`rsdag::semantics::exp_guarded`] step for step, `xmm1` the fifth
+    /// scratch register.
+    fn exp_inline(&mut self, d: u8, x: u8, [a, b, c, e]: [u8; 4]) {
+        use Arith::*;
+        let s = 1;
+        // k = round(x / ln 2) in the low bits of t = x / ln 2 + MAGIC
+        self.fc(Mul, a, x, INV_LN2);
+        self.fc(Add, a, a, MAGIC);
+        self.fc(Sub, b, a, MAGIC); // kf
+        self.int_c(Int::Sub, a, a, MAGIC.to_bits()); // k
+        self.fc(Mul, c, b, LN2_HI);
+        self.f(Sub, c, x, c); // hi
+        self.fc(Mul, b, b, LN2_LO); // lo
+        self.f(Sub, e, c, b); // r
+        self.f(Mul, s, e, e); // t2
+        self.fc(Mul, d, s, EP5);
+        for p in [EP4, EP3, EP2, EP1] {
+            self.fc(Add, d, d, p);
+            self.f(Mul, d, s, d);
+        }
+        self.f(Sub, d, e, d); // c
+        self.f(Mul, s, e, d); // r c
+        self.fconst(e, 2.0);
+        self.f(Sub, e, e, d);
+        self.f(Div, s, s, e);
+        self.f(Sub, s, b, s);
+        self.f(Sub, s, s, c);
+        self.fconst(d, 1.0);
+        self.f(Sub, d, d, s); // y
+                              // y 2^k1 2^(k - k1) with k1 = k >> 1, the shift arithmetic through
+                              // a bias (64-bit lanes have no arithmetic shift below AVX-512)
+        self.int_c(Int::Add, b, a, 2048);
+        self.shift(false, b, b, 1); // k1 + 1024
+        self.int(Int::Sub, a, a, b); // k - k1 - 1024
+        self.int_c(Int::Sub, b, b, 1);
+        self.shift(true, b, b, 52); // 2^k1
+        self.int_c(Int::Add, a, a, 2047);
+        self.shift(true, a, a, 52); // 2^(k - k1)
+        self.f(Mul, d, d, b);
+        self.f(Mul, d, d, a);
+        // underflow to zero, a NaN kept, the linear tail above the limit
+        self.zero(s);
+        self.cmp_c(x, -745.2, LT_OQ);
+        self.blend(s, d, d);
+        self.cmp_mask(x, x, UNORD_Q);
+        self.blend(x, d, d);
+        self.fc(Sub, s, x, EXP_LIMIT);
+        self.fc(Add, s, s, 1.0);
+        self.fc(Mul, s, s, EXP_AT_LIMIT);
+        self.cmp_c(x, EXP_LIMIT, GT_OQ);
+        self.blend(s, d, d);
+    }
+
+    /// [`rsdag::semantics::ln_guarded`] step for step, `xmm1` the fifth
+    /// scratch register.
+    fn ln_inline(&mut self, d: u8, x: u8, [a, b, c, e]: [u8; 4]) {
+        use Arith::*;
+        let s = 1;
+        // x = 2^k m, m in [sqrt(2)/2, sqrt(2)), from the bits
+        self.shift(false, a, x, 32); // high
+        self.int_c(Int::And, b, a, 0x000f_ffff); // hm
+        self.int_c(Int::Add, c, b, 0x9_5f64);
+        self.int_c(Int::And, c, c, 0x10_0000); // i
+        self.shift(false, a, a, 20);
+        self.int_c(Int::Sub, a, a, 1023);
+        self.shift(false, e, c, 20);
+        self.int(Int::Add, a, a, e); // k
+        self.int_c(Int::Xor, c, c, 0x3ff0_0000);
+        self.int(Int::Or, c, c, b);
+        self.shift(true, c, c, 32);
+        self.int_c(Int::And, b, x, 0xffff_ffff);
+        self.int(Int::Or, c, c, b); // m
+        self.fc(Sub, c, c, 1.0); // f
+        self.fc(Add, b, c, 2.0);
+        self.f(Div, b, c, b); // s
+        self.int_c(Int::Add, a, a, MAGIC.to_bits());
+        self.fc(Sub, a, a, MAGIC); // dk
+        self.f(Mul, e, b, b); // z
+        self.f(Mul, s, e, e); // w
+        self.fc(Mul, d, s, LG7);
+        for p in [LG5, LG3] {
+            self.fc(Add, d, d, p);
+            self.f(Mul, d, s, d);
+        }
+        self.fc(Add, d, d, LG1);
+        self.f(Mul, d, e, d); // t2
+        self.fc(Mul, e, s, LG6);
+        for p in [LG4, LG2] {
+            self.fc(Add, e, e, p);
+            self.f(Mul, e, s, e);
+        }
+        self.f(Add, d, d, e); // r = t2 + t1
+        self.fc(Mul, s, c, 0.5);
+        self.f(Mul, s, s, c); // hfsq
+        self.f(Add, e, s, d);
+        self.f(Mul, e, b, e);
+        self.fc(Mul, d, a, LN2_LO);
+        self.f(Add, e, e, d);
+        self.f(Sub, e, s, e);
+        self.f(Sub, e, e, c);
+        self.fc(Mul, d, a, LN2_HI);
+        self.f(Sub, d, d, e);
+        // infinity and NaN kept, the floor
+        self.cmp_c(x, f64::INFINITY, EQ_OQ);
+        self.blend(x, d, d);
+        self.cmp_mask(x, x, UNORD_Q);
+        self.blend(x, d, d);
+        self.fconst(s, LN_AT_FLOOR);
+        self.cmp_c(x, LN_FLOOR, LE_OQ);
+        self.blend(s, d, d);
+    }
 }
+
+/// The packed 64-bit integer ops, as their `66 0F` opcodes.
+#[derive(Clone, Copy)]
+enum Int {
+    Add = 0xD4,
+    Sub = 0xFB,
+    And = 0xDB,
+    Or = 0xEB,
+    Xor = 0xEF,
+}
+
+// VEX comparison predicates, ordered (false on a NaN) but `UNORD_Q`.
+const EQ_OQ: u8 = 0x00;
+const LT_OQ: u8 = 0x11;
+const LE_OQ: u8 = 0x12;
+const UNORD_Q: u8 = 0x03;
+const GT_OQ: u8 = 0x1E;
 
 impl<const L: usize> Isa for X64<L> {
     const LANES: usize = L;
@@ -327,7 +511,7 @@ impl<const L: usize> Isa for X64<L> {
 
     fn new(hot: &[*const ()]) -> X64<L> {
         assert!(matches!(L, 1 | 2 | 4), "one, two or four lanes");
-        let Features { sse41, avx } = features();
+        let Features { sse41, avx, .. } = features();
         assert!(L < 4 || avx, "four lanes need AVX");
         X64 {
             code: Vec::with_capacity(8192),
@@ -352,8 +536,8 @@ impl<const L: usize> Isa for X64<L> {
                     self.code.extend_from_slice(&c.to_le_bytes());
                 }
             }
-            for &(at, k) in &self.fixups {
-                let disp = (base + Self::CONST_BYTES * k) as i64 - (at + 4) as i64;
+            for &(at, k, end) in &self.fixups {
+                let disp = (base + Self::CONST_BYTES * k) as i64 - end as i64;
                 let disp = i32::try_from(disp).expect("a chunk is smaller than 2 GB");
                 self.code[at..at + 4].copy_from_slice(&disp.to_le_bytes());
             }
@@ -543,6 +727,17 @@ impl<const L: usize> Isa for X64<L> {
         self.zero(1);
         self.cmp_mask(c, 1, 4); // cmpneqsd: true when c != 0 or c is NaN
         self.blend(t, e, d);
+    }
+    fn exp_ln_inline() -> bool {
+        let f = features();
+        f.avx && (L < 4 || f.avx2)
+    }
+    fn exp_ln(&mut self, ln: bool, d: u8, x: u8, t: [u8; 4]) {
+        if ln {
+            self.ln_inline(d, x, t);
+        } else {
+            self.exp_inline(d, x, t);
+        }
     }
 
     fn call(&mut self, addr: *const (), args: &[Arg]) {

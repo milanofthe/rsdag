@@ -220,6 +220,144 @@ pub const EXP_LIMIT: f64 = 80.0;
 /// conditioning. In-range arguments are untouched. See [`unary_f64`].
 pub const LN_FLOOR: f64 = 1e-30;
 
+/// `exp(EXP_LIMIT)`, the slope of the linear tail.
+pub const EXP_AT_LIMIT: f64 = exp_core(EXP_LIMIT);
+
+/// The exponential's and the logarithm's constants, for a backend that
+/// computes them in its own instructions (it must take the same steps).
+pub mod exp_ln {
+    pub use super::{exp_core, ln_core};
+    pub use super::{EP1, EP2, EP3, EP4, EP5, INV_LN2, LG1, LG2, LG3, LG4, LG5, LG6, LG7};
+    pub use super::{EXP_AT_LIMIT, EXP_LIMIT, LN_AT_FLOOR, LN_FLOOR};
+    pub use super::{LN2_HI, LN2_LO, MAGIC};
+}
+
+// The exponential and the logarithm are rsdag's own: fdlibm's algorithms
+// (Sun Microsystems, 1993; as in musl and Go), errors below one ulp, written
+// without branches on the value. So every backend computes them the same
+// way, a lane of vector code as a scalar does, the same on every platform,
+// and the native code runs a vector of them as one call.
+
+/// `x + MAGIC - MAGIC` rounds `x` (`|x| < 2^51`) to the nearest integer, its
+/// low bits that integer.
+pub const MAGIC: f64 = 6_755_399_441_055_744.0;
+pub const INV_LN2: f64 = std::f64::consts::LOG2_E;
+/// `ln 2` in two parts, the high one with 32 trailing zero bits (so `k
+/// LN2_HI` is exact for every `k` here).
+#[allow(clippy::excessive_precision)]
+pub const LN2_HI: f64 = 6.931_471_803_691_238_165e-1;
+#[allow(clippy::excessive_precision)]
+pub const LN2_LO: f64 = 1.908_214_929_270_587_700e-10;
+#[allow(clippy::excessive_precision)]
+pub const EP1: f64 = 1.666_666_666_666_660_190_37e-1;
+#[allow(clippy::excessive_precision)]
+pub const EP2: f64 = -2.777_777_777_701_559_338_42e-3;
+#[allow(clippy::excessive_precision)]
+pub const EP3: f64 = 6.613_756_321_437_934_361_17e-5;
+#[allow(clippy::excessive_precision)]
+pub const EP4: f64 = -1.653_390_220_546_525_153_90e-6;
+#[allow(clippy::excessive_precision)]
+pub const EP5: f64 = 4.138_136_797_057_238_460_39e-8;
+#[allow(clippy::excessive_precision)]
+pub const LG1: f64 = 6.666_666_666_666_735_130e-1;
+#[allow(clippy::excessive_precision)]
+pub const LG2: f64 = 3.999_999_999_940_941_908e-1;
+#[allow(clippy::excessive_precision)]
+pub const LG3: f64 = 2.857_142_874_366_239_149e-1;
+#[allow(clippy::excessive_precision)]
+pub const LG4: f64 = 2.222_219_843_214_978_396e-1;
+#[allow(clippy::excessive_precision)]
+pub const LG5: f64 = 1.818_357_216_161_805_012e-1;
+#[allow(clippy::excessive_precision)]
+pub const LG6: f64 = 1.531_383_769_920_937_332e-1;
+#[allow(clippy::excessive_precision)]
+pub const LG7: f64 = 1.479_819_860_511_658_591e-1;
+
+/// `2^k` for `-1022 <= k <= 1023`.
+#[inline(always)]
+const fn pow2(k: i64) -> f64 {
+    f64::from_bits((k.wrapping_add(1023) as u64) << 52)
+}
+
+/// `exp(x)` for `x <= EXP_LIMIT` (and NaN): `x = k ln 2 + r` with `|r| <=
+/// ln 2 / 2`, `exp(r)` by fdlibm's rational form, scaled by `2^k` in two
+/// halves so a subnormal result rounds once. Zero below the subnormals.
+#[inline(always)]
+pub const fn exp_core(x: f64) -> f64 {
+    let t = x * INV_LN2 + MAGIC;
+    let kf = t - MAGIC;
+    let k = (t.to_bits() as i64).wrapping_sub(MAGIC.to_bits() as i64);
+    let hi = x - kf * LN2_HI;
+    let lo = kf * LN2_LO;
+    let r = hi - lo;
+    let t2 = r * r;
+    let c = r - t2 * (EP1 + t2 * (EP2 + t2 * (EP3 + t2 * (EP4 + t2 * EP5))));
+    let y = 1.0 - ((lo - (r * c) / (2.0 - c)) - hi);
+    let k1 = k >> 1;
+    let v = y * pow2(k1) * pow2(k - k1);
+    let v = if x < -745.2 { 0.0 } else { v };
+    if x.is_nan() {
+        x
+    } else {
+        v
+    }
+}
+
+/// `ln(x)` for normal `x > 0` (and `+inf`, NaN): `x = 2^k m` with `m` in
+/// `[sqrt(2)/2, sqrt(2))`, `ln(m) = ln(1 + f)` by fdlibm's series in `s =
+/// f / (2 + f)`.
+#[inline(always)]
+pub const fn ln_core(x: f64) -> f64 {
+    let bits = x.to_bits();
+    let high = (bits >> 32) as i64;
+    let hm = high & 0x000f_ffff;
+    // The mantissa past sqrt(2) moves to the next exponent.
+    let i = (hm + 0x9_5f64) & 0x10_0000;
+    let k = (high >> 20) - 1023 + (i >> 20);
+    let m = f64::from_bits((((hm | (i ^ 0x3ff0_0000)) as u64) << 32) | (bits & 0xffff_ffff));
+    let f = m - 1.0;
+    let s = f / (2.0 + f);
+    // `k` as a float, through the rounding constant (no integer conversion).
+    let dk = f64::from_bits(MAGIC.to_bits().wrapping_add(k as u64)) - MAGIC;
+    let z = s * s;
+    let w = z * z;
+    let t1 = w * (LG2 + w * (LG4 + w * LG6));
+    let t2 = z * (LG1 + w * (LG3 + w * (LG5 + w * LG7)));
+    let r = t2 + t1;
+    let hfsq = 0.5 * f * f;
+    let v = dk * LN2_HI - ((hfsq - (s * (hfsq + r) + dk * LN2_LO)) - f);
+    if x.is_nan() || x == f64::INFINITY {
+        x
+    } else {
+        v
+    }
+}
+
+/// The guarded exponential of [`unary_f64`]: linear above [`EXP_LIMIT`].
+#[inline(always)]
+pub fn exp_guarded(x: f64) -> f64 {
+    let tail = EXP_AT_LIMIT * (1.0 + (x - EXP_LIMIT));
+    if x > EXP_LIMIT {
+        tail
+    } else {
+        exp_core(x)
+    }
+}
+
+/// The guarded logarithm of [`unary_f64`]: `ln(LN_FLOOR)` at or below
+/// [`LN_FLOOR`], a NaN argument staying NaN.
+#[inline(always)]
+pub fn ln_guarded(x: f64) -> f64 {
+    if x <= LN_FLOOR {
+        LN_AT_FLOOR
+    } else {
+        ln_core(x)
+    }
+}
+
+/// `ln(LN_FLOOR)`.
+pub const LN_AT_FLOOR: f64 = ln_core(LN_FLOOR);
+
 /// `x^n` for an integer `n`, the reference every evaluator takes: square
 /// and multiply over `|n|` from the low bit, then one division for a
 /// negative exponent. `n = 2` is exactly `x * x` and `n = -1` exactly
@@ -266,23 +404,11 @@ pub fn powi_f64(x: f64, n: i32) -> f64 {
 /// The derivative rules in [`crate::autodiff`] mirror these guards exactly.
 pub fn unary_f64(op: UnaryOp, x: f64) -> f64 {
     match op {
-        UnaryOp::Exp => {
-            if x > EXP_LIMIT {
-                EXP_LIMIT.exp() * (1.0 + (x - EXP_LIMIT))
-            } else {
-                x.exp()
-            }
-        }
         // The guards test for the out-of-range side, so a NaN argument
         // falls through to the bare op and stays NaN: a guard clamps a
         // wild iterate, it does not turn a missing value into a number.
-        UnaryOp::Ln => {
-            if x <= LN_FLOOR {
-                LN_FLOOR.ln()
-            } else {
-                x.ln()
-            }
-        }
+        UnaryOp::Exp => exp_guarded(x),
+        UnaryOp::Ln => ln_guarded(x),
         UnaryOp::Sqrt => {
             if x <= 0.0 {
                 0.0

@@ -238,6 +238,7 @@ impl ROp {
                 | UnaryOp::Trunc
                 | UnaryOp::Abs
                 | UnaryOp::Sign => return None,
+                UnaryOp::Exp | UnaryOp::Ln if I::exp_ln_inline() => return None,
                 _ => crate::host::unary_addr(*op).0,
             },
             ROp::Binary(..) => crate::host::h_binary as *const (),
@@ -533,6 +534,16 @@ impl Liveness {
     /// The last op reading the value slot `s` holds when op `pos` writes it
     /// (`def`) or reads it; `pos` when nothing reads it after, `u32::MAX`
     /// when the program's outputs do.
+    /// The first op at or after `pos` that reads slot `s` (`u32::MAX` for the
+    /// outputs at the end, or none).
+    pub(crate) fn next_read(&self, s: u32, pos: u32) -> u32 {
+        let s = s as usize;
+        let reads = &self.reads[self.read_start[s] as usize..self.read_start[s + 1] as usize];
+        reads
+            .get(reads.partition_point(|&r| r < pos))
+            .copied()
+            .unwrap_or(u32::MAX)
+    }
     pub(crate) fn death(&self, s: u32, pos: u32, def: bool) -> u32 {
         let s = s as usize;
         let reads = &self.reads[self.read_start[s] as usize..self.read_start[s + 1] as usize];
