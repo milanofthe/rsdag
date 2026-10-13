@@ -34,14 +34,7 @@ pub struct ChoicePolicy {
 
 impl Default for ChoicePolicy {
     fn default() -> Self {
-        ChoicePolicy {
-            enabled: true,
-            min_selects: 16,
-            min_shrink_pct: 15,
-            flip_cooldown: 32,
-            thrash_flips: 8,
-            thrash_evals: 8,
-        }
+        ChoicePolicy::DEFAULT
     }
 }
 

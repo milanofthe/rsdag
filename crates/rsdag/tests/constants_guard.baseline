@@ -80,18 +80,8 @@ rsdag-jit/src/x86_64.rs :: X64::ln_inline :: 32
 rsdag-py/src/lib.rs :: DETACH_OPS :: 256
 rsdag-py/src/lib.rs :: Program::compile_native :: 16
 rsdag-py/src/lib.rs :: REPR_NODES :: 200
-rsdag/src/adaptive.rs :: Policy::default :: 10
-rsdag/src/adaptive.rs :: Policy::default :: 16
-rsdag/src/adaptive.rs :: Policy::default :: 3
-rsdag/src/adaptive.rs :: Policy::default :: 4
-rsdag/src/adaptive.rs :: Policy::default :: 4
 rsdag/src/autodiff.rs :: forward :: 64
 rsdag/src/autodiff.rs :: unary_factor :: 3
-rsdag/src/choices.rs :: ChoicePolicy::default :: 15
-rsdag/src/choices.rs :: ChoicePolicy::default :: 16
-rsdag/src/choices.rs :: ChoicePolicy::default :: 32
-rsdag/src/choices.rs :: ChoicePolicy::default :: 8
-rsdag/src/choices.rs :: ChoicePolicy::default :: 8
 rsdag/src/choices.rs :: Choices::built :: 100
 rsdag/src/choices.rs :: Choices::built :: 100
 rsdag/src/choices.rs :: Choices::built :: 100
@@ -247,5 +237,3 @@ rsdag/src/tape/topo.rs :: Order::insert_after :: 64
 rsdag/src/tape/topo.rs :: Order::insert_after :: 64u32
 rsdag/src/tape/topo.rs :: Topo::read :: 4
 rsdag/src/variant.rs :: Shared::find :: 100
-rsdag/src/variant.rs :: VariantPolicy::default :: 10
-rsdag/src/variant.rs :: VariantPolicy::default :: 64

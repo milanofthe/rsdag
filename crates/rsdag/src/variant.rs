@@ -78,13 +78,7 @@ pub struct VariantPolicy {
 
 impl Default for VariantPolicy {
     fn default() -> Self {
-        VariantPolicy {
-            enabled: true,
-            interpreted: true,
-            max_variants: 64,
-            min_shrink_pct: 10,
-            choices: crate::ChoicePolicy::default(),
-        }
+        VariantPolicy::DEFAULT
     }
 }
 
