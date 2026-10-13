@@ -80,6 +80,18 @@ pub struct NativeTape {
     /// Per phase (prolog, main): its ops, and those of them that call the
     /// host (lane code calls it once per lane).
     phase_ops: [(usize, usize); 2],
+    /// The tape's regions ([`rsdag::Region`]) by chunks: piece `k` is the
+    /// chunks from `starts[k]` to the next piece's, the last one's up to
+    /// `hi`.
+    regions: Vec<ChunkRegion>,
+}
+
+/// A region of the tape as chunks (see [`NativeTape::regions`]), with its
+/// ops.
+struct ChunkRegion {
+    starts: Vec<usize>,
+    hi: usize,
+    ops: usize,
 }
 
 /// The gather area lane code on the ISA `I` needs for `op`: a host call's
@@ -160,13 +172,19 @@ impl NativeBody {
 }
 
 /// `ops` in chunks of about `chunk_ops`, each ending after an op outside a
-/// stage or after a stage's last call.
-fn chunked(ops: &[ROp], chunk_ops: usize) -> Vec<&[ROp]> {
+/// stage or after a stage's last call, and before every op `cuts` lists
+/// (sorted, positions in `ops`).
+fn chunked<'a>(ops: &'a [ROp], chunk_ops: usize, cuts: &[usize]) -> Vec<&'a [ROp]> {
     let mut out = Vec::new();
     let mut start = 0;
+    let mut cut = cuts.iter().copied().filter(|&c| c > 0).peekable();
     for (k, op) in ops.iter().enumerate() {
         let inside = matches!(op, ROp::Call(c) if c.stage == StageRole::Deferred);
-        if k + 1 - start >= chunk_ops.max(1) && !inside {
+        while cut.peek().is_some_and(|&c| c <= k) {
+            cut.next();
+        }
+        let before_cut = cut.peek() == Some(&(k + 1));
+        if (k + 1 - start >= chunk_ops.max(1) || before_cut) && !inside {
             out.push(&ops[start..=k]);
             start = k + 1;
         }
@@ -327,8 +345,9 @@ impl NativeBody {
                             };
                         }
                         if let Some(st) = states {
-                            for s in 0..sl {
-                                work[s * l + lane] = st[g * stride + s];
+                            let row = &st[at.row(g) * stride..][..sl];
+                            for (s, &v) in row.iter().enumerate() {
+                                work[s * l + lane] = v;
                             }
                         }
                     }
@@ -336,8 +355,9 @@ impl NativeBody {
                     for lane in 0..l.min(end - c) {
                         let g = at.at(c + lane);
                         if let Some(st) = states_out.as_deref_mut() {
-                            for s in 0..sl {
-                                st[g * stride + s] = work[s * l + lane];
+                            let row = &mut st[at.row(g) * stride..][..sl];
+                            for (s, v) in row.iter_mut().enumerate() {
+                                *v = work[s * l + lane];
                             }
                         }
                         if let Some(o) = out.as_deref_mut() {
@@ -420,8 +440,8 @@ impl ExternBundle for NativeBody {
         let (na, sl, st) = (at.n_args, self.tape.state_len, at.stride);
         rsdag::scratch::with_len(self.work_len(), 0.0, |w| {
             for g in (k0..at.len()).map(|k| at.at(k)) {
-                let p = &pure[g * na..(g + 1) * na];
-                self.prolog_into(p, w, &mut states[g * st..g * st + sl]);
+                let (p, r) = (&pure[g * na..(g + 1) * na], at.row(g));
+                self.prolog_into(p, w, &mut states[r * st..r * st + sl]);
             }
         });
     }
@@ -441,8 +461,8 @@ impl ExternBundle for NativeBody {
         let (na, sl, st, no) = (at.n_args, self.tape.state_len, at.stride, self.n_out);
         rsdag::scratch::with_len(self.work_len(), 0.0, |w| {
             for g in (k0..at.len()).map(|k| at.at(k)) {
-                let a = &args[g * na..(g + 1) * na];
-                let s = &states[g * st..g * st + sl];
+                let (a, r) = (&args[g * na..(g + 1) * na], at.row(g));
+                let s = &states[r * st..r * st + sl];
                 self.main_into(a, s, w, &mut out[g * no..(g + 1) * no]);
             }
         });
@@ -633,7 +653,7 @@ impl NativeTape {
         if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
             return Err(JitError::Unsupported);
         }
-        let (mut ops, split) = crate::ir::record(tape);
+        let (mut ops, split, at) = crate::ir::record(tape);
         let lanes = A::LANES;
         if lanes > 1
             && ops
@@ -783,15 +803,47 @@ impl NativeTape {
         // the split, nor a stage: its last call runs the stage's calls from
         // its chunk's descriptors.
         let (pro, main) = ops.split_at(split);
-        let pro = chunked(pro, chunk_ops);
+        // A region's pieces are whole chunks: a chunk starts with each.
+        let mut cuts: Vec<usize> = (tape.regions().iter())
+            .flat_map(|r| r.starts.iter().chain([&r.hi]))
+            .map(|&k| at[k as usize])
+            .collect();
+        cuts.sort_unstable();
+        let main_cuts: Vec<usize> = cuts
+            .iter()
+            .filter(|&&c| c >= split)
+            .map(|&c| c - split)
+            .collect();
+        let pro = chunked(
+            pro,
+            chunk_ops,
+            &cuts[..cuts.partition_point(|&c| c < split)],
+        );
         let prolog_chunks = pro.len();
-        let jobs: Vec<&[ROp]> = pro.into_iter().chain(chunked(main, chunk_ops)).collect();
+        let jobs: Vec<&[ROp]> = pro
+            .into_iter()
+            .chain(chunked(main, chunk_ops, &main_cuts))
+            .collect();
         let starts: Vec<usize> = jobs
             .iter()
             .scan(0, |acc, ops| {
                 let s = *acc;
                 *acc += ops.len();
                 Some(s)
+            })
+            .collect();
+        let chunk_at = |k: u32| {
+            let p = at[k as usize];
+            starts.binary_search(&p).unwrap_or(jobs.len())
+        };
+        // Lane code calls the host through the gather area, one for all the
+        // pieces: its regions run serially.
+        let regions = (tape.regions().iter())
+            .filter(|_| lanes == 1)
+            .map(|r| ChunkRegion {
+                starts: r.starts.iter().map(|&k| chunk_at(k)).collect(),
+                hi: chunk_at(r.hi),
+                ops: r.ops() as usize,
             })
             .collect();
         let emitted: Vec<Emitted> = jobs
@@ -835,6 +887,7 @@ impl NativeTape {
             lanes,
             reads,
             phase_ops,
+            regions,
         })
     }
 
@@ -861,11 +914,32 @@ impl NativeTape {
             inputs.as_ptr(),
             &self.bundles as *const Bundles,
         );
-        for c in &self.chunks[range] {
+        // The pointers, for the pieces of a region on other threads.
+        let (w, i, b) = (wp as usize, ip as usize, bp as usize);
+        let chunk = |c: usize| {
             // SAFETY: the buffers were checked above, the code and the
-            // tables it addresses live as long as `self`.
-            unsafe { c(wp, ip, bp) };
+            // tables it addresses live as long as `self`; a region's pieces
+            // write slots no other piece reads or writes.
+            unsafe { self.chunks[c](w as *mut f64, i as *const f64, b as *const Bundles) };
             host::resume_panic();
+        };
+        let mut next = self.regions.partition_point(|r| r.starts[0] < range.start);
+        let mut c = range.start;
+        while c < range.end {
+            if let Some(r) = self.regions.get(next).filter(|r| r.starts[0] == c) {
+                next += 1;
+                if r.hi <= range.end && rsdag::parallel::worth(r.ops) {
+                    let piece = |k: usize| {
+                        let end = r.starts.get(k + 1).copied().unwrap_or(r.hi);
+                        (r.starts[k]..end).for_each(chunk);
+                    };
+                    rsdag::parallel::run(r.starts.len(), r.ops, &piece);
+                    c = r.hi;
+                    continue;
+                }
+            }
+            chunk(c);
+            c += 1;
         }
     }
 

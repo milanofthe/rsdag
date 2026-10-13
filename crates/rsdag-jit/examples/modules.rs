@@ -20,14 +20,26 @@
 //!
 //! `--no-variants` runs every device body whole, its parameter branches
 //! both computed (see `rsdag::variant`), for comparing against.
+//! `--no-folded` leaves the folded build out (its columns empty), which
+//! takes minutes on a large module. `--interleave <MB>` has the calling
+//! thread write through a buffer of that many megabytes before every timed
+//! call, as a solver's factorization does between its evaluations: the
+//! calls then find their data where a solver's find it, not in the caches
+//! the previous call left them in.
 //!
 //! `--threads <n>` runs the residual and the Jacobian with a pool of `n`
 //! threads installed, their independent calls (the device instances) in
-//! parallel (`rsdag::parallel`, rsdag's `Workers`). `--lanes
+//! parallel (`rsdag::parallel`, rsdag's `Workers`). A list (`--threads
+//! 1,2,4,12`) measures the native code at each count in one process, the
+//! counts taken in turn over `--rounds <n>` rounds (3 by default) so the
+//! machine's drift falls on all alike; one `threads` row per count, the
+//! median of its rounds, after the module's row (which is the first
+//! count's). `--native` leaves the interpreted calls unmeasured. `--lanes
 //! auto|always|never` sets the device bodies' lane
 //! code (`rsdag_jit::Lanes`, `auto` by default).
 //!
-//!     cargo run --release -p rsdag-jit --example modules -- [--values <dir>] [--composed <dir>] [--threads <n>] [--lanes <mode>] [--no-variants] <module.json>...
+//!     cargo run --release -p rsdag-jit --example modules -- [--values <dir>] [--composed <dir>] [--threads <n>[,<n>...]]
+//!         [--rounds <n>] [--native] [--interleave <MB>] [--no-folded] [--lanes <mode>] [--no-variants] <module.json>...
 
 use std::time::Instant;
 
@@ -36,8 +48,34 @@ use rsdag::{
 };
 use rsdag_jit::{Lanes, NativeTape, Options};
 
-/// Seconds per call: the best of five batches of at least 50 ms.
+static INTERLEAVE: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+
+/// Write through the `--interleave` buffer (a no-op without one).
+fn interleave() {
+    let mut buf = INTERLEAVE.lock().unwrap();
+    for v in buf.iter_mut().step_by(8) {
+        *v = v.wrapping_add(1);
+    }
+}
+
+/// Seconds per call: the best of five batches of at least 50 ms; with
+/// `--interleave`, the calls alone, the buffer written before each.
 fn per_call(mut f: impl FnMut()) -> f64 {
+    if !INTERLEAVE.lock().unwrap().is_empty() {
+        let mut best = f64::INFINITY;
+        for _ in 0..5 {
+            let (mut sum, mut n) = (0.0, 0usize);
+            while sum < 0.05 || n < 3 {
+                interleave();
+                let t = Instant::now();
+                f();
+                sum += t.elapsed().as_secs_f64();
+                n += 1;
+            }
+            best = best.min(sum / n as f64);
+        }
+        return best;
+    }
     let mut reps = 1usize;
     let mut dt;
     loop {
@@ -68,9 +106,15 @@ fn timed<R>(f: impl FnOnce() -> R) -> (R, f64) {
     (r, t.elapsed().as_secs_f64())
 }
 
-/// The pool `--threads` asks for: the programs' independent calls run on
-/// it (`rsdag::parallel`).
-static POOL: std::sync::OnceLock<Option<rsdag::parallel::Parallel>> = std::sync::OnceLock::new();
+/// The pools `--threads` asks for, by count (none for one thread): the
+/// programs' independent calls run on them (`rsdag::parallel`).
+static POOLS: std::sync::OnceLock<Vec<(usize, Option<rsdag::parallel::Parallel>)>> =
+    std::sync::OnceLock::new();
+
+/// Rounds over the thread counts (`--rounds`), and whether the interpreted
+/// calls go unmeasured (`--native`).
+static ROUNDS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+static NATIVE_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// The lane code `--lanes` asks for.
 static LANES: std::sync::OnceLock<Lanes> = std::sync::OnceLock::new();
@@ -78,16 +122,22 @@ static LANES: std::sync::OnceLock<Lanes> = std::sync::OnceLock::new();
 /// Whether device bodies run their per-binding variants (`--no-variants`).
 static VARIANTS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-/// `f` with the `--threads` pool installed, if any.
-fn on_pool<R: Send>(f: impl FnOnce() -> R + Send) -> R {
-    match POOL.get().cloned().flatten() {
+/// `f` with `pool` installed, if any.
+fn on_pool<R: Send>(pool: &Option<rsdag::parallel::Parallel>, f: impl FnOnce() -> R + Send) -> R {
+    match pool.clone() {
         Some(p) => rsdag::parallel::install(p, f),
         None => f(),
     }
 }
 
+fn median(mut v: Vec<f64>) -> f64 {
+    v.sort_by(f64::total_cmp);
+    v[v.len() / 2]
+}
+
 /// Setup (seconds) and per-call time (seconds) of `roots` over the inputs,
-/// interpreted then native; the values at `check`.
+/// interpreted then native, on the first `--threads` count; the values at
+/// `check`; the native per-call time at every count (see `--rounds`).
 fn measure(
     g: &Graph<F64>,
     roots: &[ExprId],
@@ -95,7 +145,7 @@ fn measure(
     pure: &[bool],
     vals: &[f64],
     check: &[f64],
-) -> ([f64; 4], Vec<f64>) {
+) -> ([f64; 4], Vec<f64>, Vec<f64>) {
     let (mut tape, s_tape) = timed(|| Tape::compile_split(g, roots, syms, pure));
     tape.with_backend(&rsdag::BodyBackend {
         variants: Some(rsdag::variant::VariantPolicy {
@@ -115,13 +165,29 @@ fn measure(
         timed(|| NativeTape::compile_opts(&tape, &opts, &[]).expect("native code"));
     let (mut w, mut o) = (Vec::new(), Vec::new());
     let (mut wn, mut on) = (Vec::new(), Vec::new());
-    let (c_tape, c_native) = on_pool(|| {
+    let pools = POOLS.get().expect("pools");
+    let first = &pools[0].1;
+    let interpreted = !NATIVE_ONLY.get().copied().unwrap_or(false);
+    let c_tape = on_pool(first, || {
         tape.eval_prolog(vals, &mut w);
-        let c_tape = per_call(|| tape.eval_main(vals, &mut w, &mut o));
-        native.eval_prolog(vals, &mut wn);
-        let c_native = per_call(|| native.eval_main(vals, &mut wn, &mut on));
-        (c_tape, c_native)
+        if interpreted {
+            per_call(|| tape.eval_main(vals, &mut w, &mut o))
+        } else {
+            tape.eval_main(vals, &mut w, &mut o);
+            f64::NAN
+        }
     });
+    on_pool(first, || native.eval_prolog(vals, &mut wn));
+    let mut samples = vec![Vec::new(); pools.len()];
+    for _ in 0..ROUNDS.get().copied().unwrap_or(1) {
+        for ((_, pool), at) in pools.iter().zip(samples.iter_mut()) {
+            at.push(on_pool(pool, || {
+                per_call(|| native.eval_main(vals, &mut wn, &mut on))
+            }));
+        }
+    }
+    let per_count: Vec<f64> = samples.into_iter().map(median).collect();
+    let c_native = per_count[0];
     if let Some((k, (a, b))) = o
         .iter()
         .zip(&on)
@@ -139,7 +205,7 @@ fn measure(
         );
     }
     native.eval_main(check, &mut wn, &mut on);
-    ([s_tape, s_tape + s_native, c_tape, c_native], on)
+    ([s_tape, s_tape + s_native, c_tape, c_native], on, per_count)
 }
 
 fn main() {
@@ -160,15 +226,44 @@ fn main() {
         Some(m) => panic!("--lanes auto|always|never, not {m}"),
     };
     LANES.set(lanes).ok();
-    let threads: usize = option("--threads").map_or(1, |t| t.parse().expect("--threads <n>"));
+    let counts: Vec<usize> = option("--threads").map_or(vec![1], |t| {
+        t.split(',')
+            .map(|n| n.trim().parse().expect("--threads <n>[,<n>...]"))
+            .collect()
+    });
+    let rounds: usize = option("--rounds").map_or(3, |r| r.parse().expect("--rounds <n>"));
+    if let Some(mb) = option("--interleave") {
+        let mb: usize = mb.parse().expect("--interleave <MB>");
+        *INTERLEAVE.lock().unwrap() = vec![0u64; mb << 17];
+    }
     if let Some(i) = args.iter().position(|a| a == "--no-variants") {
         args.remove(i);
         VARIANTS.set(false).ok();
     }
-    let pool = (threads > 1).then(|| {
-        rsdag::parallel::Parallel::new(std::sync::Arc::new(rsdag::parallel::Workers::new(threads)))
-    });
-    POOL.set(pool).ok();
+    let folding = match args.iter().position(|a| a == "--no-folded") {
+        Some(i) => {
+            args.remove(i);
+            false
+        }
+        None => true,
+    };
+    if let Some(i) = args.iter().position(|a| a == "--native") {
+        args.remove(i);
+        NATIVE_ONLY.set(true).ok();
+    }
+    let pools = counts
+        .iter()
+        .map(|&n| {
+            let pool = (n > 1).then(|| {
+                rsdag::parallel::Parallel::new(std::sync::Arc::new(rsdag::parallel::Workers::new(
+                    n,
+                )))
+            });
+            (n, pool)
+        })
+        .collect();
+    POOLS.set(pools).ok();
+    ROUNDS.set(if counts.len() > 1 { rounds } else { 1 }).ok();
     println!(
         "{}",
         [
@@ -248,7 +343,7 @@ fn main() {
             .zip(&pure)
             .map(|(&v, &p)| if p { v } else { v + 0.01 })
             .collect();
-        let (fm, fvals) = measure(&g, &residuals, &syms, &pure, &vals, &check);
+        let (fm, fvals, f_counts) = measure(&g, &residuals, &syms, &pure, &vals, &check);
         let (rows, s_diff) = timed(|| sparse_jacobian(&mut g, &residuals, &states));
         let (mut ri, mut ci, mut entries) = (Vec::new(), Vec::new(), Vec::new());
         for (i, row) in rows.iter().enumerate() {
@@ -258,7 +353,36 @@ fn main() {
                 entries.push(e);
             }
         }
-        let (jm, jvals) = measure(&g, &entries, &syms, &pure, &vals, &check);
+        let (jm, jvals, j_counts) = measure(&g, &entries, &syms, &pure, &vals, &check);
+        let by_count = |name: &str| {
+            if counts.len() > 1 {
+                for ((n, f), j) in counts.iter().zip(&f_counts).zip(&j_counts) {
+                    println!("threads,{name},{n},{:.4},{:.4}", f * 1e6, j * 1e6);
+                }
+            }
+        };
+        let name = std::path::Path::new(path)
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        if !folding {
+            println!(
+                "{name},{},{:.6},{:.6},{:.4},{:.4},{:.6},{:.6},{:.4},{:.4},{},,,,",
+                states.len(),
+                fm[0],
+                fm[1],
+                fm[2] * 1e6,
+                fm[3] * 1e6,
+                s_diff + jm[0],
+                s_diff + jm[1],
+                jm[2] * 1e6,
+                jm[3] * 1e6,
+                entries.len()
+            );
+            by_count(&name);
+            continue;
+        }
         let (folded, s_fold) = timed(|| {
             let inlined = g.inline_all(&residuals);
             let map = syms
@@ -278,10 +402,10 @@ fn main() {
             .collect();
         let xc: Vec<f64> = xs.iter().map(|v| v + 0.01).collect();
         let no_split = vec![false; states.len()];
-        let (ff, ffv) = measure(&g, &folded, &states, &no_split, &xs, &xc);
+        let (ff, ffv, _) = measure(&g, &folded, &states, &no_split, &xs, &xc);
         let (frows, s_fdiff) = timed(|| sparse_jacobian(&mut g, &folded, &states));
         let fentries: Vec<ExprId> = frows.iter().flatten().map(|&(_, e)| e).collect();
-        let (fj, fjv) = measure(&g, &fentries, &states, &no_split, &xs, &xc);
+        let (fj, fjv, _) = measure(&g, &fentries, &states, &no_split, &xs, &xc);
         let close = |a: &[f64], b: &[f64]| {
             let scale = b.iter().fold(0.0f64, |m, v| m.max(v.abs())).max(1e-300);
             a.iter().zip(b).all(|(x, y)| (x - y).abs() <= 1e-9 * scale)
@@ -304,10 +428,6 @@ fn main() {
             close(&dense(&fr, &fc, &fjv), &dense(&ri, &ci, &jvals)),
             "folded Jacobian differs"
         );
-        let name = std::path::Path::new(path)
-            .file_stem()
-            .unwrap()
-            .to_string_lossy();
         println!(
             "{name},{},{:.6},{:.6},{:.4},{:.4},{:.6},{:.6},{:.4},{:.4},{},{:.6},{:.4},{:.6},{:.4}",
             states.len(),
@@ -325,6 +445,7 @@ fn main() {
             s_fold + s_fdiff + fj[1],
             fj[3] * 1e6
         );
+        by_count(&name);
         if let Some(dir) = &values_dir {
             let out = serde_json::json!({ "f": fvals, "j_rows": ri, "j_cols": ci, "j": jvals });
             std::fs::write(format!("{dir}/{name}.values.json"), out.to_string())

@@ -39,7 +39,9 @@ pub use builder::{Builder, Numeric};
 pub use coo::{transpose_rows, Coo};
 pub use display::to_string;
 pub use eval::eval;
-pub use extern_fn::{BackendCache, BodyBackend, BodyCompiler, ExternBundle, Instances, Submit};
+pub use extern_fn::{
+    BackendCache, BodyBackend, BodyCompiler, ExternBundle, Instances, Rows, Submit,
+};
 pub use field::{Field, F64};
 pub use func::{Body, FuncId, Function, Output, OutputId};
 pub use graph::{Arg, Bound, Graph};
@@ -57,6 +59,6 @@ pub use scope::Scope;
 pub use semantics::{
     binary_f64, cmp_bool, dot_slice, reduce_slice, unary_f64, EXP_LIMIT, LN_FLOOR,
 };
-pub use tape::{Lowered, NoTrace, ParamSelects, Program, SpecializedTape, Tape, TraceSink};
+pub use tape::{Lowered, NoTrace, ParamSelects, Program, Region, SpecializedTape, Tape, TraceSink};
 
 pub use transform::{pin, substitute, substitute_with};

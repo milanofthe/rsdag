@@ -519,8 +519,9 @@ impl ExternBundle for VariantBody {
                 b.prolog_batch(pure, states, ins);
                 let sl = b.state_len();
                 for g in ins.iter() {
-                    states[g * st + sl..g * st + tag].fill(0.0);
-                    states[g * st + tag] = v as f64;
+                    let r = ins.row(g);
+                    states[r * st + sl..r * st + tag].fill(0.0);
+                    states[r * st + tag] = v as f64;
                 }
             });
         });
@@ -532,7 +533,7 @@ impl ExternBundle for VariantBody {
         let (st, tag) = (at.stride, self.tag());
         crate::scratch::with(|vs: &mut Vec<u32>| {
             vs.clear();
-            vs.extend(at.iter().map(|g| states[g * st + tag] as u32));
+            vs.extend(at.iter().map(|g| states[at.row(g) * st + tag] as u32));
             self.by_variant(at, vs, |v, ins| {
                 self.bundle(v).main_batch(args, states, out, ins);
             });

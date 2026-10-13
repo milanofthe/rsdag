@@ -91,3 +91,51 @@ fn a_split_caller_runs_the_callees_prolog_in_its_own() {
         }
     }
 }
+
+#[test]
+fn instances_of_the_same_parameters_share_a_state_with_the_same_results() {
+    // Twelve instances over five parameter values, some repeated; 0.0 and
+    // -0.0 are apart (not the same bits). Serially and on a pool, the split
+    // tape's outputs are the whole one's, bit for bit.
+    let qs = [0.2, 0.3, 0.2, 0.2, 0.0, -0.0, 0.3, 0.7, 0.2, 0.0, 0.7, 0.3];
+    let mut g: Graph<F64> = Graph::new();
+    let f = device(&mut g);
+    let (mut syms, mut roots) = (Vec::new(), Vec::new());
+    for i in 0..qs.len() {
+        let (x, xs) = sym(&mut g, &format!("x{i}"));
+        let (q, qsym) = sym(&mut g, &format!("q{i}"));
+        syms.push(xs);
+        syms.push(qsym);
+        let a = g.call(f, 0, &[x, q]);
+        let b = g.call(f, 1, &[x, q]);
+        roots.push(g.add(a, b));
+    }
+    let pure: Vec<bool> = (0..syms.len()).map(|k| k % 2 == 1).collect();
+    let split = Tape::compile_split(&g, &roots, &syms, &pure);
+    let whole = Tape::compile(&g, &roots, &syms);
+    let ins = |t: f64| -> Vec<f64> {
+        (0..syms.len())
+            .map(|k| match k % 2 {
+                1 => qs[k / 2],
+                _ => t + 0.1 * k as f64,
+            })
+            .collect()
+    };
+    let run = || {
+        let mut w = vec![0.0; split.work_len()];
+        let mut got = vec![0.0; split.out_len()];
+        let (mut ww, mut want) = (Vec::new(), Vec::new());
+        split.eval_prolog_into(&ins(0.0), &mut w);
+        for t in [0.0, 0.5, -1.25] {
+            split.eval_main_into(&ins(t), &mut w, &mut got);
+            whole.eval(&ins(t), &mut ww, &mut want);
+            assert!(same(&got, &want), "at t = {t}: {got:?} vs {want:?}");
+        }
+    };
+    run();
+    let pool = rsdag::parallel::Parallel {
+        pool: std::sync::Arc::new(rsdag::parallel::Workers::new(3)),
+        min_ops: 0,
+    };
+    rsdag::parallel::install(pool, run);
+}
