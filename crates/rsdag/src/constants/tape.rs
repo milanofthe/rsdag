@@ -5,9 +5,14 @@
 /// Row dots against one vector fuse into a `Gemv` from this many rows on.
 pub(crate) const GEMV_MIN_ROWS: usize = 2;
 
+/// Ops per function a native backend emits (`rsdag-jit` re-exports it as
+/// its `CHUNK_OPS`). A chunk boundary costs nothing but the call, so the
+/// size is a matter of parallel build granularity.
+pub const CHUNK_OPS: usize = 1024;
+
 /// Ops a piece of a region takes on, about (whole connected parts of the
 /// run): as many as a native chunk.
-pub(crate) const PIECE_OPS: usize = 1024;
+pub(crate) const PIECE_OPS: usize = CHUNK_OPS;
 
 /// A run of ops without a call becomes a region (see
 /// [`Region`](crate::Region)) from this many ops on: two pieces.

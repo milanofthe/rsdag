@@ -9,6 +9,9 @@ use rsdag::semantics::{binary_f64, reduce_slice, unary_f64};
 use rsdag::tape::calls::{run_call, run_stage, Call, Phase, Shared};
 use std::sync::Arc;
 
+#[cfg(target_arch = "x86_64")]
+use crate::constants::MAX_LANES;
+
 pub(crate) type Bundles = Vec<Arc<dyn ExternBundle>>;
 
 macro_rules! unary_trampolines {
@@ -37,7 +40,7 @@ pub(crate) extern "C" fn h_exp_lanes(p: *mut f64, n: u64) {
     // SAFETY: the emitted code passes its gather area, `n` lanes long.
     let xs = unsafe { std::slice::from_raw_parts_mut(p, n as usize) };
     #[cfg(target_arch = "x86_64")]
-    if xs.len() == 4 && crate::x86_64::features().avx2 {
+    if xs.len() == MAX_LANES && crate::x86_64::features().avx2 {
         // SAFETY: AVX2 is there, and four lanes at `p`.
         return unsafe { lanes4::exp(p) };
     }
@@ -49,7 +52,7 @@ pub(crate) extern "C" fn h_ln_lanes(p: *mut f64, n: u64) {
     // SAFETY: as for `h_exp_lanes`.
     let xs = unsafe { std::slice::from_raw_parts_mut(p, n as usize) };
     #[cfg(target_arch = "x86_64")]
-    if xs.len() == 4 && crate::x86_64::features().avx2 {
+    if xs.len() == MAX_LANES && crate::x86_64::features().avx2 {
         // SAFETY: AVX2 is there, and four lanes at `p`.
         return unsafe { lanes4::ln(p) };
     }
@@ -80,7 +83,11 @@ pub(crate) mod lanes4 {
     /// `2^k` for each lane's `-1022 <= k <= 1023`.
     #[inline(always)]
     unsafe fn pow2(k: __m256i) -> __m256d {
-        unsafe { _mm256_castsi256_pd(_mm256_slli_epi64::<52>(_mm256_add_epi64(k, ci(1023)))) }
+        unsafe {
+            _mm256_castsi256_pd(_mm256_slli_epi64::<{ F64_FRAC_BITS as i32 }>(
+                _mm256_add_epi64(k, ci(F64_EXP_BIAS)),
+            ))
+        }
     }
 
     /// # Safety
@@ -108,7 +115,7 @@ pub(crate) mod lanes4 {
             let k1 = _mm256_sub_epi64(_mm256_castpd_si256(_mm256_add_pd(k1f, c(MAGIC))), magic);
             let k2 = _mm256_sub_epi64(k, k1);
             let mut v = _mm256_mul_pd(_mm256_mul_pd(y, pow2(k1)), pow2(k2));
-            let under = _mm256_cmp_pd::<_CMP_LT_OQ>(x, c(-745.2));
+            let under = _mm256_cmp_pd::<_CMP_LT_OQ>(x, c(EXP_UNDERFLOW));
             v = _mm256_blendv_pd(v, c(0.0), under);
             let nan = _mm256_cmp_pd::<_CMP_UNORD_Q>(x, x);
             v = _mm256_blendv_pd(v, x, nan);
@@ -128,14 +135,16 @@ pub(crate) mod lanes4 {
         unsafe {
             let x = _mm256_loadu_pd(p);
             let bits = _mm256_castpd_si256(x);
-            let high = _mm256_srli_epi64::<32>(bits);
-            let hm = _mm256_and_si256(high, ci(0x000f_ffff));
-            let i = _mm256_and_si256(_mm256_add_epi64(hm, ci(0x9_5f64)), ci(0x10_0000));
-            let e = _mm256_sub_epi64(_mm256_srli_epi64::<20>(high), ci(1023));
-            let k = _mm256_add_epi64(e, _mm256_srli_epi64::<20>(i));
-            let m_hi = _mm256_or_si256(hm, _mm256_xor_si256(i, ci(0x3ff0_0000)));
-            let low = _mm256_and_si256(bits, ci(0xffff_ffff));
-            let m = _mm256_castsi256_pd(_mm256_or_si256(_mm256_slli_epi64::<32>(m_hi), low));
+            const HIGH: i32 = F64_HIGH_WORD as i32;
+            const HIGH_FRAC: i32 = F64_HIGH_FRAC_BITS as i32;
+            let high = _mm256_srli_epi64::<HIGH>(bits);
+            let hm = _mm256_and_si256(high, ci(LN_HIGH_FRAC_MASK));
+            let i = _mm256_and_si256(_mm256_add_epi64(hm, ci(LN_SQRT2_CARRY)), ci(LN_HIGH_UNIT));
+            let e = _mm256_sub_epi64(_mm256_srli_epi64::<HIGH_FRAC>(high), ci(F64_EXP_BIAS));
+            let k = _mm256_add_epi64(e, _mm256_srli_epi64::<HIGH_FRAC>(i));
+            let m_hi = _mm256_or_si256(hm, _mm256_xor_si256(i, ci(LN_HIGH_ONE)));
+            let low = _mm256_and_si256(bits, ci(F64_LOW_WORD_MASK as i64));
+            let m = _mm256_castsi256_pd(_mm256_or_si256(_mm256_slli_epi64::<HIGH>(m_hi), low));
             let f = _mm256_sub_pd(m, c(1.0));
             let s = _mm256_div_pd(f, _mm256_add_pd(c(2.0), f));
             let magic = ci(MAGIC.to_bits() as i64);

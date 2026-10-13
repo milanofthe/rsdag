@@ -35,8 +35,7 @@ pub(crate) struct A64 {
 }
 
 const WINDOW: usize = 4096 * 8;
-const PREFETCH_EVERY: usize = 128;
-const PREFETCH_AHEAD: usize = 2048;
+use crate::constants::{PREFETCH_AHEAD, PREFETCH_EVERY};
 const HOT_LO: u32 = 22;
 const HOT_N: usize = 6;
 

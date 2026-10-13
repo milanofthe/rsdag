@@ -57,6 +57,12 @@ const EXEMPT: &[(&str, &[&str], &[&str], &str)] = &[
         "Win32's memory allocation and protection flags",
     ),
     (
+        "rsdag-jit/src/host.rs",
+        &["reduce_code"],
+        &[],
+        "the op codes of the host's reduce routine, an ABI with the emitted code",
+    ),
+    (
         "rsdag/src/semantics.rs",
         &[
             "MAGIC", "LN2_HI", "LN2_LO", "EP1", "EP2", "EP3", "EP4", "EP5", "LG1", "LG2", "LG3",

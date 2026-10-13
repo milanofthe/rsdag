@@ -109,8 +109,7 @@ pub(crate) enum StageRole {
     Last(u32),
 }
 
-/// Integer powers up to this exponent are emitted as their products.
-pub(crate) const POWI_INLINE: u32 = 64;
+use crate::constants::{INLINE_MINMAX_MAX, INLINE_ROWS, POWI_INLINE};
 
 /// Whether `x^n` is emitted inline (as `semantics::powi_t` multiplies,
 /// product for product) rather than through the host.
@@ -151,11 +150,6 @@ impl Dense {
         }
     }
 }
-
-/// A min or max over at most this many terms is a chain of instructions
-/// where the ISA has one (`Isa::MINMAX`); longer ones go through the host
-/// routine, whose call costs about as much as this many terms.
-pub(crate) const INLINE_MINMAX_MAX: usize = 16;
 
 impl ROp {
     /// Every operand the op reads: slots, and the tagged inputs a scalar
@@ -264,12 +258,6 @@ impl ROp {
     }
 }
 
-/// A product kernel of fewer rows than this runs as its entries' dots,
-/// inline in the code: there the host call costs more than the arithmetic
-/// (measured: a six by six product inline in two thirds of the host's
-/// time, an eight by eight one on the host in two thirds of the inline).
-const INLINE_ROWS: u32 = 8;
-
 /// A small product kernel as the ops it stands for: every entry the dot
 /// of its row and its column (the kernel's own fold, see
 /// [`rsdag::semantics::gemm_t`]), then the entries that fold, in entry
@@ -314,7 +302,7 @@ fn inline_product(
         } else {
             acc.c.map_or(d, |c| elem(c, width, e))
         };
-        match f.0 & 3 {
+        match f.0 & Fold::KIND {
             0 => {}
             1 => out.push(ROp::Sub(d, c, d)),
             2 => out.push(ROp::Add(d, c, d)),

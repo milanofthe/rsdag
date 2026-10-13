@@ -17,9 +17,7 @@
 //! guards hold identically. `tests/parity.rs` fuzzes arena == tape ==
 //! native to the bit.
 
-/// Ops per emitted function. A chunk boundary costs nothing but the call,
-/// so the size is a matter of parallel build granularity.
-pub const CHUNK_OPS: usize = 1024;
+pub use rsdag::constants::CHUNK_OPS;
 
 /// How a natively compiled function body runs a batch of instances (the
 /// calls one `CallBatch` makes).
@@ -99,6 +97,7 @@ impl std::error::Error for JitError {}
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
 pub mod background;
+mod constants;
 mod host;
 mod ir;
 mod isa;

@@ -34,8 +34,15 @@ use rsdag::{ExternBundle, Instances, Tape};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
+use crate::constants::{
+    CODE_ALIGN, GATHER_TABLE, LANE_CALL, LANE_MOVE, MAX_LANES, REG_NUMBERS, TASK_MAX_INSTANCES,
+};
 use crate::host::{self, Bundles};
 use crate::ir::{Dense, Kernel, KernelKind, Liveness, ROp, StageRole};
+use rsdag::constants::FOLD_LANES;
+
+/// Bytes a value takes in the work array and the inputs.
+const F64_BYTES: usize = std::mem::size_of::<f64>();
 use crate::isa::{Arg, Arith, Base, IArg, Isa, Round};
 use crate::{Batch, JitError, Lanes, Options};
 
@@ -104,6 +111,7 @@ fn lane_gather_len<I: Isa>(op: &ROp) -> usize {
         ROp::Reduce(_, rsdag::node::ReduceOp::Min | rsdag::node::ReduceOp::Max, a) => {
             a.len() * l + a.len() + l
         }
+        // lit: two arguments and the result, lane by lane
         _ if op.host::<I>().is_some() => 3 * l,
         _ => 0,
     }
@@ -195,9 +203,6 @@ fn chunked<'a>(ops: &'a [ROp], chunk_ops: usize, cuts: &[usize]) -> Vec<&'a [ROp
     out
 }
 
-/// Lanes the lane code runs at most (the four of AVX).
-const MAX_LANES: usize = 4;
-
 /// The phase a run of lane code covers, in the order of [`LaneCode::pays`].
 #[derive(Clone, Copy, PartialEq)]
 enum Phase {
@@ -205,6 +210,9 @@ enum Phase {
     Main,
     Whole,
 }
+
+/// The phases, [`Phase`]'s variants.
+const PHASES: usize = Phase::Whole as usize + 1;
 
 /// A body's lane code of one width.
 struct LaneCode {
@@ -230,12 +238,7 @@ impl LaneCode {
 /// into and out of the lanes (inputs read, the state, the outputs) and
 /// makes its host calls lane by lane; it costs as much with lanes left
 /// empty.
-/// What a host call costs, in ops, against an op of the code ([`lane_costs`]).
-const LANE_CALL: usize = 6;
-
 fn lane_costs(lt: &NativeTape, n_state: usize, n_out: usize) -> ([usize; 3], [usize; 3]) {
-    const MOVE: usize = 2;
-    const HOST: usize = LANE_CALL;
     let [(o0, h0), (o1, h1)] = lt.phase_ops;
     let [r0, r1] = [lt.reads[0].len(), lt.reads[1].len()];
     let phases = [
@@ -243,8 +246,9 @@ fn lane_costs(lt: &NativeTape, n_state: usize, n_out: usize) -> ([usize; 3], [us
         (o1, h1, r1 + n_state + n_out),
         (o0 + o1, h0 + h1, r0 + r1 + n_out),
     ];
-    let block =
-        phases.map(|(ops, host, moved)| ops - host + lt.lanes * (host * (1 + HOST) + moved * MOVE));
+    let block = phases.map(|(ops, host, moved)| {
+        ops - host + lt.lanes * (host * (1 + LANE_CALL) + moved * LANE_MOVE)
+    });
     (block, phases.map(|(ops, _, _)| ops))
 }
 
@@ -273,7 +277,7 @@ impl NativeBody {
         // The rest, fewer than a block: `best[m]` the cheapest way to take
         // `m` of it, and the lane code it starts with (`None`: scalar).
         let rest = n - full;
-        let mut best = [(0usize, None::<usize>); 8];
+        let mut best = [(0usize, None::<usize>); MAX_LANES];
         for m in 1..=rest {
             best[m] = (best[m - 1].0 + one, None);
             for (i, lc) in self.lanes.iter().enumerate().filter(|(_, lc)| pays(lc)) {
@@ -539,7 +543,8 @@ fn native_body(
         _ => NativeTape::compile_lanes(body),
     };
     // Forced, the scalar code is never the cheaper way.
-    let mut scalar = [usize::MAX / 16; 3];
+    // lit: headroom for the lane count's multiples
+    let mut scalar = [usize::MAX / 16; PHASES];
     let lanes: Vec<LaneCode> = lanes
         .into_iter()
         .map(|lt| {
@@ -560,7 +565,7 @@ fn native_body(
         .collect();
     let lanes = lanes
         .into_iter()
-        .filter(|lc| (0..3).any(|k| lc.pays(k, scalar[k])))
+        .filter(|lc| (0..PHASES).any(|k| lc.pays(k, scalar[k])))
         .collect();
     Ok(Arc::new(NativeBody {
         tape: NativeTape::compile_opts(body, opts, &[])?,
@@ -591,13 +596,15 @@ fn options_key(opts: &Options) -> u64 {
         Lanes::Always => 1,
         Lanes::Never => 2,
     };
+    // lit: the key's fields, chunk size, batch and lanes
     ((opts.chunk_ops as u64) << 32) ^ batch ^ (lanes << 62)
 }
 
-/// Instances per parallel task: about four tasks per thread of the
-/// current pool.
+/// Instances per parallel task: about
+/// [`PIECES_PER_WORKER`](rsdag::parallel::PIECES_PER_WORKER) tasks per
+/// thread of the current pool, at most [`TASK_MAX_INSTANCES`].
 fn blocks(n: usize) -> usize {
-    (n / (rayon::current_num_threads() * 4)).clamp(1, 4096)
+    rsdag::parallel::piece_len(n, rayon::current_num_threads()).min(TASK_MAX_INSTANCES)
 }
 
 /// The work array: the tape's slots, then the gather area for host calls,
@@ -652,7 +659,7 @@ impl NativeTape {
             let opts = Options::default();
             let wide = crate::x86_64::features()
                 .avx
-                .then(|| Self::compile_isa::<X64<4>>(tape, &opts, &[]));
+                .then(|| Self::compile_isa::<X64<MAX_LANES>>(tape, &opts, &[]));
             let two = Some(Self::compile_isa::<X64<2>>(tape, &opts, &[]));
             wide.into_iter().chain(two).filter_map(Result::ok).collect()
         }
@@ -711,6 +718,7 @@ impl NativeTape {
                 };
                 // The form of the bundle the program runs: its code by the
                 // options, and where its work goes.
+                // lit: a bit of the key options_key leaves free
                 let key = options_key(opts) ^ (u64::from(opts.background) << 61);
                 match b.backend_cache() {
                     Some(cache) => cache.get_or_try_insert(key, make),
@@ -877,12 +885,12 @@ impl NativeTape {
         // One mapping for all of them: a chunk is position independent (it
         // reaches host routines, descriptors and tables by absolute
         // address), so it runs from wherever it lands, 16-byte aligned.
-        let size = emitted.iter().map(|e| e.bytes.len() + 15).sum();
+        let size = emitted.iter().map(|e| e.bytes.len() + CODE_ALIGN - 1).sum();
         let mut bytes: Vec<u8> = Vec::with_capacity(size);
         let mut offsets = Vec::with_capacity(emitted.len());
         let mut descs = Vec::with_capacity(emitted.len());
         for e in emitted {
-            bytes.resize(bytes.len().next_multiple_of(16), 0);
+            bytes.resize(bytes.len().next_multiple_of(CODE_ALIGN), 0);
             offsets.push(bytes.len());
             bytes.extend_from_slice(&e.bytes);
             descs.push((e.calls, e.kernels));
@@ -1087,7 +1095,7 @@ struct Emitter<'a, I: Isa> {
     /// Cache index holding each slot.
     at: FxHashMap<u32, usize>,
     /// Cache index of each register number.
-    index: [u8; 32],
+    index: [u8; REG_NUMBERS],
     pinned: Vec<bool>,
     /// The chunk's call and kernel descriptors, allocated for all of them before the
     /// first is emitted (their addresses go into the code).
@@ -1097,14 +1105,9 @@ struct Emitter<'a, I: Isa> {
     gathers: Vec<Box<[u32]>>,
 }
 
-/// Calls with this many arguments over all their instances and more have
-/// the host gather them from a table; narrower ones gather in the code,
-/// whose size would otherwise grow with every argument.
-const GATHER_TABLE: usize = 64;
-
 impl<'a, I: Isa> Emitter<'a, I> {
     fn new(layout: Layout, live: &'a Liveness, hot: &[*const ()]) -> Emitter<'a, I> {
-        let mut index = [0u8; 32];
+        let mut index = [0u8; REG_NUMBERS];
         for (i, &r) in I::CACHE.iter().enumerate() {
             index[r as usize] = i as u8;
         }
@@ -1215,7 +1218,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
     }
     /// The byte offset of slot (or input) `s`: its `LANES` values side by side.
     fn slot_off(s: u32) -> usize {
-        s as usize * 8 * I::LANES
+        s as usize * F64_BYTES * I::LANES
     }
     /// The register holding `slot`, loading it if the cache does not have it.
     fn get(&mut self, slot: u32) -> u8 {
@@ -1294,15 +1297,15 @@ impl<'a, I: Isa> Emitter<'a, I> {
             return;
         }
         let l = I::LANES;
-        let base = self.layout.gather * 8;
+        let base = self.layout.gather * F64_BYTES;
         let mut nf = 0;
         for a in args {
             if let Arg::F(r) = *a {
-                self.isa.store(r, Base::Work, base + nf * l * 8);
+                self.isa.store(r, Base::Work, base + nf * l * F64_BYTES);
                 nf += 1;
             }
         }
-        let res = base + nf * l * 8;
+        let res = base + nf * l * F64_BYTES;
         for lane in 0..l {
             self.release_except(&[]);
             let mut j = 0;
@@ -1311,7 +1314,8 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 .map(|a| match *a {
                     Arg::F(_) => {
                         let r = self.fresh();
-                        self.isa.load_lane(r, Base::Work, base + (j * l + lane) * 8);
+                        self.isa
+                            .load_lane(r, Base::Work, base + (j * l + lane) * F64_BYTES);
                         j += 1;
                         Arg::F(r)
                     }
@@ -1319,7 +1323,8 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 })
                 .collect();
             self.call(addr, &lane_args);
-            self.isa.store_lane(I::RESULT, Base::Work, res + lane * 8);
+            self.isa
+                .store_lane(I::RESULT, Base::Work, res + lane * F64_BYTES);
         }
         self.release_except(&[]);
         let r = self.fresh_for(dst);
@@ -1334,11 +1339,11 @@ impl<'a, I: Isa> Emitter<'a, I> {
     /// offset of the copy.
     fn gather_at(&mut self, slots: &[u32], places: Option<&[u32]>, at: usize) -> usize {
         debug_assert_eq!(I::LANES, 1, "lane code gathers lane by lane");
-        let base = (self.layout.gather + at) * 8;
+        let base = (self.layout.gather + at) * F64_BYTES;
         for (k, &s) in slots.iter().enumerate() {
             let r = self.get(s);
             let to = places.map_or(k, |p| p[k] as usize);
-            self.isa.store(r, Base::Work, base + to * 8);
+            self.isa.store(r, Base::Work, base + to * F64_BYTES);
             self.release_except(&[]);
         }
         base
@@ -1363,7 +1368,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
     /// ([`ROp::gather_len`]).
     fn dense_arg(&mut self, d: &Dense, at: &mut usize) -> IArg {
         let mut arg = |this: &mut Self, d: &Dense| match d {
-            Dense::Inputs(k) => IArg::InputAddr(*k as usize * 8),
+            Dense::Inputs(k) => IArg::InputAddr(*k as usize * F64_BYTES),
             Dense::Run(s, len) => {
                 // Read in place: whatever of the run the register cache
                 // still owes to memory is written back first.
@@ -1372,7 +1377,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
                         this.drop_index(i);
                     }
                 }
-                IArg::WorkAddr(*s as usize * 8)
+                IArg::WorkAddr(*s as usize * F64_BYTES)
             }
             Dense::Slots(s) => {
                 let p = IArg::WorkAddr(this.gather_at(s, None, *at));
@@ -1517,18 +1522,19 @@ impl<'a, I: Isa> Emitter<'a, I> {
                     // lane's terms side by side for the routine, its result
                     // into its lane.
                     let (l, m) = (I::LANES, args.len());
-                    let base = self.layout.gather * 8;
+                    let base = self.layout.gather * F64_BYTES;
                     for (j, &a) in args.iter().enumerate() {
                         let r = self.get(a);
-                        self.isa.store(r, Base::Work, base + j * l * 8);
+                        self.isa.store(r, Base::Work, base + j * l * F64_BYTES);
                         self.release_except(&[]);
                     }
-                    let (row, res) = (base + m * l * 8, base + (m * l + m) * 8);
+                    let (row, res) = (base + m * l * F64_BYTES, base + (m * l + m) * F64_BYTES);
                     for lane in 0..l {
                         for j in 0..m {
                             let t = self.fresh();
-                            self.isa.load_lane(t, Base::Work, base + (j * l + lane) * 8);
-                            self.isa.store_lane(t, Base::Work, row + j * 8);
+                            self.isa
+                                .load_lane(t, Base::Work, base + (j * l + lane) * F64_BYTES);
+                            self.isa.store_lane(t, Base::Work, row + j * F64_BYTES);
                             self.release_except(&[]);
                         }
                         let call = [
@@ -1537,7 +1543,8 @@ impl<'a, I: Isa> Emitter<'a, I> {
                             Arg::I(IArg::Imm(m as u64)),
                         ];
                         self.call(host::h_reduce as *const (), &call);
-                        self.isa.store_lane(I::RESULT, Base::Work, res + lane * 8);
+                        self.isa
+                            .store_lane(I::RESULT, Base::Work, res + lane * F64_BYTES);
                     }
                     let r = self.fresh_for(dst);
                     self.isa.load(r, Base::Work, res);
@@ -1651,6 +1658,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
             }
             ROp::Kernel(ref kn) => {
                 let mut at = 0usize;
+                // lit: a kernel's three operands (host::KernelDesc)
                 let mut operands = [host::Place::NONE; 3];
                 for (p, (d, _)) in operands.iter_mut().zip(&kn.operands) {
                     *p = match self.dense_arg(d, &mut at) {
@@ -1677,8 +1685,8 @@ impl<'a, I: Isa> Emitter<'a, I> {
                     n: n as u64,
                     operands,
                     codes: kn.codes.as_ref().map_or(0, |c| c.1 as u64),
-                    out: kn.dst as u64 * 8,
-                    scratch: self.layout.scratch as u64 * 8,
+                    out: kn.dst as u64 * F64_BYTES as u64,
+                    scratch: self.layout.scratch as u64 * F64_BYTES as u64,
                     scratch_len: self.layout.scratch_len as u64,
                 };
                 let d = self.kernels.len();
@@ -1777,7 +1785,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
             // Lanes: one call computes every lane of the exponential or the
             // logarithm.
             None if I::LANES > 1 && matches!(uop, UnaryOp::Exp | UnaryOp::Ln) => {
-                let base = self.layout.gather * 8;
+                let base = self.layout.gather * F64_BYTES;
                 self.isa.store(x, Base::Work, base);
                 let addr = match uop {
                     UnaryOp::Exp => host::h_exp_lanes as *const (),
@@ -1810,14 +1818,14 @@ impl<'a, I: Isa> Emitter<'a, I> {
     /// the identity itself (`+0` or `1`, exactly), so the fold starts there.
     fn fold(&mut self, op: Arith, ident: f64, a: &[u32], b: Option<&[u32]>) -> u8 {
         let n = a.len();
-        let ch = n / 4;
+        let ch = n / FOLD_LANES;
         let mut s = if ch == 0 {
             self.fconst(ident)
         } else {
-            let acc: [u8; 4] = std::array::from_fn(|_| self.fconst(ident));
+            let acc: [u8; FOLD_LANES] = std::array::from_fn(|_| self.fconst(ident));
             for c in 0..ch {
                 for (k, &ak) in acc.iter().enumerate() {
-                    self.term(op, ak, ak, a, b, 4 * c + k);
+                    self.term(op, ak, ak, a, b, FOLD_LANES * c + k);
                     self.release_except(&acc);
                 }
             }
@@ -1829,7 +1837,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
             self.isa.arith(op, s, l, r);
             s
         };
-        for k in ch * 4..n {
+        for k in ch * FOLD_LANES..n {
             let s2 = self.fresh();
             self.term(op, s2, s, a, b, k);
             s = s2;
