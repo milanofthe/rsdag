@@ -1088,8 +1088,6 @@ struct Emitter<'a, I: Isa> {
     at: FxHashMap<u32, usize>,
     /// Cache index of each register number.
     index: [u8; 32],
-    /// Round-robin victim pointers of the callee-saved and caller-saved pools.
-    next: [usize; 2],
     pinned: Vec<bool>,
     /// The chunk's call and kernel descriptors, allocated for all of them before the
     /// first is emitted (their addresses go into the code).
@@ -1121,7 +1119,6 @@ impl<'a, I: Isa> Emitter<'a, I> {
             death: vec![0; I::CACHE.len()],
             at: Default::default(),
             index,
-            next: [0, 0],
             pinned: vec![false; I::CACHE.len()],
             descs: Vec::new(),
             kernels: Vec::new(),
@@ -1148,8 +1145,8 @@ impl<'a, I: Isa> Emitter<'a, I> {
             self.drop_index(i);
         }
     }
-    /// A register to write a temporary into: the next unpinned one round
-    /// robin, evicting whatever it held; pinned for the rest of the op.
+    /// A register to write a temporary into (see [`fresh_in`](Self::fresh_in)),
+    /// evicting whatever it held; pinned for the rest of the op.
     fn fresh(&mut self) -> u8 {
         self.fresh_in(I::SAVED..I::CACHE.len())
     }
@@ -1169,12 +1166,17 @@ impl<'a, I: Isa> Emitter<'a, I> {
         }
     }
     /// A register from the preferred pool: first one that is empty or holds
-    /// a dead value, in either pool; else the preferred pool's round-robin
-    /// victim; else any unpinned register.
+    /// a dead value, in either pool; else the one of the preferred pool
+    /// whose value is read again last (Belady's choice: its reload comes
+    /// the latest), a clean one before one that costs a store; else that
+    /// choice over every unpinned register.
     fn fresh_in(&mut self, pool: std::ops::Range<usize>) -> u8 {
         let n = I::CACHE.len();
-        let (lo, len) = (pool.start, pool.len().max(1));
-        let other = if lo == 0 { I::SAVED..n } else { 0..I::SAVED };
+        let other = if pool.start == 0 {
+            I::SAVED..n
+        } else {
+            0..I::SAVED
+        };
         let take = |e: &mut Self, i: usize| {
             e.drop_index(i);
             e.pinned[i] = true;
@@ -1192,20 +1194,16 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 return take(self, i);
             }
         }
-        let cursor = &mut self.next[usize::from(lo != 0 || I::SAVED == 0)];
-        for _ in 0..len {
-            let i = lo + *cursor % len;
-            *cursor = (*cursor + 1) % len;
-            if !self.pinned[i] {
-                return take(self, i);
-            }
+        let victim = |e: &Self, r: std::ops::Range<usize>| {
+            r.filter(|&i| !e.pinned[i]).max_by_key(|&i| {
+                let next = e.held[i].map_or(u32::MAX, |s| e.live.next_read(s, e.pos));
+                (next, !e.dirty[i])
+            })
+        };
+        match victim(self, pool).or_else(|| victim(self, 0..n)) {
+            Some(i) => take(self, i),
+            None => unreachable!("an op pins fewer than {n} registers"),
         }
-        for i in 0..n {
-            if !self.pinned[i] {
-                return take(self, i);
-            }
-        }
-        unreachable!("an op pins fewer than {n} registers");
     }
     fn pin(&mut self, r: u8) {
         self.pinned[self.index[r as usize] as usize] = true;
