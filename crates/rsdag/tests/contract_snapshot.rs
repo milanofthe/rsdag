@@ -1,8 +1,9 @@
 //! The contract constants, to the bit: the values every backend
 //! reproduces (the domain guards, the exponential's and the logarithm's
-//! constants, the fold order, the elimination's panels) and the module
-//! format. Changing one changes results, so it takes an edit here in the
-//! same commit, where review sees it.
+//! constants and bit fields, the fold order, the integer powers, the
+//! elimination's panels) and the module format. Changing one changes
+//! results, so it takes an edit here in the same commit, where review sees
+//! it.
 
 use rsdag::semantics::exp_ln::*;
 use rsdag::semantics::{LU_PANEL_LARGE, LU_PANEL_SMALL, LU_PANEL_SWITCH, LU_UNBLOCKED_MAX};
@@ -23,6 +24,30 @@ fn domain_guards() {
     bits("LN_FLOOR", LN_FLOOR, 0x39b4_484b_feeb_c2a0);
     bits("EXP_AT_LIMIT", EXP_AT_LIMIT, 0x4725_5779_b984_f3eb);
     bits("LN_AT_FLOOR", LN_AT_FLOOR, 0xc051_44f6_9ff9_ffc4);
+    bits("EXP_UNDERFLOW", EXP_UNDERFLOW, 0xc087_4999_9999_999a);
+}
+
+#[test]
+fn exp_and_ln_bit_fields() {
+    assert_eq!(F64_EXP_BIAS, 1023);
+    assert_eq!(F64_FRAC_BITS, 52);
+    assert_eq!(F64_HIGH_WORD, 32);
+    assert_eq!(F64_HIGH_FRAC_BITS, 20);
+    assert_eq!(F64_LOW_WORD_MASK, 0xffff_ffff);
+    assert_eq!(LN_HIGH_FRAC_MASK, 0x000f_ffff);
+    assert_eq!(LN_SQRT2_CARRY, 0x9_5f64);
+    assert_eq!(LN_HIGH_UNIT, 0x10_0000);
+    assert_eq!(LN_HIGH_ONE, 0x3ff0_0000);
+}
+
+#[test]
+fn fold_order_and_integer_powers() {
+    assert_eq!(rsdag::constants::FOLD_LANES, 4);
+    bits(
+        "POWF_AS_POWI_MAX",
+        rsdag::constants::POWF_AS_POWI_MAX,
+        0x4050_0000_0000_0000,
+    );
 }
 
 #[test]

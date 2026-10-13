@@ -12,6 +12,13 @@
 //! environment keeps x86-64 to SSE2 (here and in the JIT), so both paths
 //! can be tested on one machine.
 
+use crate::constants::{
+    FOLD_LANES, GEMM_COL_BLOCK, GEMM_ROW_BLOCK, GEMV_ROW_BLOCK, LU_TRAILING_ROWS,
+};
+
+/// The lanes of a [`Quad`], one per accumulator of the reference fold.
+const LANES: usize = FOLD_LANES;
+
 /// Four `f64` lanes, every operation lane by lane and rounded once.
 trait Quad: Copy {
     fn splat(v: f64) -> Self;
@@ -39,13 +46,13 @@ trait Quad: Copy {
         Self::splat(0.0)
     }
     #[inline(always)]
-    fn of(v: [f64; 4]) -> Self {
+    fn of(v: [f64; LANES]) -> Self {
         // SAFETY: `v` holds four.
         unsafe { Self::load(v.as_ptr()) }
     }
     #[inline(always)]
-    fn lanes(self) -> [f64; 4] {
-        let mut v = [0.0; 4];
+    fn lanes(self) -> [f64; LANES] {
+        let mut v = [0.0; LANES];
         // SAFETY: `v` holds four.
         unsafe { self.store(v.as_mut_ptr()) };
         v
@@ -419,28 +426,28 @@ fn finish<Q: Quad>(acc: Q, a: &[f64], b: &[f64], from: usize) -> f64 {
 fn dot_q<Q: Quad>(a: &[f64], b: &[f64]) -> f64 {
     let n = a.len();
     assert!(b.len() >= n, "dot operands of one length");
-    let ch = n / 4;
+    let ch = n / LANES;
     let mut acc = Q::zero();
     let (pa, pb) = (a.as_ptr(), b.as_ptr());
     for c in 0..ch {
-        let o = 4 * c;
+        let o = LANES * c;
         // SAFETY: `o + 3 < 4 * ch <= n <= a.len(), b.len()`.
         unsafe { acc = acc.add(Q::load(pa.add(o)).mul(Q::load(pb.add(o)))) }
     }
-    finish(acc, a, b, ch * 4)
+    finish(acc, a, b, ch * LANES)
 }
 
 #[inline(always)]
 fn gemv_q<Q: Quad>(a: &[f64], x: &[f64], m: usize, n: usize, out: &mut [f64]) {
     assert!(a.len() >= m * n && x.len() >= n && out.len() >= m);
-    let ch = n / 4;
+    let ch = n / LANES;
     let px = x.as_ptr();
     let mut i = 0;
-    while i + 4 <= m {
-        let p: [*const f64; 4] = std::array::from_fn(|r| a[(i + r) * n..].as_ptr());
-        let mut acc = [Q::zero(); 4];
+    while i + GEMV_ROW_BLOCK <= m {
+        let p: [*const f64; GEMV_ROW_BLOCK] = std::array::from_fn(|r| a[(i + r) * n..].as_ptr());
+        let mut acc = [Q::zero(); GEMV_ROW_BLOCK];
         for c in 0..ch {
-            let o = 4 * c;
+            let o = LANES * c;
             // SAFETY: row `r` starts at `(i + r) * n` with `n` elements,
             // `o + 3 < n`; `x` has `n`.
             unsafe {
@@ -451,9 +458,9 @@ fn gemv_q<Q: Quad>(a: &[f64], x: &[f64], m: usize, n: usize, out: &mut [f64]) {
             }
         }
         for (r, &ar) in acc.iter().enumerate() {
-            out[i + r] = finish(ar, &a[(i + r) * n..][..n], x, ch * 4);
+            out[i + r] = finish(ar, &a[(i + r) * n..][..n], x, ch * LANES);
         }
-        i += 4;
+        i += GEMV_ROW_BLOCK;
     }
     for r in i..m {
         out[r] = dot_q::<Q>(&a[r * n..][..n], x);
@@ -518,17 +525,17 @@ fn gemm_q<Q: Quad, F: FnMut(usize, f64)>(
     mut st: F,
 ) {
     assert!(a.len() >= m * k && b.len() >= n * k);
-    let ch = k / 4;
+    let ch = k / LANES;
     let mut i = 0;
-    while i + 4 <= m {
-        let pa: [*const f64; 4] = std::array::from_fn(|r| a[(i + r) * k..].as_ptr());
+    while i + GEMM_ROW_BLOCK <= m {
+        let pa: [*const f64; GEMM_ROW_BLOCK] = std::array::from_fn(|r| a[(i + r) * k..].as_ptr());
         let mut j = 0;
-        while j + 2 <= n {
+        while j + GEMM_COL_BLOCK <= n {
             let pb0 = b[j * k..].as_ptr();
             let pb1 = b[(j + 1) * k..].as_ptr();
-            let mut acc = [[Q::zero(); 2]; 4];
+            let mut acc = [[Q::zero(); GEMM_COL_BLOCK]; GEMM_ROW_BLOCK];
             for c in 0..ch {
-                let o = 4 * c;
+                let o = LANES * c;
                 // SAFETY: every row has `k` elements and `o + 3 < k`.
                 unsafe {
                     let b0 = Q::load(pb0.add(o));
@@ -545,13 +552,13 @@ fn gemm_q<Q: Quad, F: FnMut(usize, f64)>(
                 for (q, &aq) in ar.iter().enumerate() {
                     st(
                         (i + r) * n + j + q,
-                        finish(aq, ra, &b[(j + q) * k..][..k], ch * 4),
+                        finish(aq, ra, &b[(j + q) * k..][..k], ch * LANES),
                     );
                 }
             }
-            j += 2;
+            j += GEMM_COL_BLOCK;
         }
-        for r in 0..4 {
+        for r in 0..GEMM_ROW_BLOCK {
             for jj in j..n {
                 st(
                     (i + r) * n + jj,
@@ -559,7 +566,7 @@ fn gemm_q<Q: Quad, F: FnMut(usize, f64)>(
                 );
             }
         }
-        i += 4;
+        i += GEMM_ROW_BLOCK;
     }
     for r in i..m {
         for j in 0..n {
@@ -573,18 +580,18 @@ fn gemm_q<Q: Quad, F: FnMut(usize, f64)>(
 #[inline(always)]
 fn axpy_sub<Q: Quad>(row_i: &mut [f64], row_k: &[f64], l: f64) {
     let n = row_i.len().min(row_k.len());
-    let ch = n / 4;
+    let ch = n / LANES;
     let lv = Q::splat(l);
     let (pi, pk) = (row_i.as_mut_ptr(), row_k.as_ptr());
     for c in 0..ch {
-        let o = 4 * c;
+        let o = LANES * c;
         // SAFETY: `o + 3 < n` within both rows.
         unsafe {
             let v = Q::load(pi.add(o)).sub(lv.mul(Q::load(pk.add(o))));
             v.store(pi.add(o));
         }
     }
-    for j in ch * 4..n {
+    for j in ch * LANES..n {
         row_i[j] -= l * row_k[j];
     }
 }
@@ -607,6 +614,7 @@ fn solve_q<Q: Quad>(
             }
         };
     }
+    // lit: the sizes the fixed eliminations are instantiated for
     fixed!(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16);
     match lu_panel(n) {
         0 => solve_unblocked::<Q>(a, b, n, k, out, scratch),
@@ -633,14 +641,15 @@ fn solve_batch_q<Q: Quad>(
         macro_rules! lanes {
             ($($n:literal)*) => {
                 match n {
-                    $($n => while c + 4 <= count {
+                    $($n => while c + LANES <= count {
                         solve_lanes::<Q, $n>(&a[c * sa..], &b[c * sb..], k, &mut out[c * sb..]);
-                        c += 4;
+                        c += LANES;
                     },)*
                     _ => {}
                 }
             };
         }
+        // lit: the sizes of a batch, 1 to SOLVE_BATCH_MAX_N
         lanes!(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16);
     }
     for c in c..count {
@@ -854,8 +863,8 @@ fn pivot(m: &mut [f64], n: usize, w: usize, kk: usize) -> f64 {
 #[inline(always)]
 fn back_substitute<Q: Quad>(m: &[f64], n: usize, k: usize, w: usize, out: &mut [f64]) {
     let mut c = 0;
-    while c + 4 <= k {
-        let x = &mut out[c * n..(c + 4) * n];
+    while c + LANES <= k {
+        let x = &mut out[c * n..(c + LANES) * n];
         for i in (0..n).rev() {
             let mut s = Q::of(std::array::from_fn(|q| m[i * w + n + c + q]));
             for j in i + 1..n {
@@ -866,7 +875,7 @@ fn back_substitute<Q: Quad>(m: &[f64], n: usize, k: usize, w: usize, out: &mut [
                 x[q * n + i] = v / m[i * w + i];
             }
         }
-        c += 4;
+        c += LANES;
     }
     while c < k {
         let x = &mut out[c * n..(c + 1) * n];
@@ -926,7 +935,7 @@ fn solve_blocked<Q: Quad, const NB: usize>(
             }
             let mut i = k1;
             while i < n {
-                let rows = (n - i).min(4);
+                let rows = (n - i).min(LU_TRAILING_ROWS);
                 for r in 0..rows {
                     let at = (i + r) * w;
                     lrows[r * nb..(r + 1) * nb].copy_from_slice(&m[at + k0..at + k1]);

@@ -4,6 +4,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet};
 
 use crate::field::{Field, F64};
 
+use crate::constants::POWF_AS_POWI_MAX;
 use crate::extern_fn::ExternBundle;
 use crate::func::{FuncId, Function, Output, OutputId};
 use crate::node::{
@@ -975,11 +976,11 @@ fn cmp_field<K: Field>(op: CmpOp, x: &K, y: &K) -> bool {
     }
 }
 
-/// A constant that is a small integer (the exponent of a `Powf` that is
-/// really an integer power).
+/// A constant that is a small integer, up to [`POWF_AS_POWI_MAX`] (the
+/// exponent of a `Powf` that is really an integer power).
 fn small_integer<K: Field>(k: &K) -> Option<i64> {
     let x = k.to_f64();
-    if x.fract() == 0.0 && x.abs() <= 64.0 && K::from_i64(x as i64) == *k {
+    if x.fract() == 0.0 && x.abs() <= POWF_AS_POWI_MAX && K::from_i64(x as i64) == *k {
         Some(x as i64)
     } else {
         None

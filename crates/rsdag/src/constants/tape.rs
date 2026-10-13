@@ -34,6 +34,24 @@ pub(crate) const ORDER_RELABEL_GROWTH: f64 = 4.0 / 3.0;
 /// the installed pool.
 pub(crate) const OUTPUT_BLOCK: usize = 8192;
 
+/// Rows a dense matrix-vector product takes at a time, each with its own
+/// [`FOLD_LANES`](crate::constants::FOLD_LANES) accumulators: sixteen
+/// independent chains for the core. Every row's fold is the dot's.
+pub(crate) const GEMV_ROW_BLOCK: usize = 4;
+
+/// Rows of the left factor a dense matrix-matrix product takes at a time,
+/// against [`GEMM_COL_BLOCK`] of the right one: thirty-two independent
+/// accumulators, six operand rows in the near cache. Every entry's fold is
+/// the dot's.
+pub(crate) const GEMM_ROW_BLOCK: usize = 4;
+/// See [`GEMM_ROW_BLOCK`]; the kernels are written out for two.
+pub(crate) const GEMM_COL_BLOCK: usize = 2;
+
+/// Rows of the trailing matrix the blocked elimination updates at a time,
+/// one product against the panel's rows; each entry is the same dot
+/// whatever the block.
+pub(crate) const LU_TRAILING_ROWS: usize = 4;
+
 /// Systems of at most this many unknowns and right-hand sides solve side
 /// by side in a batch, four to a vector
 /// ([`solve_batch_into`](crate::semantics::solve_batch_into) in `f64`);

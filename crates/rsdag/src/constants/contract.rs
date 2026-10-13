@@ -25,6 +25,58 @@ pub const EXP_LIMIT: f64 = 80.0;
 /// [`unary_f64`](crate::semantics::unary_f64).
 pub const LN_FLOOR: f64 = 1e-30;
 
+/// Arguments below this give `exp` exactly zero. The true value there is
+/// less than half the smallest subnormal, so it rounds to zero anyway; the
+/// cut makes it so for every such argument, where the scaling by `2^k` in
+/// two halves of [`exp_core`](crate::semantics::exp_core) would leave the
+/// exponent range.
+pub const EXP_UNDERFLOW: f64 = -745.2;
+
+/// The accumulators of the reference fold of sums, products and dot
+/// products: term `i` goes to accumulator `i mod 4`, the accumulators merge
+/// as `(a0 + a1) + (a2 + a3)`, then the tail adds in order. Every evaluator
+/// folds so (a vector kernel holds one accumulator per lane, native code
+/// one per register), which is what makes their results agree to the bit.
+/// The merge is written out for four.
+pub const FOLD_LANES: usize = 4;
+
+/// A `Powf` whose exponent is a constant integer of at most this magnitude
+/// is an integer power ([`Graph::pow_i`](crate::Graph::pow_i)): it
+/// evaluates by multiplication ([`powi_t`](crate::semantics::powi_t)), not
+/// by `pow`. The native backend's own bound on the powers it multiplies
+/// out inline (`POWI_INLINE`) is a matter of code size, not this.
+pub const POWF_AS_POWI_MAX: f64 = 64.0;
+
+// The bits of an `f64` that the exponential and the logarithm take apart
+// (fdlibm's reduction, `crate::semantics::exp_core` and `ln_core`), the
+// same in every backend that computes them in its own instructions.
+
+/// The exponent bias of an `f64`: a biased exponent of `1023` is `2^0`.
+pub const F64_EXP_BIAS: i64 = 1023;
+/// The fraction bits of an `f64`, below its exponent.
+pub const F64_FRAC_BITS: u32 = 52;
+/// The shift from an `f64`'s bits to its high word: the sign, the exponent
+/// and the top [`F64_HIGH_FRAC_BITS`] of the fraction, the word `ln`
+/// reduces its argument on.
+pub const F64_HIGH_WORD: u32 = 32;
+/// The fraction bits in the high word.
+pub const F64_HIGH_FRAC_BITS: u32 = F64_FRAC_BITS - F64_HIGH_WORD;
+/// The low word of an `f64`'s bits.
+pub const F64_LOW_WORD_MASK: u64 = 0xffff_ffff;
+/// The fraction bits of the high word.
+pub const LN_HIGH_FRAC_MASK: i64 = 0x000f_ffff;
+/// fdlibm's constant: added to the high word's fraction bits, it carries
+/// into [`LN_HIGH_UNIT`] once they reach `0x6_a09c`, a mantissa of about
+/// `sqrt(2)`; such a mantissa moves to the next exponent, halved, so it
+/// lands in `[sqrt(2)/2, sqrt(2))`.
+pub const LN_SQRT2_CARRY: i64 = 0x9_5f64;
+/// The unit bit of the high word, one above its fraction bits: the carry
+/// of [`LN_SQRT2_CARRY`].
+pub const LN_HIGH_UNIT: i64 = 0x10_0000;
+/// The high word of `1.0`; with the carry flipped in, the exponent of `1`
+/// or of `1/2`, which the reduced mantissa takes.
+pub const LN_HIGH_ONE: i64 = 0x3ff0_0000;
+
 /// The column-panel widths of the blocked elimination in
 /// [`solve_t`](crate::semantics::solve_t): the panel's own updates run one
 /// element at a time, the trailing update as a product, and the balance
