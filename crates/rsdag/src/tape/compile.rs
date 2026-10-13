@@ -44,7 +44,7 @@ use crate::node::{ArgList, ExprId, Node, SymbolId};
 /// their argument list.
 type Site = (u32, ArgList);
 use crate::constants::{
-    GEMV_MIN_ROWS, PIECE_OPS, REGION_MIN_OPS, SOLVE_BATCH_MAX_K, SOLVE_BATCH_MAX_N,
+    GEMV_MIN_ROWS, PIECE_OPS, PLACE_MIN_RUN, REGION_MIN_OPS, SOLVE_BATCH_MAX_K, SOLVE_BATCH_MAX_N,
 };
 
 /// A call's operands and the slot of its state block (the last operand of
@@ -560,7 +560,7 @@ impl Program {
                             continue;
                         }
                         held[c2 as usize] = true;
-                        (code | 4 | (c2 << 3), placeholder)
+                        (code | Fold::SELF | (c2 << Fold::SELF_SHIFT), placeholder)
                     }
                     Ref::Value(i, _) if code != Fold::NEG.0 => {
                         if kernel_pure && !self.insts[i as usize].pure {
@@ -2821,7 +2821,7 @@ impl Program {
                     while e < operand.len() && placeable(&operand[e]) {
                         e += 1;
                     }
-                    if e - s >= 4 {
+                    if e - s >= PLACE_MIN_RUN {
                         for r in &operand[s..e] {
                             if let Ref::Value(j, _) = *r {
                                 reserved[j as usize] = next;

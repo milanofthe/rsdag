@@ -14,6 +14,9 @@ use crate::variant::VariantPolicy;
 /// choices most of them take, few enough to cost little next to the batch.
 pub(crate) const TRACED: usize = 16;
 
+/// A share in percent (`min_shrink_pct`) against this whole.
+pub(crate) const PERCENT: usize = 100;
+
 impl ChoicePolicy {
     /// The defaults ([`Default`] returns them).
     pub const DEFAULT: ChoicePolicy = ChoicePolicy {

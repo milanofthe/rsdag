@@ -92,7 +92,7 @@ pub struct Parallel {
     pub min_ops: usize,
 }
 
-pub use crate::constants::MIN_OPS;
+pub use crate::constants::{MIN_OPS, PIECES_PER_WORKER};
 
 impl Parallel {
     pub fn new(pool: Arc<dyn Pool>) -> Self {
@@ -172,18 +172,25 @@ pub fn run(n: usize, ops: usize, f: &(dyn Fn(usize) + Sync)) {
     }
 }
 
-/// Instances per piece of work for a stage of `n` instances: about four
-/// pieces per worker of the installed pool (balance over instances of
-/// unequal cost), all in one piece when there is none.
+/// Instances per piece of work for a stage of `n` instances: about
+/// [`PIECES_PER_WORKER`] pieces per worker of the installed pool (balance
+/// over instances of unequal cost), all in one piece when there is none.
 pub fn block(n: usize) -> usize {
     let threads = CURRENT.with(|c| c.borrow().as_ref().map_or(0, |p| p.pool.threads()));
     if threads < 2 {
         return n.max(1);
     }
-    (n / (threads * 4)).max(1)
+    piece_len(n, threads)
+}
+
+/// Items per piece of `n` items over `threads` workers: about
+/// [`PIECES_PER_WORKER`] pieces per worker, at least one item each.
+pub fn piece_len(n: usize, threads: usize) -> usize {
+    (n / (threads * PIECES_PER_WORKER)).max(1)
 }
 
 pub use crate::constants::SPIN;
+use crate::constants::SPIN_YIELD_EVERY;
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
@@ -303,7 +310,7 @@ impl Shared {
                 Some(job) => unsafe { job.execute() },
                 None => {
                     idle += 1;
-                    if idle.is_multiple_of(64) {
+                    if idle.is_multiple_of(SPIN_YIELD_EVERY) {
                         std::thread::yield_now();
                     } else {
                         std::hint::spin_loop();
@@ -331,7 +338,7 @@ impl Shared {
             }
             if since.elapsed() < self.spin {
                 idle += 1;
-                if idle.is_multiple_of(64) {
+                if idle.is_multiple_of(SPIN_YIELD_EVERY) {
                     std::thread::yield_now();
                 } else {
                     std::hint::spin_loop();

@@ -4,7 +4,7 @@ use crate::field::Field;
 use crate::graph::Graph;
 use crate::node::{ExprId, Node};
 
-use crate::constants::INFIX_MAX;
+use crate::constants::{INFIX_MAX, INFIX_OP_BYTES};
 
 /// Render an expression (raw, unsimplified): infix while that stays short,
 /// else a listing `%k = ...` of the nodes it reaches, in dependency order,
@@ -30,7 +30,7 @@ pub fn to_string<K: Field>(ctx: &Graph<K>, id: ExprId) -> String {
         let own = if ctx.operands(e).is_empty() {
             leaf(ctx, e).len()
         } else {
-            8
+            INFIX_OP_BYTES
         };
         let total = ctx
             .operands(e)

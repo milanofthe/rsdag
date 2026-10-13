@@ -12,6 +12,8 @@
 //! arm is unpinned for good, so the next specialization keeps it a real
 //! `Select`; choices that flip too often turn specialization off.
 
+use crate::constants::PERCENT;
+
 /// When specializing against the choices pays. The defaults are what a
 /// circuit simulator's Newton loop measured best with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,7 +123,7 @@ impl Choices {
     /// is built: kept when it shrinks the program enough, else
     /// specialization goes off (`false`).
     pub(crate) fn built(&mut self, policy: &ChoicePolicy, ops: usize, full: usize) -> bool {
-        if ops * 100 > full * (100 - policy.min_shrink_pct.min(100)) {
+        if ops * PERCENT > full * (PERCENT - policy.min_shrink_pct.min(PERCENT)) {
             self.off = true;
             return false;
         }

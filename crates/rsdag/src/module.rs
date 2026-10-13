@@ -245,6 +245,7 @@ impl<K> Module<K> {
                         Node::Dot(_) if n % 2 != 0 => return shape("dot of uneven halves"),
                         Node::Solve(_, k) => {
                             // `n*n + n` values for some `n`, component below `n`.
+                            // lit: m from n = m^2 + m
                             let m = ((((4 * n + 1) as f64).sqrt() - 1.0) / 2.0).round() as usize;
                             if m == 0 || m * m + m != n || k as usize >= m {
                                 return shape("solve list of no square system");

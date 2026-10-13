@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 use rustc_hash::FxHashMap as HashMap;
 
 use super::compile::{Kind, Program, Ref};
+use crate::constants::ORDER_RELABEL_GROWTH;
 
 /// A topological order of a program's instructions that the fold pass
 /// keeps valid as kernels take accumulators, by two-way search (Haeupler,
@@ -170,6 +171,7 @@ impl Topo {
         // Forward marks are `sf`, backward ones `sb`. The sides take one
         // edge each in turn (a kernel's readers can be thousands), each a
         // stack of nodes with the next edge to look at.
+        // lit: room for the next search's two stamps
         if self.stamp > u32::MAX - 4 {
             self.seen.fill(0);
             self.stamp = 0;
@@ -314,7 +316,7 @@ impl Order {
         }
         let head = self.label.len() as u32 - 2;
         let tail = head + 1;
-        for i in 1..=64u32 {
+        for i in 1..=u64::BITS {
             let size = 1u128 << i;
             let base = lo as u128 & !(size - 1);
             let end = base + size;
@@ -332,7 +334,7 @@ impl Order {
                 v = self.next[v as usize];
             }
             // Sparse enough: fewer than (2 / 1.5)^i elements in 2^i labels.
-            if i == 64 || (c as f64) < (4.0f64 / 3.0).powi(i as i32) {
+            if i == u64::BITS || (c as f64) < ORDER_RELABEL_GROWTH.powi(i as i32) {
                 let from = base.max(1);
                 let to = end.min(u64::MAX as u128);
                 let gap = (to - from) / (c + 1);

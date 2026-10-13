@@ -112,6 +112,7 @@ fn unary_factor<K: Field>(ctx: &mut Graph<K>, op: UnaryOp, a: ExprId) -> ExprId 
             // 1 / (3 cbrt(a)^2)
             let c = ctx.unary(UnaryOp::Cbrt, a);
             let c2 = ctx.mul(c, c);
+            // lit: the 3 of d cbrt(a) = 1 / (3 cbrt(a)^2)
             let three = ctx.konst_int(3);
             let d = ctx.mul(three, c2);
             ctx.recip(d)
@@ -353,6 +354,7 @@ pub(crate) fn forward<K: Field>(
     moves: &dyn Fn(ExprId) -> bool,
 ) -> Vec<ExprId> {
     let zero = ctx.zero();
+    // lit: a first capacity, grown as needed
     let mut stack: Vec<(ExprId, bool)> = Vec::with_capacity(64);
     stack.extend(roots.iter().rev().map(|&r| (r, false)));
     let mut ops = Vec::new();

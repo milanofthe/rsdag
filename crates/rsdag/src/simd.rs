@@ -487,7 +487,7 @@ pub(crate) fn gemm_fold(
     // store.
     let uniform = codes.windows(2).all(|w| w[0] == w[1]);
     let f = Fold(codes[0]);
-    match (uniform, f.0 & 3, f.is_self(), c) {
+    match (uniform, f.0 & Fold::KIND, f.is_self(), c) {
         (true, 0, _, _) => gemm_with(a, b, m, k, n, |i, v| out[i] = v),
         (true, 3, _, _) => gemm_with(a, b, m, k, n, |i, v| out[i] = -v),
         (true, 1, false, Some(c)) => {

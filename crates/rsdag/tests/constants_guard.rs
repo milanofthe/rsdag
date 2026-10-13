@@ -14,7 +14,8 @@
 //! - it is in test code (`#[cfg(test)]`, `#[test]`);
 //! - its item is on [`EXEMPT`], with the reason: instruction encodings, ABI
 //!   tables, published coefficients, hash constants, tag bits;
-//! - its line carries a `// lit: <reason>` comment.
+//! - its line carries a `// lit: <reason>` comment, or the line above is
+//!   one.
 //!
 //! The contract values ([`CONTRACT`]) are held tighter: outside the
 //! constants files they appear nowhere, exempt code included, so a backend
@@ -81,6 +82,30 @@ const EXEMPT: &[(&str, &[&str], &[&str], &str)] = &[
         &["shape"],
         &[],
         "splitmix64's constants of the structural hash",
+    ),
+    (
+        "rsdag/src/tape/mod.rs",
+        &[
+            "INPUT",
+            "Fold::NEG",
+            "Fold::KIND",
+            "Fold::SELF",
+            "Fold::SELF_SHIFT",
+        ],
+        &[],
+        "tag bits: an operand's input bit, a fold code's fields",
+    ),
+    (
+        "rsdag/src/graph/mod.rs",
+        &["BOUND"],
+        &[],
+        "the tag bit of a bound symbol",
+    ),
+    (
+        "rsdag/src/role.rs",
+        &["ParamRole::place"],
+        &[],
+        "the rank of each role's group in a signature, an enumeration",
     ),
     (
         "rsdag/src/synth.rs",
@@ -218,7 +243,9 @@ fn lex(src: &str) -> (Vec<Token>, Vec<usize>) {
                     .trim()
                     .is_empty()
             {
-                lit_lines.push(line);
+                // On a line of its own, the comment covers the next one.
+                let own_line = src[..i].rsplit('\n').next().unwrap_or("").trim().is_empty();
+                lit_lines.push(if own_line { line + 1 } else { line });
             }
             i = end;
         } else if src[i..].starts_with("/*") {
@@ -951,6 +978,8 @@ fn the_guard_reads_rust() {
             let e = [0u8; 16];
             let s = 'a: loop { break 'a 5; };
             let g = 1e3; // lit: a sample
+            // lit: a sample on the line above
+            let h = 1e4;
             42
         }
         #[cfg(test)]
@@ -977,6 +1006,6 @@ fn the_guard_reads_rust() {
         .map(|(a, b)| (a.to_string(), b.to_string()))
         .collect();
     assert_eq!(found, want);
-    assert_eq!(hatches, 1);
+    assert_eq!(hatches, 2);
     assert_eq!(hits.last().unwrap().contract, Some("EXP_UNDERFLOW"));
 }
