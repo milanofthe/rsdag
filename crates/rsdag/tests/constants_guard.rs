@@ -21,10 +21,7 @@
 //! constants files they appear nowhere, exempt code included, so a backend
 //! cannot carry a copy of them.
 //!
-//! `constants_guard.baseline`, next to this file, lists what is left from
-//! before the guard as `path :: item :: literal`; it may only shrink. A
-//! literal not on it fails the test with its line; an entry no longer found
-//! fails it too, and `CONSTANTS_GUARD_BLESS=1` drops such entries.
+//! A literal found fails the test with its file, line and item.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -161,10 +158,6 @@ fn is_float(text: &str) -> bool {
 
 fn crates_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
-}
-
-fn baseline_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/constants_guard.baseline")
 }
 
 /// Every source file of every crate, as `crate/src/...`.
@@ -880,8 +873,9 @@ fn item_name(toks: &[Token], k: usize) -> Option<String> {
     }
 }
 
-/// Every hit of the workspace, as `path :: item :: literal` with its line.
-fn hits() -> (Vec<(String, usize, Hit)>, BTreeMap<String, usize>) {
+/// Every hit of the workspace, as `file:line` messages, and the count of
+/// literals under `// lit:` per file.
+fn hits() -> (Vec<String>, BTreeMap<String, usize>) {
     let mut all = Vec::new();
     let mut hatches = BTreeMap::new();
     for (rel, path) in sources() {
@@ -891,12 +885,15 @@ fn hits() -> (Vec<(String, usize, Hit)>, BTreeMap<String, usize>) {
             hatches.insert(rel.clone(), n);
         }
         for h in hits {
-            let key = format!(
-                "{rel} :: {} :: {}",
-                if h.item.is_empty() { "-" } else { &h.item },
-                h.text
-            );
-            all.push((key, h.line, h));
+            let item = if h.item.is_empty() { "-" } else { &h.item };
+            let why = match h.contract {
+                Some(c) => format!("is the contract value of `{c}`: use the constant"),
+                None => "is not named (move it to the crate's constants file, or mark it `// lit: <reason>`)".into(),
+            };
+            all.push(format!(
+                "crates/{rel}:{}: literal {} in {item} {why}",
+                h.line, h.text
+            ));
         }
     }
     (all, hatches)
@@ -908,64 +905,15 @@ fn every_number_has_a_name() {
     for (file, n) in &hatches {
         println!("{file}: {n} literal(s) under `// lit:`");
     }
-    let text = std::fs::read_to_string(baseline_path()).unwrap_or_default();
-    let mut left: BTreeMap<String, usize> = BTreeMap::new();
-    for l in text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-    {
-        *left.entry(l.to_string()).or_default() += 1;
-    }
-    let mut kept: BTreeMap<String, usize> = BTreeMap::new();
-    let mut fresh = Vec::new();
-    for (key, line, h) in &all {
-        let in_baseline = left.get(key).is_some_and(|&n| n > 0);
-        if in_baseline {
-            *left.get_mut(key).unwrap() -= 1;
-            *kept.entry(key.clone()).or_default() += 1;
-        } else {
-            let (path, rest) = key.split_once(" :: ").unwrap();
-            let why = match h.contract {
-                Some(c) => format!("the contract value of `{c}`: use the constant"),
-                None => "is not named (move it to the crate's constants file, or mark it `// lit: <reason>`)".into(),
-            };
-            fresh.push(format!(
-                "crates/{path}:{line}: literal {} in {} {why}",
-                h.text,
-                rest.rsplit_once(" :: ").unwrap().0
-            ));
-        }
-    }
-    let stale: Vec<_> = left.iter().filter(|(_, &n)| n > 0).collect();
-    if !stale.is_empty() && std::env::var_os("CONSTANTS_GUARD_BLESS").is_some() {
-        let mut out = String::new();
-        for l in text
-            .lines()
-            .filter(|l| l.trim().is_empty() || l.starts_with('#'))
-        {
-            out += l;
-            out += "\n";
-        }
-        for (key, n) in &kept {
-            for _ in 0..*n {
-                out += key;
-                out += "\n";
-            }
-        }
-        std::fs::write(baseline_path(), out).unwrap();
-    } else if !stale.is_empty() {
-        let list: Vec<String> = stale.iter().map(|(k, n)| format!("  {k} (x{n})")).collect();
-        panic!(
-            "constants_guard.baseline lists literals that are gone; delete them (or run with CONSTANTS_GUARD_BLESS=1):\n{}",
-            list.join("\n")
-        );
-    }
     assert!(
-        fresh.is_empty(),
-        "{} unnamed literal(s):\n{}",
-        fresh.len(),
-        fresh.join("\n")
+        all.is_empty(),
+        "{} unnamed literal(s):
+{}",
+        all.len(),
+        all.join(
+            "
+"
+        )
     );
 }
 
