@@ -49,7 +49,7 @@ pub trait Pool: Send + Sync {
     /// Run `body` with a [`Spawn`] its tasks start tasks through, returning
     /// once every task ran. The default runs the tasks one after the other
     /// after `body`.
-    fn scope<'s>(&self, body: &mut (dyn FnMut(&dyn Spawn<'s>) + Send + 's)) {
+    fn scope<'s>(&self, body: &mut (dyn FnMut(&dyn Spawn<'s>) + Send)) {
         let queue = Serial(std::sync::Mutex::new(std::collections::VecDeque::new()));
         body(&queue);
         loop {
@@ -565,7 +565,7 @@ impl Pool for Workers {
         resume(side.panic);
     }
 
-    fn scope<'s>(&self, body: &mut (dyn FnMut(&dyn Spawn<'s>) + Send + 's)) {
+    fn scope<'s>(&self, body: &mut (dyn FnMut(&dyn Spawn<'s>) + Send)) {
         let scope = ScopeJob {
             shared: &self.shared,
             open: AtomicUsize::new(0),
