@@ -516,7 +516,8 @@ impl ExternBundle for NativeBody {
                 Batch::Serial => false,
                 Batch::Always => true,
                 Batch::Parallel => {
-                    rayon_dispatch().width(ops * self.rate.ns_per_op(), n_groups) > 1
+                    !self.rate.probing(ops)
+                        && rayon_dispatch().width(ops * self.rate.ns_per_op(), n_groups) > 1
                 }
             };
         if !parallel {

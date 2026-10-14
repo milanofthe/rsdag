@@ -48,9 +48,28 @@ pub const OUTPUT_NS_PER_VALUE: f32 = 1.0;
 pub const RATE_SAMPLE_EVERY: u32 = 16;
 /// See [`RATE_SAMPLE_EVERY`].
 pub const RATE_MIN_OPS: f64 = 2_000.0;
+/// The first runs of at least [`RATE_MIN_OPS`] ops of a
+/// [`Rate`](crate::parallel::Rate)'s code run serially and are measured,
+/// the first of them (cold caches) not counted: the rate a section's width
+/// is decided on comes from runs of one thread, never from wide ones,
+/// whose time mixes the work with what the hand-off cost.
+pub const RATE_PROBES: u32 = 4;
+/// A wide run (one in [`RATE_SAMPLE_EVERY`] is timed) that takes less than
+/// this fraction of the time its rate predicts shows the rate stale (the
+/// code got cheaper since: a body specialized, compiled): the rate probes
+/// anew.
+pub const RATE_STALE: f64 = 0.5;
+/// A section that runs on `k` threads runs serially, measured, once in
+/// this many times `k - 1` runs: its rate stays the code's as it is now,
+/// for about a percent of the section's time.
+pub const RATE_EXPLORE: u32 = 100;
 /// The weight of a new measurement in a [`Rate`](crate::parallel::Rate)'s
-/// running mean.
-pub const RATE_WEIGHT: f32 = 0.25;
+/// running mean, toward less time and toward more: interruptions only ever
+/// add time to a run, so the mean follows a faster run at once and a slower
+/// one only as they keep coming.
+pub const RATE_WEIGHT_DOWN: f32 = 0.5;
+/// See [`RATE_WEIGHT_DOWN`].
+pub const RATE_WEIGHT_UP: f32 = 0.1;
 
 /// Pieces of work per thread a section is cut into
 /// ([`piece_len`](crate::parallel::piece_len)): about four balance

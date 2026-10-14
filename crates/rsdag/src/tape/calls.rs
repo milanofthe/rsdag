@@ -285,13 +285,29 @@ pub unsafe fn run_stage<'a, T: Scalar>(
             run_part(c, slots, gather, inputs, groups, s)
         })
     };
-    let width = crate::parallel::width(work, groups);
-    if width < 2 {
+    // the bundles' rates come from serial runs: their probes first
+    let probing = (0..n).any(|k| {
+        let c = call(k);
+        c.bundle.rate().probing(c.ops as f64)
+    });
+    let width = if probing {
+        1
+    } else {
+        crate::parallel::width(work, groups)
+    };
+    // a wide stage now and then serially, its rates kept the code's
+    let ops: f64 = (0..n).map(|k| call(k).ops as f64).sum();
+    let explore = width >= 2 && call(0).bundle.rate().explore(ops, width);
+    if width < 2 || explore {
         for k in 0..n {
             let c = call(k);
-            c.bundle
-                .rate()
-                .time(c.ops as f64, || run_groups(&c, 0..c.n_groups));
+            let rate = c.bundle.rate();
+            let run = || run_groups(&c, 0..c.n_groups);
+            if explore {
+                rate.measure(c.ops as f64, run);
+            } else {
+                rate.time(c.ops as f64, run);
+            }
         }
         return;
     }
@@ -313,22 +329,11 @@ pub unsafe fn run_stage<'a, T: Scalar>(
         run_groups(&c, g0..(g0 + bs).min(c.n_groups));
     };
     let total = (0..n).map(|k| pieces(&call(k))).sum();
-    // Measured as a whole, now and then: the threads' time less the
-    // section's cost, shared out over the calls as estimated, so a stage
-    // that went wide on a rate too high learns its way back.
-    let ops: f64 = (0..n).map(|k| call(k).ops as f64).sum();
-    if !call(0).bundle.rate().sample(ops) {
-        crate::parallel::run_width(total, width, &run);
-        return;
-    }
-    let t = std::time::Instant::now();
-    crate::parallel::run_width(total, width, &run);
-    let spent = t.elapsed().as_nanos() as f64 - crate::parallel::section_cost(width);
-    let serial = spent.max(0.0) * width as f64;
-    for k in 0..n {
-        let c = call(k);
-        c.bundle
-            .rate()
-            .learn(serial * work_of(&c) / work, c.ops as f64);
+    // now and then timed: far faster than its rates predict, they are stale
+    let timed = call(0).bundle.rate().sample(ops);
+    if crate::parallel::run_watched(total, width, work, timed, &run) {
+        for k in 0..n {
+            call(k).bundle.rate().reprobe();
+        }
     }
 }

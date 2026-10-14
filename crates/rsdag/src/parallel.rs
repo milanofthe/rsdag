@@ -110,7 +110,8 @@ pub struct Parallel {
 use crate::constants::{ASSUMED_HELPER_NS, ASSUMED_SECTION_NS};
 use crate::constants::{CALIBRATION_LINES, CALIBRATION_ROUNDS};
 pub use crate::constants::{GAIN, PIECES_PER_WORKER};
-use crate::constants::{RATE_MIN_OPS, RATE_SAMPLE_EVERY, RATE_WEIGHT};
+use crate::constants::{RATE_EXPLORE, RATE_MIN_OPS, RATE_PROBES, RATE_SAMPLE_EVERY, RATE_STALE};
+use crate::constants::{RATE_WEIGHT_DOWN, RATE_WEIGHT_UP};
 
 impl Parallel {
     /// `pool` with what a section costs on it.
@@ -201,13 +202,17 @@ impl Dispatch {
 /// What an op of some code costs, in ns: a prior until runs are measured,
 /// then their running mean. Code that runs on the pool carries one (a
 /// function body, a backend's own ops), so a section's work is its ops at
-/// its code's rate. Measured on one run in [`RATE_SAMPLE_EVERY`] of at
-/// least [`RATE_MIN_OPS`] ops.
+/// its code's rate. Only serial runs are measured: the first
+/// [`RATE_PROBES`] of at least [`RATE_MIN_OPS`] ops run serially for it
+/// ([`probing`](Self::probing)), and after them one serial run in
+/// [`RATE_SAMPLE_EVERY`].
 #[derive(Debug)]
 pub struct Rate {
     /// ns per op, as `f32` bits.
     ns: std::sync::atomic::AtomicU32,
     runs: std::sync::atomic::AtomicU32,
+    /// Serial probes run.
+    probes: std::sync::atomic::AtomicU32,
 }
 
 impl Rate {
@@ -216,7 +221,30 @@ impl Rate {
         Rate {
             ns: std::sync::atomic::AtomicU32::new(prior.to_bits()),
             runs: std::sync::atomic::AtomicU32::new(0),
+            probes: std::sync::atomic::AtomicU32::new(0),
         }
+    }
+
+    /// Whether a run of `ops` ops is to run serially, to be measured: the
+    /// rate has not had its probes yet.
+    pub fn probing(&self, ops: f64) -> bool {
+        ops >= RATE_MIN_OPS && self.probes.load(std::sync::atomic::Ordering::Relaxed) < RATE_PROBES
+    }
+
+    /// Whether a run of `ops` ops that would go `k` wide is to run serially
+    /// instead, measured: one in [`RATE_EXPLORE`] times `k - 1`.
+    pub fn explore(&self, ops: f64, k: usize) -> bool {
+        let every = RATE_EXPLORE.saturating_mul(k.saturating_sub(1).max(1) as u32);
+        ops >= RATE_MIN_OPS
+            && self
+                .runs
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                .is_multiple_of(every)
+    }
+
+    /// The rate is stale: its next runs probe again (warm, all counted).
+    pub fn reprobe(&self) {
+        self.probes.store(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// ns per op.
@@ -224,7 +252,8 @@ impl Rate {
         f32::from_bits(self.ns.load(std::sync::atomic::Ordering::Relaxed)) as f64
     }
 
-    /// Whether to measure a run of `ops` ops.
+    /// Whether to measure a serial run of `ops` ops (a probe, or one in
+    /// [`RATE_SAMPLE_EVERY`]).
     pub fn sample(&self, ops: f64) -> bool {
         ops >= RATE_MIN_OPS
             && self
@@ -233,7 +262,7 @@ impl Rate {
                 .is_multiple_of(RATE_SAMPLE_EVERY)
     }
 
-    /// A run of `ops` ops took `ns` ns of one thread.
+    /// A serial run of `ops` ops took `ns` ns.
     pub fn learn(&self, ns: f64, ops: f64) {
         if !(ns > 0.0 && ops > 0.0) {
             return;
@@ -242,15 +271,37 @@ impl Rate {
         let seen = (ns / ops) as f32;
         let _ = self.ns.fetch_update(Relaxed, Relaxed, |b| {
             let old = f32::from_bits(b);
-            Some((old + RATE_WEIGHT * (seen - old)).to_bits())
+            let w = if seen < old {
+                RATE_WEIGHT_DOWN
+            } else {
+                RATE_WEIGHT_UP
+            };
+            Some((old + w * (seen - old)).to_bits())
         });
     }
 
-    /// `f`, a run of `ops` ops, measured if sampled.
+    /// `f`, a serial run of `ops` ops, measured if it is a probe or
+    /// sampled. The first probe warms the caches and is not counted; the
+    /// first counted one replaces the prior.
     pub fn time<R>(&self, ops: f64, f: impl FnOnce() -> R) -> R {
-        if !self.sample(ops) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let probe = self.probing(ops).then(|| self.probes.fetch_add(1, Relaxed));
+        if probe.is_none() && !self.sample(ops) {
             return f();
         }
+        let t = std::time::Instant::now();
+        let r = f();
+        let ns = t.elapsed().as_nanos() as f64;
+        match probe {
+            Some(0) => {}
+            Some(1) => self.ns.store(((ns / ops) as f32).to_bits(), Relaxed),
+            _ => self.learn(ns, ops),
+        }
+        r
+    }
+
+    /// `f`, a serial run of `ops` ops, measured.
+    pub fn measure<R>(&self, ops: f64, f: impl FnOnce() -> R) -> R {
         let t = std::time::Instant::now();
         let r = f();
         self.learn(t.elapsed().as_nanos() as f64, ops);
@@ -306,11 +357,6 @@ pub fn width(work: f64, pieces: usize) -> usize {
     })
 }
 
-/// What a section on `k` threads costs on the installed pool, in ns.
-pub fn section_cost(k: usize) -> f64 {
-    CURRENT.with(|c| c.borrow().as_ref().map_or(0.0, |p| p.dispatch.cost(k)))
-}
-
 /// Run `n` pieces of `work` ns of work together: on as many threads of the
 /// installed pool as it is worth ([`width`]), else serially on this
 /// thread.
@@ -319,22 +365,39 @@ pub fn run(n: usize, work: f64, f: &(dyn Fn(usize) + Sync)) {
 }
 
 /// Run `n` pieces of `ops` ops of code at `rate` together, on as many
-/// threads as they are worth ([`run`]); the rate learns from the runs (a
-/// wide one counted as the threads' time less the section's cost).
+/// threads as they are worth ([`run`]); the rate learns from the serial
+/// runs (its probes first, see [`Rate`]).
 pub fn run_rated(n: usize, ops: f64, rate: &Rate, f: &(dyn Fn(usize) + Sync)) {
-    let k = width(ops * rate.ns_per_op(), n);
-    if !rate.sample(ops) {
-        return run_width(n, k, f);
+    let k = if rate.probing(ops) {
+        1
+    } else {
+        width(ops * rate.ns_per_op(), n)
+    };
+    if k < 2 {
+        return rate.time(ops, || (0..n).for_each(f));
+    }
+    if rate.explore(ops, k) {
+        return rate.measure(ops, || (0..n).for_each(f));
+    }
+    if run_watched(n, k, ops * rate.ns_per_op(), rate.sample(ops), f) {
+        rate.reprobe();
+    }
+}
+
+/// [`run_width`] of `n` pieces of `work` ns on `k` threads, timed if
+/// `timed`: whether it took less than [`RATE_STALE`] of the time predicted
+/// for it (the rates its work was estimated at are stale).
+pub fn run_watched(n: usize, k: usize, work: f64, timed: bool, f: &(dyn Fn(usize) + Sync)) -> bool {
+    if !timed {
+        run_width(n, k, f);
+        return false;
     }
     let t = std::time::Instant::now();
     run_width(n, k, f);
     let spent = t.elapsed().as_nanos() as f64;
-    let serial = if k < 2 {
-        spent
-    } else {
-        (spent - section_cost(k)).max(0.0) * k as f64
-    };
-    rate.learn(serial, ops);
+    let cost = CURRENT.with(|c| c.borrow().as_ref().map_or(0.0, |p| p.dispatch.cost(k)));
+    let predicted = work * n.div_ceil(k.max(1)) as f64 / n.max(1) as f64 + cost;
+    spent < RATE_STALE * predicted
 }
 
 /// Run `n` pieces of work on `k` threads of the installed pool (the calling
