@@ -82,16 +82,7 @@ pub struct Policy {
 
 impl Default for Policy {
     fn default() -> Self {
-        Policy {
-            jit: true,
-            kick_after: 3,
-            eager_pass: Some(Duration::from_millis(10)),
-            choices: ChoicePolicy::default(),
-            spec_compile_after: 16,
-            spec_compile_budget: 4,
-            spec_interp_cost: 4,
-            variants: crate::variant::VariantPolicy::default(),
-        }
+        Policy::DEFAULT
     }
 }
 

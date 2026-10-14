@@ -72,10 +72,7 @@ pub struct Module<K> {
     pub call_contexts: Vec<Option<(Vec<u32>, ArgList)>>,
 }
 
-/// The current [`Module::version`]. Bump it when the meaning of an existing
-/// node changes; adding a variant at the end of an enum does not need it,
-/// because an older reader fails on the unknown discriminant anyway.
-pub const MODULE_VERSION: u32 = 2;
+pub use crate::constants::MODULE_VERSION;
 
 /// Why a module cannot be loaded. A module is data from outside (a file, a
 /// cache, another process), so the loader checks it whole before it builds
@@ -248,6 +245,7 @@ impl<K> Module<K> {
                         Node::Dot(_) if n % 2 != 0 => return shape("dot of uneven halves"),
                         Node::Solve(_, k) => {
                             // `n*n + n` values for some `n`, component below `n`.
+                            // lit: m from n = m^2 + m
                             let m = ((((4 * n + 1) as f64).sqrt() - 1.0) / 2.0).round() as usize;
                             if m == 0 || m * m + m != n || k as usize >= m {
                                 return shape("solve list of no square system");

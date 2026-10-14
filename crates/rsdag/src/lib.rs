@@ -7,6 +7,7 @@ pub mod adaptive;
 pub mod autodiff;
 pub mod builder;
 pub mod choices;
+pub mod constants;
 pub mod coo;
 pub mod display;
 pub mod dot;

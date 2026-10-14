@@ -68,7 +68,7 @@ impl Degree {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct UnarySet(u64);
 
-const _: () = assert!(crate::node::UNARY_OPS.len() <= 64);
+const _: () = assert!(crate::node::UNARY_OPS.len() <= u64::BITS as usize);
 
 impl UnarySet {
     pub fn insert(&mut self, op: UnaryOp) {

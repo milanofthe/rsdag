@@ -11,6 +11,7 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::constants::{LABEL_EXACT_MAX, LABEL_FIXED_MAX, LABEL_FIXED_MIN, LABEL_INT_MAX};
 use crate::field::Field;
 use crate::func::{FuncId, Output};
 use crate::graph::Graph;
@@ -49,11 +50,11 @@ pub enum Notation {
 /// A number as a label: an integer as one, else four significant digits,
 /// in exponent form beyond `1e5` or below `1e-3`.
 pub fn number(x: f64) -> String {
-    if x.fract() == 0.0 && x.abs() < 1e15 {
+    if x.fract() == 0.0 && x.abs() < LABEL_INT_MAX {
         return format!("{}", x as i64);
     }
     let a = x.abs();
-    if !(1e-3..1e5).contains(&a) {
+    if !(LABEL_FIXED_MIN..LABEL_FIXED_MAX).contains(&a) {
         return format!("{x:.3e}");
     }
     let s = format!("{x:.4}");
@@ -283,7 +284,7 @@ impl<'g, K: Field> GraphView<'g, K> {
             Node::Const(c) => {
                 let exact = g.const_val(c).render();
                 let label = match g.const_f64(e) {
-                    Some(x) if exact.len() > 8 || !exact.contains('/') => number(x),
+                    Some(x) if exact.len() > LABEL_EXACT_MAX || !exact.contains('/') => number(x),
                     _ => exact,
                 };
                 (label, Kind::Const)

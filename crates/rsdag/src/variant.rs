@@ -53,9 +53,7 @@ use crate::func::InterpretedBody;
 use crate::hooks::{log, Level};
 use crate::tape::{Guards, ParamSelects, Tape};
 
-/// Instances a trace takes of a batch, spread over it: enough to see the
-/// choices most of them take, few enough to cost little next to the batch.
-const TRACED: usize = 16;
+use crate::constants::{PERCENT, TRACED};
 
 /// How bodies specialize per binding (see the module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,13 +78,7 @@ pub struct VariantPolicy {
 
 impl Default for VariantPolicy {
     fn default() -> Self {
-        VariantPolicy {
-            enabled: true,
-            interpreted: true,
-            max_variants: 64,
-            min_shrink_pct: 10,
-            choices: crate::ChoicePolicy::default(),
-        }
+        VariantPolicy::DEFAULT
     }
 }
 
@@ -169,7 +161,7 @@ impl Shared {
         let n = selects.n_conds();
         let (all, decided) = t.ops_decided(&selects, &[vec![true; n], vec![false; n]]);
         let least = decided.into_iter().min().unwrap_or(all).min(all);
-        let shrink_pct = (all - least) * 100 / all.max(1);
+        let shrink_pct = (all - least) * PERCENT / all.max(1);
         Some(Found {
             selects,
             shrink_pct,

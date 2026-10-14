@@ -19,11 +19,14 @@
 // `PyResult` method; the conversions are the macro's, not ours.
 #![allow(clippy::useless_conversion)]
 
+mod constants;
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+use constants::{DETACH_OPS, PY_JIT_BATCH_MIN_OPS, REPR_NODES};
 use pyo3::basic::CompareOp;
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyAttributeError, PyTypeError, PyValueError};
@@ -160,9 +163,6 @@ fn floormod(g: &mut Graph<F64>, a: ExprId, b: ExprId) -> ExprId {
 fn powf(g: &mut Graph<F64>, a: ExprId, b: ExprId) -> ExprId {
     g.binary(BinOp::Powf, a, b)
 }
-
-/// Node budget of a tracer's `repr`.
-const REPR_NODES: usize = 200;
 
 /// Whether the expression under `id` written out as a tree has at most
 /// `budget` nodes; stops counting once over, so the cost is the budget.
@@ -557,10 +557,6 @@ struct Scratch {
     out: Vec<f64>,
 }
 
-/// Programs from this many ops on release the GIL while they run; below,
-/// releasing and retaking it costs more than the evaluation.
-const DETACH_OPS: usize = 256;
-
 /// Append the values of `arg` to `s.ins` and its shape to `s.key` (the
 /// number of dimensions, then the extents; a number has none): a number,
 /// a flat list or tuple of numbers, an object exporting a buffer of doubles
@@ -913,7 +909,9 @@ impl Program {
             return Ok(());
         }
         let opts = rsdag_jit::Options {
-            batch: rsdag_jit::Batch::Parallel { min_ops: 1 << 16 },
+            batch: rsdag_jit::Batch::Parallel {
+                min_ops: PY_JIT_BATCH_MIN_OPS,
+            },
             ..rsdag_jit::Options::default()
         };
         let c = py

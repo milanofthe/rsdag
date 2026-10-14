@@ -9,41 +9,48 @@
 //! platform library, and the fold orders of reductions and dot products. A
 //! backend that reproduces these bit for bit reproduces every program.
 
+use crate::constants::{
+    EXP_UNDERFLOW, F64_EXP_BIAS, F64_FRAC_BITS, F64_HIGH_FRAC_BITS, F64_HIGH_WORD,
+    F64_LOW_WORD_MASK, GEMM_COL_BLOCK, GEMM_ROW_BLOCK, GEMV_ROW_BLOCK, LN_HIGH_FRAC_MASK,
+    LN_HIGH_ONE, LN_HIGH_UNIT, LN_SQRT2_CARRY, LU_TRAILING_ROWS,
+};
 use crate::node::{BinOp, CmpOp, Elementary, ReduceOp, UnaryOp};
 use crate::scalar::Scalar;
 use crate::tape::Fold;
 
-/// The reduction of a slice in `T`: four accumulators, merged as
-/// `(a0 + a1) + (a2 + a3)`, then the tail in order. The one fold order every
+pub use crate::constants::FOLD_LANES;
+
+/// The reduction of a slice in `T`: four accumulators ([`FOLD_LANES`]),
+/// merged as `(a0 + a1) + (a2 + a3)`, then the tail in order. The one fold order every
 /// evaluator uses, so results agree to the bit; for fewer than four operands
 /// the accumulators start at the identity and the result is the sequential
 /// fold's exactly.
 pub fn reduce_slice_t<T: Scalar>(op: ReduceOp, xs: &[T]) -> T {
     match op {
         ReduceOp::Sum => {
-            let mut a = [T::zero(); 4];
-            let ch = xs.len() / 4;
+            let mut a = [T::zero(); FOLD_LANES];
+            let ch = xs.len() / FOLD_LANES;
             for c in 0..ch {
-                for l in 0..4 {
-                    a[l] = a[l].add(xs[4 * c + l]);
+                for l in 0..FOLD_LANES {
+                    a[l] = a[l].add(xs[FOLD_LANES * c + l]);
                 }
             }
             let mut acc = (a[0].add(a[1])).add(a[2].add(a[3]));
-            for &x in &xs[ch * 4..] {
+            for &x in &xs[ch * FOLD_LANES..] {
                 acc = acc.add(x);
             }
             acc
         }
         ReduceOp::Product => {
-            let mut a = [T::one(); 4];
-            let ch = xs.len() / 4;
+            let mut a = [T::one(); FOLD_LANES];
+            let ch = xs.len() / FOLD_LANES;
             for c in 0..ch {
-                for l in 0..4 {
-                    a[l] = a[l].mul(xs[4 * c + l]);
+                for l in 0..FOLD_LANES {
+                    a[l] = a[l].mul(xs[FOLD_LANES * c + l]);
                 }
             }
             let mut acc = (a[0].mul(a[1])).mul(a[2].mul(a[3]));
-            for &x in &xs[ch * 4..] {
+            for &x in &xs[ch * FOLD_LANES..] {
                 acc = acc.mul(x);
             }
             acc
@@ -67,15 +74,15 @@ pub fn reduce_slice_t<T: Scalar>(op: ReduceOp, xs: &[T]) -> T {
 
 /// The inner product in `T`, the same order over the products.
 pub fn dot_slice_t<T: Scalar>(a: &[T], b: &[T]) -> T {
-    let mut acc = [T::zero(); 4];
-    let ch = a.len() / 4;
+    let mut acc = [T::zero(); FOLD_LANES];
+    let ch = a.len() / FOLD_LANES;
     for c in 0..ch {
-        for l in 0..4 {
-            acc[l] = acc[l].add(a[4 * c + l].mul(b[4 * c + l]));
+        for l in 0..FOLD_LANES {
+            acc[l] = acc[l].add(a[FOLD_LANES * c + l].mul(b[FOLD_LANES * c + l]));
         }
     }
     let mut s = (acc[0].add(acc[1])).add(acc[2].add(acc[3]));
-    for k in ch * 4..a.len() {
+    for k in ch * FOLD_LANES..a.len() {
         s = s.add(a[k].mul(b[k]));
     }
     s
@@ -203,22 +210,7 @@ pub fn rand_stream(key: f64, counter: f64) -> f64 {
     ))
 }
 
-/// Argument above which `exp` is linearly extrapolated (a "limited exponential",
-/// SPICE `limexp`). `exp` overflows f64 near 709; compact models routinely drive
-/// the argument far past that on intermediate Newton iterates (out-of-range
-/// internal-node guesses), producing `inf`/`NaN` that poison the whole solve.
-/// Linearizing above this threshold keeps the value and its (constant) derivative
-/// finite with ample headroom against overflow, while leaving every physical
-/// evaluation -- exp arguments are O(10) at any real operating point -- bit-for-bit
-/// unchanged. 80 is the classic SPICE `limexp` knee. See [`unary_f64`].
-pub const EXP_LIMIT: f64 = 80.0;
-
-/// Argument at or below which `ln` is clamped (so `ln(x<=0)` returns a finite,
-/// modest `ln(LN_FLOOR)` instead of `-inf`/`NaN` on an out-of-range Newton
-/// iterate). A *clamp*, not a linear extrapolation: a steep extrapolation slope
-/// (`1/LN_FLOOR`) would blow intermediate values up to `~1e30` and wreck
-/// conditioning. In-range arguments are untouched. See [`unary_f64`].
-pub const LN_FLOOR: f64 = 1e-30;
+pub use crate::constants::{EXP_LIMIT, LN_FLOOR};
 
 /// `exp(EXP_LIMIT)`, the slope of the linear tail.
 pub const EXP_AT_LIMIT: f64 = exp_core(EXP_LIMIT);
@@ -230,6 +222,10 @@ pub mod exp_ln {
     pub use super::{EP1, EP2, EP3, EP4, EP5, INV_LN2, LG1, LG2, LG3, LG4, LG5, LG6, LG7};
     pub use super::{EXP_AT_LIMIT, EXP_LIMIT, LN_AT_FLOOR, LN_FLOOR};
     pub use super::{LN2_HI, LN2_LO, MAGIC};
+    pub use crate::constants::{
+        EXP_UNDERFLOW, F64_EXP_BIAS, F64_FRAC_BITS, F64_HIGH_FRAC_BITS, F64_HIGH_WORD,
+        F64_LOW_WORD_MASK, LN_HIGH_FRAC_MASK, LN_HIGH_ONE, LN_HIGH_UNIT, LN_SQRT2_CARRY,
+    };
 }
 
 // The exponential and the logarithm are rsdag's own: fdlibm's algorithms
@@ -276,7 +272,7 @@ pub const LG7: f64 = 1.479_819_860_511_658_591e-1;
 /// `2^k` for `-1022 <= k <= 1023`.
 #[inline(always)]
 const fn pow2(k: i64) -> f64 {
-    f64::from_bits((k.wrapping_add(1023) as u64) << 52)
+    f64::from_bits((k.wrapping_add(F64_EXP_BIAS) as u64) << F64_FRAC_BITS)
 }
 
 /// `exp(x)` for `x <= EXP_LIMIT` (and NaN): `x = k ln 2 + r` with `|r| <=
@@ -295,7 +291,7 @@ pub const fn exp_core(x: f64) -> f64 {
     let y = 1.0 - ((lo - (r * c) / (2.0 - c)) - hi);
     let k1 = k >> 1;
     let v = y * pow2(k1) * pow2(k - k1);
-    let v = if x < -745.2 { 0.0 } else { v };
+    let v = if x < EXP_UNDERFLOW { 0.0 } else { v };
     if x.is_nan() {
         x
     } else {
@@ -309,12 +305,14 @@ pub const fn exp_core(x: f64) -> f64 {
 #[inline(always)]
 pub const fn ln_core(x: f64) -> f64 {
     let bits = x.to_bits();
-    let high = (bits >> 32) as i64;
-    let hm = high & 0x000f_ffff;
+    let high = (bits >> F64_HIGH_WORD) as i64;
+    let hm = high & LN_HIGH_FRAC_MASK;
     // The mantissa past sqrt(2) moves to the next exponent.
-    let i = (hm + 0x9_5f64) & 0x10_0000;
-    let k = (high >> 20) - 1023 + (i >> 20);
-    let m = f64::from_bits((((hm | (i ^ 0x3ff0_0000)) as u64) << 32) | (bits & 0xffff_ffff));
+    let i = (hm + LN_SQRT2_CARRY) & LN_HIGH_UNIT;
+    let k = (high >> F64_HIGH_FRAC_BITS) - F64_EXP_BIAS + (i >> F64_HIGH_FRAC_BITS);
+    let m = f64::from_bits(
+        (((hm | (i ^ LN_HIGH_ONE)) as u64) << F64_HIGH_WORD) | (bits & F64_LOW_WORD_MASK),
+    );
     let f = m - 1.0;
     let s = f / (2.0 + f);
     // `k` as a float, through the rounding constant (no integer conversion).
@@ -493,32 +491,28 @@ pub fn gemv_t<T: Scalar>(a: &[T], x: &[T], m: usize, n: usize, out: &mut [T]) {
     // Four rows at a time, each with its own four accumulators: sixteen
     // independent chains for the core, and every row's fold is exactly
     // `dot_slice_t`'s.
-    let ch = n / 4;
+    let ch = n / FOLD_LANES;
     let mut i = 0;
-    while i + 4 <= m {
-        let rows = [
-            &a[i * n..(i + 1) * n],
-            &a[(i + 1) * n..(i + 2) * n],
-            &a[(i + 2) * n..(i + 3) * n],
-            &a[(i + 3) * n..(i + 4) * n],
-        ];
-        let mut acc = [[T::zero(); 4]; 4];
+    while i + GEMV_ROW_BLOCK <= m {
+        let rows: [&[T]; GEMV_ROW_BLOCK] =
+            std::array::from_fn(|r| &a[(i + r) * n..(i + r + 1) * n]);
+        let mut acc = [[T::zero(); FOLD_LANES]; GEMV_ROW_BLOCK];
         for c in 0..ch {
             for (r, row) in rows.iter().enumerate() {
-                for l in 0..4 {
-                    acc[r][l] = acc[r][l].add(row[4 * c + l].mul(x[4 * c + l]));
+                for l in 0..FOLD_LANES {
+                    acc[r][l] = acc[r][l].add(row[FOLD_LANES * c + l].mul(x[FOLD_LANES * c + l]));
                 }
             }
         }
         for (r, row) in rows.iter().enumerate() {
             let a4 = acc[r];
             let mut s = (a4[0].add(a4[1])).add(a4[2].add(a4[3]));
-            for k in ch * 4..n {
+            for k in ch * FOLD_LANES..n {
                 s = s.add(row[k].mul(x[k]));
             }
             out[i + r] = s;
         }
-        i += 4;
+        i += GEMV_ROW_BLOCK;
     }
     for r in i..m {
         out[r] = dot_slice_t(&a[r * n..(r + 1) * n], x);
@@ -560,25 +554,25 @@ pub fn gemm_with<T: Scalar>(
 ) {
     // Four rows of `a` against two rows of `b` at a time: thirty-two
     // independent accumulators, six operand rows in the near cache.
-    let ch = k / 4;
-    let tail = |i: usize, j: usize, acc: [T; 4]| -> T {
+    let ch = k / FOLD_LANES;
+    let tail = |i: usize, j: usize, acc: [T; FOLD_LANES]| -> T {
         let mut s = (acc[0].add(acc[1])).add(acc[2].add(acc[3]));
-        for l in ch * 4..k {
+        for l in ch * FOLD_LANES..k {
             s = s.add(a[i * k + l].mul(b[j * k + l]));
         }
         s
     };
     let mut i = 0;
-    while i + 4 <= m {
+    while i + GEMM_ROW_BLOCK <= m {
         let mut j = 0;
-        while j + 2 <= n {
-            let mut acc = [[[T::zero(); 4]; 2]; 4];
+        while j + GEMM_COL_BLOCK <= n {
+            let mut acc = [[[T::zero(); FOLD_LANES]; GEMM_COL_BLOCK]; GEMM_ROW_BLOCK];
             for c in 0..ch {
                 for (r, ar) in acc.iter_mut().enumerate() {
-                    let ra = &a[(i + r) * k + 4 * c..][..4];
+                    let ra = &a[(i + r) * k + FOLD_LANES * c..][..FOLD_LANES];
                     for (q, aq) in ar.iter_mut().enumerate() {
-                        let rb = &b[(j + q) * k + 4 * c..][..4];
-                        for l in 0..4 {
+                        let rb = &b[(j + q) * k + FOLD_LANES * c..][..FOLD_LANES];
+                        for l in 0..FOLD_LANES {
                             aq[l] = aq[l].add(ra[l].mul(rb[l]));
                         }
                     }
@@ -589,9 +583,9 @@ pub fn gemm_with<T: Scalar>(
                     st((i + r) * n + j + q, tail(i + r, j + q, aq));
                 }
             }
-            j += 2;
+            j += GEMM_COL_BLOCK;
         }
-        for r in 0..4 {
+        for r in 0..GEMM_ROW_BLOCK {
             for jj in j..n {
                 st(
                     (i + r) * n + jj,
@@ -599,7 +593,7 @@ pub fn gemm_with<T: Scalar>(
                 );
             }
         }
-        i += 4;
+        i += GEMM_ROW_BLOCK;
     }
     for r in i..m {
         for j in 0..n {
@@ -687,21 +681,7 @@ pub fn gemv(a: &[f64], x: &[f64], m: usize, n: usize, out: &mut [f64]) {
     <f64 as Scalar>::gemv(a, x, m, n, out)
 }
 
-/// The column-panel widths of the blocked elimination in [`solve_t`]: the
-/// panel's own updates run one element at a time, the trailing update as
-/// a product, and the balance moves with the size (measured: 16 wins
-/// below about five hundred unknowns, 32 above). A width is a constant of
-/// its instantiation so the panel loops unroll.
-pub const LU_PANEL_SMALL: usize = 16;
-/// See [`LU_PANEL_SMALL`].
-pub const LU_PANEL_LARGE: usize = 32;
-/// Systems of fewer unknowns than this use [`LU_PANEL_SMALL`].
-pub const LU_PANEL_SWITCH: usize = 512;
-/// Systems of at most this many unknowns are eliminated right-looking
-/// without panels: each pivot updates the whole trailing matrix and the
-/// right-hand sides row by row (one product and one difference per entry),
-/// which at these sizes beats the panel machinery.
-pub const LU_UNBLOCKED_MAX: usize = 64;
+pub use crate::constants::{LU_PANEL_LARGE, LU_PANEL_SMALL, LU_PANEL_SWITCH, LU_UNBLOCKED_MAX};
 
 pub fn solve_t<T: Scalar>(a: &[T], b: &[T], n: usize, out: &mut [T]) {
     solve_many_t(a, b, n, 1, out)
@@ -731,13 +711,7 @@ pub fn solve_many_into<T: Scalar>(
     T::solve_many(a, b, n, k, out, &mut scratch[..solve_scratch_len(n, k)])
 }
 
-/// Systems of at most this many unknowns and right-hand sides solve side
-/// by side in a batch, four to a vector ([`solve_batch_into`] in `f64`);
-/// the tape batches solves of these shapes only, larger ones gain nothing
-/// from it.
-pub const SOLVE_BATCH_MAX_N: usize = 16;
-/// See [`SOLVE_BATCH_MAX_N`].
-pub const SOLVE_BATCH_MAX_K: usize = 4;
+pub use crate::constants::{SOLVE_BATCH_MAX_K, SOLVE_BATCH_MAX_N};
 
 /// `count` independent systems of one shape: `a` holds their `n` by `n`
 /// matrices back to back, `b` their `k` right-hand sides each (as
@@ -781,7 +755,12 @@ pub(crate) fn lu_panel(n: usize) -> usize {
 /// for the trailing update.
 pub fn solve_scratch_len(n: usize, k: usize) -> usize {
     let (w, nb) = (n + k, lu_panel(n));
-    n * w + if nb > 0 { nb * w + 4 * nb + 4 * w } else { 0 }
+    n * w
+        + if nb > 0 {
+            nb * w + LU_TRAILING_ROWS * nb + LU_TRAILING_ROWS * w
+        } else {
+            0
+        }
 }
 
 /// The scratch of a solve cut into its parts: the augmented matrix `[a | b]`
@@ -803,7 +782,7 @@ pub(crate) fn solve_parts<'s, T: Copy>(
         }
     }
     let (ut, rest) = rest.split_at_mut(nb * w);
-    let (lrows, prod) = rest.split_at_mut(4 * nb);
+    let (lrows, prod) = rest.split_at_mut(LU_TRAILING_ROWS * nb);
     [m, ut, lrows, prod]
 }
 
@@ -888,7 +867,7 @@ pub(crate) fn solve_generic_into<T: Scalar>(
             }
             let mut i = k1;
             while i < n {
-                let rows = (n - i).min(4);
+                let rows = (n - i).min(LU_TRAILING_ROWS);
                 for r in 0..rows {
                     let at = (i + r) * w;
                     lrows[r * nb..(r + 1) * nb].copy_from_slice(&m[at + k0..at + k1]);

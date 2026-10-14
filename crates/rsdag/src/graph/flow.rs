@@ -73,15 +73,17 @@ enum Ids {
     Sorted(Rc<[u32]>),
 }
 
-/// The widest universe a [`Set`] keeps as a bitset.
-pub(crate) const BITS_MAX: usize = 4096;
+use crate::constants::BITS_MAX;
+
+/// Members a word of a bitset holds.
+const WORD: usize = u64::BITS as usize;
 
 impl Set {
     /// `{k}`, of a universe of `n`.
     pub(crate) fn one(k: u32, n: usize) -> Set {
         if n <= BITS_MAX {
-            let mut w = vec![0u64; k as usize / 64 + 1];
-            w[k as usize / 64] = 1 << (k % 64);
+            let mut w = vec![0u64; k as usize / WORD + 1];
+            w[k as usize / WORD] = 1 << (k % u64::BITS);
             Set(Some(Ids::Bits(w.into())))
         } else {
             Set(Some(Ids::Sorted(Rc::from([k]))))
@@ -93,8 +95,8 @@ impl Set {
         match &self.0 {
             None => false,
             Some(Ids::Bits(w)) => w
-                .get(k as usize / 64)
-                .is_some_and(|&b| b >> (k % 64) & 1 == 1),
+                .get(k as usize / WORD)
+                .is_some_and(|&b| b >> (k % u64::BITS) & 1 == 1),
             Some(Ids::Sorted(v)) => v.binary_search(&k).is_ok(),
         }
     }
@@ -112,7 +114,7 @@ impl Set {
                 (w != 0).then(|| {
                     let b = w.trailing_zeros();
                     w &= w - 1;
-                    i as u32 * 64 + b
+                    i as u32 * u64::BITS + b
                 })
             })
         });

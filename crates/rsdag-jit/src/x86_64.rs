@@ -400,18 +400,19 @@ impl<const L: usize> X64<L> {
         self.f(Sub, d, d, s); // y
                               // y 2^k1 2^(k - k1) with k1 = k >> 1, the shift arithmetic through
                               // a bias (64-bit lanes have no arithmetic shift below AVX-512)
-        self.int_c(Int::Add, b, a, 2048);
+        let frac = F64_FRAC_BITS as u8;
+        self.int_c(Int::Add, b, a, (2 * (F64_EXP_BIAS + 1)) as u64);
         self.shift(false, b, b, 1); // k1 + 1024
         self.int(Int::Sub, a, a, b); // k - k1 - 1024
         self.int_c(Int::Sub, b, b, 1);
-        self.shift(true, b, b, 52); // 2^k1
-        self.int_c(Int::Add, a, a, 2047);
-        self.shift(true, a, a, 52); // 2^(k - k1)
+        self.shift(true, b, b, frac); // 2^k1
+        self.int_c(Int::Add, a, a, (2 * F64_EXP_BIAS + 1) as u64);
+        self.shift(true, a, a, frac); // 2^(k - k1)
         self.f(Mul, d, d, b);
         self.f(Mul, d, d, a);
         // underflow to zero, a NaN kept, the linear tail above the limit
         self.zero(s);
-        self.cmp_c(x, -745.2, LT_OQ);
+        self.cmp_c(x, EXP_UNDERFLOW, LT_OQ);
         self.blend(s, d, d);
         self.cmp_mask(x, x, UNORD_Q);
         self.blend(x, d, d);
@@ -428,18 +429,19 @@ impl<const L: usize> X64<L> {
         use Arith::*;
         let s = 1;
         // x = 2^k m, m in [sqrt(2)/2, sqrt(2)), from the bits
-        self.shift(false, a, x, 32); // high
-        self.int_c(Int::And, b, a, 0x000f_ffff); // hm
-        self.int_c(Int::Add, c, b, 0x9_5f64);
-        self.int_c(Int::And, c, c, 0x10_0000); // i
-        self.shift(false, a, a, 20);
-        self.int_c(Int::Sub, a, a, 1023);
-        self.shift(false, e, c, 20);
+        let (high, high_frac) = (F64_HIGH_WORD as u8, F64_HIGH_FRAC_BITS as u8);
+        self.shift(false, a, x, high); // high
+        self.int_c(Int::And, b, a, LN_HIGH_FRAC_MASK as u64); // hm
+        self.int_c(Int::Add, c, b, LN_SQRT2_CARRY as u64);
+        self.int_c(Int::And, c, c, LN_HIGH_UNIT as u64); // i
+        self.shift(false, a, a, high_frac);
+        self.int_c(Int::Sub, a, a, F64_EXP_BIAS as u64);
+        self.shift(false, e, c, high_frac);
         self.int(Int::Add, a, a, e); // k
-        self.int_c(Int::Xor, c, c, 0x3ff0_0000);
+        self.int_c(Int::Xor, c, c, LN_HIGH_ONE as u64);
         self.int(Int::Or, c, c, b);
-        self.shift(true, c, c, 32);
-        self.int_c(Int::And, b, x, 0xffff_ffff);
+        self.shift(true, c, c, high);
+        self.int_c(Int::And, b, x, F64_LOW_WORD_MASK);
         self.int(Int::Or, c, c, b); // m
         self.fc(Sub, c, c, 1.0); // f
         self.fc(Add, b, c, 2.0);

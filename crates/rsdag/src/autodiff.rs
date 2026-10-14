@@ -112,6 +112,7 @@ fn unary_factor<K: Field>(ctx: &mut Graph<K>, op: UnaryOp, a: ExprId) -> ExprId 
             // 1 / (3 cbrt(a)^2)
             let c = ctx.unary(UnaryOp::Cbrt, a);
             let c2 = ctx.mul(c, c);
+            // lit: the 3 of d cbrt(a) = 1 / (3 cbrt(a)^2)
             let three = ctx.konst_int(3);
             let d = ctx.mul(three, c2);
             ctx.recip(d)
@@ -353,6 +354,7 @@ pub(crate) fn forward<K: Field>(
     moves: &dyn Fn(ExprId) -> bool,
 ) -> Vec<ExprId> {
     let zero = ctx.zero();
+    // lit: a first capacity, grown as needed
     let mut stack: Vec<(ExprId, bool)> = Vec::with_capacity(64);
     stack.extend(roots.iter().rev().map(|&r| (r, false)));
     let mut ops = Vec::new();
@@ -522,10 +524,7 @@ fn tangent<K: Field>(ctx: &mut Graph<K>, e: ExprId, wrt: SymbolId, memo: &mut Me
 /// pairs that are not the structural zero, in ascending column order.
 pub type SparseRows = Vec<Vec<(usize, ExprId)>>;
 
-/// Rows of this many touched unknowns and more are differentiated in
-/// reverse mode, one adjoint sweep for the whole row; below it, forward
-/// sweeps per unknown, shared by every row that touches it, are cheaper.
-pub const REVERSE_MIN_TOUCHED: usize = 16;
+pub use crate::constants::REVERSE_MIN_TOUCHED;
 
 /// Sparse Jacobian of `residuals` with respect to `wrt`: row `i` lists the
 /// nonzero `(column, d residuals[i] / d wrt[column])`, by column.

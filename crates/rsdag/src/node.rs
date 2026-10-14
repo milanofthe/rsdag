@@ -567,6 +567,7 @@ pub enum Node {
     Call(OutputId, ArgList),
 }
 
+// lit: sixteen bytes a node
 const _: () = assert!(std::mem::size_of::<Node>() == 16);
 
 impl Node {
@@ -576,6 +577,7 @@ impl Node {
     pub fn operands<'a>(&self, pool: &'a [ExprId]) -> Operands<'a> {
         let z = ExprId(0);
         match *self {
+            // lit: the inline buffer's three operands
             Node::Const(_) | Node::Symbol(_) => Operands::Inline { buf: [z; 3], n: 0 },
             Node::Add(a, b) | Node::Mul(a, b) | Node::Cmp(_, a, b) | Node::Binary(_, a, b) => {
                 Operands::Inline {
@@ -589,7 +591,7 @@ impl Node {
             },
             Node::Select(c, t, e) => Operands::Inline {
                 buf: [c, t, e],
-                n: 3,
+                n: 3, // lit: a select's three operands
             },
             Node::Reduce(_, l) | Node::Dot(l) | Node::Call(_, l) | Node::Solve(l, _) => {
                 Operands::Slice(&pool[l.start as usize..(l.start + l.len) as usize])

@@ -159,21 +159,28 @@ impl Fold {
     pub const SUB: Fold = Fold(1);
     /// `c + d` with `c` the accumulator operand.
     pub const ADD: Fold = Fold(2);
+    /// The bits of a code that say which fold: [`PLAIN`](Self::PLAIN),
+    /// [`SUB`](Self::SUB), [`ADD`](Self::ADD) or [`NEG`](Self::NEG).
+    pub const KIND: u32 = 3;
+    /// The bit of a self fold, whose accumulator is another entry's product.
+    pub const SELF: u32 = 4;
+    /// Where a self fold's code keeps that entry's index.
+    pub const SELF_SHIFT: u32 = 3;
     pub fn is_plain(self) -> bool {
-        self.0 & 3 == 0
+        self.0 & Self::KIND == 0
     }
     pub fn is_self(self) -> bool {
-        self.0 & 4 != 0
+        self.0 & Self::SELF != 0
     }
     /// The entry whose product is the accumulator of a self fold.
     pub fn self_index(self) -> usize {
-        (self.0 >> 3) as usize
+        (self.0 >> Self::SELF_SHIFT) as usize
     }
     /// The product `d` folded against the accumulator `a` (unused by a
     /// plain or negating fold).
     #[inline]
     pub fn fold<T: Scalar>(self, a: T, d: T) -> T {
-        match self.0 & 3 {
+        match self.0 & Self::KIND {
             0 => d,
             1 => a.sub(d),
             2 => a.add(d),
@@ -182,7 +189,7 @@ impl Fold {
     }
     /// Whether the fold reads the accumulator operand.
     pub fn reads_operand(self) -> bool {
-        matches!(self.0 & 3, 1 | 2) && !self.is_self()
+        matches!(self.0 & Self::KIND, 1 | 2) && !self.is_self()
     }
 }
 
@@ -273,9 +280,7 @@ impl Region {
     }
 }
 
-/// Ops a call of a bundle without a body ([`ExternBundle::body`]) counts as,
-/// per instance.
-const OPAQUE_OPS: u64 = 1000;
+use crate::constants::OPAQUE_OPS;
 
 /// Ops one instance of `call` runs in its bundle's body: the prolog for a
 /// prolog, the main phase for a call over a state, all of it for a call
@@ -1259,9 +1264,7 @@ impl Tape {
     }
 }
 
-/// Outputs a block of [`write_outputs`] copies, from which on a large
-/// program copies its outputs in blocks on the installed pool.
-const OUTPUT_BLOCK: usize = 8192;
+use crate::constants::OUTPUT_BLOCK;
 
 /// The program's outputs, the operands `outputs` (slots of `work`, or
 /// tagged inputs), into `out`: in blocks on the installed pool
@@ -1424,7 +1427,7 @@ fn acc_text(pool: &[u32], acc: Option<Accum>, len: u32) -> String {
                 .iter()
                 .map(|&code| {
                     let f = Fold(code);
-                    let op = match code & 3 {
+                    let op = match code & Fold::KIND {
                         0 => "=",
                         1 => "-",
                         2 => "+",

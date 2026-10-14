@@ -43,18 +43,9 @@ use crate::node::{ArgList, ExprId, Node, SymbolId};
 /// One instance's calls: the context they run in (see `Graph::bind`) and
 /// their argument list.
 type Site = (u32, ArgList);
-use crate::semantics::{SOLVE_BATCH_MAX_K, SOLVE_BATCH_MAX_N};
-
-/// Row dots against one vector fuse into a `Gemv` from this many rows on.
-const GEMV_MIN_ROWS: usize = 2;
-
-/// A run of ops without a call becomes a region (see [`Region`]) from this
-/// many ops on: two pieces.
-const REGION_MIN_OPS: usize = 2 * PIECE_OPS;
-
-/// Ops a piece of a region takes on, about (whole connected parts of the
-/// run): as many as a native chunk.
-const PIECE_OPS: usize = 1024;
+use crate::constants::{
+    GEMV_MIN_ROWS, PIECE_OPS, PLACE_MIN_RUN, REGION_MIN_OPS, SOLVE_BATCH_MAX_K, SOLVE_BATCH_MAX_N,
+};
 
 /// A call's operands and the slot of its state block (the last operand of
 /// a stateful call), or [`NO_STATE`](super::NO_STATE).
@@ -569,7 +560,7 @@ impl Program {
                             continue;
                         }
                         held[c2 as usize] = true;
-                        (code | 4 | (c2 << 3), placeholder)
+                        (code | Fold::SELF | (c2 << Fold::SELF_SHIFT), placeholder)
                     }
                     Ref::Value(i, _) if code != Fold::NEG.0 => {
                         if kernel_pure && !self.insts[i as usize].pure {
@@ -2830,7 +2821,7 @@ impl Program {
                     while e < operand.len() && placeable(&operand[e]) {
                         e += 1;
                     }
-                    if e - s >= 4 {
+                    if e - s >= PLACE_MIN_RUN {
                         for r in &operand[s..e] {
                             if let Ref::Value(j, _) = *r {
                                 reserved[j as usize] = next;
