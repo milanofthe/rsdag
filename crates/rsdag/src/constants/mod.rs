@@ -6,7 +6,7 @@
 //! Each constant says what it is and in what unit, why it has its value,
 //! and what a change would change: results (the contract), or time alone.
 //! The modules that use one re-export it where it was before
-//! (`rsdag::semantics::EXP_LIMIT`, `rsdag::parallel::MIN_OPS`, ...).
+//! (`rsdag::semantics::EXP_LIMIT`, `rsdag::parallel::SPIN`, ...).
 //! `tests/constants_guard.rs` keeps numbers from drifting back into the
 //! code, `tests/contract_snapshot.rs` holds the contract to its bits.
 

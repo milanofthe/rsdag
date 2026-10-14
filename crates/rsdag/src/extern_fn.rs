@@ -185,6 +185,15 @@ pub trait ExternBundle: Send + Sync {
         0
     }
 
+    /// What an op of this bundle costs, learned from its runs: what a stage
+    /// of its calls is worth on a pool ([`crate::parallel`]). The default
+    /// is one rate all bundles without their own share.
+    fn rate(&self) -> &crate::parallel::Rate {
+        static SHARED: crate::parallel::Rate =
+            crate::parallel::Rate::new(crate::constants::INTERPRETED_NS_PER_OP);
+        &SHARED
+    }
+
     /// [`call`](Self::call) over a work buffer the caller owns: the form a
     /// solver drives per instance per iteration, with nothing allocated and
     /// nothing hidden in a thread-local.

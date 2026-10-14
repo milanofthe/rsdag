@@ -1,15 +1,58 @@
-//! Parallel execution ([`crate::parallel`]): when a stage goes to the
-//! pool, and how its workers wait. Time only: a stage computes the same
-//! bits on any number of threads.
+//! Parallel execution ([`crate::parallel`]): when a section goes to the
+//! pool and on how many threads, and how its workers wait. Time only: a
+//! section computes the same bits on any number of threads.
+//!
+//! No value here is a fact about one machine: what a section costs is
+//! measured on the pool that runs it ([`Workers`](crate::parallel::Workers)
+//! calibrates its [`Dispatch`](crate::parallel::Dispatch)), and what an op
+//! costs is learned from the runs ([`Rate`](crate::parallel::Rate)). The
+//! values below are priors before either is known, and margins.
 
-/// [`Parallel::min_ops`](crate::parallel::Parallel::min_ops) by default,
-/// in ops (instances times their body's ops): about ten microseconds of
-/// work. The Python bindings gate a native batch at another value of the
-/// same unit (`PY_JIT_BATCH_MIN_OPS` in `rsdag-py`, `1 << 16`); both stay
-/// as they are until a gate measured in time replaces them.
-pub const MIN_OPS: usize = 20_000;
+/// A section goes wide only if that saves at least this fraction of its
+/// serial time ([`Dispatch::width`](crate::parallel::Dispatch::width)):
+/// margin for the scatter of the measured costs, so that a section near
+/// break-even stays serial instead of flipping between the two.
+pub const GAIN: f64 = 0.2;
 
-/// Pieces of work per worker a stage (and a native batch) is cut into
+/// What a section costs a pool that measures nothing
+/// ([`Dispatch::assumed`](crate::parallel::Dispatch::assumed)), in ns:
+/// this, plus [`ASSUMED_HELPER_NS`] per thread beyond the calling one.
+/// Machine: a desktop CPU's wake and hand-off; a pool that knows better
+/// says so through [`Pool::dispatch`](crate::parallel::Pool::dispatch).
+pub const ASSUMED_SECTION_NS: f64 = 2_000.0;
+/// See [`ASSUMED_SECTION_NS`].
+pub const ASSUMED_HELPER_NS: f64 = 1_000.0;
+
+/// The calibration of a pool's [`Dispatch`](crate::parallel::Dispatch):
+/// sections timed per thread count (the median taken), after as many to
+/// wake the workers. About a millisecond per thread count.
+pub const CALIBRATION_ROUNDS: usize = 64;
+/// Cache lines each piece of a calibration section writes, so that the
+/// calibration pays the hand-over of a piece's output a real section pays.
+pub const CALIBRATION_LINES: usize = 8;
+
+/// The ns per op an op costs before any is measured
+/// ([`Rate`](crate::parallel::Rate)): interpreted code (a tape's own ops,
+/// an interpreted body) and native code. Machine: priors only, replaced
+/// by what the runs measure.
+pub const INTERPRETED_NS_PER_OP: f32 = 5.0;
+/// See [`INTERPRETED_NS_PER_OP`].
+pub const NATIVE_NS_PER_OP: f32 = 0.5;
+/// The ns per value a block of a program's outputs costs before it is
+/// measured (a gather from all over the slots). Machine: a prior.
+pub const OUTPUT_NS_PER_VALUE: f32 = 1.0;
+
+/// A [`Rate`](crate::parallel::Rate) learns from one run in this many, and
+/// only from runs of at least [`RATE_MIN_OPS`] ops: two clock reads against
+/// enough work that they do not show.
+pub const RATE_SAMPLE_EVERY: u32 = 16;
+/// See [`RATE_SAMPLE_EVERY`].
+pub const RATE_MIN_OPS: f64 = 2_000.0;
+/// The weight of a new measurement in a [`Rate`](crate::parallel::Rate)'s
+/// running mean.
+pub const RATE_WEIGHT: f32 = 0.25;
+
+/// Pieces of work per thread a section is cut into
 /// ([`piece_len`](crate::parallel::piece_len)): about four balance
 /// instances of unequal cost, and a piece still carries enough work to
 /// pay for its hand-off.

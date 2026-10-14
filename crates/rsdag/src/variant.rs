@@ -291,6 +291,9 @@ pub struct VariantBody {
     backend: BodyBackend,
     policy: VariantPolicy,
     backends: BackendCache,
+    /// What an op of the body costs as its instances run (whatever variant
+    /// and form), learned from the runs.
+    rate: crate::parallel::Rate,
 }
 
 impl VariantBody {
@@ -332,6 +335,7 @@ impl VariantBody {
             backend,
             policy,
             backends: BackendCache::default(),
+            rate: crate::parallel::Rate::new(crate::constants::INTERPRETED_NS_PER_OP),
         };
         // An instance runs the full body until its variant is ready: this
         // form of it from the start.
@@ -751,6 +755,9 @@ impl VariantBody {
 impl ExternBundle for VariantBody {
     fn n_outputs(&self) -> usize {
         self.full.n_outputs()
+    }
+    fn rate(&self) -> &crate::parallel::Rate {
+        &self.rate
     }
     fn work_len(&self) -> usize {
         self.full.work_len()

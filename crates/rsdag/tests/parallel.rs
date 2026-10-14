@@ -70,7 +70,7 @@ fn ring() -> (Graph<F64>, Vec<ExprId>, Vec<SymbolId>, Vec<bool>) {
 fn pool(threads: usize) -> Parallel {
     Parallel {
         pool: Arc::new(parallel::Workers::new(threads)),
-        min_ops: 0,
+        dispatch: rsdag::parallel::Dispatch::free(threads),
     }
 }
 
@@ -139,7 +139,7 @@ fn small_stages_stay_serial_and_nothing_is_installed_outside() {
     let tape = Tape::compile(&g, &roots, &syms);
     let x = inputs();
     let mut p = pool(4);
-    p.min_ops = usize::MAX;
+    p.dispatch = parallel::Dispatch::never();
     let r = parallel::install(p, || {
         assert!(parallel::current().is_some());
         eval(&tape, &x)
@@ -264,4 +264,50 @@ fn a_panic_in_a_task_or_a_side_reaches_its_section() {
         n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     });
     assert_eq!(n.into_inner(), 8);
+}
+
+#[test]
+fn a_section_goes_as_wide_as_its_work_is_worth() {
+    use parallel::Dispatch;
+    // free: every section of two pieces or more on as many threads as pieces
+    assert_eq!(Dispatch::free(8).width(1.0, 3), 3);
+    assert_eq!(Dispatch::free(8).width(1.0, 100), 8);
+    assert_eq!(Dispatch::free(8).width(1.0, 1), 1);
+    assert_eq!(Dispatch::never().width(1e12, 100), 1);
+    // 1 us per section plus 1 us per helper: a microsecond of work stays
+    // serial, a millisecond goes to all eight threads, and in between some
+    let d = Dispatch::new((0..=8).map(|k| 1e3 * k as f64).collect());
+    assert_eq!(d.width(1e3, 64), 1);
+    assert_eq!(d.width(1e6, 64), 8);
+    let mid = d.width(2e4, 64);
+    assert!(mid > 1 && mid < 8, "{mid}");
+    // nothing to gain: serial
+    assert_eq!(d.width(f64::NAN, 64), 1);
+}
+
+#[test]
+fn workers_measure_what_a_section_costs_them() {
+    use parallel::{Pool, Workers};
+    let w = Workers::new(4);
+    let d = w.dispatch();
+    assert_eq!(d.threads(), 4);
+    let costs: Vec<f64> = (2..=4).map(|k| d.cost(k)).collect();
+    assert!(
+        costs.iter().all(|c| c.is_finite() && *c >= 0.0),
+        "{costs:?}"
+    );
+    assert!(costs.windows(2).all(|c| c[0] <= c[1]), "{costs:?}");
+    assert_eq!(Workers::new(1).dispatch().width(1e12, 100), 1);
+}
+
+#[test]
+fn a_rate_learns_what_an_op_costs() {
+    let r = parallel::Rate::new(10.0);
+    assert_eq!(r.ns_per_op(), 10.0);
+    for _ in 0..64 {
+        r.learn(1e4, 1e4);
+    }
+    assert!((r.ns_per_op() - 1.0).abs() < 1e-3, "{}", r.ns_per_op());
+    // a run too small to measure is never sampled
+    assert!(!(0..64).any(|_| r.sample(1.0)));
 }

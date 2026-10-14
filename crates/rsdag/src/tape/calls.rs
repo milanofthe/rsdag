@@ -253,10 +253,12 @@ unsafe fn run_part<T: Scalar>(
     }
 }
 
-/// A stage of `n` independent calls, the `k`th of them `call(k)`: on the
-/// installed pool when it is worth it ([`crate::parallel`]), every block of
-/// instances over scratch of its thread's, else one call after the other.
-/// Either way the results are the serial ones, and nothing is allocated.
+/// A stage of `n` independent calls, the `k`th of them `call(k)`: on as
+/// many threads of the installed pool as its work is worth
+/// ([`crate::parallel::width`]; each call's ops at its bundle's
+/// [`rate`](ExternBundle::rate)), every block of instances over scratch of
+/// its thread's, else one call after the other. Either way the results are
+/// the serial ones, and nothing is allocated.
 ///
 /// # Safety
 /// As [`run_call`], for every call; and the calls of the stage read nothing
@@ -268,7 +270,9 @@ pub unsafe fn run_stage<'a, T: Scalar>(
     gather: Shared<T>,
     inputs: &[T],
 ) {
-    let ops: u64 = (0..n).map(|k| call(k).ops).sum();
+    let work_of = |c: &Call| c.ops as f64 * c.bundle.rate().ns_per_op();
+    let work: f64 = (0..n).map(|k| work_of(&call(k))).sum();
+    let groups: usize = (0..n).map(|k| call(k).n_groups).sum();
     // the rows the prologs' instances share, before any part of them runs
     for k in 0..n {
         let c = call(k);
@@ -281,16 +285,19 @@ pub unsafe fn run_stage<'a, T: Scalar>(
             run_part(c, slots, gather, inputs, groups, s)
         })
     };
-    if !crate::parallel::worth(ops as usize) {
+    let width = crate::parallel::width(work, groups);
+    if width < 2 {
         for k in 0..n {
             let c = call(k);
-            run_groups(&c, 0..c.n_groups);
+            c.bundle
+                .rate()
+                .time(c.ops as f64, || run_groups(&c, 0..c.n_groups));
         }
         return;
     }
     // Pieces of `bs` instances, call after call; the `it`th found by
     // counting through the calls (a stage has few).
-    let bs = crate::parallel::block((0..n).map(|k| call(k).n_groups).sum());
+    let bs = crate::parallel::block(groups, width);
     let pieces = |c: &Call| c.n_groups.div_ceil(bs);
     let run = |mut it: usize| {
         let mut k = 0;
@@ -306,5 +313,22 @@ pub unsafe fn run_stage<'a, T: Scalar>(
         run_groups(&c, g0..(g0 + bs).min(c.n_groups));
     };
     let total = (0..n).map(|k| pieces(&call(k))).sum();
-    crate::parallel::run(total, ops as usize, &run);
+    // Measured as a whole, now and then: the threads' time less the
+    // section's cost, shared out over the calls as estimated, so a stage
+    // that went wide on a rate too high learns its way back.
+    let ops: f64 = (0..n).map(|k| call(k).ops as f64).sum();
+    if !call(0).bundle.rate().sample(ops) {
+        crate::parallel::run_width(total, width, &run);
+        return;
+    }
+    let t = std::time::Instant::now();
+    crate::parallel::run_width(total, width, &run);
+    let spent = t.elapsed().as_nanos() as f64 - crate::parallel::section_cost(width);
+    let serial = spent.max(0.0) * width as f64;
+    for k in 0..n {
+        let c = call(k);
+        c.bundle
+            .rate()
+            .learn(serial * work_of(&c) / work, c.ops as f64);
+    }
 }

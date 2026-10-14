@@ -135,7 +135,7 @@ fn instances_of_the_same_parameters_share_a_state_with_the_same_results() {
     run();
     let pool = rsdag::parallel::Parallel {
         pool: std::sync::Arc::new(rsdag::parallel::Workers::new(3)),
-        min_ops: 0,
+        dispatch: rsdag::parallel::Dispatch::free(3),
     };
     rsdag::parallel::install(pool, run);
 }

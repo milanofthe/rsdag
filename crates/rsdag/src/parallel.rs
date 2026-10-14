@@ -3,12 +3,16 @@
 //! A tape groups consecutive calls that read nothing another one of them
 //! writes into stages (see [`Tape::stages`](crate::Tape::stages)); every
 //! instance of every call in a stage is a piece of work of its own. When
-//! a [`Pool`] is installed on the calling thread ([`install`]) and a stage
-//! carries at least [`Parallel::min_ops`] ops, its instances run on the
-//! pool, each over scratch of its worker's; otherwise one after the other.
-//! Either way an instance computes exactly what the serial loop computes,
-//! so the results are the same bit for bit, whatever the thread count.
-//! Both backends, the interpreter and the native code, run stages so.
+//! a [`Pool`] is installed on the calling thread ([`install`]), a stage
+//! runs on as many of its threads as its work is worth ([`width`]): its
+//! time (its ops at what an op of its code costs, a [`Rate`] learned from
+//! the runs) against what a section costs the pool (its [`Dispatch`],
+//! which [`Workers`] measure), so a small stage stays on the calling
+//! thread whatever the machine. Each piece runs over scratch of its
+//! worker's. Either way an instance computes exactly what the serial loop
+//! computes, so the results are the same bit for bit, whatever the thread
+//! count. Both backends, the interpreter and the native code, run stages
+//! so.
 //!
 //! The host lends the pool: [`Workers`], this module's own, keeps its
 //! workers awake across the short serial stretches between a solver's
@@ -34,6 +38,17 @@ pub trait Pool: Send + Sync {
     /// Run `f(item)` for every `item` in `0..n`, returning when all ran.
     /// A piece may open sections of its own.
     fn run(&self, n: usize, f: &(dyn Fn(usize) + Sync));
+    /// [`run`](Self::run) on at most `width` threads, the calling one among
+    /// them. The default runs on all.
+    fn run_width(&self, n: usize, width: usize, f: &(dyn Fn(usize) + Sync)) {
+        let _ = width;
+        self.run(n, f)
+    }
+    /// What a section costs on this pool. The default assumes
+    /// ([`Dispatch::assumed`]); a pool that can measure itself says so.
+    fn dispatch(&self) -> Dispatch {
+        Dispatch::assumed(self.threads())
+    }
     /// Run `f` where handing work to the pool is cheapest: on one of its
     /// workers, for a pool whose hand-off from outside costs more (a
     /// thread put to sleep and woken). The default runs it here.
@@ -83,23 +98,163 @@ fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// A pool and from what size of stage on it is worth the hand-off.
+/// A pool and what a section costs on it.
 #[derive(Clone)]
 pub struct Parallel {
     pub pool: Arc<dyn Pool>,
-    /// Ops a stage carries (instances times their body's ops) from which on
-    /// it runs on the pool; smaller stages run serially.
-    pub min_ops: usize,
+    /// The pool's [`Pool::dispatch`], or another for a host that wants
+    /// every section wide ([`Dispatch::free`]) or none ([`Dispatch::never`]).
+    pub dispatch: Dispatch,
 }
 
-pub use crate::constants::{MIN_OPS, PIECES_PER_WORKER};
+use crate::constants::{ASSUMED_HELPER_NS, ASSUMED_SECTION_NS};
+use crate::constants::{CALIBRATION_LINES, CALIBRATION_ROUNDS};
+pub use crate::constants::{GAIN, PIECES_PER_WORKER};
+use crate::constants::{RATE_MIN_OPS, RATE_SAMPLE_EVERY, RATE_WEIGHT};
 
 impl Parallel {
+    /// `pool` with what a section costs on it.
     pub fn new(pool: Arc<dyn Pool>) -> Self {
-        Parallel {
-            pool,
-            min_ops: MIN_OPS,
+        let dispatch = pool.dispatch();
+        Parallel { pool, dispatch }
+    }
+}
+
+/// What a section costs on a pool: `cost(k)` ns for a section on `k`
+/// threads, the calling one among them. A section of `work` ns of serial
+/// work in `p` equal pieces takes about `work * ceil(p / k) / p + cost(k)`
+/// on `k` threads, and goes as wide as that is shortest ([`width`](
+/// Self::width)).
+#[derive(Clone, Debug)]
+pub struct Dispatch {
+    /// `cost[k]` for `k` threads; `cost[0]` and `cost[1]` are zero.
+    cost: Arc<[f64]>,
+}
+
+impl Dispatch {
+    /// The costs `cost[k]` of a section on `k` threads, for `k` up to
+    /// `cost.len() - 1` (`cost[0]` and `cost[1]` are not read).
+    pub fn new(cost: Vec<f64>) -> Self {
+        let mut cost = cost;
+        for c in cost.iter_mut().take(2) {
+            *c = 0.0;
         }
+        Dispatch { cost: cost.into() }
+    }
+
+    /// Sections cost nothing on `threads` threads: every section of two
+    /// pieces or more goes wide (tests, and hosts that know better).
+    pub fn free(threads: usize) -> Self {
+        Dispatch::new(vec![0.0; threads.max(1) + 1])
+    }
+
+    /// No section goes wide.
+    pub fn never() -> Self {
+        Dispatch::new(vec![0.0; 2])
+    }
+
+    /// What a pool of `threads` threads that measures nothing costs:
+    /// [`ASSUMED_SECTION_NS`] plus [`ASSUMED_HELPER_NS`] per helper.
+    pub fn assumed(threads: usize) -> Self {
+        let cost = (0..=threads.max(1))
+            .map(|k| ASSUMED_SECTION_NS + ASSUMED_HELPER_NS * k.saturating_sub(1) as f64)
+            .collect();
+        Dispatch::new(cost)
+    }
+
+    /// The most threads a section is costed for.
+    pub fn threads(&self) -> usize {
+        self.cost.len().saturating_sub(1).max(1)
+    }
+
+    /// What a section costs on `k` threads, in ns.
+    pub fn cost(&self, k: usize) -> f64 {
+        if k < 2 {
+            return 0.0;
+        }
+        self.cost.get(k).copied().unwrap_or(f64::INFINITY)
+    }
+
+    /// The threads a section of `work` ns in `pieces` pieces runs on: the
+    /// count it takes the shortest on, if that saves at least [`GAIN`] of
+    /// the serial time; one (serially) otherwise.
+    pub fn width(&self, work: f64, pieces: usize) -> usize {
+        if !(work > 0.0) || pieces < 2 {
+            return 1;
+        }
+        let p = pieces as f64;
+        let mut best = (1, work);
+        for k in 2..=pieces.min(self.threads()) {
+            let t = work * pieces.div_ceil(k) as f64 / p + self.cost[k];
+            if t < best.1 {
+                best = (k, t);
+            }
+        }
+        if best.1 <= (1.0 - GAIN) * work {
+            best.0
+        } else {
+            1
+        }
+    }
+}
+
+/// What an op of some code costs, in ns: a prior until runs are measured,
+/// then their running mean. Code that runs on the pool carries one (a
+/// function body, a backend's own ops), so a section's work is its ops at
+/// its code's rate. Measured on one run in [`RATE_SAMPLE_EVERY`] of at
+/// least [`RATE_MIN_OPS`] ops.
+#[derive(Debug)]
+pub struct Rate {
+    /// ns per op, as `f32` bits.
+    ns: std::sync::atomic::AtomicU32,
+    runs: std::sync::atomic::AtomicU32,
+}
+
+impl Rate {
+    /// A rate of `prior` ns per op until runs are measured.
+    pub const fn new(prior: f32) -> Self {
+        Rate {
+            ns: std::sync::atomic::AtomicU32::new(prior.to_bits()),
+            runs: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    /// ns per op.
+    pub fn ns_per_op(&self) -> f64 {
+        f32::from_bits(self.ns.load(std::sync::atomic::Ordering::Relaxed)) as f64
+    }
+
+    /// Whether to measure a run of `ops` ops.
+    pub fn sample(&self, ops: f64) -> bool {
+        ops >= RATE_MIN_OPS
+            && self
+                .runs
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                .is_multiple_of(RATE_SAMPLE_EVERY)
+    }
+
+    /// A run of `ops` ops took `ns` ns of one thread.
+    pub fn learn(&self, ns: f64, ops: f64) {
+        if !(ns > 0.0 && ops > 0.0) {
+            return;
+        }
+        use std::sync::atomic::Ordering::Relaxed;
+        let seen = (ns / ops) as f32;
+        let _ = self.ns.fetch_update(Relaxed, Relaxed, |b| {
+            let old = f32::from_bits(b);
+            Some((old + RATE_WEIGHT * (seen - old)).to_bits())
+        });
+    }
+
+    /// `f`, a run of `ops` ops, measured if sampled.
+    pub fn time<R>(&self, ops: f64, f: impl FnOnce() -> R) -> R {
+        if !self.sample(ops) {
+            return f();
+        }
+        let t = std::time::Instant::now();
+        let r = f();
+        self.learn(t.elapsed().as_nanos() as f64, ops);
+        r
     }
 }
 
@@ -137,21 +292,55 @@ pub fn current() -> Option<Parallel> {
     CURRENT.with(|c| c.borrow().clone())
 }
 
-/// Whether work of `ops` ops runs on the installed pool: there is one, with
-/// at least two workers, and the work reaches its [`Parallel::min_ops`].
-pub fn worth(ops: usize) -> bool {
-    !IN_STAGE.with(|f| f.get())
-        && CURRENT.with(|c| {
-            c.borrow()
-                .as_ref()
-                .is_some_and(|p| ops >= p.min_ops && p.pool.threads() >= 2)
+/// The threads `work` ns of work in `pieces` pieces runs on here: as many
+/// as the installed pool's [`Dispatch`] makes it worth, one (serially)
+/// outside a pool and inside a stage.
+pub fn width(work: f64, pieces: usize) -> usize {
+    if IN_STAGE.with(|f| f.get()) {
+        return 1;
+    }
+    CURRENT.with(|c| {
+        c.borrow().as_ref().map_or(1, |p| {
+            p.dispatch.width(work, pieces).min(p.pool.threads()).max(1)
         })
+    })
 }
 
-/// Run `n` pieces of work of `ops` ops together: on the installed pool when
-/// there is one and the work is worth it, else serially on this thread.
-pub fn run(n: usize, ops: usize, f: &(dyn Fn(usize) + Sync)) {
-    let p = if n >= 2 && worth(ops) {
+/// What a section on `k` threads costs on the installed pool, in ns.
+pub fn section_cost(k: usize) -> f64 {
+    CURRENT.with(|c| c.borrow().as_ref().map_or(0.0, |p| p.dispatch.cost(k)))
+}
+
+/// Run `n` pieces of `work` ns of work together: on as many threads of the
+/// installed pool as it is worth ([`width`]), else serially on this
+/// thread.
+pub fn run(n: usize, work: f64, f: &(dyn Fn(usize) + Sync)) {
+    run_width(n, width(work, n), f)
+}
+
+/// Run `n` pieces of `ops` ops of code at `rate` together, on as many
+/// threads as they are worth ([`run`]); the rate learns from the runs (a
+/// wide one counted as the threads' time less the section's cost).
+pub fn run_rated(n: usize, ops: f64, rate: &Rate, f: &(dyn Fn(usize) + Sync)) {
+    let k = width(ops * rate.ns_per_op(), n);
+    if !rate.sample(ops) {
+        return run_width(n, k, f);
+    }
+    let t = std::time::Instant::now();
+    run_width(n, k, f);
+    let spent = t.elapsed().as_nanos() as f64;
+    let serial = if k < 2 {
+        spent
+    } else {
+        (spent - section_cost(k)).max(0.0) * k as f64
+    };
+    rate.learn(serial, ops);
+}
+
+/// Run `n` pieces of work on `k` threads of the installed pool (the calling
+/// one among them), serially for `k < 2` or without a pool.
+pub fn run_width(n: usize, k: usize, f: &(dyn Fn(usize) + Sync)) {
+    let p = if n >= 2 && k >= 2 {
         CURRENT.with(|c| c.borrow().as_ref().map(|p| p.pool.clone()))
     } else {
         None
@@ -166,21 +355,20 @@ pub fn run(n: usize, ops: usize, f: &(dyn Fn(usize) + Sync)) {
             }
             IN_STAGE.with(|f| f.set(true));
             let _clear = Clear;
-            pool.run(n, f)
+            pool.run_width(n, k, f)
         }
         None => (0..n).for_each(f),
     }
 }
 
-/// Instances per piece of work for a stage of `n` instances: about
-/// [`PIECES_PER_WORKER`] pieces per worker of the installed pool (balance
-/// over instances of unequal cost), all in one piece when there is none.
-pub fn block(n: usize) -> usize {
-    let threads = CURRENT.with(|c| c.borrow().as_ref().map_or(0, |p| p.pool.threads()));
-    if threads < 2 {
+/// Instances per piece of work for a stage of `n` instances on `k`
+/// threads: about [`PIECES_PER_WORKER`] pieces per thread (balance over
+/// instances of unequal cost), all in one piece on one.
+pub fn block(n: usize, k: usize) -> usize {
+    if k < 2 {
         return n.max(1);
     }
-    piece_len(n, threads)
+    piece_len(n, k)
 }
 
 /// Items per piece of `n` items over `threads` workers: about
@@ -197,7 +385,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Condvar, Mutex};
 
 /// A pool of threads that steal work: `threads - 1` workers and the thread
-/// that starts a section, which takes part in it. Every worker keeps a
+/// that starts a section, which takes part in it. A section runs on as
+/// many of them as it asks for ([`Pool::run_width`]); what that costs is
+/// measured once, when they start ([`Pool::dispatch`]). Every worker keeps a
 /// queue of its own, the threads outside the pool share one; a thread
 /// looking for work takes the newest of its own queue, else the oldest of
 /// the outside one or another worker's. A thread waiting for its section to
@@ -210,6 +400,8 @@ pub struct Workers {
     shared: Arc<Shared>,
     threads: usize,
     handles: Vec<std::thread::JoinHandle<()>>,
+    /// What a section costs on them, measured when they start.
+    dispatch: Dispatch,
 }
 
 /// A piece of work in a queue: what it runs on and how.
@@ -495,11 +687,62 @@ impl Workers {
                     .expect("a worker thread")
             })
             .collect();
-        Workers {
+        let mut w = Workers {
             shared,
             threads,
             handles,
+            dispatch: Dispatch::never(),
+        };
+        let measured = Dispatch::measure(threads, &|k, piece| w.run_width(k, k, piece));
+        w.dispatch = measured;
+        w
+    }
+}
+
+impl Dispatch {
+    /// What a section costs on a pool of `threads` threads, measured:
+    /// `run(k, piece)` runs `piece(i)` for `i` in `0..k` on `k` threads.
+    /// Per thread count the median of [`CALIBRATION_ROUNDS`] sections of as
+    /// many pieces, each writing [`CALIBRATION_LINES`] cache lines (the
+    /// hand-over of a piece's output a real section pays), less what one
+    /// piece costs alone; never less than with fewer threads. Run after as
+    /// many sections on all threads, so it finds the workers awake as a
+    /// solver's sections do. About a millisecond per thread count.
+    pub fn measure(threads: usize, run: &dyn Fn(usize, &(dyn Fn(usize) + Sync))) -> Dispatch {
+        if threads < 2 {
+            return Dispatch::never();
         }
+        #[repr(align(64))]
+        struct Line(std::sync::atomic::AtomicU64);
+        let lines: Vec<Line> = (0..threads * CALIBRATION_LINES)
+            .map(|_| Line(std::sync::atomic::AtomicU64::new(0)))
+            .collect();
+        let piece = |i: usize| {
+            for l in &lines[i * CALIBRATION_LINES..(i + 1) * CALIBRATION_LINES] {
+                l.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        };
+        let median = |f: &dyn Fn()| {
+            let mut t: Vec<f64> = (0..CALIBRATION_ROUNDS)
+                .map(|_| {
+                    let s = std::time::Instant::now();
+                    f();
+                    s.elapsed().as_nanos() as f64
+                })
+                .collect();
+            t.sort_by(f64::total_cmp);
+            t[t.len() / 2]
+        };
+        for _ in 0..CALIBRATION_ROUNDS {
+            run(threads, &piece);
+        }
+        let one = median(&|| piece(0));
+        let mut cost = vec![0.0; threads + 1];
+        for k in 2..=threads {
+            let c = median(&|| run(k, &piece)) - one;
+            cost[k] = c.max(cost[k - 1]);
+        }
+        Dispatch::new(cost)
     }
 }
 
@@ -509,7 +752,16 @@ impl Pool for Workers {
     }
 
     fn run(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
-        if self.threads < 2 || n < 2 {
+        self.run_width(n, self.threads, f)
+    }
+
+    fn dispatch(&self) -> Dispatch {
+        self.dispatch.clone()
+    }
+
+    fn run_width(&self, n: usize, width: usize, f: &(dyn Fn(usize) + Sync)) {
+        let width = width.min(self.threads);
+        if width < 2 || n < 2 {
             (0..n).for_each(f);
             return;
         }
@@ -526,7 +778,7 @@ impl Pool for Workers {
             data: &job as *const RunJob<'_> as *const (),
             run: RunJob::help,
         };
-        let helpers = (n - 1).min(self.threads - 1);
+        let helpers = (n - 1).min(width - 1);
         job.out.store(helpers, SeqCst);
         for _ in 0..helpers {
             sh.push(helper);

@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use constants::{DETACH_OPS, PY_JIT_BATCH_MIN_OPS, REPR_NODES};
+use constants::{DETACH_OPS, REPR_NODES};
 use pyo3::basic::CompareOp;
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyAttributeError, PyTypeError, PyValueError};
@@ -909,9 +909,7 @@ impl Program {
             return Ok(());
         }
         let opts = rsdag_jit::Options {
-            batch: rsdag_jit::Batch::Parallel {
-                min_ops: PY_JIT_BATCH_MIN_OPS,
-            },
+            batch: rsdag_jit::Batch::Parallel,
             ..rsdag_jit::Options::default()
         };
         let c = py

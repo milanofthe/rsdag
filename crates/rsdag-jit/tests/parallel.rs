@@ -73,7 +73,7 @@ fn ring() -> (Graph<F64>, Vec<ExprId>, Vec<SymbolId>, Vec<bool>) {
 fn pool(threads: usize) -> Parallel {
     Parallel {
         pool: Arc::new(parallel::Workers::new(threads)),
-        min_ops: 0,
+        dispatch: rsdag::parallel::Dispatch::free(threads),
     }
 }
 

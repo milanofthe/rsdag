@@ -129,6 +129,7 @@ pub struct InterpretedBody {
     pure: Vec<bool>,
     /// What backends compiled of the tape (see [`ExternBundle::backend_cache`]).
     backends: crate::extern_fn::BackendCache,
+    rate: crate::parallel::Rate,
 }
 
 impl InterpretedBody {
@@ -140,6 +141,7 @@ impl InterpretedBody {
             n_out,
             pure,
             backends: Default::default(),
+            rate: crate::parallel::Rate::new(crate::constants::INTERPRETED_NS_PER_OP),
         }
     }
 
@@ -155,6 +157,9 @@ impl InterpretedBody {
 impl ExternBundle for InterpretedBody {
     fn n_outputs(&self) -> usize {
         self.n_out
+    }
+    fn rate(&self) -> &crate::parallel::Rate {
+        &self.rate
     }
     fn work_len(&self) -> usize {
         self.tape.work_len() + self.tape.out_len() + self.pure.len()
