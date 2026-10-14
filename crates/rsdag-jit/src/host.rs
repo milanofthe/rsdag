@@ -485,6 +485,7 @@ mod tests {
         v
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn four_lanes_are_the_scalar_bit_for_bit() {
         if !crate::x86_64::features().avx2 {

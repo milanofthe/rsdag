@@ -524,7 +524,7 @@ impl Tape {
     /// each the arm its condition picks, what only the other arms read
     /// dropped. Bit for bit the tape's outputs wherever the conditions take
     /// `pattern`; the prolog split kept, its state laid out anew, the main
-    /// phase reading no more than the tape's (see [`decided`]). No guards:
+    /// phase reading no more than the tape's (see `decided`). No guards:
     /// the caller computes the pattern.
     pub fn decide(&self, ps: &ParamSelects, pattern: &[bool]) -> Tape {
         let mut p = self.lift();
