@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use rsdag::parallel::{self, Parallel};
+use rsdag::parallel::{self, Lent};
 use rsdag::{ExprId, FuncId, Graph, Node, ParamRole, ReduceOp, Scope, SymbolId, Tape, F64};
 use rsdag_jit::{NativeTape, Options};
 
@@ -70,8 +70,8 @@ fn ring() -> (Graph<F64>, Vec<ExprId>, Vec<SymbolId>, Vec<bool>) {
     (g, roots, syms, pure)
 }
 
-fn pool(threads: usize) -> Parallel {
-    Parallel {
+fn pool(threads: usize) -> Lent {
+    Lent {
         pool: Arc::new(parallel::Workers::new(threads)),
         dispatch: rsdag::parallel::Dispatch::free(threads),
     }
@@ -103,7 +103,7 @@ fn a_split_native_program_on_a_pool_is_the_serial_one() {
     assert_eq!(bits(&out), bits(&on), "native serial");
     for threads in [2, 5, 8] {
         let (mut wp, mut op) = (Vec::new(), Vec::new());
-        parallel::install(pool(threads), || {
+        parallel::install_lent(pool(threads), || {
             native.eval_prolog(&x, &mut wp);
             for _ in 0..3 {
                 native.eval_main(&x, &mut wp, &mut op);
@@ -124,7 +124,7 @@ fn native_calls_without_state_on_a_pool_are_the_serial_ones() {
     let (mut w, mut serial) = (Vec::new(), Vec::new());
     tape.eval(&x, &mut w, &mut serial);
     let (mut wn, mut par) = (Vec::new(), Vec::new());
-    parallel::install(pool(4), || native.eval(&x, &mut wn, &mut par));
+    parallel::install_lent(pool(4), || native.eval(&x, &mut wn, &mut par));
     assert_eq!(bits(&serial), bits(&par));
 }
 
@@ -152,7 +152,7 @@ fn a_stage_across_chunks_is_the_serial_one() {
         native.eval_main(&x, &mut wn, &mut on);
         assert_eq!(bits(&out), bits(&on), "chunks of {chunk}, serial");
         let (mut wp, mut op) = (Vec::new(), Vec::new());
-        parallel::install(pool(4), || {
+        parallel::install_lent(pool(4), || {
             native.eval_prolog(&x, &mut wp);
             native.eval_main(&x, &mut wp, &mut op);
         });

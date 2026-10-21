@@ -517,7 +517,7 @@ impl ExternBundle for NativeBody {
                 Batch::Always => true,
                 Batch::Parallel => {
                     !self.rate.probing(ops)
-                        && rayon_dispatch().width(ops * self.rate.ns_per_op(), n_groups) > 1
+                        && rspool::rayon::width(ops * self.rate.ns_per_op(), n_groups) > 1
                 }
             };
         if !parallel {
@@ -620,16 +620,6 @@ fn options_key(opts: &Options) -> u64 {
 /// Instances per parallel task: about
 /// [`PIECES_PER_WORKER`](rsdag::parallel::PIECES_PER_WORKER) tasks per
 /// thread of the current pool, at most [`TASK_MAX_INSTANCES`].
-/// What a section costs on the rayon pool, measured on first use.
-fn rayon_dispatch() -> &'static rsdag::parallel::Dispatch {
-    static D: std::sync::OnceLock<rsdag::parallel::Dispatch> = std::sync::OnceLock::new();
-    D.get_or_init(|| {
-        rsdag::parallel::Dispatch::measure(rayon::current_num_threads(), &|k, piece| {
-            (0..k).into_par_iter().for_each(piece)
-        })
-    })
-}
-
 fn blocks(n: usize) -> usize {
     rsdag::parallel::piece_len(n, rayon::current_num_threads()).min(TASK_MAX_INSTANCES)
 }

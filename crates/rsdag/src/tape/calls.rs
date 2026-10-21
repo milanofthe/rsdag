@@ -313,7 +313,7 @@ pub unsafe fn run_stage<'a, T: Scalar>(
     }
     // Pieces of `bs` instances, call after call; the `it`th found by
     // counting through the calls (a stage has few).
-    let bs = crate::parallel::block(groups, width);
+    let bs = crate::parallel::piece_len(groups, width);
     let pieces = |c: &Call| c.n_groups.div_ceil(bs);
     let run = |mut it: usize| {
         let mut k = 0;

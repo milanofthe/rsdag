@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use rsdag::parallel::{self, Parallel};
+use rsdag::parallel::{self, Lent};
 use rsdag::{ExprId, FuncId, Graph, Node, ParamRole, ReduceOp, Scope, SymbolId, Tape, F64};
 
 const N: usize = 64;
@@ -67,8 +67,8 @@ fn ring() -> (Graph<F64>, Vec<ExprId>, Vec<SymbolId>, Vec<bool>) {
     (g, roots, syms, pure)
 }
 
-fn pool(threads: usize) -> Parallel {
-    Parallel {
+fn pool(threads: usize) -> Lent {
+    Lent {
         pool: Arc::new(parallel::Workers::new(threads)),
         dispatch: rsdag::parallel::Dispatch::free(threads),
     }
@@ -111,7 +111,7 @@ fn a_split_program_on_a_pool_is_the_serial_one() {
     tape.eval_main(&x, &mut w, &mut out);
     for threads in [2, 3, 8] {
         let (mut wp, mut op) = (Vec::new(), Vec::new());
-        parallel::install(pool(threads), || {
+        parallel::install_lent(pool(threads), || {
             tape.eval_prolog(&x, &mut wp);
             tape.eval_main(&x, &mut wp, &mut op);
         });
@@ -129,7 +129,7 @@ fn calls_without_state_on_a_pool_are_the_serial_ones() {
     assert!(!tape.stages().is_empty());
     let x = inputs();
     let serial = eval(&tape, &x);
-    let par = parallel::install(pool(4), || eval(&tape, &x));
+    let par = parallel::install_lent(pool(4), || eval(&tape, &x));
     assert_eq!(bits(&serial), bits(&par));
 }
 
@@ -140,184 +140,10 @@ fn small_stages_stay_serial_and_nothing_is_installed_outside() {
     let x = inputs();
     let mut p = pool(4);
     p.dispatch = parallel::Dispatch::never();
-    let r = parallel::install(p, || {
+    let r = parallel::install_lent(p, || {
         assert!(parallel::current().is_some());
         eval(&tape, &x)
     });
     assert!(parallel::current().is_none());
     assert_eq!(bits(&r), bits(&eval(&tape, &x)));
-}
-
-#[test]
-fn workers_run_every_piece_once_awake_or_woken() {
-    use rsdag::parallel::{Pool, Workers};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let w = Workers::with_spin(4, std::time::Duration::from_micros(50));
-    let hits: Vec<AtomicUsize> = (0..500).map(|_| AtomicUsize::new(0)).collect();
-    for round in 0..200 {
-        w.run(500, &|i| {
-            hits[i].fetch_add(1, Ordering::Relaxed);
-        });
-        // now and then long enough for the workers to fall asleep
-        if round % 50 == 0 {
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-    }
-    assert!(hits.iter().all(|h| h.load(Ordering::Relaxed) == 200));
-}
-
-#[test]
-fn a_panic_in_a_piece_reaches_the_caller() {
-    use rsdag::parallel::{Pool, Workers};
-    let w = Workers::new(3);
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        w.run(64, &|i| assert!(i != 37, "piece 37"));
-    }));
-    assert!(r.is_err());
-    // the pool goes on
-    let n = std::sync::atomic::AtomicUsize::new(0);
-    w.run(64, &|_| {
-        n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    });
-    assert_eq!(n.into_inner(), 64);
-}
-
-#[test]
-fn sections_nest_on_the_workers() {
-    // A run whose pieces run, join and scope again, the scope's tasks
-    // starting tasks: every leaf once, with the pool's threads only.
-    use rsdag::parallel::{Pool, Spawn, Workers};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let w = Workers::new(4);
-    let hits: Vec<AtomicUsize> = (0..16 * 32 * 2).map(|_| AtomicUsize::new(0)).collect();
-    let tasks = AtomicUsize::new(0);
-    for _ in 0..20 {
-        w.run(16, &|i| {
-            w.run(32, &|j| {
-                let k = (i * 32 + j) * 2;
-                let (h0, h1) = (&hits[k], &hits[k + 1]);
-                w.join(
-                    &mut || {
-                        h0.fetch_add(1, Ordering::Relaxed);
-                    },
-                    &mut || {
-                        h1.fetch_add(1, Ordering::Relaxed);
-                    },
-                );
-            });
-            w.scope(&mut |s: &dyn Spawn<'_>| {
-                for _ in 0..3 {
-                    let tasks = &tasks;
-                    s.spawn(Box::new(move |s: &dyn Spawn<'_>| {
-                        tasks.fetch_add(1, Ordering::Relaxed);
-                        s.spawn(Box::new(move |_: &dyn Spawn<'_>| {
-                            tasks.fetch_add(1, Ordering::Relaxed);
-                        }));
-                    }));
-                }
-            });
-        });
-    }
-    assert!(hits.iter().all(|h| h.load(Ordering::Relaxed) == 20));
-    assert_eq!(tasks.into_inner(), 20 * 16 * 6);
-}
-
-#[test]
-fn threads_outside_the_pool_share_it() {
-    // Four threads outside the pool run sections on it at once.
-    use rsdag::parallel::{Pool, Workers};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let w = Workers::new(3);
-    let n = AtomicUsize::new(0);
-    std::thread::scope(|s| {
-        for _ in 0..4 {
-            s.spawn(|| {
-                for _ in 0..200 {
-                    w.run(17, &|_| {
-                        w.run(5, &|_| {
-                            n.fetch_add(1, Ordering::Relaxed);
-                        });
-                    });
-                }
-            });
-        }
-    });
-    assert_eq!(n.into_inner(), 4 * 200 * 17 * 5);
-}
-
-#[test]
-fn a_panic_in_a_task_or_a_side_reaches_its_section() {
-    use rsdag::parallel::{Pool, Spawn, Workers};
-    let w = Workers::new(3);
-    let side = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        w.join(&mut || {}, &mut || panic!("side"));
-    }));
-    assert!(side.is_err());
-    let task = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        w.scope(&mut |s: &dyn Spawn<'_>| {
-            s.spawn(Box::new(|_: &dyn Spawn<'_>| panic!("task")));
-        });
-    }));
-    assert!(task.is_err());
-    let n = std::sync::atomic::AtomicUsize::new(0);
-    w.run(8, &|_| {
-        n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    });
-    assert_eq!(n.into_inner(), 8);
-}
-
-#[test]
-fn a_section_goes_as_wide_as_its_work_is_worth() {
-    use parallel::Dispatch;
-    // free: every section of two pieces or more on as many threads as pieces
-    assert_eq!(Dispatch::free(8).width(1.0, 3), 3);
-    assert_eq!(Dispatch::free(8).width(1.0, 100), 8);
-    assert_eq!(Dispatch::free(8).width(1.0, 1), 1);
-    assert_eq!(Dispatch::never().width(1e12, 100), 1);
-    // 1 us per section plus 1 us per helper: a microsecond of work stays
-    // serial, a millisecond goes to all eight threads, and in between some
-    let d = Dispatch::new((0..=8).map(|k| 1e3 * k as f64).collect());
-    assert_eq!(d.width(1e3, 64), 1);
-    assert_eq!(d.width(1e6, 64), 8);
-    let mid = d.width(2e4, 64);
-    assert!(mid > 1 && mid < 8, "{mid}");
-    // nothing to gain: serial
-    assert_eq!(d.width(f64::NAN, 64), 1);
-}
-
-#[test]
-fn workers_measure_what_a_section_costs_them() {
-    use parallel::{Pool, Workers};
-    let w = Workers::new(4);
-    let d = w.dispatch();
-    assert_eq!(d.threads(), 4);
-    let costs: Vec<f64> = (2..=4).map(|k| d.cost(k)).collect();
-    assert!(
-        costs.iter().all(|c| c.is_finite() && *c >= 0.0),
-        "{costs:?}"
-    );
-    assert!(costs.windows(2).all(|c| c[0] <= c[1]), "{costs:?}");
-    assert_eq!(Workers::new(1).dispatch().width(1e12, 100), 1);
-}
-
-#[test]
-fn a_rate_learns_what_an_op_costs() {
-    let r = parallel::Rate::new(10.0);
-    assert_eq!(r.ns_per_op(), 10.0);
-    for _ in 0..64 {
-        r.learn(1e4, 1e4);
-    }
-    assert!((r.ns_per_op() - 1.0).abs() < 1e-3, "{}", r.ns_per_op());
-    // a run of no work is never sampled, any other now and then
-    assert!(!(0..64).any(|_| r.sample(0.0)));
-    assert!((0..64).any(|_| r.sample(1.0)));
-}
-
-#[test]
-fn a_wide_section_explores_whatever_the_serial_samples_counted() {
-    let r = parallel::Rate::new(1.0);
-    // an odd number of serial samples first must not shift exploration off
-    // its multiples
-    r.sample(1.0);
-    assert!((0..1000).any(|_| r.explore(1.0, 2)));
 }

@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use rsdag::node::CmpOp;
-use rsdag::parallel::{self, Parallel};
+use rsdag::parallel::{self, Lent};
 use rsdag::tape::Op;
 use rsdag::{ExprId, Graph, Node, ReduceOp, SymbolId, Tape, F64};
 use rsdag_jit::NativeTape;
@@ -60,8 +60,8 @@ fn assembly() -> (Graph<F64>, Vec<ExprId>, Vec<SymbolId>) {
     (g, roots, syms)
 }
 
-fn pool(threads: usize) -> Parallel {
-    Parallel {
+fn pool(threads: usize) -> Lent {
+    Lent {
         pool: Arc::new(parallel::Workers::new(threads)),
         dispatch: rsdag::parallel::Dispatch::free(threads),
     }
@@ -143,7 +143,7 @@ fn a_region_on_a_pool_is_the_serial_one() {
         for threads in [2, 5, 12] {
             let (mut wp, mut op, mut wq, mut oq) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
             let mut tp = Vec::<u8>::new();
-            parallel::install(pool(threads), || {
+            parallel::install_lent(pool(threads), || {
                 for _ in 0..3 {
                     tape.eval(&x, &mut wp, &mut op);
                     native.eval(&x, &mut wq, &mut oq);

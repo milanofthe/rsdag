@@ -133,9 +133,9 @@ fn instances_of_the_same_parameters_share_a_state_with_the_same_results() {
         }
     };
     run();
-    let pool = rsdag::parallel::Parallel {
+    let pool = rsdag::parallel::Lent {
         pool: std::sync::Arc::new(rsdag::parallel::Workers::new(3)),
         dispatch: rsdag::parallel::Dispatch::free(3),
     };
-    rsdag::parallel::install(pool, run);
+    rsdag::parallel::install_lent(pool, run);
 }

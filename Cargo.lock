@@ -226,6 +226,7 @@ dependencies = [
  "num-rational",
  "num-traits",
  "rsdag",
+ "rspool",
  "rustc-hash",
  "serde",
  "serde_json",
@@ -238,6 +239,7 @@ dependencies = [
  "libc",
  "rayon",
  "rsdag",
+ "rspool",
  "rustc-hash",
  "serde_json",
 ]
@@ -249,6 +251,13 @@ dependencies = [
  "pyo3",
  "rsdag",
  "rsdag-jit",
+]
+
+[[package]]
+name = "rspool"
+version = "0.1.0"
+dependencies = [
+ "rayon",
 ]
 
 [[package]]
