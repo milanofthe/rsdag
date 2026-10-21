@@ -308,6 +308,7 @@ fn a_rate_learns_what_an_op_costs() {
         r.learn(1e4, 1e4);
     }
     assert!((r.ns_per_op() - 1.0).abs() < 1e-3, "{}", r.ns_per_op());
-    // a run too small to measure is never sampled
-    assert!(!(0..64).any(|_| r.sample(1.0)));
+    // a run of no work is never sampled, any other now and then
+    assert!(!(0..64).any(|_| r.sample(0.0)));
+    assert!((0..64).any(|_| r.sample(1.0)));
 }

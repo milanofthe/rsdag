@@ -110,7 +110,7 @@ pub struct Parallel {
 use crate::constants::{ASSUMED_HELPER_NS, ASSUMED_SECTION_NS};
 use crate::constants::{CALIBRATION_LINES, CALIBRATION_ROUNDS};
 pub use crate::constants::{GAIN, PIECES_PER_WORKER};
-use crate::constants::{RATE_EXPLORE, RATE_MIN_OPS, RATE_PROBES, RATE_SAMPLE_EVERY, RATE_STALE};
+use crate::constants::{RATE_EXPLORE, RATE_PROBES, RATE_SAMPLE_EVERY, RATE_STALE};
 use crate::constants::{RATE_WEIGHT_DOWN, RATE_WEIGHT_UP};
 
 impl Parallel {
@@ -203,7 +203,7 @@ impl Dispatch {
 /// then their running mean. Code that runs on the pool carries one (a
 /// function body, a backend's own ops), so a section's work is its ops at
 /// its code's rate. Only serial runs are measured: the first
-/// [`RATE_PROBES`] of at least [`RATE_MIN_OPS`] ops run serially for it
+/// [`RATE_PROBES`] runs of its code run serially for it
 /// ([`probing`](Self::probing)), and after them one serial run in
 /// [`RATE_SAMPLE_EVERY`].
 #[derive(Debug)]
@@ -228,14 +228,14 @@ impl Rate {
     /// Whether a run of `ops` ops is to run serially, to be measured: the
     /// rate has not had its probes yet.
     pub fn probing(&self, ops: f64) -> bool {
-        ops >= RATE_MIN_OPS && self.probes.load(std::sync::atomic::Ordering::Relaxed) < RATE_PROBES
+        ops > 0.0 && self.probes.load(std::sync::atomic::Ordering::Relaxed) < RATE_PROBES
     }
 
     /// Whether a run of `ops` ops that would go `k` wide is to run serially
     /// instead, measured: one in [`RATE_EXPLORE`] times `k - 1`.
     pub fn explore(&self, ops: f64, k: usize) -> bool {
         let every = RATE_EXPLORE.saturating_mul(k.saturating_sub(1).max(1) as u32);
-        ops >= RATE_MIN_OPS
+        ops > 0.0
             && self
                 .runs
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -255,7 +255,7 @@ impl Rate {
     /// Whether to measure a serial run of `ops` ops (a probe, or one in
     /// [`RATE_SAMPLE_EVERY`]).
     pub fn sample(&self, ops: f64) -> bool {
-        ops >= RATE_MIN_OPS
+        ops > 0.0
             && self
                 .runs
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)

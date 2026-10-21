@@ -42,14 +42,12 @@ pub const NATIVE_NS_PER_OP: f32 = 0.5;
 /// measured (a gather from all over the slots). Machine: a prior.
 pub const OUTPUT_NS_PER_VALUE: f32 = 1.0;
 
-/// A [`Rate`](crate::parallel::Rate) learns from one run in this many, and
-/// only from runs of at least [`RATE_MIN_OPS`] ops: two clock reads against
-/// enough work that they do not show.
+/// A [`Rate`](crate::parallel::Rate) learns from one serial run in this
+/// many: two clock reads, a few ns a run on average even for the smallest
+/// sections, whose rate decides as much as a large one's.
 pub const RATE_SAMPLE_EVERY: u32 = 16;
-/// See [`RATE_SAMPLE_EVERY`].
-pub const RATE_MIN_OPS: f64 = 2_000.0;
-/// The first runs of at least [`RATE_MIN_OPS`] ops of a
-/// [`Rate`](crate::parallel::Rate)'s code run serially and are measured,
+/// The first runs of a [`Rate`](crate::parallel::Rate)'s code run serially
+/// and are measured,
 /// the first of them (cold caches) not counted: the rate a section's width
 /// is decided on comes from runs of one thread, never from wide ones,
 /// whose time mixes the work with what the hand-off cost.
