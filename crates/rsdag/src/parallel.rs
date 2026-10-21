@@ -286,7 +286,7 @@ impl Rate {
     }
 
     /// `f`, a serial run of `ops` ops, measured if it is a probe or
-    /// sampled. The first probe warms the caches and is not counted; the
+    /// sampled, and counted if no section inside it went wide. The first probe warms the caches and is not counted; the
     /// first counted one replaces the prior.
     pub fn time<R>(&self, ops: f64, f: impl FnOnce() -> R) -> R {
         use std::sync::atomic::Ordering::Relaxed;
@@ -294,10 +294,9 @@ impl Rate {
         if probe.is_none() && !self.sample(ops) {
             return f();
         }
-        let t = std::time::Instant::now();
-        let r = f();
-        let ns = t.elapsed().as_nanos() as f64;
+        let (r, ns, serial) = timed(f);
         match probe {
+            _ if !serial => {}
             Some(0) => {}
             Some(1) => self.ns.store(((ns / ops) as f32).to_bits(), Relaxed),
             _ => self.learn(ns, ops),
@@ -305,11 +304,13 @@ impl Rate {
         r
     }
 
-    /// `f`, a serial run of `ops` ops, measured.
+    /// `f`, a serial run of `ops` ops, measured (unless a section inside it
+    /// went wide).
     pub fn measure<R>(&self, ops: f64, f: impl FnOnce() -> R) -> R {
-        let t = std::time::Instant::now();
-        let r = f();
-        self.learn(t.elapsed().as_nanos() as f64, ops);
+        let (r, ns, serial) = timed(f);
+        if serial {
+            self.learn(ns, ops);
+        }
         r
     }
 }
@@ -318,6 +319,19 @@ thread_local! {
     static CURRENT: RefCell<Option<Parallel>> = const { RefCell::new(None) };
     /// This thread is running pieces of a stage: a stage inside runs serially.
     static IN_STAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Sections this thread sent to a pool: a measured run that sent one
+    /// (a call whose body has wide stages of its own) is no serial work and
+    /// teaches its rate nothing.
+    static WIDE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// `f`, timed in ns, and whether it ran on this thread alone.
+fn timed<R>(f: impl FnOnce() -> R) -> (R, f64, bool) {
+    let before = WIDE.with(|w| w.get());
+    let t = std::time::Instant::now();
+    let r = f();
+    let ns = t.elapsed().as_nanos() as f64;
+    (r, ns, WIDE.with(|w| w.get()) == before)
 }
 
 /// Run `f` with `p` installed: the programs `f` evaluates run their stages
@@ -422,6 +436,7 @@ pub fn run_width(n: usize, k: usize, f: &(dyn Fn(usize) + Sync)) {
                 }
             }
             IN_STAGE.with(|f| f.set(true));
+            WIDE.with(|w| w.set(w.get() + 1));
             let _clear = Clear;
             pool.run_width(n, k, f)
         }
