@@ -211,6 +211,10 @@ pub struct Rate {
     /// ns per op, as `f32` bits.
     ns: std::sync::atomic::AtomicU32,
     runs: std::sync::atomic::AtomicU32,
+    /// Runs that would go wide, apart from `runs`: a count shared with the
+    /// serial samples could skip every multiple (see [`explore`](
+    /// Self::explore)).
+    wide: std::sync::atomic::AtomicU32,
     /// Serial probes run.
     probes: std::sync::atomic::AtomicU32,
 }
@@ -221,6 +225,7 @@ impl Rate {
         Rate {
             ns: std::sync::atomic::AtomicU32::new(prior.to_bits()),
             runs: std::sync::atomic::AtomicU32::new(0),
+            wide: std::sync::atomic::AtomicU32::new(0),
             probes: std::sync::atomic::AtomicU32::new(0),
         }
     }
@@ -237,7 +242,7 @@ impl Rate {
         let every = RATE_EXPLORE.saturating_mul(k.saturating_sub(1).max(1) as u32);
         ops > 0.0
             && self
-                .runs
+                .wide
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 .is_multiple_of(every)
     }

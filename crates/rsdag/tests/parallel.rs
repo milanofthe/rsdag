@@ -312,3 +312,12 @@ fn a_rate_learns_what_an_op_costs() {
     assert!(!(0..64).any(|_| r.sample(0.0)));
     assert!((0..64).any(|_| r.sample(1.0)));
 }
+
+#[test]
+fn a_wide_section_explores_whatever_the_serial_samples_counted() {
+    let r = parallel::Rate::new(1.0);
+    // an odd number of serial samples first must not shift exploration off
+    // its multiples
+    r.sample(1.0);
+    assert!((0..1000).any(|_| r.explore(1.0, 2)));
+}
