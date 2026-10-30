@@ -285,32 +285,37 @@ pub unsafe fn run_stage<'a, T: Scalar>(
             run_part(c, slots, gather, inputs, groups, s)
         })
     };
-    // the bundles' rates come from serial runs: their probes first
+    // The bundles' rates come from serial runs, their probes first; the
+    // stage decides with the first call's rate on its surcharge, its
+    // explorations and retries (`rspool::Work`), its serial runs measured
+    // call by call at their own rates.
+    let ops: f64 = (0..n).map(|k| call(k).ops as f64).sum();
+    let decide = rspool::Work::estimated(work, ops, call(0).bundle.rate());
     let probing = (0..n).any(|k| {
         let c = call(k);
         c.bundle.rate().probing(c.ops as f64)
     });
-    let width = if probing {
-        1
+    let go = if probing {
+        rspool::Go::Here
     } else {
-        crate::parallel::width(work, groups)
+        decide.go::<rspool::Here>(groups)
     };
-    // a wide stage now and then serially, its rates kept the code's
-    let ops: f64 = (0..n).map(|k| call(k).ops as f64).sum();
-    let explore = width >= 2 && call(0).bundle.rate().explore(ops, width);
-    if width < 2 || explore {
-        for k in 0..n {
-            let c = call(k);
-            let rate = c.bundle.rate();
-            let run = || run_groups(&c, 0..c.n_groups);
-            if explore {
-                rate.measure(c.ops as f64, run);
-            } else {
-                rate.time(c.ops as f64, run);
+    let width = match go {
+        rspool::Go::Wide(k) => k,
+        go => {
+            for k in 0..n {
+                let c = call(k);
+                let rate = c.bundle.rate();
+                let run = || run_groups(&c, 0..c.n_groups);
+                if go == rspool::Go::Explore {
+                    rate.measure(c.ops as f64, run);
+                } else {
+                    rate.time(c.ops as f64, run);
+                }
             }
+            return;
         }
-        return;
-    }
+    };
     // Pieces of `bs` instances, call after call; the `it`th found by
     // counting through the calls (a stage has few).
     let bs = crate::parallel::piece_len(groups, width);
@@ -329,11 +334,5 @@ pub unsafe fn run_stage<'a, T: Scalar>(
         run_groups(&c, g0..(g0 + bs).min(c.n_groups));
     };
     let total = (0..n).map(|k| pieces(&call(k))).sum();
-    // now and then timed: far faster than its rates predict, they are stale
-    let timed = call(0).bundle.rate().sample(ops);
-    if crate::parallel::run_watched(total, width, work, timed, &run) {
-        for k in 0..n {
-            call(k).bundle.rate().reprobe();
-        }
-    }
+    decide.wide::<rspool::Here>(total, width, &run);
 }
