@@ -5,12 +5,14 @@
 //! writes into stages (see [`Tape::stages`](crate::Tape::stages)); every
 //! instance of every call in a stage is a piece of work of its own. When a
 //! [`Pool`] is lent on the calling thread ([`install`]), a stage runs on as
-//! many of its threads as its work is worth ([`width`]): its ops at what an
-//! op of its bodies costs (each body's [`Rate`](crate::ExternBundle::rate),
-//! learned from the runs) against what a section costs the pool (its
-//! [`Dispatch`], which [`Workers`] measure). A small stage stays on the
-//! calling thread whatever the machine; a stage as wide as the pool leaves
-//! the calls inside it their share, one thread. Each piece runs over scratch
+//! many of its threads as its runs were fastest on for work of its size:
+//! its ops at what an op of its bodies costs (each body's
+//! [`Rate`](crate::ExternBundle::rate)), and per width the time such stages
+//! took, measured on the runs ([`Work`]), a width not yet measured counted
+//! at what a section costs the pool (its [`Dispatch`], which [`Workers`]
+//! measure). A small stage stays on the calling thread whatever the
+//! machine; a stage as wide as the pool leaves the calls inside it their
+//! share, one thread. Each piece runs over scratch
 //! of its worker's. Either way an instance computes exactly what the serial
 //! loop computes, so the results are the same bit for bit, whatever the
 //! thread count. Both backends, the interpreter and the native code, run
@@ -22,7 +24,7 @@
 //! threads and one cost model with them.
 
 pub use rspool::{
-    current, dispatch, in_piece, install, install_lent, piece_len, run, run_rated, run_watched,
-    run_width, threads, width, Dispatch, Go, Here, Lent, Piece, Place, Pool, Rate, Serial, Spawn,
+    current, dispatch, in_piece, install, install_lent, piece_len, run, run_rated, run_width,
+    threads, width, Dispatch, Go, Here, Lent, Piece, Place, Pool, Rate, Serial, SerialRun, Spawn,
     Task, Timing, Work, Workers, GAIN, PIECES_PER_WORKER, SPIN,
 };

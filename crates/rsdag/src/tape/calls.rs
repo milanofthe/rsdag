@@ -285,33 +285,24 @@ pub unsafe fn run_stage<'a, T: Scalar>(
             run_part(c, slots, gather, inputs, groups, s)
         })
     };
-    // The bundles' rates come from serial runs, their probes first; the
-    // stage decides with the first call's rate on its surcharge, its
-    // explorations and retries (`rspool::Work`), its serial runs measured
-    // call by call at their own rates.
+    // The stage runs as wide as its runs on the first call's rate were
+    // fastest for work of its size (`rspool::Work`); a serial run is
+    // measured as a whole for that choice, and call by call for the ns per
+    // op of each body.
     let ops: f64 = (0..n).map(|k| call(k).ops as f64).sum();
     let decide = rspool::Work::estimated(work, ops, call(0).bundle.rate());
-    let probing = (0..n).any(|k| {
-        let c = call(k);
-        c.bundle.rate().probing(c.ops as f64)
-    });
-    let go = if probing {
-        rspool::Go::Here
-    } else {
-        decide.go::<rspool::Here>(groups)
-    };
-    let width = match go {
+    let width = match decide.go::<rspool::Here>(groups) {
         rspool::Go::Wide(k) => k,
-        go => {
+        rspool::Go::Here => {
+            let whole = decide.serial_timed();
             for k in 0..n {
                 let c = call(k);
-                let rate = c.bundle.rate();
-                let run = || run_groups(&c, 0..c.n_groups);
-                if go == rspool::Go::Explore {
-                    rate.measure(c.ops as f64, run);
-                } else {
-                    rate.time(c.ops as f64, run);
-                }
+                c.bundle
+                    .rate()
+                    .time(c.ops as f64, || run_groups(&c, 0..c.n_groups));
+            }
+            if let Some(t) = whole {
+                decide.record_serial(t);
             }
             return;
         }

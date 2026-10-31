@@ -515,10 +515,7 @@ impl ExternBundle for NativeBody {
             && match self.batch {
                 Batch::Serial => false,
                 Batch::Always => true,
-                Batch::Parallel => {
-                    !self.rate.probing(ops)
-                        && rspool::rayon::width(ops * self.rate.ns_per_op(), n_groups) > 1
-                }
+                Batch::Parallel => rspool::rayon::width(ops * self.rate.ns_per_op(), n_groups) > 1,
             };
         if !parallel {
             self.rate.time(ops, || {
