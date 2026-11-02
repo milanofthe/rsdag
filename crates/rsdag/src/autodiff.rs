@@ -107,7 +107,20 @@ fn unary_factor<K: Field>(ctx: &mut Graph<K>, op: UnaryOp, a: ExprId) -> ExprId 
             let d = ctx.add(one, a);
             ctx.recip(d)
         }
-        UnaryOp::Expm1 => ctx.exp(a),
+        UnaryOp::Expm1 => {
+            // d/dx expm1(a) = exp(a), unguarded like expm1 itself: the
+            // guarded exp below the threshold (the bare exponential there,
+            // no cancellation for negative a), expm1(a) + 1 above it, where
+            // exp's linear tail would part from the primal. The `expm1`
+            // node is the primal's; a NaN `a` takes the exp arm.
+            let hi = ctx.konst_f64(crate::semantics::EXP_LIMIT);
+            let above = ctx.cmp(CmpOp::Gt, a, hi);
+            let em1 = ctx.unary(UnaryOp::Expm1, a);
+            let one = ctx.one();
+            let raw = ctx.add(em1, one);
+            let ea = ctx.exp(a);
+            ctx.select(above, raw, ea)
+        }
         UnaryOp::Cbrt => {
             // 1 / (3 cbrt(a)^2)
             let c = ctx.unary(UnaryOp::Cbrt, a);

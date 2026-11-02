@@ -80,6 +80,45 @@ fn exp_derivative_shares_primal_and_matches_limexp_tail() {
 }
 
 #[test]
+fn expm1_derivative_is_the_unguarded_exponential() {
+    use rsdag::semantics::EXP_LIMIT;
+    let mut ctx: Graph<BigRational> = Graph::new();
+    let x = ctx.sym("x");
+    let f = ctx.unary(UnaryOp::Expm1, x);
+    let xid = ctx.symbol_id("x");
+    let df = differentiate(&mut ctx, f, xid);
+    let d2f = differentiate(&mut ctx, df, xid);
+    let mut env: HashMap<SymbolId, f64> = HashMap::new();
+    for &xv in &[
+        -700.0,
+        -50.0,
+        -1.0,
+        -1e-12,
+        0.0,
+        1e-12,
+        1.0,
+        EXP_LIMIT - 0.1,
+        EXP_LIMIT,
+        EXP_LIMIT + 0.1,
+        81.0,
+        90.0,
+        500.0,
+        700.0,
+    ] {
+        env.insert(xid, xv);
+        let got = rsdag::eval(&ctx, &[df, d2f], &env);
+        let want = xv.exp();
+        for (order, v) in got.iter().enumerate() {
+            assert!(
+                (v - want).abs() <= 4.0 * f64::EPSILON * want,
+                "x={xv}, derivative {}: {v} against exp {want}",
+                order + 1
+            );
+        }
+    }
+}
+
+#[test]
 fn select_and_opaque_autodiff() {
     use rsdag::node::CmpOp;
     let mut ctx: Graph<BigRational> = Graph::new();
