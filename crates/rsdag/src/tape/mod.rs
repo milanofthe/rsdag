@@ -826,7 +826,7 @@ impl Tape {
                 .filter(|r| r.lo() as usize == i)
             {
                 next_region += 1;
-                if !S::RECORDS && r.hi as usize <= hi && crate::parallel::worth(r.ops() as usize) {
+                if !S::RECORDS && r.hi as usize <= hi {
                     let slots = Shared::new(work);
                     let piece = |k: usize| {
                         crate::scratch::with_len(self.max_args, T::zero(), |s| {
@@ -842,14 +842,21 @@ impl Tape {
                             }
                         })
                     };
-                    crate::parallel::run(r.starts.len(), r.ops() as usize, &piece);
+                    crate::parallel::run_rated(
+                        r.starts.len(),
+                        r.ops() as f64,
+                        &INTERPRETED,
+                        &piece,
+                    );
                     skip = r.hi as usize;
                     continue;
                 }
             }
             if let Some(st) = self.stages.get(next).filter(|st| st.lo as usize == i) {
                 next += 1;
-                if st.hi as usize <= hi && crate::parallel::worth(st.ops as usize) {
+                // `run_stage` runs it on as many threads as it is worth,
+                // one included
+                if st.hi as usize <= hi {
                     let (slots, gather) = (
                         Shared::new(work),
                         Shared::new(&mut scratch[..self.max_args]),
@@ -1266,6 +1273,14 @@ impl Tape {
 
 use crate::constants::OUTPUT_BLOCK;
 
+/// What an op of the interpreter's own costs (a region's), learned from
+/// the runs.
+static INTERPRETED: crate::parallel::Rate =
+    crate::parallel::Rate::new(crate::constants::INTERPRETED_NS_PER_OP);
+/// What an output of a block costs to gather, learned from the runs.
+static OUTPUTS: crate::parallel::Rate =
+    crate::parallel::Rate::new(crate::constants::OUTPUT_NS_PER_VALUE);
+
 /// The program's outputs, the operands `outputs` (slots of `work`, or
 /// tagged inputs), into `out`: in blocks on the installed pool
 /// ([`crate::parallel`]) when there are enough of them (a circuit's
@@ -1281,7 +1296,7 @@ pub fn write_outputs<T: Scalar>(outputs: &[u32], inputs: &[T], work: &[T], out: 
             unsafe { dst.set(i, read(inputs, work, outputs[i])) };
         }
     };
-    crate::parallel::run(pieces, n, &block);
+    crate::parallel::run_rated(pieces, n as f64, &OUTPUTS, &block);
 }
 
 /// The value of an operand: a slot, or an input when tagged (a missing

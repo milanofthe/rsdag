@@ -108,7 +108,7 @@ fn timed<R>(f: impl FnOnce() -> R) -> (R, f64) {
 
 /// The pools `--threads` asks for, by count (none for one thread): the
 /// programs' independent calls run on them (`rsdag::parallel`).
-static POOLS: std::sync::OnceLock<Vec<(usize, Option<rsdag::parallel::Parallel>)>> =
+static POOLS: std::sync::OnceLock<Vec<(usize, Option<rsdag::parallel::Lent>)>> =
     std::sync::OnceLock::new();
 
 /// Rounds over the thread counts (`--rounds`), and whether the interpreted
@@ -124,9 +124,9 @@ static LANES: std::sync::OnceLock<Lanes> = std::sync::OnceLock::new();
 static VARIANTS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// `f` with `pool` installed, if any.
-fn on_pool<R: Send>(pool: &Option<rsdag::parallel::Parallel>, f: impl FnOnce() -> R + Send) -> R {
+fn on_pool<R: Send>(pool: &Option<rsdag::parallel::Lent>, f: impl FnOnce() -> R + Send) -> R {
     match pool.clone() {
-        Some(p) => rsdag::parallel::install(p, f),
+        Some(p) => rsdag::parallel::install_lent(p, f),
         None => f(),
     }
 }
@@ -308,9 +308,7 @@ fn main() {
         .iter()
         .map(|&n| {
             let pool = (n > 1).then(|| {
-                rsdag::parallel::Parallel::new(std::sync::Arc::new(rsdag::parallel::Workers::new(
-                    n,
-                )))
+                rsdag::parallel::Lent::new(std::sync::Arc::new(rsdag::parallel::Workers::new(n)))
             });
             (n, pool)
         })

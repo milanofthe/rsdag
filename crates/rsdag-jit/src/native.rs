@@ -43,6 +43,10 @@ use rsdag::constants::FOLD_LANES;
 
 /// Bytes a value takes in the work array and the inputs.
 const F64_BYTES: usize = std::mem::size_of::<f64>();
+
+/// What an op of a native region costs, learned from the runs.
+static REGIONS: rsdag::parallel::Rate =
+    rsdag::parallel::Rate::new(rsdag::constants::NATIVE_NS_PER_OP);
 use crate::isa::{Arg, Arith, Base, IArg, Isa, Round};
 use crate::{Batch, JitError, Lanes, Options};
 
@@ -137,6 +141,7 @@ struct NativeBody {
     /// are those alone).
     rank: Vec<Option<usize>>,
     batch: Batch,
+    rate: rsdag::parallel::Rate,
 }
 
 impl NativeBody {
@@ -406,6 +411,9 @@ impl ExternBundle for NativeBody {
     fn n_outputs(&self) -> usize {
         self.n_out
     }
+    fn rate(&self) -> &rsdag::parallel::Rate {
+        &self.rate
+    }
     fn work_len(&self) -> usize {
         self.tape.layout.total + self.pure.len()
     }
@@ -501,15 +509,19 @@ impl ExternBundle for NativeBody {
             });
             return;
         }
-        let parallel = match self.batch {
-            Batch::Serial => false,
-            Batch::Parallel { min_ops } => {
-                n_groups >= 2 && self.n_out > 0 && n_groups * self.tape.n_ops >= min_ops
-            }
-        };
+        let ops = (n_groups * self.tape.n_ops) as f64;
+        let parallel = n_groups >= 2
+            && self.n_out > 0
+            && match self.batch {
+                Batch::Serial => false,
+                Batch::Always => true,
+                Batch::Parallel => rspool::rayon::width(ops * self.rate.ns_per_op(), n_groups) > 1,
+            };
         if !parallel {
-            rsdag::scratch::with::<Vec<f64>, _>(|work| {
-                self.run_groups(work, args, n_args, out, 0..n_groups)
+            self.rate.time(ops, || {
+                rsdag::scratch::with::<Vec<f64>, _>(|work| {
+                    self.run_groups(work, args, n_args, out, 0..n_groups)
+                })
             });
             return;
         }
@@ -581,6 +593,7 @@ fn native_body(
             })
             .collect(),
         batch: opts.batch,
+        rate: rsdag::parallel::Rate::new(rsdag::constants::NATIVE_NS_PER_OP),
     }))
 }
 
@@ -589,7 +602,8 @@ fn native_body(
 fn options_key(opts: &Options) -> u64 {
     let batch = match opts.batch {
         Batch::Serial => 0,
-        Batch::Parallel { min_ops } => 1 + min_ops as u64,
+        Batch::Parallel => 1,
+        Batch::Always => 2,
     };
     let lanes = match opts.lanes {
         Lanes::Auto => 0,
@@ -959,12 +973,12 @@ impl NativeTape {
         while c < range.end {
             if let Some(r) = self.regions.get(next).filter(|r| r.starts[0] == c) {
                 next += 1;
-                if r.hi <= range.end && rsdag::parallel::worth(r.ops) {
+                if r.hi <= range.end {
                     let piece = |k: usize| {
                         let end = r.starts.get(k + 1).copied().unwrap_or(r.hi);
                         (r.starts[k]..end).for_each(chunk);
                     };
-                    rsdag::parallel::run(r.starts.len(), r.ops, &piece);
+                    rsdag::parallel::run_rated(r.starts.len(), r.ops as f64, &REGIONS, &piece);
                     c = r.hi;
                     continue;
                 }

@@ -11,6 +11,7 @@ description = "Native code backend for rsdag programs"
 rsdag.workspace = true
 rustc-hash.workspace = true
 rayon.workspace = true
+rspool = { workspace = true, features = ["rayon"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -70,7 +70,7 @@ fn a_parallel_batch_is_the_serial_loop() {
             .collect();
         let tape = Tape::compile(&g, &roots, &syms);
         let opts = Options {
-            batch: Batch::Parallel { min_ops: 0 },
+            batch: Batch::Always,
             ..Options::default()
         };
         let par = NativeTape::compile_opts(&tape, &opts, &[]).expect("compile");
