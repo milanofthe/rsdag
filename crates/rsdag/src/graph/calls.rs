@@ -235,9 +235,9 @@ impl<K: Field> Graph<K> {
     pub fn output_support(&self, f: FuncId, out: u32) -> Arc<[u32]> {
         // a known output's, without bringing the outputs appended since up
         let key = (Through::Carries, None);
-        match self.funcs[f.0 as usize].cached_reads(&key) {
-            Some(r) if (out as usize) < r.len() => r[out as usize].clone(),
-            _ => self.reads(f, Through::Carries, None)[out as usize].clone(),
+        match self.funcs[f.0 as usize].cached_read(&key, out) {
+            Some(r) => r,
+            None => self.reads(f, Through::Carries, None)[out as usize].clone(),
         }
     }
 

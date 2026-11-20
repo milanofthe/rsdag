@@ -312,6 +312,12 @@ impl Function {
         self.reads.lock().unwrap().get(key).cloned()
     }
 
+    /// What output `out` reads, if known under `key`.
+    pub(crate) fn cached_read(&self, key: &ReadsKey, out: u32) -> Option<Arc<[u32]>> {
+        let reads = self.reads.lock().unwrap();
+        reads.get(key)?.get(out as usize).cloned()
+    }
+
     pub(crate) fn cache_reads(&self, key: ReadsKey, reads: Arc<[Arc<[u32]>]>) {
         self.reads.lock().unwrap().insert(key, reads);
     }
