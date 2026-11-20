@@ -792,8 +792,8 @@ impl<K: Field> Graph<K> {
     pub fn free_calls_in(&self, exprs: &[ExprId]) -> std::collections::BTreeSet<OutputId> {
         self.cone(exprs, false)
             .nodes
-            .into_iter()
-            .filter_map(|e| match *self.node(e) {
+            .iter()
+            .filter_map(|&e| match *self.node(e) {
                 Node::Call(o, _) => Some(o),
                 _ => None,
             })
@@ -811,21 +811,18 @@ impl<K: Field> Graph<K> {
     /// program over them takes. One walk over the forest, each shared node
     /// once.
     pub fn free_symbols_in(&self, exprs: &[ExprId]) -> std::collections::BTreeSet<SymbolId> {
-        self.symbols_of(self.cone(exprs, true).nodes)
+        self.symbols_of(&self.cone(exprs, true).nodes)
     }
 
     /// The symbols `exprs` mention, the bodies they call not looked into: the
     /// parameters a function closed over them takes (see
     /// [`close`](Self::close)).
     pub fn mentioned_symbols_in(&self, exprs: &[ExprId]) -> std::collections::BTreeSet<SymbolId> {
-        self.symbols_of(self.cone(exprs, false).nodes)
+        self.symbols_of(&self.cone(exprs, false).nodes)
     }
 
-    fn symbols_of(&self, nodes: Vec<ExprId>) -> std::collections::BTreeSet<SymbolId> {
-        nodes
-            .into_iter()
-            .filter_map(|e| self.as_symbol(e))
-            .collect()
+    fn symbols_of(&self, nodes: &[ExprId]) -> std::collections::BTreeSet<SymbolId> {
+        nodes.iter().filter_map(|&e| self.as_symbol(e)).collect()
     }
 }
 

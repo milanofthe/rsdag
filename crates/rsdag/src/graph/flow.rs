@@ -183,8 +183,18 @@ pub(crate) fn inert(node: &Node) -> usize {
 /// The nodes under some roots in a topological order, each after its
 /// operands, and each node's place in it (see [`Graph::cone`]).
 pub(crate) struct Cone {
-    pub(crate) nodes: Vec<ExprId>,
+    pub(crate) nodes: Pooled<Vec<ExprId>>,
     at: NodeTable<u32>,
+}
+
+/// The buffers of [`Graph::cone`]'s walk.
+#[derive(Default)]
+struct Walk {
+    lists: FxHashSet<ArgList>,
+    funcs: FxHashSet<FuncId>,
+    contexts: FxHashSet<u32>,
+    stack: Vec<(ExprId, bool)>,
+    ops: Vec<ExprId>,
 }
 
 /// A node met but not finished in [`Graph::cone`]'s walk.
@@ -224,12 +234,21 @@ impl<K: Field> Graph<K> {
     /// mentions).
     pub(crate) fn cone(&self, roots: &[ExprId], globals: bool) -> Cone {
         let mut at = NodeTable::new(self.len());
-        let mut lists: FxHashSet<ArgList> = FxHashSet::default();
-        let mut funcs: FxHashSet<FuncId> = FxHashSet::default();
-        let mut contexts: FxHashSet<u32> = FxHashSet::default();
-        let mut stack: Vec<(ExprId, bool)> = roots.iter().rev().map(|&r| (r, false)).collect();
-        let mut nodes = Vec::new();
-        let mut ops: Vec<ExprId> = Vec::new();
+        let mut walk: Pooled<Walk> = Pooled::take();
+        let Walk {
+            lists,
+            funcs,
+            contexts,
+            stack,
+            ops,
+        } = &mut *walk;
+        lists.clear();
+        funcs.clear();
+        contexts.clear();
+        stack.clear();
+        stack.extend(roots.iter().rev().map(|&r| (r, false)));
+        let mut nodes: Pooled<Vec<ExprId>> = Pooled::take();
+        nodes.clear();
         while let Some((e, done)) = stack.pop() {
             if done {
                 at.set(e, nodes.len() as u32);

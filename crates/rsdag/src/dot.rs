@@ -64,7 +64,7 @@ pub fn number(x: f64) -> String {
 
 /// The nodes `roots` reach, themselves included.
 pub fn reachable<K: Field>(g: &Graph<K>, roots: &[ExprId]) -> FxHashSet<ExprId> {
-    g.cone(roots, false).nodes.into_iter().collect()
+    g.cone(roots, false).nodes.iter().copied().collect()
 }
 
 /// A graph's DAG under some roots (see the module docs).
@@ -361,7 +361,7 @@ impl<'g, K: Field> GraphView<'g, K> {
             seeds.extend(ids.iter().copied());
         }
         // Nodes in id order: operands before the nodes that read them.
-        let mut exprs = g.cone(&seeds, false).nodes;
+        let mut exprs = g.cone(&seeds, false).nodes.to_vec();
         exprs.sort_unstable();
         let mut home: FxHashMap<ExprId, usize> = FxHashMap::default();
         for (c, (_, ids)) in clusters.iter().enumerate() {

@@ -129,7 +129,7 @@ pub struct Bound {
 /// dominant cost of the traversals a build pass runs by the thousand. The
 /// storage comes from a per-thread pool and goes back there on drop: a
 /// traversal nested in another takes a table of its own, and repeated
-/// traversals allocate none. Keys are nodes below the arena length at
+/// traversals allocate none (see [`Pooled`]). Keys are nodes below the arena length at
 /// [`begin`](Self::begin); a node made during the traversal is no key (`set`
 /// ignores it, `get` finds nothing).
 pub(crate) struct NodeTable<T: Slot> {
@@ -166,14 +166,10 @@ impl Slot for u32 {
 /// The storage of a [`NodeTable`]: stamps, values, epoch.
 type TableStore = (Vec<u32>, Vec<u32>, u32);
 
-thread_local! {
-    static TABLES: std::cell::RefCell<Vec<TableStore>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
 impl<T: Slot> NodeTable<T> {
     /// An empty table over an arena of `n` nodes.
     pub(crate) fn new(n: usize) -> Self {
-        let (stamp, val, cur) = TABLES.with(|t| t.borrow_mut().pop()).unwrap_or_default();
+        let (stamp, val, cur) = Pooled::<TableStore>::take().into_inner();
         let mut t = NodeTable {
             stamp,
             val,
@@ -227,7 +223,59 @@ impl<T: Slot> Drop for NodeTable<T> {
             std::mem::take(&mut self.val),
             self.cur,
         );
-        TABLES.with(|t| t.borrow_mut().push(store));
+        Pooled::give(store);
+    }
+}
+
+thread_local! {
+    static POOL: std::cell::RefCell<Vec<Box<dyn std::any::Any>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Buffers a traversal reuses, taken from a per-thread pool and given back
+/// on drop, with what they hold (the taker clears them): a traversal run
+/// thousands of times allocates its buffers once, and one nested in
+/// another takes buffers of its own.
+pub(crate) struct Pooled<T: Default + 'static>(Option<T>);
+
+impl<T: Default + 'static> Pooled<T> {
+    pub(crate) fn take() -> Self {
+        let found = POOL.with(|p| {
+            let mut p = p.borrow_mut();
+            let at = p.iter().rposition(|b| b.is::<T>())?;
+            p.swap_remove(at).downcast::<T>().ok()
+        });
+        Pooled(Some(found.map_or_else(T::default, |b| *b)))
+    }
+
+    /// The value, no longer given back on drop.
+    pub(crate) fn into_inner(mut self) -> T {
+        self.0.take().expect("held until drop")
+    }
+
+    /// Put `t` in the pool.
+    pub(crate) fn give(t: T) {
+        drop(Pooled(Some(t)));
+    }
+}
+
+impl<T: Default + 'static> std::ops::Deref for Pooled<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.0.as_ref().expect("held until drop")
+    }
+}
+
+impl<T: Default + 'static> std::ops::DerefMut for Pooled<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.0.as_mut().expect("held until drop")
+    }
+}
+
+impl<T: Default + 'static> Drop for Pooled<T> {
+    fn drop(&mut self) {
+        if let Some(t) = self.0.take() {
+            POOL.with(|p| p.borrow_mut().push(Box::new(t)));
+        }
     }
 }
 

@@ -280,7 +280,8 @@ impl Function {
         let mut globals: Vec<ExprId> = ctx
             .cone(&exprs, true)
             .nodes
-            .into_iter()
+            .iter()
+            .copied()
             .filter(
                 |&e| matches!(*ctx.node(e), crate::node::Node::Symbol(s) if !params.contains(&s)),
             )

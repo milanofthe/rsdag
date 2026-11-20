@@ -7,14 +7,14 @@ use crate::field::Field;
 use rustc_hash::FxHashMap as HashMap;
 
 use crate::func::FuncId;
-use crate::graph::{Graph, NO_CONTEXT};
+use crate::graph::{Graph, Pooled, NO_CONTEXT};
 use crate::node::{ArgList, ExprId, Node, SymbolId};
 
 /// A bottom-up rewrite (see [`rewrite`]): the graph it reads and what it
 /// makes of each node.
 pub(crate) trait Rule<K: Field> {
     /// What a node becomes: a node of a graph, a drawn node.
-    type V: Copy;
+    type V: Copy + 'static;
     /// The graph rewritten.
     fn source(&self) -> &Graph<K>;
     /// Node `e`, no call, over its operands rewritten, in
@@ -51,14 +51,33 @@ impl<V: Copy> Call<'_, V> {
 /// outputs share what the rule makes of it.
 pub(crate) fn rewrite<K: Field, R: Rule<K>>(r: &mut R, roots: &[ExprId]) -> Vec<R::V> {
     let cone = r.source().cone(roots, false);
+    let mut scratch: Pooled<Scratch<R::V>> = Pooled::take();
+    let Scratch {
+        index,
+        place,
+        start,
+        found,
+        outs,
+        next,
+        at_done,
+        done,
+        vals,
+        contexts,
+        ops,
+        args,
+    } = &mut *scratch;
+    index.clear();
+    contexts.clear();
+    place.clear();
+    start.clear();
+    found.clear();
+    outs.clear();
+    done.clear();
+    vals.clear();
     // Per call its instance and its place among the instance's calls, and
     // the calls laid out by instance: `outs[start[s]..start[s + 1]]`.
-    let mut index: HashMap<(FuncId, u32, ArgList), u32> = HashMap::default();
-    let mut place: Vec<(u32, u32)> = Vec::with_capacity(cone.nodes.len());
-    let mut start: Vec<u32> = Vec::new();
-    let mut found: Vec<(u32, (ExprId, u32))> = Vec::new();
     let g = r.source();
-    for &e in &cone.nodes {
+    for &e in cone.nodes.iter() {
         place.push(match *g.node(e) {
             Node::Call(o, l) => {
                 let (f, k) = g.output(o);
@@ -79,20 +98,16 @@ pub(crate) fn rewrite<K: Field, R: Rule<K>>(r: &mut R, roots: &[ExprId]) -> Vec<
         (*n, sum) = (sum, sum + *n);
     }
     start.push(sum);
-    let mut outs: Vec<(ExprId, u32)> = vec![(ExprId(0), 0); sum as usize];
-    let mut next = start.clone();
-    for (s, call) in found {
+    outs.resize(sum as usize, (ExprId(0), 0));
+    next.clone_from(start);
+    for &(s, call) in found.iter() {
         outs[next[s as usize] as usize] = call;
         next[s as usize] += 1;
     }
     // per instance, where its calls' values start in `done`
-    let mut at_done: Vec<u32> = vec![u32::MAX; index.len()];
-    let mut done: Vec<R::V> = Vec::new();
-    let mut vals: Vec<R::V> = Vec::with_capacity(cone.nodes.len());
-    // per context, its bound expressions rewritten
-    let mut contexts: HashMap<u32, Vec<R::V>> = HashMap::default();
-    let (mut ops, mut args): (Vec<R::V>, Vec<R::V>) = (Vec::new(), Vec::new());
-    for (&e, &(s, k)) in cone.nodes.iter().zip(&place) {
+    at_done.clear();
+    at_done.resize(index.len(), u32::MAX);
+    for (&e, &(s, k)) in cone.nodes.iter().zip(place.iter()) {
         let g = r.source();
         let node = *g.node(e);
         let v = match node {
@@ -112,12 +127,12 @@ pub(crate) fn rewrite<K: Field, R: Rule<K>>(r: &mut R, roots: &[ExprId]) -> Vec<
                     let call = Call {
                         f,
                         ctx: c,
-                        args: &args,
+                        args,
                         bound,
                     };
                     at_done[s] = done.len() as u32;
                     let calls = &outs[start[s] as usize..start[s + 1] as usize];
-                    r.calls(&call, calls, &mut done);
+                    r.calls(&call, calls, done);
                     debug_assert_eq!(done.len() as u32 - at_done[s], calls.len() as u32);
                 }
                 done[(at_done[s] + k) as usize]
@@ -125,12 +140,47 @@ pub(crate) fn rewrite<K: Field, R: Rule<K>>(r: &mut R, roots: &[ExprId]) -> Vec<
             _ => {
                 ops.clear();
                 ops.extend(g.operands(e).iter().map(|&a| vals[cone.pos(a)]));
-                r.node(e, node, &ops)
+                r.node(e, node, ops)
             }
         };
         vals.push(v);
     }
     roots.iter().map(|&e| vals[cone.pos(e)]).collect()
+}
+
+/// The buffers of [`rewrite`], kept in the per-thread pool.
+struct Scratch<V> {
+    index: HashMap<(FuncId, u32, ArgList), u32>,
+    place: Vec<(u32, u32)>,
+    start: Vec<u32>,
+    found: Vec<(u32, (ExprId, u32))>,
+    outs: Vec<(ExprId, u32)>,
+    next: Vec<u32>,
+    at_done: Vec<u32>,
+    done: Vec<V>,
+    vals: Vec<V>,
+    contexts: HashMap<u32, Vec<V>>,
+    ops: Vec<V>,
+    args: Vec<V>,
+}
+
+impl<V> Default for Scratch<V> {
+    fn default() -> Self {
+        Scratch {
+            index: HashMap::default(),
+            place: Vec::new(),
+            start: Vec::new(),
+            found: Vec::new(),
+            outs: Vec::new(),
+            next: Vec::new(),
+            at_done: Vec::new(),
+            done: Vec::new(),
+            vals: Vec::new(),
+            contexts: HashMap::default(),
+            ops: Vec::new(),
+            args: Vec::new(),
+        }
+    }
 }
 
 /// [`substitute`]: a symbol `map` binds its expression, a call whose body
