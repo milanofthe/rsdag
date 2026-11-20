@@ -113,16 +113,7 @@ impl Tape {
         let m = p.insts.len();
         // A pinned select is its arm, through chains of them (the guards'
         // count, built after, pins nothing).
-        let resolve = |r: Ref| -> Ref {
-            let mut r = r;
-            while let Ref::Value(i, _) = r {
-                match pinned.get(i as usize).copied().flatten() {
-                    Some((_, arm, _)) => r = arm,
-                    None => break,
-                }
-            }
-            r
-        };
+        let mut arm: Vec<Option<Ref>> = pinned.iter().map(|q| q.map(|(_, a, _)| a)).collect();
         // The selects the outputs reach, a pinned one reading only its
         // condition and its arm: their conditions are the guards.
         let mut live = vec![false; m];
@@ -150,7 +141,7 @@ impl Tape {
             }
             let g = match (live[i], pinned[i]) {
                 (true, Some((cond, _, choice))) => {
-                    let cond = resolve(cond);
+                    let cond = decided(&p, &arm, cond, false);
                     *guard.entry(cond).or_insert_with(|| {
                         guards.push(cond);
                         expected.push(choice);
@@ -174,13 +165,11 @@ impl Tape {
                 }
             }
         }
-        for r in p.pool.iter_mut().chain(p.roots.iter_mut()) {
-            *r = resolve(*r);
-        }
-        p.retain_reachable();
-        let order = p.schedule();
-        let mut tape = p.emit(&order, self.prolog_ops > 0);
-        tape.n_inputs = self.n_inputs;
+        arm.resize(p.insts.len(), None);
+        let resolve =
+            |v: &[Ref]| -> Vec<Ref> { v.iter().map(|&r| decided(&p, &arm, r, false)).collect() };
+        (p.pool, p.roots) = (resolve(&p.pool), resolve(&p.roots));
+        let tape = self.emit_again(&mut p, self.prolog_ops > 0);
         // Guards on an input or a prolog value: checked once after a prolog
         // pass (roots are pinned, so valid across every later main pass).
         let checked = if form == Guards::Each {
@@ -203,6 +192,20 @@ impl Tape {
             guard_of,
             count: form == Guards::Count,
         }
+    }
+}
+
+impl Tape {
+    /// `p`, a transform of this tape's program, without what nothing
+    /// reads any more, scheduled and emitted again like a fresh
+    /// compilation over this tape's inputs (`split`: the prolog split
+    /// kept).
+    fn emit_again(&self, p: &mut Program, split: bool) -> Tape {
+        p.retain_reachable();
+        let order = p.schedule();
+        let mut tape = p.emit(&order, split);
+        tape.n_inputs = self.n_inputs;
+        tape
     }
 }
 
@@ -397,7 +400,7 @@ pub struct ParamSelects {
 impl ParamSelects {
     /// Per instruction of `p` (the tape's program), the arm `pattern`
     /// decides it to, for the selects this decides.
-    fn arms(&self, p: &super::compile::Program, pattern: &[bool]) -> Vec<Option<Ref>> {
+    fn arms(&self, p: &Program, pattern: &[bool]) -> Vec<Option<Ref>> {
         let mut arm: Vec<Option<Ref>> = vec![None; p.insts.len()];
         for &(i, c) in &self.of {
             let ins = p.ins(i as usize);
@@ -451,7 +454,7 @@ impl Tape {
             return None;
         }
         let mut p = self.lift();
-        let pure = |r: Ref, p: &super::compile::Program| match r {
+        let pure = |r: Ref, p: &Program| match r {
             Ref::Input(k) => pure_inputs.get(k as usize).copied().unwrap_or(false),
             Ref::Value(j, _) => p.insts[j as usize].pure,
         };
@@ -479,11 +482,8 @@ impl Tape {
             return None;
         }
         p.roots = conds;
-        p.retain_reachable();
-        let order = p.schedule();
-        let mut tape = p.emit(&order, false);
-        tape.n_inputs = self.n_inputs;
-        Some(ParamSelects { conds: tape, of })
+        let conds = self.emit_again(&mut p, false);
+        Some(ParamSelects { conds, of })
     }
 
     /// The instructions, undecided and decided by each of `patterns` (see
@@ -545,11 +545,7 @@ impl Tape {
             .map(|&r| decided(&p, &arm, r, true))
             .collect();
         (p.pool, p.roots) = (pool, roots);
-        p.retain_reachable();
-        let order = p.schedule();
-        let mut tape = p.emit(&order, self.prolog_ops > 0);
-        tape.n_inputs = self.n_inputs;
-        tape
+        self.emit_again(&mut p, self.prolog_ops > 0)
     }
 }
 
@@ -559,7 +555,7 @@ impl Tape {
 /// is in the state, where its arm would be a parameter the main phase reads
 /// itself, passed on every evaluation. Deciding it saves the prolog one op
 /// per binding, nothing per evaluation.
-fn decided(p: &super::compile::Program, arm: &[Option<Ref>], r: Ref, main: bool) -> Ref {
+fn decided(p: &Program, arm: &[Option<Ref>], r: Ref, main: bool) -> Ref {
     let mut r = r;
     while let Ref::Value(i, _) = r {
         match arm[i as usize] {

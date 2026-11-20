@@ -18,23 +18,26 @@
 pub struct BackendCache(std::sync::Mutex<Vec<(u64, std::sync::Arc<dyn ExternBundle>)>>);
 
 impl BackendCache {
+    /// The form compiled under `key`, if any.
+    pub fn get(&self, key: u64) -> Option<std::sync::Arc<dyn ExternBundle>> {
+        let v = self.0.lock().unwrap();
+        v.iter().find(|(k, _)| *k == key).map(|(_, b)| b.clone())
+    }
+
     /// The form compiled under `key`, compiled by `make` on its first use.
     pub fn get_or_try_insert<E>(
         &self,
         key: u64,
         make: impl FnOnce() -> Result<std::sync::Arc<dyn ExternBundle>, E>,
     ) -> Result<std::sync::Arc<dyn ExternBundle>, E> {
-        let find = |v: &[(u64, std::sync::Arc<dyn ExternBundle>)]| {
-            v.iter().find(|(k, _)| *k == key).map(|(_, b)| b.clone())
-        };
-        if let Some(b) = find(&self.0.lock().unwrap()) {
+        if let Some(b) = self.get(key) {
             return Ok(b);
         }
         // Compiled outside the lock: a body's own calls take their bodies'.
         let b = make()?;
         let mut v = self.0.lock().unwrap();
-        if let Some(first) = find(&v) {
-            return Ok(first);
+        if let Some((_, first)) = v.iter().find(|(k, _)| *k == key) {
+            return Ok(first.clone());
         }
         v.push((key, b.clone()));
         Ok(b)

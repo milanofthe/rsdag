@@ -11,10 +11,10 @@
 //! 2. **Choice specialization** (interpreter): models branch by operating
 //!    region (`Select`) and the full tape evaluates both arms. After a
 //!    traced evaluation the tape is shortened against the current choices
-//!    ([`Tape::specialize`]) and runs guarded; a region flip retraces and
-//!    respecializes, a select seen flipping is unpinned for good, and a
-//!    tape whose choices thrash opts out. A specialization that holds long
-//!    enough is compiled too.
+//!    ([`Tape::specialize`]) and runs guarded, under the policy of
+//!    [`crate::choices`]: a region flip retraces and respecializes, a
+//!    select seen flipping is unpinned for good, a tape whose choices
+//!    thrash opts out, and a specialization that holds is compiled too.
 //! 3. **The interpreter**, always correct, always available.
 //!
 //! The prolog/main split runs in episodes: [`Adaptive::eval_prolog`] once
@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::choices::{ChoicePolicy, Choices};
+use crate::choices::{ChoicePolicy, Specializer};
 use crate::hooks::{log, Level};
 use crate::{Program, SpecializedTape, Tape};
 
@@ -65,14 +65,6 @@ pub struct Policy {
     /// How the program specializes over its region choices (its bodies'
     /// are [`VariantPolicy::choices`](crate::variant::VariantPolicy::choices)).
     pub choices: ChoicePolicy,
-    /// Guard-holding evaluations before a specialization is compiled.
-    pub spec_compile_after: u32,
-    /// Native compiles a specialization may spend across region flips.
-    pub spec_compile_budget: u32,
-    /// With the full native code landed, the interpreted specialization
-    /// runs only when this many times shorter (an interpreted op costs
-    /// about this many native ones).
-    pub spec_interp_cost: usize,
     /// How the program's bodies specialize per parameter binding. Where
     /// the program is compiled, the compiled form builds the variants (on
     /// the compiler's background queue) and the interpreted one runs its
@@ -98,20 +90,20 @@ struct Jit {
     landed: (Mutex<bool>, Condvar),
 }
 
-/// Specialization cache and its policy counters.
-#[derive(Default)]
+/// The program's specialization over its choices: the policy's state, and
+/// the shortened tape by the version it was built at, with its native code
+/// once compiled.
 struct Spec {
-    spec: Option<Arc<SpecializedTape>>,
-    /// What the evaluations taught of the choices; its version moves
-    /// whenever `spec` is replaced, so a compile of an outdated
-    /// specialization is dropped when it lands.
-    choices: Choices,
-    scratch_choices: Vec<u8>,
-    /// Consecutive guard-holding evaluations (the compile probation).
-    stable: u32,
-    compiles: u32,
-    inflight: bool,
-    native: Option<(u64, Native)>,
+    learned: Specializer,
+    spec: Option<(u64, Arc<SpecializedTape>, Option<Native>)>,
+}
+
+impl Spec {
+    /// The current specialization, its version and its native code.
+    fn current(&self) -> Option<(u64, Arc<SpecializedTape>, Option<Native>)> {
+        let v = self.learned.current()?;
+        self.spec.clone().filter(|(at, ..)| *at == v)
+    }
 }
 
 /// What an [`Adaptive`] has done so far (see [`Adaptive::stats`]).
@@ -140,7 +132,7 @@ enum Kind {
     /// The full tape's layout: the interpreter or the native code.
     Full,
     SpecInterp(Arc<SpecializedTape>, u64),
-    SpecNative(Native, Arc<SpecializedTape>),
+    SpecNative(Native, Arc<SpecializedTape>, u64),
 }
 
 /// A tape and its accelerated forms, arbitrated per call.
@@ -168,8 +160,13 @@ impl Adaptive {
             }),
             ..crate::BodyBackend::default()
         });
-        let spec = (policy.choices.enabled && tape.n_selects() >= policy.choices.min_selects)
-            .then(|| Arc::new(Mutex::new(Spec::default())));
+        let learned = Specializer::new(tape.n_selects());
+        let spec = learned.eligible(&policy.choices).then(|| {
+            Arc::new(Mutex::new(Spec {
+                learned,
+                spec: None,
+            }))
+        });
         Adaptive {
             tape: Arc::new(tape),
             policy,
@@ -197,10 +194,10 @@ impl Adaptive {
             ..Stats::default()
         };
         if let Some(Ok(st)) = self.spec.as_ref().map(|c| c.try_lock()) {
-            s.specializations = st.choices.built;
-            s.flips = st.choices.flips;
-            s.spec_native = st.native.is_some();
-            s.spec_off = st.choices.off;
+            s.specializations = st.learned.built;
+            s.flips = st.learned.flips;
+            s.spec_native = st.current().is_some_and(|(.., native)| native.is_some());
+            s.spec_off = st.learned.off;
         }
         s
     }
@@ -234,11 +231,16 @@ impl Adaptive {
             // Contention (parallel callers sharing one tape) falls past the
             // specialized rungs rather than serializing on the cache.
             if let Ok(mut st) = cache.try_lock() {
-                if !st.choices.off && self.eval_spec(&mut st, cache, inputs, work, out) {
+                if self.eval_spec(&mut st, cache, inputs, work, out) {
                     return;
                 }
             }
         }
+        self.eval_full(inputs, work, out);
+    }
+
+    /// The full tape, natively once compiled.
+    fn eval_full(&self, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
         match self.native() {
             Some(native) => run(native, inputs, work, out),
             None => self.tape.eval(inputs, work, out),
@@ -254,40 +256,42 @@ impl Adaptive {
         work: &mut Vec<f64>,
         out: &mut Vec<f64>,
     ) -> bool {
-        st.choices.ran(1);
-        if let (Some((ver, native)), Some(sp)) = (st.native.clone(), st.spec.clone()) {
-            if ver == st.choices.version {
-                run(&*native, inputs, work, out);
-                if sp.check_outputs(out) {
-                    st.stable = st.stable.saturating_add(1);
-                    return true;
-                }
+        st.learned.ran(1);
+        let Some((ver, sp, native)) = st.current() else {
+            if !st.learned.due(&self.policy.choices) {
+                return false;
             }
-            // A flip under the compiled specialization, or a stale epoch:
-            // drop the native code and re-check interpreted.
-            st.native = None;
-        }
-        if let Some(sp) = st.spec.clone() {
-            if self.native().is_some()
-                && sp.n_ops() * self.policy.spec_interp_cost > self.tape.n_ops()
-            {
-                return false; // the native full tape is faster
-            }
-            if sp.eval_checked(inputs, work, out) {
-                st.stable = st.stable.saturating_add(1);
-                let ver = st.choices.version;
-                self.maybe_compile_spec(st, cache, &sp, ver);
-                return true;
-            }
-            self.on_flip(st, inputs, work, out);
+            // The traced evaluation is this call's correct result.
+            self.retrace(st, inputs, work, out);
             return true;
+        };
+        let held = match native {
+            Some(native) => {
+                run(&*native, inputs, work, out);
+                sp.check_outputs(out)
+            }
+            None if !self.interpreted_serves(&sp) => {
+                // The native full tape serves; the specialization is
+                // compiled where due.
+                self.maybe_compile_spec(st, cache);
+                return false;
+            }
+            None => sp.eval_checked(inputs, work, out),
+        };
+        if held {
+            st.learned.held(ver, 1);
+            self.maybe_compile_spec(st, cache);
+        } else {
+            self.on_flip(st, ver, inputs, work, out);
         }
-        if st.spec.is_none() && !st.choices.ready() {
-            return false; // cooling down: the full tape serves
-        }
-        // The traced evaluation is this call's correct result either way.
-        self.retrace(st, inputs, work, out);
         true
+    }
+
+    /// Whether the interpreted specialization `sp` serves next to the full
+    /// tape as it runs now.
+    fn interpreted_serves(&self, sp: &SpecializedTape) -> bool {
+        let (ops, full) = (sp.n_ops(), self.tape.n_ops());
+        Specializer::interpreted_serves(&self.policy.choices, ops, full, self.native().is_some())
     }
 
     /// Phase 1 of an episode: prepare `work` for the main passes and name
@@ -309,10 +313,8 @@ impl Adaptive {
         let forms = self.forms();
         if let Some(cache) = &self.spec {
             if let Ok(mut st) = cache.try_lock() {
-                if !st.choices.off {
-                    if let Some(kind) = self.spec_prolog(&mut st, inputs, work) {
-                        return Episode(kind, forms);
-                    }
+                if let Some(kind) = self.spec_prolog(&mut st, inputs, work) {
+                    return Episode(kind, forms);
                 }
             }
         }
@@ -322,38 +324,26 @@ impl Adaptive {
 
     /// The specialized episode starts, `None` for a full one.
     fn spec_prolog(&self, st: &mut Spec, inputs: &[f64], work: &mut Vec<f64>) -> Option<Kind> {
-        // Episode entry advances the clock the flip cooldown runs on.
-        st.choices.ran(1);
-        if st.spec.is_none() {
-            if !st.choices.ready() {
+        st.learned.ran(1);
+        if st.current().is_none() {
+            if !st.learned.due(&self.policy.choices) {
                 return None;
             }
-            let mut tmp = Vec::new();
-            self.retrace(st, inputs, work, &mut tmp);
-            st.choices.version += 1;
-            st.stable = 0;
+            self.retrace(st, inputs, work, &mut Vec::new());
         }
-        if let (Some((ver, native)), Some(sp)) = (st.native.clone(), st.spec.clone()) {
-            if ver == st.choices.version {
-                prolog(&*native, inputs, work);
-                if sp.check_prolog_guards(inputs, work) {
-                    return Some(Kind::SpecNative(native, sp));
-                }
-                // A parameter change flipped a pinned region.
-                self.on_flip(st, inputs, work, &mut Vec::new());
-                return Some(Kind::Full);
+        let (ver, sp, native) = st.current()?;
+        if let Some(native) = native {
+            prolog(&*native, inputs, work);
+            if sp.check_prolog_guards(inputs, work) {
+                return Some(Kind::SpecNative(native, sp, ver));
             }
-            st.native = None;
-        }
-        let sp = st.spec.clone()?;
-        if self.native().is_some() && sp.n_ops() * self.policy.spec_interp_cost > self.tape.n_ops()
-        {
+        } else if !self.interpreted_serves(&sp) {
             return None;
+        } else if sp.eval_prolog_checked(inputs, work) {
+            return Some(Kind::SpecInterp(sp, ver));
         }
-        if sp.eval_prolog_checked(inputs, work) {
-            return Some(Kind::SpecInterp(sp, st.choices.version));
-        }
-        self.on_flip(st, inputs, work, &mut Vec::new());
+        // A parameter change flipped a pinned region.
+        self.on_flip(st, ver, inputs, work, &mut Vec::new());
         Some(Kind::Full)
     }
 
@@ -396,26 +386,26 @@ impl Adaptive {
             *ep = self.eval_prolog(inputs, work);
         }
         match &ep.0 {
-            Kind::SpecNative(native, sp) => {
+            Kind::SpecNative(native, sp, ver) => {
                 main(&**native, inputs, work, out);
                 if sp.check_outputs(out) {
                     return;
                 }
-                self.flip_retrace(inputs, work, out);
+                self.flip_retrace(*ver, inputs, work, out);
                 ep.0 = Kind::Full;
             }
             Kind::SpecInterp(sp, ver) => {
                 if sp.eval_main_checked(inputs, work, out) {
                     if let Some(cache) = &self.spec {
                         if let Ok(mut st) = cache.try_lock() {
-                            st.choices.ran(1);
-                            st.stable = st.stable.saturating_add(1);
-                            self.maybe_compile_spec(&mut st, cache, sp, *ver);
+                            st.learned.ran(1);
+                            st.learned.held(*ver, 1);
+                            self.maybe_compile_spec(&mut st, cache);
                         }
                     }
                     return;
                 }
-                self.flip_retrace(inputs, work, out);
+                self.flip_retrace(*ver, inputs, work, out);
                 ep.0 = Kind::Full;
             }
             // Mid-episode, the interpreter's state serves the native code
@@ -458,114 +448,80 @@ impl Adaptive {
 
     // --- bookkeeping --------------------------------------------------------
 
-    fn disable(&self, st: &mut Spec, why: &str) {
-        st.choices.off = true;
-        st.spec = None;
-        st.native = None;
-        log(
-            Level::Debug,
-            &format!(
-                "tape specialization off ({why}): {} flips in {} evals",
-                st.choices.flips, st.choices.evals
-            ),
-        );
-    }
-
-    /// A full traced evaluation (the correct result of this call), a diff
-    /// against the trace the current specialization pinned, whose differing
-    /// selects are unpinned for good, and a respecialization over the rest
-    /// (deferred during a cooldown).
+    /// A full traced evaluation, the correct result of this call, and what
+    /// it teaches: a specialization where one is due.
     fn retrace(&self, st: &mut Spec, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
-        let mut fresh = std::mem::take(&mut st.scratch_choices);
-        fresh.clear();
+        let mut fresh = Vec::new();
         self.tape.eval_with(inputs, work, out, &mut fresh);
-        st.choices.observe(&fresh);
-        if st.choices.ready() {
-            let spec = self.tape.specialize(st.choices.trace(), &st.choices.pin());
-            if st
-                .choices
-                .built(&self.policy.choices, spec.n_ops(), self.tape.n_ops())
-            {
-                st.spec = Some(Arc::new(spec));
-            } else {
-                self.disable(st, "shrink too small");
-            }
-        } else {
-            st.spec = None;
+        let tape = &self.tape;
+        let built = st
+            .learned
+            .learn(&self.policy.choices, [&fresh[..]], tape.n_ops(), |t, p| {
+                let sp = tape.specialize(t, p);
+                let ops = sp.n_ops();
+                (sp, ops)
+            });
+        if let Some((ver, sp)) = built {
+            st.spec = Some((ver, Arc::new(sp), None));
         }
-        st.scratch_choices = fresh;
     }
 
-    /// A main-phase flip: learn and respecialize (or disable on thrash),
-    /// with this call's result from the full tape.
-    fn flip_retrace(&self, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
+    /// A main-phase flip under specialization `ver` (see [`on_flip`](Self::on_flip)).
+    fn flip_retrace(&self, ver: u64, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
         match self.spec.as_ref().map(|c| c.lock()) {
-            Some(Ok(mut st)) => self.on_flip(&mut st, inputs, work, out),
+            Some(Ok(mut st)) => self.on_flip(&mut st, ver, inputs, work, out),
             _ => self.tape.eval(inputs, work, out),
         }
     }
 
-    /// A region flipped: count it, and learn it by a traced evaluation of
-    /// the full tape, which is this call's result and leaves the full
-    /// tape's state in `work` (an episode continues full); unless flips
-    /// come too often, and specialization goes off for this tape.
-    fn on_flip(&self, st: &mut Spec, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
-        st.native = None;
-        st.stable = 0;
-        st.choices.version += 1;
-        st.choices.cool(&self.policy.choices);
-        if st.choices.flipped(&self.policy.choices, 1) {
-            self.disable(st, "choices thrash");
-            self.tape.eval(inputs, work, out);
-        } else {
+    /// A guard of specialization `ver` failed: this call's result from the
+    /// full tape, traced where the policy learns from it. Either leaves the
+    /// full tape's state in `work` (an episode continues full).
+    fn on_flip(
+        &self,
+        st: &mut Spec,
+        ver: u64,
+        inputs: &[f64],
+        work: &mut Vec<f64>,
+        out: &mut Vec<f64>,
+    ) {
+        if st.learned.failed(&self.policy.choices, ver, 1) {
             self.retrace(st, inputs, work, out);
+        } else {
+            self.eval_full(inputs, work, out);
         }
     }
 
-    /// Past the probation, hand the current specialization to the
-    /// background compiler (budgeted, one job in flight).
-    fn maybe_compile_spec(
-        &self,
-        st: &mut Spec,
-        cache: &Arc<Mutex<Spec>>,
-        sp: &Arc<SpecializedTape>,
-        ver: u64,
-    ) {
-        if !self.policy.jit
-            || st.stable != self.policy.spec_compile_after
-            || st.choices.version != ver
-            || st.inflight
-            || st.native.is_some()
-            || st.compiles >= self.policy.spec_compile_budget
-        {
-            return;
-        }
-        let Some(compiler) = self.compiler.clone() else {
+    /// Hand the current specialization to the background compiler where
+    /// the policy says so.
+    fn maybe_compile_spec(&self, st: &mut Spec, cache: &Arc<Mutex<Spec>>) {
+        let Some(compiler) = self.compiler.clone().filter(|_| self.policy.jit) else {
             return;
         };
-        st.inflight = true;
-        st.compiles += 1;
-        let (sp, cache) = (sp.clone(), cache.clone());
-        let job = move || {
+        let Some((at, sp, native)) = st.current() else {
+            return;
+        };
+        let (have, serves) = (native.map(|_| at), self.interpreted_serves(&sp));
+        let Some(ver) = st.learned.compile_due(&self.policy.choices, have, serves) else {
+            return;
+        };
+        let (cache, c) = (cache.clone(), compiler.clone());
+        compiler.submit(Box::new(move || {
             // The prolog guards are read from the work buffer after a
             // prolog, so their slots stay materialized.
             let guards: Vec<u32> = sp.prolog_guards().iter().map(|&(s, _)| s).collect();
-            let compiled = compiler.compile(sp.tape(), &guards);
+            let compiled = c.compile(sp.tape(), &guards);
             let mut st = cache.lock().unwrap_or_else(|e| e.into_inner());
-            st.inflight = false;
-            if st.choices.version == ver {
-                if let Some(native) = compiled {
-                    log(
-                        Level::Debug,
-                        "specialized tape compiled, native backend active",
-                    );
-                    st.native = Some((ver, Arc::from(native)));
+            if let (true, Some(compiled)) = (st.learned.landed(ver), compiled) {
+                log(
+                    Level::Debug,
+                    "specialized tape compiled, native backend active",
+                );
+                if let Some((_, _, native)) = &mut st.spec {
+                    *native = Some(Arc::from(compiled));
                 }
             }
-        };
-        if let Some(c) = &self.compiler {
-            c.submit(Box::new(job));
-        }
+        }));
     }
 
     /// Whether an interpreted pass has marked the tape as large (see
