@@ -85,7 +85,7 @@ pub fn eval<T: Scalar, K: Field>(
     let cone = ctx.cone(roots, true);
     let at = |e: ExprId| cone.pos(e);
     let mut fe = FuncEval::new();
-    for &e in &cone.nodes {
+    for &e in cone.nodes.iter() {
         if let Node::Call(o, _) = *ctx.node(e) {
             let (f, out) = ctx.output(o);
             fe.need(f, out);
@@ -94,7 +94,7 @@ pub fn eval<T: Scalar, K: Field>(
     let mut w: Vec<T> = Vec::with_capacity(cone.nodes.len());
     // A dense system is solved once for all its components.
     let mut solved: HashMap<ArgList, Vec<T>> = HashMap::new();
-    for &e in &cone.nodes {
+    for &e in cone.nodes.iter() {
         let node = *ctx.node(e);
         let mut sym = |s: SymbolId| env.get(&s).copied().unwrap_or(T::nan());
         let mut call = |o: OutputId, l: ArgList, args: &[T]| fe.output(ctx, o, l, args);

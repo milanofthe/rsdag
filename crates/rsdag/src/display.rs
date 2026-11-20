@@ -15,7 +15,7 @@ pub fn to_string<K: Field>(ctx: &Graph<K>, id: ExprId) -> String {
     // one's infix form, capped past the limit.
     let cone = ctx.cone(&[id], false);
     let mut len: Vec<usize> = Vec::with_capacity(cone.nodes.len());
-    for &e in &cone.nodes {
+    for &e in cone.nodes.iter() {
         let ops = ctx.operands(e);
         let own = if ops.is_empty() {
             leaf(ctx, e).len()

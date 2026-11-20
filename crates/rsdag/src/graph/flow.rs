@@ -348,7 +348,7 @@ impl<K: Field> Graph<K> {
         let mut vals: Vec<V> = Vec::with_capacity(cone.nodes.len());
         // per instance, what each output reads among its moving arguments
         let mut sites: HashMap<(FuncId, u32, ArgList), Arc<[Arc<[u32]>]>> = HashMap::default();
-        for &e in &cone.nodes {
+        for &e in cone.nodes.iter() {
             let val = |c: &ExprId| &vals[cone.pos(*c)];
             let node = *self.node(e);
             let v = match node {

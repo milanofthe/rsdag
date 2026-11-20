@@ -192,7 +192,7 @@ fn classify_cone<K: Field>(
     // operands, each classified from its operands'.
     let cone = g.cone(exprs, false);
     let mut memo: Vec<Nonlinearity> = Vec::with_capacity(cone.nodes.len());
-    for &e in &cone.nodes {
+    for &e in cone.nodes.iter() {
         let c = match *g.node(e) {
             Node::Symbol(s) => leaf(s),
             Node::Call(o, l) => {
