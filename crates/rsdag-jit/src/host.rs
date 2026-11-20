@@ -271,7 +271,7 @@ pub(crate) extern "C" fn h_call(
     });
 }
 
-/// The calls of a stage ([`rsdag::Stage`]): `n` of them from `c` on, run
+/// The calls of a stage ([`rsdag::tape::Stage`]): `n` of them from `c` on, run
 /// by the tape's [`run_stage`].
 pub(crate) extern "C" fn h_stage(
     layout: *const Layout,
