@@ -21,8 +21,9 @@ pub(crate) trait Rule<K: Field> {
     /// [`Graph::operands`] order.
     fn node(&mut self, e: ExprId, node: Node, ops: &[Self::V]) -> Self::V;
     /// The calls `outs` (node, output index) of one instance, in cone
-    /// order, over the instance's operands rewritten: one value per call.
-    fn calls(&mut self, call: &Call<Self::V>, outs: &[(ExprId, u32)]) -> Vec<Self::V>;
+    /// order, over the instance's operands rewritten: one value per call
+    /// pushed to `vals`.
+    fn calls(&mut self, call: &Call<Self::V>, outs: &[(ExprId, u32)], vals: &mut Vec<Self::V>);
 }
 
 /// An instance a rewrite meets: function `f` called in context `ctx` of
@@ -50,39 +51,57 @@ impl<V: Copy> Call<'_, V> {
 /// outputs share what the rule makes of it.
 pub(crate) fn rewrite<K: Field, R: Rule<K>>(r: &mut R, roots: &[ExprId]) -> Vec<R::V> {
     let cone = r.source().cone(roots, false);
-    // per instance its calls, and per call its place among them
-    let mut sites: HashMap<(FuncId, u32, ArgList), (Vec<(ExprId, u32)>, Vec<R::V>)> =
-        HashMap::default();
-    let mut rank: Vec<u32> = Vec::with_capacity(cone.nodes.len());
+    // Per call its instance and its place among the instance's calls, and
+    // the calls laid out by instance: `outs[start[s]..start[s + 1]]`.
+    let mut index: HashMap<(FuncId, u32, ArgList), u32> = HashMap::default();
+    let mut place: Vec<(u32, u32)> = Vec::with_capacity(cone.nodes.len());
+    let mut start: Vec<u32> = Vec::new();
+    let g = r.source();
     for &e in &cone.nodes {
-        let g = r.source();
-        rank.push(match *g.node(e) {
+        place.push(match *g.node(e) {
             Node::Call(o, l) => {
-                let (f, k) = g.output(o);
-                let site = sites.entry((f, g.context_of(o), l)).or_default();
-                site.0.push((e, k));
-                site.0.len() as u32 - 1
+                let fresh = index.len() as u32;
+                let s = *index
+                    .entry((g.output(o).0, g.context_of(o), l))
+                    .or_insert(fresh);
+                if s == fresh {
+                    start.push(0);
+                }
+                start[s as usize] += 1;
+                (s, start[s as usize] - 1)
             }
-            _ => u32::MAX,
+            _ => (u32::MAX, 0),
         });
     }
+    let mut sum = 0;
+    for n in start.iter_mut() {
+        (*n, sum) = (sum, sum + *n);
+    }
+    start.push(sum);
+    let mut outs: Vec<(ExprId, u32)> = vec![(ExprId(0), 0); sum as usize];
+    for (&e, &(s, k)) in cone.nodes.iter().zip(&place) {
+        if let Node::Call(o, _) = *g.node(e) {
+            outs[(start[s as usize] + k) as usize] = (e, g.output(o).1);
+        }
+    }
+    // per instance, where its calls' values start in `done`
+    let mut at_done: Vec<u32> = vec![u32::MAX; index.len()];
+    let mut done: Vec<R::V> = Vec::new();
     let mut vals: Vec<R::V> = Vec::with_capacity(cone.nodes.len());
-    // per argument list and per context, its expressions rewritten
-    let mut lists: HashMap<ArgList, Vec<R::V>> = HashMap::default();
+    // per context, its bound expressions rewritten
     let mut contexts: HashMap<u32, Vec<R::V>> = HashMap::default();
-    let mut ops: Vec<R::V> = Vec::new();
-    for (i, &e) in cone.nodes.iter().enumerate() {
+    let (mut ops, mut args): (Vec<R::V>, Vec<R::V>) = (Vec::new(), Vec::new());
+    for (&e, &(s, k)) in cone.nodes.iter().zip(&place) {
         let g = r.source();
         let node = *g.node(e);
         let v = match node {
             Node::Call(o, l) => {
-                let (f, c) = (g.output(o).0, g.context_of(o));
-                let site = sites.get_mut(&(f, c, l)).expect("every call in a site");
-                if site.1.is_empty() {
+                let s = s as usize;
+                if at_done[s] == u32::MAX {
+                    let (f, c) = (g.output(o).0, g.context_of(o));
                     let at = |a: &ExprId| vals[cone.pos(*a)];
-                    let args = lists
-                        .entry(l)
-                        .or_insert_with(|| g.args(l).iter().map(at).collect());
+                    args.clear();
+                    args.extend(g.args(l).iter().map(at));
                     let bound = match c {
                         NO_CONTEXT => &[][..],
                         c => contexts
@@ -92,12 +111,15 @@ pub(crate) fn rewrite<K: Field, R: Rule<K>>(r: &mut R, roots: &[ExprId]) -> Vec<
                     let call = Call {
                         f,
                         ctx: c,
-                        args,
+                        args: &args,
                         bound,
                     };
-                    site.1 = r.calls(&call, &site.0);
+                    at_done[s] = done.len() as u32;
+                    let calls = &outs[start[s] as usize..start[s + 1] as usize];
+                    r.calls(&call, calls, &mut done);
+                    debug_assert_eq!(done.len() as u32 - at_done[s], calls.len() as u32);
                 }
-                site.1[rank[i] as usize]
+                done[(at_done[s] + k) as usize]
             }
             _ => {
                 ops.clear();
@@ -130,13 +152,13 @@ impl<K: Field> Rule<K> for Substitute<'_, K> {
             _ => self.g.build(node, ops),
         }
     }
-    fn calls(&mut self, call: &Call<ExprId>, outs: &[(ExprId, u32)]) -> Vec<ExprId> {
+    fn calls(&mut self, call: &Call<ExprId>, outs: &[(ExprId, u32)], vals: &mut Vec<ExprId>) {
         let (g, map) = (&mut *self.g, self.map);
         let f = *self
             .copies
             .entry(call.f)
             .or_insert_with(|| g.rebound(call.f, map));
-        g.calls_over(f.unwrap_or(call.f), call, outs)
+        g.calls_over(f.unwrap_or(call.f), call, outs, vals)
     }
 }
 

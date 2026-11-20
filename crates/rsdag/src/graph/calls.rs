@@ -508,12 +508,13 @@ impl<K: Field> Graph<K> {
         f: FuncId,
         call: &crate::transform::Call<ExprId>,
         outs: &[(ExprId, u32)],
-    ) -> Vec<ExprId> {
+        vals: &mut Vec<ExprId>,
+    ) {
         let ctx = self.context_over(call.ctx, f, call.bound);
         let l = self.intern_args(call.args);
-        outs.iter()
-            .map(|&(_, k)| self.call_list_in(f, k, ctx, l))
-            .collect()
+        for &(_, k) in outs {
+            vals.push(self.call_list_in(f, k, ctx, l));
+        }
     }
 
     /// Output `out` of `f` applied to `args` (one argument per parameter). A
@@ -852,15 +853,17 @@ impl<K: Field> Rule<K> for Specialize<'_, K> {
     fn node(&mut self, _: ExprId, node: Node, ops: &[ExprId]) -> ExprId {
         self.g.build(node, ops)
     }
-    fn calls(&mut self, call: &Call<ExprId>, outs: &[(ExprId, u32)]) -> Vec<ExprId> {
+    fn calls(&mut self, call: &Call<ExprId>, outs: &[(ExprId, u32)], vals: &mut Vec<ExprId>) {
         let g = &mut *self.g;
         let ctx = g.context_over(call.ctx, call.f, call.bound);
-        let full = call.params(g).into_owned();
+        let full = call.params(g);
         match specialize_instance(g, call.f, ctx, &full, self.made, &mut self.kept) {
-            Some((copy, ctx, rest)) => (outs.iter())
-                .map(|&(_, k)| g.call_list_in(copy, k, ctx, rest))
-                .collect(),
-            None => g.calls_over(call.f, call, outs),
+            Some((copy, ctx, rest)) => {
+                for &(_, k) in outs {
+                    vals.push(g.call_list_in(copy, k, ctx, rest));
+                }
+            }
+            None => g.calls_over(call.f, call, outs, vals),
         }
     }
 }
@@ -992,11 +995,11 @@ impl<K: Field> Rule<K> for Inline<'_, K> {
     fn node(&mut self, _: ExprId, node: Node, ops: &[ExprId]) -> ExprId {
         self.g.build(node, ops)
     }
-    fn calls(&mut self, call: &Call<ExprId>, outs: &[(ExprId, u32)]) -> Vec<ExprId> {
+    fn calls(&mut self, call: &Call<ExprId>, outs: &[(ExprId, u32)], vals: &mut Vec<ExprId>) {
         let f = call.f;
         // an extern body, or a function not to inline, stays a call
         if self.g.func(f).is_extern() || !(self.which)(self.g, f) {
-            return self.g.calls_over(f, call, outs);
+            return self.g.calls_over(f, call, outs, vals);
         }
         if !self.bodies.contains_key(&f) {
             let exprs = self.g.func(f).exprs();
@@ -1023,7 +1026,7 @@ impl<K: Field> Rule<K> for Inline<'_, K> {
             .iter()
             .map(|&(_, k)| self.bodies[&f][k as usize])
             .collect();
-        crate::transform::substitute(g, &bodies, &bind)
+        vals.extend(crate::transform::substitute(g, &bodies, &bind));
     }
 }
 

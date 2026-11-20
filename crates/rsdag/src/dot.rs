@@ -457,7 +457,7 @@ impl<K: Field> Rule<K> for Frame<'_, '_, '_, K> {
         self.inl.top.insert(e, n);
         n
     }
-    fn calls(&mut self, call: &Call<u32>, outs: &[(ExprId, u32)]) -> Vec<u32> {
+    fn calls(&mut self, call: &Call<u32>, outs: &[(ExprId, u32)], vals: &mut Vec<u32>) {
         let view = self.inl.view;
         let func = view.g.func(call.f);
         let ops = call.params(view.g);
@@ -482,12 +482,12 @@ impl<K: Field> Rule<K> for Frame<'_, '_, '_, K> {
             drawn = rewrite(&mut frame, &exprs).into_iter();
         }
         // a call of no body is drawn as the call
-        (outs.iter())
-            .map(|&(e, k)| match body(k) {
+        for &(e, k) in outs {
+            vals.push(match body(k) {
                 Some(_) => drawn.next().expect("one per body"),
                 None => self.inl.draw(self.fr, e, &ops),
-            })
-            .collect()
+            });
+        }
     }
 }
 

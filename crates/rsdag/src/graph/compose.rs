@@ -100,7 +100,8 @@ impl<K: Field> crate::transform::Rule<K> for Import<'_, K> {
         &mut self,
         call: &crate::transform::Call<ExprId>,
         outs: &[(ExprId, u32)],
-    ) -> Vec<ExprId> {
+        vals: &mut Vec<ExprId>,
+    ) {
         let f = self.g.import(self.other, call.f, self.imported);
         // a bound call: its context over the imported expressions
         let ctx = match call.ctx {
@@ -113,8 +114,8 @@ impl<K: Field> crate::transform::Rule<K> for Import<'_, K> {
             }
         };
         let l = self.g.intern_args(call.args);
-        (outs.iter())
-            .map(|&(_, k)| self.g.call_list_in(f, k, ctx, l))
-            .collect()
+        for &(_, k) in outs {
+            vals.push(self.g.call_list_in(f, k, ctx, l));
+        }
     }
 }
