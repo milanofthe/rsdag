@@ -348,7 +348,7 @@ impl<K: Field> Graph<K> {
                             let moving: Vec<u32> = (0..(args.len() + globals.len()) as u32)
                                 .filter(|&p| !val(operand(p)).is_bottom())
                                 .collect();
-                            let r = self.reads(f, through, Some(&moving));
+                            let r = self.reads(f, through, &moving);
                             sites.insert(site, r.clone());
                             r
                         }
@@ -371,34 +371,21 @@ impl<K: Field> Graph<K> {
         Flow { cone, vals }
     }
 
-    /// Per output of `f`, the operands among `moving` (indices, ascending;
-    /// `None` for every one) it reads through `through`, ascending. An
-    /// extern output reads every one, a zero output none. Kept per
-    /// function, way through and moving set; over every operand with
-    /// [`Through::Carries`] it is [`output_support`](Self::output_support).
-    pub(crate) fn reads(
-        &self,
-        f: FuncId,
-        through: Through,
-        moving: Option<&[u32]>,
-    ) -> Arc<[Arc<[u32]>]> {
+    /// Per output of `f`, the parameters among `moving` (indices, ascending)
+    /// it reads through `through`, ascending. An extern output reads every
+    /// one, a zero output none. Kept per function, way through and moving
+    /// set; over all parameters with [`Through::Carries`] it is
+    /// [`output_support`](Self::output_support).
+    pub(crate) fn reads(&self, f: FuncId, through: Through, moving: &[u32]) -> Arc<[Arc<[u32]>]> {
         let func = &self.funcs[f.0 as usize];
         let outputs = func.outputs();
-        let key = (through, moving.map(Box::from));
+        let key = (through, Box::<[u32]>::from(moving));
         // outputs are only ever appended (derivatives): the known ones stay
         let known = func.cached_reads(&key);
         let done = known.as_ref().map_or(0, |r| r.len());
         if done == outputs.len() {
             return known.expect("all outputs known");
         }
-        let every: Vec<u32>;
-        let moving = match moving {
-            Some(m) => m,
-            None => {
-                every = (0..(func.params().len() + self.globals_of(f).len()) as u32).collect();
-                &every
-            }
-        };
         let index: HashMap<SymbolId, u32> = moving
             .iter()
             .map(|&p| (self.operand_symbol(f, p), p))

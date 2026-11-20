@@ -95,9 +95,12 @@ pub struct Function {
     /// What each node of the outputs' cone depends on among the parameters
     /// that are no model parameters, once asked for (see `Graph::derive`).
     pub(crate) deps: std::sync::Mutex<Option<Arc<crate::graph::Deps>>>,
+    /// Per output, its support once asked for (see
+    /// [`Graph::output_support`](crate::Graph::output_support)). An output
+    /// never changes once pushed, so neither does its support.
+    support: std::sync::Mutex<Vec<Option<Arc<[u32]>>>>,
     /// What each output reads, per way through and set of moving
-    /// parameters (see `Graph::reads`); its support the one through
-    /// derivatives over every operand.
+    /// parameters (see `Graph::reads`).
     reads: std::sync::Mutex<HashMap<ReadsKey, Arc<[Arc<[u32]>]>>>,
     /// The symbols the body reads that are not its parameters, its calls'
     /// included, once asked for (see `Graph::globals`).
@@ -107,9 +110,8 @@ pub struct Function {
     composite: std::sync::OnceLock<bool>,
 }
 
-/// A way through calls and a set of moving parameters, `None` for every
-/// operand (see `Graph::reads`).
-pub(crate) type ReadsKey = (crate::graph::Through, Option<Box<[u32]>>);
+/// A way through calls and a set of moving parameters (see `Graph::reads`).
+pub(crate) type ReadsKey = (crate::graph::Through, Box<[u32]>);
 
 /// A function body evaluated by the interpreter: the fallback every consumer
 /// can build from the symbolic outputs alone, so a tape or an arena sweep is
@@ -221,6 +223,7 @@ impl Function {
             lowered: Default::default(),
             deriv_index: HashMap::default(),
             deps: Default::default(),
+            support: Default::default(),
             reads: Default::default(),
             globals: Default::default(),
             composite: Default::default(),
@@ -312,10 +315,21 @@ impl Function {
         self.reads.lock().unwrap().get(key).cloned()
     }
 
-    /// What output `out` reads, if known under `key`.
-    pub(crate) fn cached_read(&self, key: &ReadsKey, out: u32) -> Option<Arc<[u32]>> {
-        let reads = self.reads.lock().unwrap();
-        reads.get(key)?.get(out as usize).cloned()
+    pub(crate) fn cached_support(&self, out: u32) -> Option<Arc<[u32]>> {
+        self.support
+            .lock()
+            .unwrap()
+            .get(out as usize)
+            .cloned()
+            .flatten()
+    }
+
+    pub(crate) fn cache_support(&self, out: u32, support: Arc<[u32]>) {
+        let mut cache = self.support.lock().unwrap();
+        if cache.len() <= out as usize {
+            cache.resize(out as usize + 1, None);
+        }
+        cache[out as usize] = Some(support);
     }
 
     pub(crate) fn cache_reads(&self, key: ReadsKey, reads: Arc<[Arc<[u32]>]>) {
