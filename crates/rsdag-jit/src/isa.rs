@@ -29,8 +29,8 @@ pub(crate) enum IArg {
     WorkAddr(usize),
     /// The address of a byte offset into the input vector.
     InputAddr(usize),
-    /// The bundle table pointer the chunk received.
-    Bundles,
+    /// The layout pointer the chunk received.
+    Layout,
 }
 
 /// One argument of a host call, in the routine's signature order: the
@@ -74,7 +74,7 @@ pub(crate) trait Isa {
     fn new(hot: &[*const ()]) -> Self;
     fn finish(self) -> Vec<u8>;
 
-    /// Function entry: `fn(work: *mut f64, inputs: *const f64, bundles: *const _)`
+    /// Function entry: `fn(work: *mut f64, inputs: *const f64, layout: *const _)`
     /// in the platform's C convention, the three pointers kept in callee-saved
     /// registers for the chunk's lifetime.
     fn prologue(&mut self);
@@ -102,9 +102,10 @@ pub(crate) trait Isa {
     fn neg(&mut self, d: u8, a: u8);
     fn abs(&mut self, d: u8, a: u8);
     fn sqrt(&mut self, d: u8, a: u8);
-    /// `false` when the instruction is not available; the caller then uses
-    /// the host routine.
-    fn round(&mut self, mode: Round, d: u8, a: u8) -> bool;
+    /// Whether this CPU runs [`round`](Self::round); without it the caller
+    /// uses the host routine.
+    fn round_inline() -> bool;
+    fn round(&mut self, mode: Round, d: u8, a: u8);
     /// Whether [`minmax`](Self::minmax) is available; without it the
     /// caller uses the host routine.
     const MINMAX: bool;

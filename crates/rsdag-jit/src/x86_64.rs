@@ -1,6 +1,6 @@
 //! x86-64 encodings, System V and Windows x64.
 //!
-//! `rbx` work, `r13` inputs, `r14` bundles; `rax` scratch; `xmm0` and
+//! `rbx` work, `r13` inputs, `r14` layout; `rax` scratch; `xmm0` and
 //! `xmm1` carry call arguments, the result and the masks of a select. The
 //! cache is `xmm2` to `xmm15`. Under System V every vector register is
 //! caller-saved, so nothing survives a host call; under Windows `xmm6` to
@@ -32,7 +32,7 @@ use rsdag::semantics::exp_ln::*;
 
 const WORK: u8 = 3; // rbx
 const INPUTS: u8 = 13; // r13
-const BUNDLES: u8 = 14; // r14
+const LAYOUT: u8 = 14; // r14
 const WIN: bool = cfg!(windows);
 /// Integer argument registers: rdi rsi rdx rcx r8 r9, or rcx rdx r8 r9.
 const INT_ARGS: &[u8] = if WIN {
@@ -50,7 +50,6 @@ const WIN_SHADOW: i32 = 32;
 
 pub(crate) struct X64<const L: usize> {
     code: Vec<u8>,
-    sse41: bool,
     /// Three-operand VEX forms and `vblendvpd`.
     avx: bool,
     /// Host routines held in `r12` and `r15`.
@@ -223,10 +222,10 @@ impl<const L: usize> X64<L> {
                 self.b(0x8D); // lea rk, [r13 + off]
                 self.modrm_mem(rk, INPUTS, off);
             }
-            IArg::Bundles => {
-                self.rex(true, BUNDLES, rk);
+            IArg::Layout => {
+                self.rex(true, LAYOUT, rk);
                 self.b(0x89); // mov rk, r14
-                self.modrm_reg(BUNDLES, rk);
+                self.modrm_reg(LAYOUT, rk);
             }
         }
     }
@@ -513,11 +512,10 @@ impl<const L: usize> Isa for X64<L> {
 
     fn new(hot: &[*const ()]) -> X64<L> {
         assert!(matches!(L, 1 | 2 | 4), "one, two or four lanes");
-        let Features { sse41, avx, .. } = features();
+        let Features { avx, .. } = features();
         assert!(L < 4 || avx, "four lanes need AVX");
         X64 {
             code: Vec::with_capacity(8192),
-            sse41,
             avx,
             hot: hot.iter().copied().take(HOT_REGS.len()).collect(),
             pool: Vec::new(),
@@ -689,10 +687,10 @@ impl<const L: usize> Isa for X64<L> {
     fn sqrt(&mut self, d: u8, a: u8) {
         self.unary_rr(Self::PFX, Self::PP, 0x51, d, a);
     }
-    fn round(&mut self, mode: Round, d: u8, a: u8) -> bool {
-        if !self.sse41 {
-            return false;
-        }
+    fn round_inline() -> bool {
+        features().sse41
+    }
+    fn round(&mut self, mode: Round, d: u8, a: u8) {
         let imm = match mode {
             Round::Floor => 0x9,
             Round::Ceil => 0xA,
@@ -709,7 +707,6 @@ impl<const L: usize> Isa for X64<L> {
         }
         self.modrm_reg(d, a);
         self.b(imm);
-        true
     }
     fn cmp_select(&mut self, op: CmpOp, a: u8, b: u8, t: u8, e: u8, d: u8) {
         // cmpsd predicates: 0 eq, 1 lt, 2 le (ordered, so false on NaN),

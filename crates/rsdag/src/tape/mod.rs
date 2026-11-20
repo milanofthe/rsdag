@@ -1106,21 +1106,37 @@ impl Tape {
         self.dst[i]
     }
 
+    /// The inputs the ops `ops` read, ascending.
+    pub fn reads(&self, ops: std::ops::Range<usize>) -> Vec<u32> {
+        let mut r: Vec<u32> = Vec::new();
+        for i in ops {
+            self.for_each_operand(i, |k| r.extend(input_index(k)));
+        }
+        r.sort_unstable();
+        r.dedup();
+        r
+    }
+
     /// The inputs the main phase reads, ascending: what a call of this
     /// tape as a body needs per evaluation once its prolog ran.
     pub fn main_reads(&self) -> Vec<u32> {
-        let mut r: Vec<u32> = Vec::new();
-        for i in self.prolog_ops..self.ops.len() {
-            self.for_each_operand(i, |k| {
-                if let Some(j) = input_index(k) {
-                    r.push(j);
-                }
-            });
-        }
+        let mut r = self.reads(self.prolog_ops..self.ops.len());
         r.extend(self.outputs.iter().filter_map(|&o| input_index(o)));
         r.sort_unstable();
         r.dedup();
         r
+    }
+
+    /// The widest gather any op needs: the gather area of the work buffer,
+    /// after the slots.
+    pub fn gather_len(&self) -> usize {
+        self.max_args
+    }
+
+    /// The scratch lent to a called bundle or a dense solve, after the
+    /// gather area.
+    pub fn lent(&self) -> usize {
+        self.lent
     }
 
     /// The operand list `start .. start + len` of the pool.
@@ -1302,7 +1318,7 @@ pub fn write_outputs<T: Scalar>(outputs: &[u32], inputs: &[T], work: &[T], out: 
 /// The value of an operand: a slot, or an input when tagged (a missing
 /// input is `NaN`).
 #[inline]
-fn read<T: Scalar>(inputs: &[T], work: &[T], k: u32) -> T {
+pub fn read<T: Scalar>(inputs: &[T], work: &[T], k: u32) -> T {
     match input_index(k) {
         Some(i) => inputs.get(i as usize).copied().unwrap_or(T::nan()),
         None => work[k as usize],

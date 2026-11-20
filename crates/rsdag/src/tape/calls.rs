@@ -25,15 +25,16 @@ use crate::scalar::Scalar;
 
 use super::input_index;
 
-/// Which entry of its bundle a call runs.
+/// Which entry of its bundle a call runs, in the order a body's phases
+/// run.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Phase {
-    /// Everything, per instance.
-    Whole,
-    /// The main phase over the instances' states.
-    Main,
     /// The instances' states from their pure arguments.
     Prolog,
+    /// The main phase over the instances' states.
+    Main,
+    /// Everything, per instance.
+    Whole,
 }
 
 /// Slots of the state block of a stateful call over `n_groups` instances of
@@ -44,6 +45,7 @@ pub fn state_block(n_groups: u32, state_len: u32) -> u32 {
 }
 
 /// A call over `n_groups` instances of `bundle`.
+#[derive(Clone, Copy)]
 pub struct Call<'a> {
     pub bundle: &'a dyn ExternBundle,
     pub phase: Phase,
