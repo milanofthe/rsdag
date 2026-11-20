@@ -272,7 +272,12 @@ impl Adaptive {
                 run(&*native, inputs, work, out);
                 sp.check_outputs(out)
             }
-            None if !self.interpreted_serves(&sp) => return false,
+            None if !self.interpreted_serves(&sp) => {
+                // The native full tape serves; the specialization is
+                // compiled where due.
+                self.maybe_compile_spec(st, cache);
+                return false;
+            }
             None => sp.eval_checked(inputs, work, out),
         };
         if held {
@@ -500,8 +505,8 @@ impl Adaptive {
         let Some((at, sp, native)) = st.current() else {
             return;
         };
-        let have = native.map(|_| at);
-        let Some(ver) = st.learned.compile_due(&self.policy.choices, have) else {
+        let (have, serves) = (native.map(|_| at), self.interpreted_serves(&sp));
+        let Some(ver) = st.learned.compile_due(&self.policy.choices, have, serves) else {
             return;
         };
         let (cache, c) = (cache.clone(), compiler.clone());

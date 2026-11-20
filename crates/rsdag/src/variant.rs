@@ -540,12 +540,17 @@ impl VariantBody {
         if let Some(form) = self.compiled(&body) {
             return Some((ver, form));
         }
+        self.serves(v, &body).then_some((ver, body))
+    }
+
+    /// Whether the interpreted shortened main phase `body` of variant `v`
+    /// serves in this form (see [`Specializer::interpreted_serves`]).
+    fn serves(&self, v: usize, body: &InterpretedBody) -> bool {
         let ops = main_ops(body.body().expect("an interpreted body is a tape"));
         let full = self.shared.body(v as u32);
         let full = main_ops(full.body().expect("an interpreted body is a tape"));
         let compiled = self.backend.compile.is_some();
         Specializer::interpreted_serves(&self.policy.choices, ops, full, compiled)
-            .then_some((ver, body))
     }
 
     /// The instances `at` of variant `v`: on its shortened main phase where
@@ -687,8 +692,8 @@ impl VariantBody {
         let compile = self.backend.compile.clone()?;
         let choice = self.shared.choice(v);
         let (at, body) = choice.spec.read().unwrap().clone()?;
-        let have = self.compiled(&body).map(|_| at);
-        let ver = learned.compile_due(&self.policy.choices, have)?;
+        let (have, serves) = (self.compiled(&body).map(|_| at), self.serves(v, &body));
+        let ver = learned.compile_due(&self.policy.choices, have, serves)?;
         let key = self.backend.key;
         // Nothing a prolog runs on changes: no epoch to move.
         Some(move || {

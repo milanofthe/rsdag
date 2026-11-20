@@ -99,3 +99,87 @@ fn a_session_evaluates_as_the_program() {
         assert!(same(&row, &want), "point {k} alone");
     }
 }
+
+/// Native code for the test: the interpreter on a copy of the tape (the
+/// tape emitted again, nothing pinned), compiled on a thread of its own.
+struct Copying;
+
+impl rsdag::Compiler for Copying {
+    fn compile(&self, tape: &Tape, _live: &[u32]) -> Option<Box<dyn rsdag::Program>> {
+        let n = tape.n_selects();
+        Some(Box::new(
+            tape.specialize(&vec![0; n], &vec![false; n]).into_tape(),
+        ))
+    }
+    fn submit(&self, job: Box<dyn FnOnce() + Send>) {
+        std::thread::spawn(job);
+    }
+}
+
+/// Sixteen regions of `x` above and below their thresholds, a heavy arm
+/// and a light one each, and as much again that no region decides: the
+/// specialization at a point removes about half of the tape.
+fn regions() -> (Graph<F64>, Vec<rsdag::ExprId>, Vec<rsdag::SymbolId>) {
+    let mut g: Graph<F64> = Graph::new();
+    let x = g.sym("x");
+    let rsdag::Node::Symbol(xs) = *g.node(x) else {
+        unreachable!()
+    };
+    let chain = |g: &mut Graph<F64>, k: usize| {
+        let mut y = x;
+        for i in 0..8 {
+            let w = g.konst_f64(0.9 + 1e-3 * (8 * k + i) as f64);
+            let t = g.tanh(y);
+            y = g.mul(w, t);
+        }
+        y
+    };
+    let mut roots = Vec::new();
+    for k in 0..16 {
+        let th = g.konst_f64(0.1 * k as f64 - 0.72);
+        let c = g.cmp(rsdag::CmpOp::Gt, x, th);
+        let heavy = chain(&mut g, k);
+        let w = g.konst_f64(0.5 + 0.01 * k as f64);
+        let light = g.mul(w, x);
+        roots.push(g.select(c, heavy, light));
+        roots.push(chain(&mut g, 100 + k));
+    }
+    (g, roots, vec![xs])
+}
+
+/// Once the full tape's native code serves, an interpreted specialization
+/// that is not several times shorter does not run, so it holds no guards
+/// to wait for: it is compiled, and its native code serves.
+#[test]
+fn a_specialization_is_compiled_where_the_interpreted_one_does_not_serve() {
+    let (g, roots, syms) = regions();
+    let tape = Tape::compile(&g, &roots, &syms);
+    let full = tape.n_ops();
+    let a = Adaptive::new(tape, Policy::default(), Some(std::sync::Arc::new(Copying)));
+    let (mut w, mut o, mut rw, mut ro) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for k in 0..400 {
+        let x = 0.01 * (k % 7) as f64;
+        a.eval(&[x], &mut w, &mut o);
+        a.tape().eval(&[x], &mut rw, &mut ro);
+        assert!(same(&o, &ro), "call {k}");
+        // The full tape's native code lands well before the probation of
+        // an interpreted specialization would end.
+        while k == 3 && a.native().is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        std::thread::sleep(std::time::Duration::from_micros(200));
+    }
+    let st = a.stats();
+    let mut trace = Vec::new();
+    a.tape().eval_with(&[0.0], &mut rw, &mut ro, &mut trace);
+    let spec = a.tape().specialize(&trace, &[true; 16]).n_ops();
+    assert!(
+        4 * spec > full && 100 * spec < 85 * full,
+        "{spec} of {full}"
+    );
+    assert!(st.native && st.specializations > 0, "{st:?}");
+    assert!(
+        st.spec_native,
+        "the specialization's native code serves: {st:?}"
+    );
+}

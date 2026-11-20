@@ -213,13 +213,20 @@ impl Specializer {
     }
 
     /// The version to compile now, `have` the one compiled already: the
-    /// current specialization once it held through its probation, within
-    /// the budget, one compile at a time.
-    pub(crate) fn compile_due(&mut self, policy: &ChoicePolicy, have: Option<u64>) -> Option<u64> {
+    /// current specialization, within the budget, one compile at a time,
+    /// once it held through its probation where the interpreted one serves
+    /// (`serves`); where it does not, nothing runs it to hold, and it is
+    /// compiled at once.
+    pub(crate) fn compile_due(
+        &mut self,
+        policy: &ChoicePolicy,
+        have: Option<u64>,
+        serves: bool,
+    ) -> Option<u64> {
         let v = self.current()?;
         if have == Some(v)
             || self.compiling
-            || self.stable < policy.compile_after
+            || (serves && self.stable < policy.compile_after)
             || self.compiles >= policy.compile_budget
         {
             return None;
