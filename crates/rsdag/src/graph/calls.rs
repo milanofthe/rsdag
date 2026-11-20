@@ -233,7 +233,12 @@ impl<K: Field> Graph<K> {
     /// over it, and each is kept. An extern output is taken to read every
     /// parameter, a zero one none.
     pub fn output_support(&self, f: FuncId, out: u32) -> Arc<[u32]> {
-        self.reads(f, Through::Carries, None)[out as usize].clone()
+        // a known output's, without bringing the outputs appended since up
+        let key = (Through::Carries, None);
+        match self.funcs[f.0 as usize].cached_reads(&key) {
+            Some(r) if (out as usize) < r.len() => r[out as usize].clone(),
+            _ => self.reads(f, Through::Carries, None)[out as usize].clone(),
+        }
     }
 
     /// Per root, whether its value reads any of `syms`, a comparison's
