@@ -318,27 +318,6 @@ pub(crate) fn carrying<K: Field>(ctx: &Graph<K>, e: ExprId, out: &mut Vec<ExprId
     }
 }
 
-/// The nodes under `root` through operands that carry a derivative, marked
-/// in `seen`, in ascending id order: a topological one, a hash-consed node
-/// having a larger id than its operands. Through a call only the operands
-/// its output's support names, so a row of a wide body's single call walks
-/// that row's share of it, not the call's whole argument list.
-fn cone<K: Field>(ctx: &Graph<K>, root: ExprId, seen: &mut NodeTable<u32>) -> Vec<ExprId> {
-    let mut out = Vec::new();
-    let mut stack = vec![root];
-    let mut ops = Vec::new();
-    while let Some(e) = stack.pop() {
-        if !seen.contains(e) {
-            seen.set(e, 0);
-            out.push(e);
-            carrying(ctx, e, &mut ops);
-            stack.extend_from_slice(&ops);
-        }
-    }
-    out.sort_unstable();
-    out
-}
-
 /// One forward sweep: `d root / d wrt` for every root. The derivative of
 /// every node below is kept in `memo`, so a subexpression shared by the
 /// roots (or by the roots of a later sweep over the same `wrt` and memo)
@@ -658,31 +637,25 @@ pub fn vjp<K: Field>(
 /// differs. The result is an ordinary expression in the same context, so it can
 /// be differentiated again.
 pub fn gradient<K: Field>(ctx: &mut Graph<K>, f: ExprId, wrt: &[SymbolId]) -> Vec<ExprId> {
-    // The cone of f, ascending: walked backwards, every node comes after
-    // all of its consumers. `pos` is a node's place in it.
+    // Activity: a node is active if it depends on a symbol of `wrt`
+    // through operands that carry a derivative. Only active operands
+    // receive an adjoint, so a subgraph over other symbols (the parameters
+    // not asked for, a call's constant arguments) builds nothing. The
+    // active nodes ascending: walked backwards, every node comes after all
+    // of its consumers. `pos` is a node's place among them.
+    let wanted: rustc_hash::FxHashSet<SymbolId> = wrt.iter().copied().collect();
+    let flow = ctx.flow(&[f], Through::Carries, |n| match *n {
+        Node::Symbol(s) => wanted.contains(&s),
+        _ => false,
+    });
+    let mut nodes: Vec<ExprId> = (flow.iter()).filter(|&(_, a)| *a).map(|(e, _)| e).collect();
+    nodes.sort_unstable();
     let mut pos = NodeTable::new(ctx.len());
-    let nodes = cone(ctx, f, &mut pos);
     for (k, &e) in nodes.iter().enumerate() {
         pos.set(e, k as u32);
     }
-    let at = |e: ExprId| pos.get(e).expect("in the cone") as usize;
-    // Activity: a node is active if it depends on a symbol of `wrt`. Only
-    // active operands receive an adjoint, so a subgraph over other symbols
-    // (the parameters not asked for, a call's constant arguments) builds
-    // nothing.
-    let wanted: rustc_hash::FxHashSet<SymbolId> = wrt.iter().copied().collect();
-    let mut active = vec![false; nodes.len()];
-    let mut ops = Vec::new();
-    for (k, &e) in nodes.iter().enumerate() {
-        active[k] = match *ctx.node(e) {
-            Node::Symbol(s) => wanted.contains(&s),
-            _ => {
-                carrying(ctx, e, &mut ops);
-                ops.iter().any(|&c| active[at(c)])
-            }
-        };
-    }
-    let act = |e: ExprId| active[at(e)];
+    let at = |e: ExprId| pos.get(e).expect("active") as usize;
+    let act = |e: ExprId| pos.contains(e);
 
     // Adjoint accumulation: per node a term list, folded into one fused
     // Reduce(Sum) when the node is visited (all consumers seen by then).
