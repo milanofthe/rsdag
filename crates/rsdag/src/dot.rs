@@ -14,7 +14,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::constants::{LABEL_EXACT_MAX, LABEL_FIXED_MAX, LABEL_FIXED_MIN, LABEL_INT_MAX};
 use crate::field::Field;
 use crate::func::{FuncId, Output};
-use crate::graph::Graph;
+use crate::graph::{Graph, NodeTable};
 use crate::node::{ExprId, Node, ReduceOp, SymbolId};
 use crate::transform::{rewrite, Call, Rule};
 
@@ -64,14 +64,7 @@ pub fn number(x: f64) -> String {
 
 /// The nodes `roots` reach, themselves included.
 pub fn reachable<K: Field>(g: &Graph<K>, roots: &[ExprId]) -> FxHashSet<ExprId> {
-    let mut seen = FxHashSet::default();
-    let mut stack: Vec<ExprId> = roots.to_vec();
-    while let Some(e) = stack.pop() {
-        if seen.insert(e) {
-            stack.extend(g.operands(e).iter().copied());
-        }
-    }
-    seen
+    g.cone(roots, false).nodes.into_iter().collect()
 }
 
 /// A graph's DAG under some roots (see the module docs).
@@ -368,8 +361,8 @@ impl<'g, K: Field> GraphView<'g, K> {
             seeds.extend(ids.iter().copied());
         }
         // Nodes in id order: operands before the nodes that read them.
-        let mut exprs: Vec<ExprId> = reachable(g, &seeds).into_iter().collect();
-        exprs.sort_by_key(|e| e.0);
+        let mut exprs = g.cone(&seeds, false).nodes;
+        exprs.sort_unstable();
         let mut home: FxHashMap<ExprId, usize> = FxHashMap::default();
         for (c, (_, ids)) in clusters.iter().enumerate() {
             for &e in ids {
@@ -381,10 +374,10 @@ impl<'g, K: Field> GraphView<'g, K> {
             parents: vec![None; clusters.len()],
             ..GraphData::default()
         };
-        let mut at: FxHashMap<ExprId, usize> = FxHashMap::default();
+        let mut at: NodeTable<u32> = NodeTable::new(g.len());
         for &e in &exprs {
             let (label, kind) = self.style(e, &params);
-            at.insert(e, data.nodes.len());
+            at.set(e, data.nodes.len() as u32);
             data.nodes.push(GraphNode {
                 id: format!("n{}", e.0),
                 label,
@@ -393,6 +386,7 @@ impl<'g, K: Field> GraphView<'g, K> {
                 faded: self.faded(e),
             });
         }
+        let pos = |e: &ExprId| at.get(*e).expect("drawn") as usize;
         for &e in &exprs {
             let select = matches!(g.node(e), Node::Select(..));
             for (k, a) in g.operands(e).iter().enumerate() {
@@ -401,7 +395,7 @@ impl<'g, K: Field> GraphView<'g, K> {
                 } else {
                     ""
                 };
-                data.edges.push((at[a], at[&e], label));
+                data.edges.push((pos(a), pos(&e), label));
             }
         }
         for (i, (e, name)) in self.roots.iter().enumerate() {
@@ -415,10 +409,10 @@ impl<'g, K: Field> GraphView<'g, K> {
                 cluster: None,
                 faded: self.faded(*e),
             });
-            data.edges.push((at[e], data.nodes.len() - 1, ""));
+            data.edges.push((pos(e), data.nodes.len() - 1, ""));
         }
         for (a, b, label) in &links {
-            data.links.push((at[a], at[b], label.clone()));
+            data.links.push((pos(a), pos(b), label.clone()));
         }
         data
     }

@@ -8,7 +8,7 @@ use crate::field::Field;
 use rustc_hash::FxHashMap as HashMap;
 
 use crate::func::{FuncId, OutputId};
-use crate::graph::{Graph, Join, NodeTable, Set, Through};
+use crate::graph::{inert, Graph, Join, NodeTable, Set, Through};
 use crate::node::{ArgList, BinOp, CmpOp, ExprId, Node, ReduceOp, SymbolId, UnaryOp};
 
 /// Derivative of `expr` with respect to the symbol `wrt`.
@@ -281,16 +281,6 @@ fn cofactors<K: Field>(
         suffix = ctx.mul(suffix, args[i]);
     }
     out
-}
-
-/// How many leading operands of `node` carry no derivative: both of a
-/// comparison's (piecewise constant), a select's condition.
-fn inert(node: &Node) -> usize {
-    match node {
-        Node::Cmp(..) => 2,
-        Node::Select(..) => 1,
-        _ => 0,
-    }
 }
 
 /// Whether `test` holds for every operand of `e` that carries a derivative

@@ -191,19 +191,23 @@ fn classify_cone<K: Field>(
     // One sweep over the nodes the expressions reach, each after its
     // operands, each classified from its operands'.
     let cone = g.cone(exprs, false);
-    let mut memo: HashMap<ExprId, Nonlinearity> = HashMap::default();
+    let mut memo: Vec<Nonlinearity> = Vec::with_capacity(cone.nodes.len());
     for &e in &cone.nodes {
         let c = match *g.node(e) {
             Node::Symbol(s) => leaf(s),
             Node::Call(o, l) => {
-                let args: Vec<Nonlinearity> = g.full_args(o, l).iter().map(|a| memo[a]).collect();
+                let args = g
+                    .full_args(o, l)
+                    .iter()
+                    .map(|&a| memo[cone.pos(a)])
+                    .collect();
                 classify_call(g, o, args, calls)
             }
-            _ => classify(g, e, |a| memo[&a]),
+            _ => classify(g, e, |a| memo[cone.pos(a)]),
         };
-        memo.insert(e, c);
+        memo.push(c);
     }
-    exprs.iter().map(|e| memo[e]).collect()
+    exprs.iter().map(|&e| memo[cone.pos(e)]).collect()
 }
 
 /// Output `o` called on arguments of classes `args`: its body classified with

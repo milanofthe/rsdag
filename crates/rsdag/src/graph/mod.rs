@@ -236,7 +236,7 @@ mod compose;
 mod flow;
 
 pub(crate) use calls::Deps;
-pub(crate) use flow::{Join, Set, Through};
+pub(crate) use flow::{inert, Join, Set, Through};
 
 impl<K: Field> Default for Graph<K> {
     fn default() -> Self {
