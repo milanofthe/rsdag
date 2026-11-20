@@ -188,11 +188,11 @@ fn classify_cone<K: Field>(
     leaf: &dyn Fn(SymbolId) -> Nonlinearity,
     calls: &mut CallMemo,
 ) -> Vec<Nonlinearity> {
-    // One sweep over the nodes the expressions reach, ascending (a node
-    // after its operands), each classified from its operands'.
-    let cone = g.cone_sorted(exprs, false);
+    // One sweep over the nodes the expressions reach, each after its
+    // operands, each classified from its operands'.
+    let cone = g.cone(exprs, false);
     let mut memo: HashMap<ExprId, Nonlinearity> = HashMap::default();
-    for &e in &cone {
+    for &e in &cone.nodes {
         let c = match *g.node(e) {
             Node::Symbol(s) => leaf(s),
             Node::Call(o, l) => {

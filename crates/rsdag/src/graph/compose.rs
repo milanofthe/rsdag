@@ -34,23 +34,8 @@ impl<K: Field> Graph<K> {
             .iter()
             .map(|&s| self.symbol_id(other.symbol_name(s)))
             .collect();
-        let exprs: Vec<ExprId> = func
-            .outputs()
-            .iter()
-            .filter_map(|o| match *o {
-                Output::Expr(e) => Some(e),
-                _ => None,
-            })
-            .collect();
-        let mut built = self.import_exprs(other, &exprs, imported).into_iter();
-        let outputs: Vec<Output> = func
-            .outputs()
-            .iter()
-            .map(|o| match *o {
-                Output::Expr(_) => Output::Expr(built.next().expect("one per expression")),
-                other => other,
-            })
-            .collect();
+        let built = self.import_exprs(other, &func.exprs(), imported);
+        let outputs = func.outputs_over(built);
         // A symbolic function this graph already holds, the same over the
         // same parameters, is the one to call: its instances, imported along
         // different paths, then batch together.
@@ -67,17 +52,9 @@ impl<K: Field> Graph<K> {
             imported.insert(f, g);
             return g;
         }
-        let new = self.push_function(Function::new(
-            func.name(),
-            params,
-            func.extern_body().cloned(),
-        ));
-        for (k, &role) in func.param_roles().iter().enumerate() {
-            self.set_param_role(new, k as u32, role);
-        }
-        for (out, &role) in outputs.into_iter().zip(func.output_roles()) {
-            self.push_output(new, out, role);
-        }
+        let outputs = outputs.into_iter().zip(func.output_roles().iter().copied());
+        let body = func.extern_body().cloned();
+        let new = self.define(func.name(), params, func.param_roles(), body, outputs);
         imported.insert(f, new);
         new
     }
@@ -91,48 +68,53 @@ impl<K: Field> Graph<K> {
         roots: &[ExprId],
         imported: &mut HashMap<FuncId, FuncId>,
     ) -> Vec<ExprId> {
-        // the cone of `roots` in `other`, ascending: operands first
-        let cone = other.cone_sorted(roots, false);
-        let mut map: HashMap<ExprId, ExprId> = HashMap::default();
-        map.reserve(cone.len());
-        let mut lists: HashMap<ArgList, ArgList> = HashMap::default();
-        let mut ops: Vec<ExprId> = Vec::new();
-        for &e in &cone {
-            let node = *other.node(e);
-            let r = match node {
-                Node::Const(c) => self.konst(other.const_val(c).clone()),
-                Node::Symbol(s) => self.sym(other.symbol_name(s)),
-                Node::Call(o, l) => {
-                    let (f, k) = other.output(o);
-                    let g = self.import(other, f, imported);
-                    let nl = match lists.get(&l) {
-                        Some(&nl) => nl,
-                        None => {
-                            let args: Vec<ExprId> = other.args(l).iter().map(|a| map[a]).collect();
-                            let nl = self.intern_args(&args);
-                            lists.insert(l, nl);
-                            nl
-                        }
-                    };
-                    // a bound call: its context over the imported expressions
-                    let ctx = match other.context(o) {
-                        None => crate::graph::NO_CONTEXT,
-                        Some((at, exprs)) => {
-                            let pairs: Vec<(u32, ExprId)> =
-                                at.iter().zip(exprs).map(|(&p, e)| (p, map[e])).collect();
-                            self.bind(g, &pairs).ctx
-                        }
-                    };
-                    self.call_list_in(g, k, ctx, nl)
-                }
-                _ => {
-                    ops.clear();
-                    ops.extend(other.operands(e).iter().map(|a| map[a]));
-                    self.build(node, &ops)
-                }
-            };
-            map.insert(e, r);
+        let mut rule = Import {
+            g: self,
+            other,
+            imported,
+        };
+        crate::transform::rewrite(&mut rule, roots)
+    }
+}
+
+/// [`Graph::import_exprs`]: `other`'s nodes rebuilt in `g`.
+struct Import<'a, K: Field> {
+    g: &'a mut Graph<K>,
+    other: &'a Graph<K>,
+    imported: &'a mut HashMap<FuncId, FuncId>,
+}
+
+impl<K: Field> crate::transform::Rule<K> for Import<'_, K> {
+    type V = ExprId;
+    fn source(&self) -> &Graph<K> {
+        self.other
+    }
+    fn node(&mut self, _: ExprId, node: Node, ops: &[ExprId]) -> ExprId {
+        match node {
+            Node::Const(c) => self.g.konst(self.other.const_val(c).clone()),
+            Node::Symbol(s) => self.g.sym(self.other.symbol_name(s)),
+            _ => self.g.build(node, ops),
         }
-        roots.iter().map(|r| map[r]).collect()
+    }
+    fn calls(
+        &mut self,
+        call: &crate::transform::Call<ExprId>,
+        outs: &[(ExprId, u32)],
+    ) -> Vec<ExprId> {
+        let f = self.g.import(self.other, call.f, self.imported);
+        // a bound call: its context over the imported expressions
+        let ctx = match call.ctx {
+            NO_CONTEXT => NO_CONTEXT,
+            c => {
+                let at = &self.other.contexts[c as usize].at;
+                let pairs: Vec<(u32, ExprId)> =
+                    at.iter().copied().zip(call.bound.iter().copied()).collect();
+                self.g.bind(f, &pairs).ctx
+            }
+        };
+        let l = self.g.intern_args(call.args);
+        (outs.iter())
+            .map(|&(_, k)| self.g.call_list_in(f, k, ctx, l))
+            .collect()
     }
 }

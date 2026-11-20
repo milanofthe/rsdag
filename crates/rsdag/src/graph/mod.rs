@@ -96,6 +96,18 @@ pub(crate) struct Context {
 /// Marks a bound parameter in [`Context::slot`].
 pub(crate) const BOUND: u32 = 1 << 31;
 
+impl Context {
+    /// Parameter `p` of a call in this context: its argument among `args`,
+    /// or where the context binds it its expression among `bound`.
+    #[inline]
+    pub(crate) fn pick<T: Copy>(&self, p: usize, args: &[T], bound: &[T]) -> T {
+        match self.slot[p] {
+            s if s & BOUND == 0 => args[s as usize],
+            s => bound[(s & !BOUND) as usize],
+        }
+    }
+}
+
 /// What [`Graph::partial`] does with a parameter: bind it to an
 /// expression in the function, or pass one per call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -301,13 +313,13 @@ impl<K: Field> Graph<K> {
         self.args(l).split_at(l.len() / 2)
     }
 
-    /// The operands a node reads, without allocation (leaves have none).
+    /// The operands a node reads (leaves have none); of a call, in its
+    /// function's parameter order (see [`full_args`](Self::full_args)).
     #[inline]
     pub fn operands(&self, id: ExprId) -> Operands<'_> {
         match *self.node(id) {
             Node::Call(o, l) if self.output_ctx[o.0 as usize] != NO_CONTEXT => {
-                let c = &self.contexts[self.output_ctx[o.0 as usize] as usize];
-                Operands::Owned([self.args(l), self.args(c.exprs)].concat())
+                Operands::Owned(self.full_args(o, l).into_owned())
             }
             ref node => node.operands(&self.arg_pool),
         }
@@ -956,8 +968,9 @@ impl<K: Field> Graph<K> {
     /// `node` over the operands `ops` (ids of this graph, in
     /// [`operands`](Self::operands) order), through the smart constructors:
     /// folding and canonical operand order run again, so identities that
-    /// only became visible after a transform collapse. A leaf or a call must
-    /// already name a constant, symbol or output of this graph.
+    /// only became visible after a transform collapse. A leaf must already
+    /// name a constant or symbol of this graph; a call is rebuilt over its
+    /// instance (see [`calls_over`](Self::calls_over)).
     pub(crate) fn build(&mut self, node: Node, ops: &[ExprId]) -> ExprId {
         match node {
             Node::Const(_) | Node::Symbol(_) => self.intern(node),
@@ -975,7 +988,7 @@ impl<K: Field> Graph<K> {
                 self.dot(a.to_vec(), b.to_vec())
             }
             Node::Solve(_, i) => self.solve_component(ops, i),
-            Node::Call(o, _) => self.call_over_operands(o, ops),
+            Node::Call(..) => unreachable!("a call is rebuilt over its instance"),
         }
     }
 

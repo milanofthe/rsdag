@@ -284,17 +284,11 @@ impl Function {
         if let Some(g) = self.globals.get() {
             return g.clone();
         }
-        let exprs: Vec<ExprId> = self
-            .outputs
-            .iter()
-            .filter_map(|o| match *o {
-                Output::Expr(e) => Some(e),
-                _ => None,
-            })
-            .collect();
+        let exprs = self.exprs();
         let params: rustc_hash::FxHashSet<SymbolId> = self.params.iter().copied().collect();
         let mut globals: Vec<ExprId> = ctx
-            .cone_nodes(&exprs, true)
+            .cone(&exprs, true)
+            .nodes
             .into_iter()
             .filter(
                 |&e| matches!(*ctx.node(e), crate::node::Node::Symbol(s) if !params.contains(&s)),
@@ -340,6 +334,27 @@ impl Function {
             cache.resize(out as usize + 1, None);
         }
         cache[out as usize] = Some(support);
+    }
+
+    /// The outputs that are expressions, in output order.
+    pub(crate) fn exprs(&self) -> Vec<ExprId> {
+        (self.outputs.iter())
+            .filter_map(|o| match *o {
+                Output::Expr(e) => Some(e),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The outputs with their expressions replaced, in order, by `exprs`.
+    pub(crate) fn outputs_over(&self, exprs: Vec<ExprId>) -> Vec<Output> {
+        let mut exprs = exprs.into_iter();
+        (self.outputs.iter())
+            .map(|o| match o {
+                Output::Expr(_) => Output::Expr(exprs.next().expect("one per expression")),
+                &other => other,
+            })
+            .collect()
     }
 
     pub fn name(&self) -> &str {

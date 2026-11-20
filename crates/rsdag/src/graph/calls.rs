@@ -6,6 +6,7 @@
 //! node like any other and the functions live in the same arena.
 
 use super::*;
+use crate::transform::{Call, Rule};
 
 impl<K: Field> Graph<K> {
     // --- functions and calls ---------------------------------------------
@@ -30,9 +31,29 @@ impl<K: Field> Graph<K> {
         params: Vec<SymbolId>,
         outputs: Vec<ExprId>,
     ) -> FuncId {
-        let f = self.push_function(Function::new(name, params, None));
-        for e in outputs {
-            self.push_output(f, Output::Expr(e), OutputRole::Plain);
+        let outputs = outputs
+            .into_iter()
+            .map(|e| (Output::Expr(e), OutputRole::Plain));
+        self.define(name, params, &[], None, outputs)
+    }
+
+    /// Define a function: `params` with the roles `roles` (`Free` past
+    /// them), an extern `body` or none, the outputs with their roles.
+    pub(crate) fn define(
+        &mut self,
+        name: &str,
+        params: Vec<SymbolId>,
+        roles: &[ParamRole],
+        body: Option<Arc<dyn ExternBundle>>,
+        outputs: impl IntoIterator<Item = (Output, OutputRole)>,
+    ) -> FuncId {
+        let mut func = Function::new(name, params, body);
+        for (k, &r) in roles.iter().enumerate() {
+            func.set_param_role(k as u32, r);
+        }
+        let f = self.push_function(func);
+        for (o, r) in outputs {
+            self.push_output(f, o, r);
         }
         f
     }
@@ -75,14 +96,13 @@ impl<K: Field> Graph<K> {
         outputs: Vec<ExprId>,
         role: impl Fn(&Self, SymbolId) -> Option<ParamRole>,
     ) -> FuncId {
-        let roles: Vec<(u32, ParamRole)> = (params.iter().enumerate())
-            .filter_map(|(k, &s)| role(self, s).map(|r| (k as u32, r)))
+        let roles: Vec<ParamRole> = (params.iter())
+            .map(|&s| role(self, s).unwrap_or(ParamRole::Free))
             .collect();
-        let f = self.define_func(name, params, outputs);
-        for (k, r) in roles {
-            self.set_param_role(f, k, r);
-        }
-        f
+        let outputs = outputs
+            .into_iter()
+            .map(|e| (Output::Expr(e), OutputRole::Plain));
+        self.define(name, params, &roles, None, outputs)
     }
 
     /// Set the role of parameter `param` of function `f`.
@@ -119,17 +139,9 @@ impl<K: Field> Graph<K> {
     pub fn inline_composite(&mut self, roots: &[ExprId]) -> Vec<ExprId> {
         let mut composite: HashMap<FuncId, bool> = HashMap::default();
         self.inline_where(roots, &mut |g, f| {
-            *composite.entry(f).or_insert_with(|| {
-                let exprs: Vec<ExprId> = g.funcs[f.0 as usize]
-                    .outputs()
-                    .iter()
-                    .filter_map(|o| match *o {
-                        Output::Expr(e) => Some(e),
-                        _ => None,
-                    })
-                    .collect();
-                !g.free_calls_in(&exprs).is_empty()
-            })
+            *composite
+                .entry(f)
+                .or_insert_with(|| !g.free_calls_in(&g.funcs[f.0 as usize].exprs()).is_empty())
         })
     }
 
@@ -139,12 +151,12 @@ impl<K: Field> Graph<K> {
         roots: &[ExprId],
         which: &mut dyn FnMut(&Self, FuncId) -> bool,
     ) -> Vec<ExprId> {
-        self.inline_with(
-            roots,
+        let mut rule = Inline {
+            g: self,
             which,
-            &mut HashMap::default(),
-            &mut HashMap::default(),
-        )
+            bodies: &mut HashMap::default(),
+        };
+        crate::transform::rewrite(&mut rule, roots)
     }
 
     /// Every call under `roots` that passes constants, redirected to a copy
@@ -164,64 +176,6 @@ impl<K: Field> Graph<K> {
     /// derived anew. Calls into an extern body are left as they are.
     pub fn specialize_calls(&mut self, roots: &[ExprId]) -> Vec<ExprId> {
         specialize_calls_in(self, roots, &mut HashMap::default())
-    }
-
-    /// [`inline_where`](Self::inline_where) with `bodies` holding each
-    /// output of an inlined function already inlined over its parameters
-    /// (all of a function's outputs at once, so their shared body is walked
-    /// once), and `instances` the substitution of each instance, kept across
-    /// its outputs: an instance's body is rewritten once, however many of
-    /// its outputs are called.
-    fn inline_with(
-        &mut self,
-        roots: &[ExprId],
-        which: &mut dyn FnMut(&Self, FuncId) -> bool,
-        bodies: &mut HashMap<OutputId, ExprId>,
-        instances: &mut HashMap<(FuncId, u32, ArgList), Instance>,
-    ) -> Vec<ExprId> {
-        crate::transform::rewrite(self, roots, |g, _, node, ops| {
-            let (Node::Call(o, _), Some(l)) = (node, ops.list) else {
-                return g.rebuild(node, ops);
-            };
-            let (f, k) = g.output(o);
-            match g.funcs[f.0 as usize].outputs()[k as usize] {
-                Output::Zero => return g.zero,
-                // An extern body, or a function not to inline, stays a call
-                // over inlined arguments.
-                Output::Slot(_) => return g.rebuild(node, ops),
-                Output::Expr(_) if !which(g, f) => return g.rebuild(node, ops),
-                Output::Expr(_) => {}
-            }
-            // the body of the output, whatever context it is called in
-            let plain = g.output_id(f, k);
-            if !bodies.contains_key(&plain) {
-                let outs: Vec<(u32, ExprId)> = g.funcs[f.0 as usize]
-                    .outputs()
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(k, out)| match *out {
-                        Output::Expr(e) => Some((k as u32, e)),
-                        _ => None,
-                    })
-                    .collect();
-                let exprs: Vec<ExprId> = outs.iter().map(|&(_, e)| e).collect();
-                let inlined = g.inline_with(&exprs, which, bodies, instances);
-                for (&(k, _), b) in outs.iter().zip(inlined) {
-                    let ok = g.output_id(f, k);
-                    bodies.insert(ok, b);
-                }
-            }
-            let body = bodies[&plain];
-            let inst = instances
-                .entry((f, ops.ctx, l))
-                .or_insert_with(|| Instance {
-                    bound: g.binding(f, &g.full_args_in(ops.ctx, l)),
-                    memo: HashMap::default(),
-                    lists: HashMap::default(),
-                    contexts: HashMap::default(),
-                });
-            inst.apply(g, body)
-        })
     }
 
     /// `f` with the globals `map` binds to something else than themselves
@@ -250,41 +204,25 @@ impl<K: Field> Graph<K> {
         let func = self.func(f);
         let (name, params) = (func.name().to_string(), func.params().to_vec());
         let roles = func.param_roles().to_vec();
-        let (outputs, out_roles) = (func.outputs().to_vec(), func.output_roles().to_vec());
+        let (exprs, out_roles) = (func.exprs(), func.output_roles().to_vec());
         let bound: HashMap<SymbolId, ExprId> = binding.iter().copied().collect();
-        let exprs: Vec<ExprId> = outputs
-            .iter()
-            .filter_map(|o| match *o {
-                Output::Expr(e) => Some(e),
-                _ => None,
-            })
-            .collect();
-        let mut done = crate::transform::substitute(self, &exprs, &bound).into_iter();
-        let copy = self.push_function(Function::new(&name, params.clone(), None));
-        for (k, &r) in roles.iter().enumerate() {
-            self.set_param_role(copy, k as u32, r);
-        }
-        for (o, role) in outputs.iter().zip(out_roles) {
-            let out = match *o {
-                Output::Expr(_) => Output::Expr(done.next().expect("one per expression")),
-                other => other,
-            };
-            let role = match role {
-                OutputRole::Derivative { wrt, .. } if wrt as usize >= params.len() => {
-                    OutputRole::Plain
-                }
-                r => r,
-            };
-            self.push_output(copy, out, role);
-        }
+        let done = crate::transform::substitute(self, &exprs, &bound);
+        let outputs = self.func(f).outputs_over(done);
+        // a derivative with respect to a global is one no longer
+        let n = params.len();
+        let out_roles = out_roles.into_iter().map(|r| match r {
+            OutputRole::Derivative { wrt, .. } if wrt as usize >= n => OutputRole::Plain,
+            r => r,
+        });
+        let copy = self.define(
+            &name,
+            params,
+            &roles,
+            None,
+            outputs.into_iter().zip(out_roles),
+        );
         self.rebound.insert((f, binding), copy);
         Some(copy)
-    }
-
-    /// The parameters of `f` bound to the arguments of a call.
-    fn binding(&self, f: FuncId, args: &[ExprId]) -> HashMap<SymbolId, ExprId> {
-        let params = self.funcs[f.0 as usize].params();
-        params.iter().copied().zip(args.iter().copied()).collect()
     }
 
     /// The operands of a call (its parameters, then its globals, see
@@ -366,11 +304,8 @@ impl<K: Field> Graph<K> {
         body: Arc<dyn ExternBundle>,
         outputs: Vec<Output>,
     ) -> FuncId {
-        let f = self.push_function(Function::new(name, params, Some(body)));
-        for o in outputs {
-            self.push_output(f, o, OutputRole::Plain);
-        }
-        f
+        let outputs = outputs.into_iter().map(|o| (o, OutputRole::Plain));
+        self.define(name, params, &[], Some(body), outputs)
     }
 
     /// Declare `d outputs[out] / d params[param]` of an extern function as
@@ -524,35 +459,6 @@ impl<K: Field> Graph<K> {
         self.bind(f, &pairs).ctx
     }
 
-    /// Context `c` for a call of `f` (a copy with the parameters of `c`'s).
-    pub(crate) fn context_onto(&mut self, c: u32, f: FuncId) -> u32 {
-        if c == NO_CONTEXT {
-            return NO_CONTEXT;
-        }
-        let exprs = self.args(self.contexts[c as usize].exprs).to_vec();
-        self.context_over(c, f, &exprs)
-    }
-
-    /// The operands of a call of `f` in context `ctx` over `l`, in `f`'s
-    /// parameter order (see [`full_args`](Self::full_args)).
-    pub(crate) fn full_args_in(&self, ctx: u32, l: ArgList) -> Vec<ExprId> {
-        let args = self.args(l);
-        match ctx {
-            NO_CONTEXT => args.to_vec(),
-            c => {
-                let c = &self.contexts[c as usize];
-                let bound = self.args(c.exprs);
-                c.slot
-                    .iter()
-                    .map(|&s| match s & BOUND {
-                        0 => args[s as usize],
-                        _ => bound[(s & !BOUND) as usize],
-                    })
-                    .collect()
-            }
-        }
-    }
-
     /// The parameters a call through `b` passes, in order.
     pub fn bound_arity(&self, b: Bound) -> usize {
         let n = self.funcs[b.func.0 as usize].params().len();
@@ -580,24 +486,44 @@ impl<K: Field> Graph<K> {
 
     /// The operands of a call of output `o` over `l` in `f`'s parameter
     /// order: an argument, or a bound expression where `o`'s context binds
-    /// the parameter.
+    /// the parameter. The one order of a call's operands.
     pub(crate) fn full_args(&self, o: OutputId, l: ArgList) -> std::borrow::Cow<'_, [ExprId]> {
-        match self.output_ctx[o.0 as usize] {
-            NO_CONTEXT => std::borrow::Cow::Borrowed(self.args(l)),
+        let bound = self.context(o).map_or(&[][..], |(_, b)| b);
+        self.in_param_order(self.context_of(o), self.args(l), bound)
+    }
+
+    /// The operands of a call in context `ctx`, its arguments `args` and the
+    /// context's bound expressions `bound`, in parameter order.
+    pub(crate) fn in_param_order<'a, T: Copy>(
+        &self,
+        ctx: u32,
+        args: &'a [T],
+        bound: &[T],
+    ) -> std::borrow::Cow<'a, [T]> {
+        match ctx {
+            NO_CONTEXT => std::borrow::Cow::Borrowed(args),
             c => {
                 let c = &self.contexts[c as usize];
-                let (args, bound) = (self.args(l), self.args(c.exprs));
-                std::borrow::Cow::Owned(
-                    c.slot
-                        .iter()
-                        .map(|&s| match s & BOUND {
-                            0 => args[s as usize],
-                            _ => bound[(s & !BOUND) as usize],
-                        })
-                        .collect(),
-                )
+                std::borrow::Cow::Owned((0..c.slot.len()).map(|p| c.pick(p, args, bound)).collect())
             }
         }
+    }
+
+    /// The calls `outs` of an instance rewritten (see
+    /// [`transform::rewrite`](crate::transform::rewrite)) as calls of `f`
+    /// (the instance's function, or a copy with its parameters): over the
+    /// rewritten list, in the context over the rewritten bound expressions.
+    pub(crate) fn calls_over(
+        &mut self,
+        f: FuncId,
+        call: &crate::transform::Call<ExprId>,
+        outs: &[(ExprId, u32)],
+    ) -> Vec<ExprId> {
+        let ctx = self.context_over(call.ctx, f, call.bound);
+        let l = self.intern_args(call.args);
+        outs.iter()
+            .map(|&(_, k)| self.call_list_in(f, k, ctx, l))
+            .collect()
     }
 
     /// Output `out` of `f` applied to `args` (one argument per parameter). A
@@ -648,23 +574,6 @@ impl<K: Field> Graph<K> {
             self.list_shape.insert((ctx, l), shape);
         }
         self.intern(Node::Call(o, l))
-    }
-
-    /// The call of output `o` over [`operands`](Self::operands): its
-    /// arguments, then its context's bound expressions (anew, whatever they
-    /// are now).
-    pub(crate) fn call_over_operands(&mut self, o: OutputId, ops: &[ExprId]) -> ExprId {
-        let (f, out) = self.output(o);
-        match self.context_of(o) {
-            NO_CONTEXT => self.call(f, out, ops),
-            c => {
-                let nb = self.contexts[c as usize].at.len();
-                let (args, bound) = ops.split_at(ops.len() - nb);
-                let ctx = self.context_over(c, f, bound);
-                let l = self.intern_args(args);
-                self.call_list_in(f, out, ctx, l)
-            }
-        }
     }
 
     /// The index of the derivative output `d outputs[out] / d params[param]`,
@@ -761,10 +670,10 @@ impl<K: Field> Graph<K> {
         let wrt: Vec<SymbolId> = params.iter().map(|&p| self.operand_symbol(f, p)).collect();
         let grads = crate::autodiff::gradient(self, psi, &wrt);
         formal.extend(cotangents);
-        let g = self.define_func(&name, formal, grads);
-        for (i, r) in roles.into_iter().enumerate() {
-            self.set_param_role(g, i as u32, r);
-        }
+        let outputs = grads
+            .into_iter()
+            .map(|e| (Output::Expr(e), OutputRole::Plain));
+        let g = self.define(&name, formal, &roles, None, outputs);
         self.vjps.insert(key, g);
         g
     }
@@ -880,7 +789,8 @@ impl<K: Field> Graph<K> {
     /// the forest). A solver uses it to compile exactly the outputs a set of
     /// roots reads.
     pub fn free_calls_in(&self, exprs: &[ExprId]) -> std::collections::BTreeSet<OutputId> {
-        self.cone_nodes(exprs, false)
+        self.cone(exprs, false)
+            .nodes
             .into_iter()
             .filter_map(|e| match *self.node(e) {
                 Node::Call(o, _) => Some(o),
@@ -900,14 +810,14 @@ impl<K: Field> Graph<K> {
     /// program over them takes. One walk over the forest, each shared node
     /// once.
     pub fn free_symbols_in(&self, exprs: &[ExprId]) -> std::collections::BTreeSet<SymbolId> {
-        self.symbols_of(self.cone_nodes(exprs, true))
+        self.symbols_of(self.cone(exprs, true).nodes)
     }
 
     /// The symbols `exprs` mention, the bodies they call not looked into: the
     /// parameters a function closed over them takes (see
     /// [`close`](Self::close)).
     pub fn mentioned_symbols_in(&self, exprs: &[ExprId]) -> std::collections::BTreeSet<SymbolId> {
-        self.symbols_of(self.cone_nodes(exprs, false))
+        self.symbols_of(self.cone(exprs, false).nodes)
     }
 
     fn symbols_of(&self, nodes: Vec<ExprId>) -> std::collections::BTreeSet<SymbolId> {
@@ -927,48 +837,59 @@ fn specialize_calls_in<K: Field>(
     roots: &[ExprId],
     made: &mut Specialized,
 ) -> Vec<ExprId> {
-    // per instance (function, argument list): the copy it calls over the
-    // arguments that are not constant, or none
-    let mut instances: HashMap<(FuncId, u32, ArgList), Option<(FuncId, u32, ArgList)>> =
-        HashMap::default();
-    // per copy and context of the original, the context the copy keeps
-    let mut kept: HashMap<(FuncId, u32), u32> = HashMap::default();
-    crate::transform::rewrite(g, roots, |g, _e, node, ops| {
-        let (Node::Call(o, _), Some(l)) = (node, ops.list) else {
-            return g.rebuild(node, ops);
-        };
-        let (f, out) = g.output(o);
-        let target = match instances.get(&(f, ops.ctx, l)) {
-            Some(&t) => t,
-            None => {
-                let t = specialize_instance(g, f, ops.ctx, l, made, &mut kept);
-                instances.insert((f, ops.ctx, l), t);
-                t
-            }
-        };
-        match target {
-            Some((copy, ctx, rest)) => g.call_list_in(copy, out, ctx, rest),
-            None => g.rebuild(node, ops),
-        }
-    })
+    let mut rule = Specialize {
+        g,
+        made,
+        kept: HashMap::default(),
+    };
+    crate::transform::rewrite(&mut rule, roots)
 }
 
-/// The copy of `f` a call in context `ctx` over `l` runs, the context it
-/// keeps (the bound parameters that are not constants) and the arguments
-/// it keeps, interned; `None` when the call passes no constant to
-/// specialize on.
+/// [`Graph::specialize_calls`]: an instance that passes constants calls
+/// the copy specialized to them over the other arguments.
+struct Specialize<'a, K: Field> {
+    g: &'a mut Graph<K>,
+    made: &'a mut Specialized,
+    /// per copy and context of the original, the context the copy keeps
+    kept: HashMap<(FuncId, u32), u32>,
+}
+
+impl<K: Field> Rule<K> for Specialize<'_, K> {
+    type V = ExprId;
+    fn source(&self) -> &Graph<K> {
+        self.g
+    }
+    fn node(&mut self, _: ExprId, node: Node, ops: &[ExprId]) -> ExprId {
+        self.g.build(node, ops)
+    }
+    fn calls(&mut self, call: &Call<ExprId>, outs: &[(ExprId, u32)]) -> Vec<ExprId> {
+        let g = &mut *self.g;
+        let ctx = g.context_over(call.ctx, call.f, call.bound);
+        let full = call.params(g).into_owned();
+        match specialize_instance(g, call.f, ctx, &full, self.made, &mut self.kept) {
+            Some((copy, ctx, rest)) => (outs.iter())
+                .map(|&(_, k)| g.call_list_in(copy, k, ctx, rest))
+                .collect(),
+            None => g.calls_over(call.f, call, outs),
+        }
+    }
+}
+
+/// The copy of `f` a call in context `ctx` over the operands `full` (in
+/// parameter order) runs, the context it keeps (the bound parameters that
+/// are not constants) and the arguments it keeps, interned; `None` when the
+/// call passes no constant to specialize on.
 fn specialize_instance<K: Field>(
     g: &mut Graph<K>,
     f: FuncId,
     ctx: u32,
-    l: ArgList,
+    full: &[ExprId],
     made: &mut Specialized,
     kept: &mut HashMap<(FuncId, u32), u32>,
 ) -> Option<(FuncId, u32, ArgList)> {
     // A parameter stays an argument even when constant: its work is the
     // body's prolog, and specializing on it would split the instances of
     // one function into one copy per value.
-    let full = g.full_args_in(ctx, l);
     let roles = g.func(f).param_roles();
     let consts: Vec<(u32, ExprId)> = full
         .iter()
@@ -1036,136 +957,83 @@ fn specialize_function<K: Field>(
     made: &mut Specialized,
 ) -> FuncId {
     let func = g.func(f);
-    let name = func.name().to_string();
-    let params = func.params().to_vec();
-    let roles = func.param_roles().to_vec();
-    let outputs = func.outputs().to_vec();
-    let out_roles = func.output_roles().to_vec();
+    let (name, params) = (func.name().to_string(), func.params().to_vec());
+    let (roles, out_roles) = (func.param_roles().to_vec(), func.output_roles().to_vec());
     let bound: HashMap<SymbolId, ExprId> = consts
         .iter()
         .map(|&(k, c)| (params[k as usize], c))
         .collect();
-    let exprs: Vec<ExprId> = outputs
-        .iter()
-        .filter_map(|o| match *o {
-            Output::Expr(e) => Some(e),
-            _ => None,
-        })
-        .collect();
+    let exprs = func.exprs();
     let folded = crate::transform::substitute(g, &exprs, &bound);
     let folded = specialize_calls_in(g, &folded, made);
     let kept: Vec<usize> = (0..params.len())
         .filter(|&k| !bound.contains_key(&params[k]))
         .collect();
-    let copy = g.push_function(Function::new(
-        &name,
-        kept.iter().map(|&k| params[k]).collect(),
-        None,
-    ));
-    for (j, &k) in kept.iter().enumerate() {
-        g.set_param_role(copy, j as u32, roles[k]);
-    }
-    let mut next = folded.into_iter();
-    for (o, role) in outputs.iter().zip(out_roles) {
-        let out = match *o {
-            Output::Expr(_) => {
-                let e = next.next().expect("one folded output per expression");
-                if g.is_zero(e) {
-                    Output::Zero
-                } else {
-                    Output::Expr(e)
-                }
-            }
-            _ => Output::Zero,
-        };
-        let role = match role {
-            OutputRole::Derivative { .. } => OutputRole::Plain,
-            r => r,
-        };
-        g.push_output(copy, out, role);
-    }
-    copy
+    let outputs = (g.func(f).outputs_over(folded).into_iter()).map(|o| match o {
+        Output::Expr(e) if !g.is_zero(e) => o,
+        _ => Output::Zero,
+    });
+    // the parameters move: a derivative's index is one no longer
+    let out_roles = out_roles.into_iter().map(|r| match r {
+        OutputRole::Derivative { .. } => OutputRole::Plain,
+        r => r,
+    });
+    let outputs: Vec<(Output, OutputRole)> = outputs.zip(out_roles).collect();
+    let kept_roles: Vec<ParamRole> = kept.iter().map(|&k| roles[k]).collect();
+    let params = kept.iter().map(|&k| params[k]).collect();
+    g.define(&name, params, &kept_roles, None, outputs)
 }
 
-/// One instance's substitution of its arguments into its function's body,
-/// kept across the body's outputs (they share most of it): the parameters
-/// bound, the nodes rewritten so far and the call lists.
-struct Instance {
-    bound: HashMap<SymbolId, ExprId>,
-    memo: HashMap<ExprId, ExprId>,
-    lists: HashMap<ArgList, ArgList>,
-    /// Per context and function called in it, the context rewritten.
-    contexts: HashMap<(u32, FuncId), u32>,
+/// [`Graph::inline_where`]: an instance of a function `which` names is its
+/// body, inlined once per function (`bodies`, every output of the function
+/// at once), with the instance's operands substituted for the parameters,
+/// once for all the outputs the instance calls.
+struct Inline<'a, K: Field> {
+    g: &'a mut Graph<K>,
+    which: &'a mut dyn FnMut(&Graph<K>, FuncId) -> bool,
+    bodies: &'a mut HashMap<FuncId, Vec<ExprId>>,
 }
 
-impl Instance {
-    /// `root` with the instance's arguments substituted.
-    fn apply<K: Field>(&mut self, g: &mut Graph<K>, root: ExprId) -> ExprId {
-        let mut stack: Vec<(ExprId, bool)> = vec![(root, false)];
-        let mut ops: Vec<ExprId> = Vec::new();
-        while let Some((e, expanded)) = stack.pop() {
-            if self.memo.contains_key(&e) {
-                continue;
-            }
-            let node = *g.node(e);
-            if !expanded {
-                stack.push((e, true));
-                // a list rewritten before: only the binding, which another
-                // call over the list may not share
-                if let Node::Call(o, l) = node {
-                    if self.lists.contains_key(&l) {
-                        let c = g.context_of(o);
-                        if c != NO_CONTEXT {
-                            stack.extend(
-                                (g.args(g.context_list(c)).iter().rev())
-                                    .filter(|c| !self.memo.contains_key(c))
-                                    .map(|&c| (c, false)),
-                            );
-                        }
-                        continue;
-                    }
-                }
-                let pending = g.operands(e);
-                stack.extend(
-                    pending
-                        .iter()
-                        .rev()
-                        .filter(|c| !self.memo.contains_key(c))
-                        .map(|&c| (c, false)),
-                );
-                continue;
-            }
-            let r = match node {
-                Node::Const(_) => e,
-                Node::Symbol(s) => self.bound.get(&s).copied().unwrap_or(e),
-                Node::Call(o, l) => {
-                    let memo = &self.memo;
-                    let nl = *self.lists.entry(l).or_insert_with(|| {
-                        let new: Vec<ExprId> = g.args(l).iter().map(|c| memo[c]).collect();
-                        g.intern_args(&new)
-                    });
-                    let (f0, k) = g.output(o);
-                    let f = g.rebound(f0, &self.bound).unwrap_or(f0);
-                    let (c, memo) = (g.context_of(o), &self.memo);
-                    let ctx = match c {
-                        NO_CONTEXT => NO_CONTEXT,
-                        c => *self.contexts.entry((c, f)).or_insert_with(|| {
-                            let exprs = g.args(g.context_list(c));
-                            let new: Vec<ExprId> = exprs.iter().map(|e| memo[e]).collect();
-                            g.context_over(c, f, &new)
-                        }),
-                    };
-                    g.call_list_in(f, k, ctx, nl)
-                }
-                _ => {
-                    ops.clear();
-                    ops.extend(g.operands(e).iter().map(|c| self.memo[c]));
-                    g.build(node, &ops)
-                }
-            };
-            self.memo.insert(e, r);
+impl<K: Field> Rule<K> for Inline<'_, K> {
+    type V = ExprId;
+    fn source(&self) -> &Graph<K> {
+        self.g
+    }
+    fn node(&mut self, _: ExprId, node: Node, ops: &[ExprId]) -> ExprId {
+        self.g.build(node, ops)
+    }
+    fn calls(&mut self, call: &Call<ExprId>, outs: &[(ExprId, u32)]) -> Vec<ExprId> {
+        let f = call.f;
+        // an extern body, or a function not to inline, stays a call
+        if self.g.func(f).is_extern() || !(self.which)(self.g, f) {
+            return self.g.calls_over(f, call, outs);
         }
-        self.memo[&root]
+        if !self.bodies.contains_key(&f) {
+            let exprs = self.g.func(f).exprs();
+            let mut inner = Inline {
+                g: &mut *self.g,
+                which: &mut *self.which,
+                bodies: &mut *self.bodies,
+            };
+            let mut inlined = crate::transform::rewrite(&mut inner, &exprs).into_iter();
+            let zero = self.g.zero();
+            let outputs = (self.g.func(f).outputs().iter())
+                .map(|o| match o {
+                    Output::Expr(_) => inlined.next().expect("one per expression"),
+                    _ => zero,
+                })
+                .collect();
+            self.bodies.insert(f, outputs);
+        }
+        let g = &mut *self.g;
+        let bind: HashMap<SymbolId, ExprId> = (g.func(f).params().iter().copied())
+            .zip(call.params(g).iter().copied())
+            .collect();
+        let bodies: Vec<ExprId> = outs
+            .iter()
+            .map(|&(_, k)| self.bodies[&f][k as usize])
+            .collect();
+        crate::transform::substitute(g, &bodies, &bind)
     }
 }
 

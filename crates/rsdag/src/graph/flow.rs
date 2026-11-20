@@ -180,73 +180,91 @@ fn inert(node: &Node) -> usize {
     }
 }
 
+/// The nodes under some roots in a topological order, each after its
+/// operands, and each node's place in it (see [`Graph::cone`]).
+pub(crate) struct Cone {
+    pub(crate) nodes: Vec<ExprId>,
+    at: NodeTable<u32>,
+}
+
+/// A node met but not finished in [`Graph::cone`]'s walk.
+const OPEN: u32 = u32::MAX;
+
+impl Cone {
+    /// The place of a node of the cone.
+    #[inline]
+    pub(crate) fn pos(&self, e: ExprId) -> usize {
+        self.at.get(e).expect("a node of the cone") as usize
+    }
+}
+
 /// Values over a cone (see [`Graph::flow`]).
 pub(crate) struct Flow<V> {
-    at: NodeTable<u32>,
+    cone: Cone,
     vals: Vec<V>,
-    /// The nodes of the cone, in the order of `vals`.
-    nodes: Vec<ExprId>,
 }
 
 impl<V> Flow<V> {
     /// The value of a node of the cone.
     pub(crate) fn get(&self, e: ExprId) -> &V {
-        &self.vals[self.at.get(e).expect("a node of the cone") as usize]
+        &self.vals[self.cone.pos(e)]
     }
 
     /// Every node of the cone with its value.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (ExprId, &V)> {
-        self.nodes.iter().copied().zip(&self.vals)
+        self.cone.nodes.iter().copied().zip(&self.vals)
     }
 }
 
 impl<K: Field> Graph<K> {
-    /// The nodes under `roots`, every operand and every argument list once,
-    /// in ascending id order (a topological one: a hash-consed node is
-    /// newer than its operands), with each node's position in `at`.
-    pub(crate) fn cone(&self, roots: &[ExprId], at: &mut NodeTable<u32>) -> Vec<ExprId> {
-        let mut out = self.reach(roots, at, true);
-        out.sort_unstable();
-        for (k, &e) in out.iter().enumerate() {
-            at.set(e, k as u32);
-        }
-        out
-    }
-
-    /// The nodes under `roots`, every operand and every argument list once,
-    /// in the order the walk meets them, marked in `at`; with `globals`, a
+    /// The cone of `roots`: the nodes under them, each once, in the order a
+    /// recursive walk finishes them (operands in order, every argument list
+    /// and every context once), a topological order. With `globals`, a
     /// call's globals as its operands too (what it reads, not only what it
     /// mentions).
-    fn reach(&self, roots: &[ExprId], at: &mut NodeTable<u32>, globals: bool) -> Vec<ExprId> {
+    pub(crate) fn cone(&self, roots: &[ExprId], globals: bool) -> Cone {
+        let mut at = NodeTable::new(self.len());
         let mut lists: FxHashSet<ArgList> = FxHashSet::default();
         let mut funcs: FxHashSet<FuncId> = FxHashSet::default();
         let mut contexts: FxHashSet<u32> = FxHashSet::default();
-        let mut stack: Vec<ExprId> = roots.to_vec();
-        let mut out = Vec::new();
-        while let Some(e) = stack.pop() {
+        let mut stack: Vec<(ExprId, bool)> = roots.iter().rev().map(|&r| (r, false)).collect();
+        let mut nodes = Vec::new();
+        let mut ops: Vec<ExprId> = Vec::new();
+        while let Some((e, done)) = stack.pop() {
+            if done {
+                at.set(e, nodes.len() as u32);
+                nodes.push(e);
+                continue;
+            }
             if at.contains(e) {
                 continue;
             }
-            at.set(e, 0);
-            out.push(e);
+            at.set(e, OPEN);
+            stack.push((e, true));
+            ops.clear();
             match *self.node(e) {
                 Node::Call(o, l) => {
                     if lists.insert(l) {
-                        stack.extend_from_slice(self.args(l));
-                    }
-                    let f = self.output(o).0;
-                    if globals && funcs.insert(f) {
-                        stack.extend_from_slice(&self.globals(f));
+                        ops.extend_from_slice(self.args(l));
                     }
                     let c = self.output_ctx[o.0 as usize];
                     if c != NO_CONTEXT && contexts.insert(c) {
-                        stack.extend_from_slice(self.args(self.contexts[c as usize].exprs));
+                        ops.extend_from_slice(self.args(self.contexts[c as usize].exprs));
+                    }
+                    let f = self.output(o).0;
+                    if globals && funcs.insert(f) {
+                        ops.extend_from_slice(self.globals_of(f));
                     }
                 }
-                _ => stack.extend_from_slice(&self.operands(e)),
+                ref node => ops.extend_from_slice(&node.operands(&self.arg_pool)),
             }
+            stack.extend(
+                (ops.iter().rev())
+                    .filter(|&&a| !at.contains(a))
+                    .map(|&a| (a, false)),
+            );
         }
-        out
+        Cone { nodes, at }
     }
 
     /// The symbol nodes `f`'s body reads that are not its parameters, its
@@ -283,10 +301,7 @@ impl<K: Field> Graph<K> {
             NO_CONTEXT => args[p as usize],
             c => {
                 let c = &self.contexts[c as usize];
-                match c.slot[p as usize] {
-                    s if s & BOUND == 0 => args[s as usize],
-                    s => self.args(c.exprs)[(s & !BOUND) as usize],
-                }
+                c.pick(p as usize, args, self.args(c.exprs))
             }
         }
     }
@@ -300,20 +315,6 @@ impl<K: Field> Graph<K> {
         func.globals.get().expect("just found")
     }
 
-    /// The nodes under `roots`, ascending; with `globals` the globals the
-    /// calls read (see [`cone`](Self::cone)).
-    pub(crate) fn cone_sorted(&self, roots: &[ExprId], globals: bool) -> Vec<ExprId> {
-        let mut cone = self.cone_nodes(roots, globals);
-        cone.sort_unstable();
-        cone
-    }
-
-    /// The nodes under `roots`, unordered; with `globals` the globals the
-    /// calls read (see [`cone`](Self::cone)).
-    pub(crate) fn cone_nodes(&self, roots: &[ExprId], globals: bool) -> Vec<ExprId> {
-        self.reach(roots, &mut NodeTable::new(self.len()), globals)
-    }
-
     /// Values over the cone of `roots`: a constant's and a symbol's from
     /// `leaf`, every other node's the join of its operands' as `through`
     /// passes them, a call's the join of the arguments its output reads
@@ -324,13 +325,12 @@ impl<K: Field> Graph<K> {
         through: Through,
         leaf: impl Fn(&Node) -> V,
     ) -> Flow<V> {
-        let mut at = NodeTable::new(self.len());
-        let cone = self.cone(roots, &mut at);
-        let mut vals: Vec<V> = Vec::with_capacity(cone.len());
+        let cone = self.cone(roots, true);
+        let mut vals: Vec<V> = Vec::with_capacity(cone.nodes.len());
         // per instance, what each output reads among its moving arguments
         let mut sites: HashMap<(FuncId, u32, ArgList), Arc<[Arc<[u32]>]>> = HashMap::default();
-        for &e in &cone {
-            let val = |c: &ExprId| &vals[at.get(*c).expect("in the cone") as usize];
+        for &e in &cone.nodes {
+            let val = |c: &ExprId| &vals[cone.pos(*c)];
             let node = *self.node(e);
             let v = match node {
                 Node::Const(_) | Node::Symbol(_) => leaf(&node),
@@ -368,11 +368,7 @@ impl<K: Field> Graph<K> {
             };
             vals.push(v);
         }
-        Flow {
-            at,
-            vals,
-            nodes: cone,
-        }
+        Flow { cone, vals }
     }
 
     /// Per output of `f`, the parameters among `moving` (indices, ascending)

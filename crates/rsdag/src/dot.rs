@@ -15,7 +15,8 @@ use crate::constants::{LABEL_EXACT_MAX, LABEL_FIXED_MAX, LABEL_FIXED_MIN, LABEL_
 use crate::field::Field;
 use crate::func::{FuncId, Output};
 use crate::graph::Graph;
-use crate::node::{ArgList, ExprId, Node, ReduceOp, SymbolId};
+use crate::node::{ExprId, Node, ReduceOp, SymbolId};
+use crate::transform::{rewrite, Call, Rule};
 
 /// What a node is, which decides how it is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -351,7 +352,7 @@ impl<'g, K: Field> GraphView<'g, K> {
     /// The graph this view draws (see [`GraphData`]).
     pub fn data(&self) -> GraphData {
         if self.inline {
-            return Inliner::new(self).data();
+            return Inliner::data(self);
         }
         let g = self.g;
         let mut seeds: Vec<ExprId> = self.roots.iter().map(|r| r.0).collect();
@@ -423,147 +424,145 @@ impl<'g, K: Field> GraphView<'g, K> {
     }
 }
 
-/// [`GraphView::inline`]: the drawn graph with every call replaced by its
-/// body, per instance. A node is an expression in a frame (0 the top, an
-/// instance's frame the index of its cluster plus one); a body's parameter
-/// is the argument in the caller's frame, a call's output the body's output
-/// in the instance's frame.
+/// [`GraphView::inline`]: the drawn graph with every call of a body
+/// replaced by the body, per instance. A rewrite into the drawn nodes (see
+/// [`crate::transform::rewrite`]) in frames: 0 the top, an instance's frame
+/// the index of its cluster plus one, its body rewritten there with its
+/// parameters bound to the drawn operands of the call in the caller's frame.
 struct Inliner<'v, 'g, K: Field> {
     view: &'v GraphView<'g, K>,
-    /// Per frame: the frame it sits in and its parameters' arguments there.
-    frames: Vec<(usize, FxHashMap<SymbolId, ExprId>)>,
-    instances: FxHashMap<(usize, FuncId, ArgList), usize>,
-    at: FxHashMap<(usize, ExprId), usize>,
     data: GraphData,
+    /// The free symbols drawn, at the top.
+    top: FxHashMap<ExprId, u32>,
+}
+
+/// One frame of an [`Inliner`]: its index and the drawn operands its
+/// parameters are bound to.
+struct Frame<'a, 'v, 'g, K: Field> {
+    inl: &'a mut Inliner<'v, 'g, K>,
+    fr: usize,
+    bound: FxHashMap<SymbolId, u32>,
+}
+
+impl<K: Field> Rule<K> for Frame<'_, '_, '_, K> {
+    type V = u32;
+    fn source(&self) -> &Graph<K> {
+        self.inl.view.g
+    }
+    fn node(&mut self, e: ExprId, node: Node, ops: &[u32]) -> u32 {
+        let Node::Symbol(s) = node else {
+            return self.inl.draw(self.fr, e, ops);
+        };
+        if let Some(&n) = self.bound.get(&s) {
+            return n;
+        }
+        if let Some(&n) = self.inl.top.get(&e) {
+            return n;
+        }
+        let n = self.inl.draw(0, e, ops);
+        self.inl.top.insert(e, n);
+        n
+    }
+    fn calls(&mut self, call: &Call<u32>, outs: &[(ExprId, u32)]) -> Vec<u32> {
+        let view = self.inl.view;
+        let func = view.g.func(call.f);
+        let ops = call.params(view.g);
+        let body = |k: u32| match func.outputs()[k as usize] {
+            Output::Expr(b) => Some(b),
+            _ => None,
+        };
+        let exprs: Vec<ExprId> = outs.iter().filter_map(|&(_, k)| body(k)).collect();
+        let mut drawn = Vec::new().into_iter();
+        if !exprs.is_empty() {
+            let label = (outs.iter().find_map(|(e, _)| view.labels.get(e)))
+                .map_or_else(|| func.name().to_string(), |l| l.clone());
+            self.inl.data.clusters.push(label);
+            self.inl.data.parents.push(self.fr.checked_sub(1));
+            let mut frame = Frame {
+                fr: self.inl.data.clusters.len(),
+                inl: &mut *self.inl,
+                bound: (func.params().iter().copied())
+                    .zip(ops.iter().copied())
+                    .collect(),
+            };
+            drawn = rewrite(&mut frame, &exprs).into_iter();
+        }
+        // a call of no body is drawn as the call
+        (outs.iter())
+            .map(|&(e, k)| match body(k) {
+                Some(_) => drawn.next().expect("one per body"),
+                None => self.inl.draw(self.fr, e, &ops),
+            })
+            .collect()
+    }
 }
 
 impl<'v, 'g, K: Field> Inliner<'v, 'g, K> {
-    fn new(view: &'v GraphView<'g, K>) -> Self {
-        Inliner {
+    /// Node `e` drawn in frame `fr`, read from the drawn `ops`.
+    fn draw(&mut self, fr: usize, e: ExprId, ops: &[u32]) -> u32 {
+        let (label, kind) = self.view.style(e, &self.view.params);
+        let n = self.data.nodes.len();
+        self.data.nodes.push(GraphNode {
+            id: match fr {
+                0 => format!("n{}", e.0),
+                _ => format!("n{}_{fr}", e.0),
+            },
+            label,
+            kind,
+            cluster: fr.checked_sub(1),
+            faded: self.view.faded(e),
+        });
+        let select = matches!(self.view.g.node(e), Node::Select(..));
+        for (k, &op) in ops.iter().enumerate() {
+            let label = if select {
+                ["if", "then", "else"][k]
+            } else {
+                ""
+            };
+            self.data.edges.push((op as usize, n, label));
+        }
+        n as u32
+    }
+
+    fn data(view: &'v GraphView<'g, K>) -> GraphData {
+        let mut inl = Inliner {
             view,
-            frames: vec![(0, FxHashMap::default())],
-            instances: FxHashMap::default(),
-            at: FxHashMap::default(),
             data: GraphData::default(),
-        }
-    }
-
-    /// The node `(frame, e)` stands for: a bound parameter is its argument
-    /// in the caller's frame, a free symbol the top frame's, a call of a
-    /// symbolic output that output in the instance's frame.
-    fn resolve(&mut self, mut fr: usize, mut e: ExprId) -> (usize, ExprId) {
-        let g = self.view.g;
-        loop {
-            match *g.node(e) {
-                Node::Symbol(s) if fr != 0 => match self.frames[fr].1.get(&s) {
-                    Some(&a) => (fr, e) = (self.frames[fr].0, a),
-                    None => return (0, e),
-                },
-                Node::Call(o, l) => {
-                    let (f, k) = g.output(o);
-                    let Output::Expr(b) = g.func(f).outputs()[k as usize] else {
-                        return (fr, e);
-                    };
-                    let c = match self.instances.get(&(fr, f, l)) {
-                        Some(&c) => c,
-                        None => {
-                            let func = g.func(f);
-                            let bind = func.params().iter().copied().zip(g.args(l).iter().copied());
-                            self.frames.push((fr, bind.collect()));
-                            let c = self.frames.len() - 1;
-                            self.instances.insert((fr, f, l), c);
-                            let label = match self.view.labels.get(&e) {
-                                Some(l) => l.clone(),
-                                None => func.name().to_string(),
-                            };
-                            self.data.clusters.push(label);
-                            self.data.parents.push(fr.checked_sub(1));
-                            c
-                        }
-                    };
-                    (fr, e) = (c, b);
-                }
-                _ => return (fr, e),
-            }
-        }
-    }
-
-    /// The node index of `(frame, e)`, drawing it and what it reads.
-    fn node(&mut self, fr: usize, e: ExprId) -> usize {
-        let g = self.view.g;
-        let root = self.resolve(fr, e);
-        let mut stack = vec![(root, false)];
-        while let Some((key, ready)) = stack.pop() {
-            if self.at.contains_key(&key) {
-                continue;
-            }
-            let (kf, ke) = key;
-            let ops: Vec<(usize, ExprId)> = g
-                .operands(ke)
-                .iter()
-                .map(|&a| self.resolve(kf, a))
-                .collect();
-            if !ready {
-                stack.push((key, true));
-                stack.extend(
-                    ops.into_iter()
-                        .filter(|k| !self.at.contains_key(k))
-                        .map(|k| (k, false)),
-                );
-                continue;
-            }
-            let (label, kind) = self.view.style(ke, &self.view.params);
-            let n = self.data.nodes.len();
-            self.data.nodes.push(GraphNode {
-                id: if kf == 0 {
-                    format!("n{}", ke.0)
-                } else {
-                    format!("n{}_{kf}", ke.0)
-                },
-                label,
-                kind,
-                cluster: kf.checked_sub(1),
-                faded: self.view.faded(ke),
-            });
-            self.at.insert(key, n);
-            let select = matches!(g.node(ke), Node::Select(..));
-            for (k, op) in ops.iter().enumerate() {
-                let label = if select {
-                    ["if", "then", "else"][k]
-                } else {
-                    ""
-                };
-                self.data.edges.push((self.at[op], n, label));
-            }
-        }
-        self.at[&root]
-    }
-
-    fn data(mut self) -> GraphData {
-        let view = self.view;
-        for (_, ids) in &view.clusters {
-            for &e in ids {
-                self.node(0, e);
-            }
-        }
+            top: FxHashMap::default(),
+        };
+        let mut seeds: Vec<ExprId> = view
+            .clusters
+            .iter()
+            .flat_map(|(_, ids)| ids.clone())
+            .collect();
+        let first_root = seeds.len();
+        seeds.extend(view.roots.iter().map(|r| r.0));
+        let first_link = seeds.len();
+        seeds.extend(view.links.iter().flat_map(|&(a, b, _)| [a, b]));
+        let mut top = Frame {
+            inl: &mut inl,
+            fr: 0,
+            bound: FxHashMap::default(),
+        };
+        let drawn = rewrite(&mut top, &seeds);
         for (i, (e, name)) in view.roots.iter().enumerate() {
-            let n = self.node(0, *e);
             if name.is_empty() {
                 continue;
             }
-            self.data.nodes.push(GraphNode {
+            inl.data.nodes.push(GraphNode {
                 id: format!("out{i}"),
                 label: name.clone(),
                 kind: Kind::Output,
                 cluster: None,
                 faded: view.faded(*e),
             });
-            self.data.edges.push((n, self.data.nodes.len() - 1, ""));
+            let n = drawn[first_root + i] as usize;
+            inl.data.edges.push((n, inl.data.nodes.len() - 1, ""));
         }
-        for (a, b, label) in &view.links {
-            let (a, b) = (self.node(0, *a), self.node(0, *b));
-            self.data.links.push((a, b, label.clone()));
+        for (i, (_, _, label)) in view.links.iter().enumerate() {
+            let (a, b) = (drawn[first_link + 2 * i], drawn[first_link + 2 * i + 1]);
+            inl.data.links.push((a as usize, b as usize, label.clone()));
         }
-        self.data
+        inl.data
     }
 }

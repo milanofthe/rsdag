@@ -172,3 +172,36 @@ fn inline_draws_every_instance_as_its_body() {
     // no call left to link to its body
     assert!(data.links.is_empty());
 }
+
+#[test]
+fn inline_binds_the_bound_parameters_of_a_call() {
+    // leaf(a, k) = k sin(a), called over one argument list through two
+    // bindings of k
+    let mut g: Graph<F64> = Graph::new();
+    let mut s = rsdag::Scope::new(&mut g, "leaf");
+    let (a, k) = (s.param("a"), s.param("k"));
+    let sa = s.sin(a);
+    let m = s.mul(k, sa);
+    let leaf = s.close(vec![m]);
+    let (p, c1, c2) = (g.sym("p"), g.sym("c1"), g.sym("c2"));
+    let b1 = g.bind(leaf, &[(1, c1)]);
+    let b2 = g.bind(leaf, &[(1, c2)]);
+    let one = g.call_bound(b1, 0, &[p]);
+    let two = g.call_bound(b2, 0, &[p]);
+    let r = g.add(one, two);
+
+    let data = GraphView::new(&g).root(r, "r").inline().data();
+    // an instance per binding, its bound parameter the bound expression
+    assert_eq!(data.clusters, ["leaf", "leaf"]);
+    assert!(data.nodes.iter().all(|n| n.label != "k" && n.label != "a"));
+    let reader = |name: &str| {
+        let at = data.nodes.iter().position(|n| n.label == name).unwrap();
+        let readers: Vec<_> = (data.edges.iter())
+            .filter(|e| e.0 == at)
+            .map(|e| data.nodes[e.1].cluster)
+            .collect();
+        assert_eq!(readers.len(), 1, "{name}");
+        readers[0].expect("read in a frame")
+    };
+    assert_ne!(reader("c1"), reader("c2"));
+}

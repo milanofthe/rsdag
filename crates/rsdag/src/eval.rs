@@ -81,20 +81,20 @@ pub fn eval<T: Scalar, K: Field>(
     roots: &[ExprId],
     env: &HashMap<SymbolId, T>,
 ) -> Vec<T> {
-    // the nodes the roots reach, ascending: a node after its operands
-    let cone = ctx.cone_sorted(roots, true);
-    let at = |e: ExprId| cone.binary_search(&e).expect("in the cone");
+    // the nodes the roots reach, each after its operands
+    let cone = ctx.cone(roots, true);
+    let at = |e: ExprId| cone.pos(e);
     let mut fe = FuncEval::new();
-    for &e in &cone {
+    for &e in &cone.nodes {
         if let Node::Call(o, _) = *ctx.node(e) {
             let (f, out) = ctx.output(o);
             fe.need(f, out);
         }
     }
-    let mut w: Vec<T> = Vec::with_capacity(cone.len());
+    let mut w: Vec<T> = Vec::with_capacity(cone.nodes.len());
     // A dense system is solved once for all its components.
     let mut solved: HashMap<ArgList, Vec<T>> = HashMap::new();
-    for &e in &cone {
+    for &e in &cone.nodes {
         let node = *ctx.node(e);
         let mut sym = |s: SymbolId| env.get(&s).copied().unwrap_or(T::nan());
         let mut call = |o: OutputId, l: ArgList, args: &[T]| fe.output(ctx, o, l, args);
