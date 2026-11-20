@@ -314,7 +314,8 @@ impl<K: Field> Graph<K> {
     }
 
     /// The operands a node reads (leaves have none); of a call, in its
-    /// function's parameter order (see [`full_args`](Self::full_args)).
+    /// function's parameter order: an argument, or where the call's
+    /// context binds the parameter, the bound expression.
     #[inline]
     pub fn operands(&self, id: ExprId) -> Operands<'_> {
         match *self.node(id) {
