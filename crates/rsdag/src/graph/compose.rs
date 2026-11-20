@@ -72,6 +72,7 @@ impl<K: Field> Graph<K> {
             g: self,
             other,
             imported,
+            contexts: HashMap::default(),
         };
         crate::transform::rewrite(&mut rule, roots)
     }
@@ -82,6 +83,8 @@ struct Import<'a, K: Field> {
     g: &'a mut Graph<K>,
     other: &'a Graph<K>,
     imported: &'a mut HashMap<FuncId, FuncId>,
+    /// per context of `other`, the one here, made once
+    contexts: HashMap<u32, u32>,
 }
 
 impl<K: Field> crate::transform::Rule<K> for Import<'_, K> {
@@ -106,12 +109,12 @@ impl<K: Field> crate::transform::Rule<K> for Import<'_, K> {
         // a bound call: its context over the imported expressions
         let ctx = match call.ctx {
             NO_CONTEXT => NO_CONTEXT,
-            c => {
+            c => *self.contexts.entry(c).or_insert_with(|| {
                 let at = &self.other.contexts[c as usize].at;
                 let pairs: Vec<(u32, ExprId)> =
                     at.iter().copied().zip(call.bound.iter().copied()).collect();
                 self.g.bind(f, &pairs).ctx
-            }
+            }),
         };
         let l = self.g.intern_args(call.args);
         for &(_, k) in outs {

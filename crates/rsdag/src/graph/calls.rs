@@ -6,7 +6,7 @@
 //! node like any other and the functions live in the same arena.
 
 use super::*;
-use crate::transform::{Call, Rule};
+use crate::transform::{Call, Contexts, Rule};
 
 impl<K: Field> Graph<K> {
     // --- functions and calls ---------------------------------------------
@@ -155,6 +155,7 @@ impl<K: Field> Graph<K> {
             g: self,
             which,
             bodies: &mut HashMap::default(),
+            contexts: Contexts::default(),
         };
         crate::transform::rewrite(&mut rule, roots)
     }
@@ -511,16 +512,17 @@ impl<K: Field> Graph<K> {
 
     /// The calls `outs` of an instance rewritten (see
     /// [`transform::rewrite`](crate::transform::rewrite)) as calls of `f`
-    /// (the instance's function, or a copy with its parameters): over the
-    /// rewritten list, in the context over the rewritten bound expressions.
+    /// (the instance's function, or a copy with its parameters) in context
+    /// `ctx` (see [`Contexts`](crate::transform::Contexts)), over the
+    /// rewritten list.
     pub(crate) fn calls_over(
         &mut self,
         f: FuncId,
+        ctx: u32,
         call: &crate::transform::Call<ExprId>,
         outs: &[(ExprId, u32)],
         vals: &mut Vec<ExprId>,
     ) {
-        let ctx = self.context_over(call.ctx, f, call.bound);
         let l = self.intern_args(call.args);
         for &(_, k) in outs {
             vals.push(self.call_list_in(f, k, ctx, l));
@@ -839,6 +841,7 @@ fn specialize_calls_in<K: Field>(
         g,
         made,
         kept: HashMap::default(),
+        contexts: Contexts::default(),
     };
     crate::transform::rewrite(&mut rule, roots)
 }
@@ -850,6 +853,7 @@ struct Specialize<'a, K: Field> {
     made: &'a mut Specialized,
     /// per copy and context of the original, the context the copy keeps
     kept: HashMap<(FuncId, u32), u32>,
+    contexts: Contexts,
 }
 
 impl<K: Field> Rule<K> for Specialize<'_, K> {
@@ -862,7 +866,7 @@ impl<K: Field> Rule<K> for Specialize<'_, K> {
     }
     fn calls(&mut self, call: &Call<ExprId>, outs: &[(ExprId, u32)], vals: &mut Vec<ExprId>) {
         let g = &mut *self.g;
-        let ctx = g.context_over(call.ctx, call.f, call.bound);
+        let ctx = self.contexts.of(g, call, call.f);
         let full = call.params(g);
         match specialize_instance(g, call.f, ctx, &full, self.made, &mut self.kept) {
             Some((copy, ctx, rest)) => {
@@ -870,7 +874,7 @@ impl<K: Field> Rule<K> for Specialize<'_, K> {
                     vals.push(g.call_list_in(copy, k, ctx, rest));
                 }
             }
-            None => g.calls_over(call.f, call, outs, vals),
+            None => g.calls_over(call.f, ctx, call, outs, vals),
         }
     }
 }
@@ -992,6 +996,7 @@ struct Inline<'a, K: Field> {
     g: &'a mut Graph<K>,
     which: &'a mut dyn FnMut(&Graph<K>, FuncId) -> bool,
     bodies: &'a mut HashMap<FuncId, Vec<ExprId>>,
+    contexts: Contexts,
 }
 
 impl<K: Field> Rule<K> for Inline<'_, K> {
@@ -1006,7 +1011,8 @@ impl<K: Field> Rule<K> for Inline<'_, K> {
         let f = call.f;
         // an extern body, or a function not to inline, stays a call
         if self.g.func(f).is_extern() || !(self.which)(self.g, f) {
-            return self.g.calls_over(f, call, outs, vals);
+            let ctx = self.contexts.of(self.g, call, f);
+            return self.g.calls_over(f, ctx, call, outs, vals);
         }
         if !self.bodies.contains_key(&f) {
             let exprs = self.g.func(f).exprs();
@@ -1014,6 +1020,7 @@ impl<K: Field> Rule<K> for Inline<'_, K> {
                 g: &mut *self.g,
                 which: &mut *self.which,
                 bodies: &mut *self.bodies,
+                contexts: Contexts::default(),
             };
             let mut inlined = crate::transform::rewrite(&mut inner, &exprs).into_iter();
             let zero = self.g.zero();

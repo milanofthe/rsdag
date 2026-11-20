@@ -183,6 +183,24 @@ impl<V> Default for Scratch<V> {
     }
 }
 
+/// The contexts the calls of a rewrite in place run in: per context of the
+/// source and function called, the context over the context's bound
+/// expressions rewritten, made once per rewrite (a model card shared by many
+/// instances costs its width once).
+#[derive(Default)]
+pub(crate) struct Contexts(HashMap<(u32, FuncId), u32>);
+
+impl Contexts {
+    /// The context `call`'s calls of `f` (its function, or a copy with its
+    /// parameters) run in.
+    pub(crate) fn of<K: Field>(&mut self, g: &mut Graph<K>, call: &Call<ExprId>, f: FuncId) -> u32 {
+        match call.ctx {
+            NO_CONTEXT => NO_CONTEXT,
+            c => *(self.0.entry((c, f))).or_insert_with(|| g.context_over(c, f, call.bound)),
+        }
+    }
+}
+
 /// [`substitute`]: a symbol `map` binds its expression, a call whose body
 /// reads one as a global the copy bound so (see [`Graph::rebound`]).
 struct Substitute<'a, K: Field> {
@@ -190,6 +208,7 @@ struct Substitute<'a, K: Field> {
     map: &'a HashMap<SymbolId, ExprId>,
     /// per function, the copy its calls run
     copies: HashMap<FuncId, Option<FuncId>>,
+    contexts: Contexts,
 }
 
 impl<K: Field> Rule<K> for Substitute<'_, K> {
@@ -209,7 +228,9 @@ impl<K: Field> Rule<K> for Substitute<'_, K> {
             .copies
             .entry(call.f)
             .or_insert_with(|| g.rebound(call.f, map));
-        g.calls_over(f.unwrap_or(call.f), call, outs, vals)
+        let f = f.unwrap_or(call.f);
+        let ctx = self.contexts.of(g, call, f);
+        g.calls_over(f, ctx, call, outs, vals)
     }
 }
 
@@ -258,6 +279,7 @@ pub fn substitute<K: Field>(
         g: ctx,
         map,
         copies: HashMap::default(),
+        contexts: Contexts::default(),
     };
     rewrite(&mut rule, roots)
 }
