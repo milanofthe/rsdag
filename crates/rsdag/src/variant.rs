@@ -529,18 +529,19 @@ impl VariantBody {
         self.policy.choices.enabled && (self.backend.compile.is_some() || self.policy.interpreted)
     }
 
-    /// What runs variant `v`'s shortened main phase in this form, and its
-    /// version: the backend's form once made, else the interpreted body
-    /// where that serves (see [`Specializer::interpreted_serves`]).
-    fn spec_form(&self, v: usize) -> Option<(u64, Arc<dyn ExternBundle>)> {
+    /// What runs variant `v`'s shortened main phase in this form, its
+    /// version, and whether it is the backend's form: that once made, else
+    /// the interpreted body where it serves (see
+    /// [`Specializer::interpreted_serves`]).
+    fn spec_form(&self, v: usize) -> Option<(u64, Arc<dyn ExternBundle>, bool)> {
         if !self.specializes() {
             return None;
         }
         let (ver, body) = self.shared.choice(v).spec.read().unwrap().clone()?;
         if let Some(form) = self.compiled(&body) {
-            return Some((ver, form));
+            return Some((ver, form, true));
         }
-        self.serves(v, &body).then_some((ver, body))
+        self.serves(v, &body).then_some((ver, body, false))
     }
 
     /// Whether the interpreted shortened main phase `body` of variant `v`
@@ -565,10 +566,10 @@ impl VariantBody {
         at: &Instances,
     ) {
         let full = self.bundle(v);
-        let Some((ver, spec)) = self.spec_form(v) else {
+        let Some((ver, spec, compiled)) = self.spec_form(v) else {
             full.main_batch(args, states, out, at);
             if self.specializes() {
-                self.observe(v, args, states, at, None);
+                self.observe(v, args, states, at, None, false);
             }
             return;
         };
@@ -590,16 +591,17 @@ impl VariantBody {
                 if !failed.is_empty() {
                     full.main_batch(args, states, out, &at.listed(failed));
                 }
-                self.observe(v, args, states, at, Some((ver, failed)));
+                self.observe(v, args, states, at, Some((ver, failed)), compiled);
             });
         });
     }
 
     /// The instances `at` of variant `v` ran, on its shortened main phase
-    /// of version `ver` (`failed` the instances whose guards failed) or on
-    /// the variant's own: told to the policy, and what it asks for done in
-    /// the background: a trace of some of them (the failed ones where any
-    /// failed), or this form's compile of the shortened main phase.
+    /// of version `ver` (`failed` the instances whose guards failed; the
+    /// backend's form of it where `compiled`) or on the variant's own: told
+    /// to the policy, and what it asks for done in the background: a trace
+    /// of some of them (the failed ones where any failed), or this form's
+    /// compile of the shortened main phase.
     fn observe(
         &self,
         v: usize,
@@ -607,6 +609,7 @@ impl VariantBody {
         states: &[f64],
         at: &Instances,
         ran: Option<(u64, &[u32])>,
+        compiled: bool,
     ) {
         let policy = self.policy.choices;
         let choice = self.shared.choice(v);
@@ -633,9 +636,9 @@ impl VariantBody {
                 if learned.due(&policy) {
                     spread(at.len(), |k| at.at(k) as u32)
                 } else {
-                    let compile = self.compile_due(v, &mut learned);
+                    let compile = (!compiled).then(|| self.compile_due(v, &mut learned));
                     drop(learned);
-                    if let Some(job) = compile {
+                    if let Some(job) = compile.flatten() {
                         self.later(job);
                     }
                     return;
@@ -689,6 +692,7 @@ impl VariantBody {
         v: usize,
         learned: &mut Specializer,
     ) -> Option<impl FnOnce() + Send + 'static> {
+        learned.current()?;
         let compile = self.backend.compile.clone()?;
         let choice = self.shared.choice(v);
         let (at, body) = choice.spec.read().unwrap().clone()?;

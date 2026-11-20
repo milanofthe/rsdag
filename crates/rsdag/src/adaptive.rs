@@ -96,7 +96,6 @@ struct Jit {
 struct Spec {
     learned: Specializer,
     spec: Option<(u64, Arc<SpecializedTape>, Option<Native>)>,
-    scratch: Vec<u8>,
 }
 
 impl Spec {
@@ -166,7 +165,6 @@ impl Adaptive {
             Arc::new(Mutex::new(Spec {
                 learned,
                 spec: None,
-                scratch: Vec::new(),
             }))
         });
         Adaptive {
@@ -453,8 +451,7 @@ impl Adaptive {
     /// A full traced evaluation, the correct result of this call, and what
     /// it teaches: a specialization where one is due.
     fn retrace(&self, st: &mut Spec, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
-        let mut fresh = std::mem::take(&mut st.scratch);
-        fresh.clear();
+        let mut fresh = Vec::new();
         self.tape.eval_with(inputs, work, out, &mut fresh);
         let tape = &self.tape;
         let built = st
@@ -467,7 +464,6 @@ impl Adaptive {
         if let Some((ver, sp)) = built {
             st.spec = Some((ver, Arc::new(sp), None));
         }
-        st.scratch = fresh;
     }
 
     /// A main-phase flip under specialization `ver` (see [`on_flip`](Self::on_flip)).

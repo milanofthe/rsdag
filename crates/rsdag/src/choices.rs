@@ -8,14 +8,12 @@
 //! ([`Tape::specialize`](crate::Tape::specialize),
 //! [`Tape::specialize_main`](crate::Tape::specialize_main)), guarded: where
 //! a guard fails, the evaluation runs again on the full form and the result
-//! is the same, bit for bit. What changes is only what pays. A
-//! [`Specializer`] decides it for one program or one body: when to trace,
-//! that a select seen taking the other arm is unpinned for good (the next
-//! specialization keeps it a real `Select`), when to build a specialization
-//! again, when to compile it, when the interpreted one serves, and that
-//! choices flipping too often turn specialization off. Its owner evaluates,
-//! traces and builds; the specialization and its compiled form are the
-//! owner's, by the version this hands out.
+//! is the same, bit for bit. What changes is only what pays, and a
+//! `Specializer` decides it: when to trace and to build, that a select
+//! seen flipping is unpinned for good, when to compile, which form serves,
+//! and that choices flipping too often turn specialization off. Its owner
+//! evaluates, traces, builds and keeps the forms, by the version it hands
+//! out.
 
 use crate::constants::PERCENT;
 use crate::hooks::{log, Level};
