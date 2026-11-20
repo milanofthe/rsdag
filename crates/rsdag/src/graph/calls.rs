@@ -821,11 +821,9 @@ impl<K: Field> Graph<K> {
         }
         let wrt = self.operand_symbol(f, param);
         let exprs: Vec<ExprId> = roots.iter().map(|&(_, e)| e).collect();
-        let mut memo = self.take_memo();
-        memo.begin(self.len());
+        let mut memo = NodeTable::new(self.len());
         let moves = |c: ExprId| (deps.sets.get(&c)).is_some_and(|s| s.binary_search(&j).is_ok());
         let ds = crate::autodiff::forward(self, &exprs, wrt, &mut memo, &moves);
-        self.put_memo(memo);
         for (&(o, _), d) in roots.iter().zip(ds) {
             let d = self.as_output(d);
             self.push_output(f, d, OutputRole::Derivative { of: o, wrt: param });

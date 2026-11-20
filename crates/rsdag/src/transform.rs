@@ -4,7 +4,7 @@
 use crate::field::Field;
 use rustc_hash::FxHashMap as HashMap;
 
-use crate::graph::{Graph, NO_CONTEXT};
+use crate::graph::{Graph, NodeTable, NO_CONTEXT};
 use crate::node::{ArgList, ExprId, Node, SymbolId};
 
 /// A node's operands, rewritten: in [`Graph::operands`] order, and for a
@@ -45,7 +45,7 @@ pub(crate) fn rewrite<K: Field>(
     roots: &[ExprId],
     mut rule: impl FnMut(&mut Graph<K>, ExprId, Node, &Ops) -> ExprId,
 ) -> Vec<ExprId> {
-    let mut memo = g.take_memo();
+    let mut memo: NodeTable<ExprId> = NodeTable::new(g.len());
     let mut stack: Vec<(ExprId, bool)> = Vec::new();
     let mut ops: Vec<ExprId> = Vec::new();
     // per call argument list: its operands rewritten, and interned
@@ -146,7 +146,6 @@ pub(crate) fn rewrite<K: Field>(
         .iter()
         .map(|&r| memo.get(r).expect("root rewritten"))
         .collect();
-    g.put_memo(memo);
     out
 }
 

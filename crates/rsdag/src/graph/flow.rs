@@ -9,15 +9,9 @@
 //! ones): a call that passes a value in a few arguments of hundreds asks
 //! only about those few.
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::*;
-
-thread_local! {
-    /// Position tables for the cones of this thread's analyses, reused.
-    static MEMOS: RefCell<Vec<Memo>> = const { RefCell::new(Vec::new()) };
-}
 
 /// The operands a value passes through, and how a call passes it on.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -188,23 +182,16 @@ fn inert(node: &Node) -> usize {
 
 /// Values over a cone (see [`Graph::flow`]).
 pub(crate) struct Flow<V> {
-    at: Memo,
+    at: NodeTable<u32>,
     vals: Vec<V>,
     /// The nodes of the cone, in the order of `vals`.
     nodes: Vec<ExprId>,
 }
 
-impl<V> Drop for Flow<V> {
-    fn drop(&mut self) {
-        let at = std::mem::take(&mut self.at);
-        MEMOS.with(|m| m.borrow_mut().push(at));
-    }
-}
-
 impl<V> Flow<V> {
     /// The value of a node of the cone.
     pub(crate) fn get(&self, e: ExprId) -> &V {
-        &self.vals[self.at.get(e).expect("a node of the cone").0 as usize]
+        &self.vals[self.at.get(e).expect("a node of the cone") as usize]
     }
 
     /// Every node of the cone with its value.
@@ -217,11 +204,11 @@ impl<K: Field> Graph<K> {
     /// The nodes under `roots`, every operand and every argument list once,
     /// in ascending id order (a topological one: a hash-consed node is
     /// newer than its operands), with each node's position in `at`.
-    pub(crate) fn cone(&self, roots: &[ExprId], at: &mut Memo) -> Vec<ExprId> {
+    pub(crate) fn cone(&self, roots: &[ExprId], at: &mut NodeTable<u32>) -> Vec<ExprId> {
         let mut out = self.reach(roots, at, true);
         out.sort_unstable();
         for (k, &e) in out.iter().enumerate() {
-            at.set(e, ExprId(k as u32));
+            at.set(e, k as u32);
         }
         out
     }
@@ -230,18 +217,17 @@ impl<K: Field> Graph<K> {
     /// in the order the walk meets them, marked in `at`; with `globals`, a
     /// call's globals as its operands too (what it reads, not only what it
     /// mentions).
-    fn reach(&self, roots: &[ExprId], at: &mut Memo, globals: bool) -> Vec<ExprId> {
-        at.begin(self.len());
+    fn reach(&self, roots: &[ExprId], at: &mut NodeTable<u32>, globals: bool) -> Vec<ExprId> {
         let mut lists: FxHashSet<ArgList> = FxHashSet::default();
         let mut funcs: FxHashSet<FuncId> = FxHashSet::default();
         let mut contexts: FxHashSet<u32> = FxHashSet::default();
         let mut stack: Vec<ExprId> = roots.to_vec();
         let mut out = Vec::new();
         while let Some(e) = stack.pop() {
-            if at.get(e).is_some() {
+            if at.contains(e) {
                 continue;
             }
-            at.set(e, e);
+            at.set(e, 0);
             out.push(e);
             match *self.node(e) {
                 Node::Call(o, l) => {
@@ -325,10 +311,7 @@ impl<K: Field> Graph<K> {
     /// The nodes under `roots`, unordered; with `globals` the globals the
     /// calls read (see [`cone`](Self::cone)).
     pub(crate) fn cone_nodes(&self, roots: &[ExprId], globals: bool) -> Vec<ExprId> {
-        let mut at = MEMOS.with(|m| m.borrow_mut().pop()).unwrap_or_default();
-        let cone = self.reach(roots, &mut at, globals);
-        MEMOS.with(|m| m.borrow_mut().push(at));
-        cone
+        self.reach(roots, &mut NodeTable::new(self.len()), globals)
     }
 
     /// Values over the cone of `roots`: a constant's and a symbol's from
@@ -341,13 +324,13 @@ impl<K: Field> Graph<K> {
         through: Through,
         leaf: impl Fn(&Node) -> V,
     ) -> Flow<V> {
-        let mut at = MEMOS.with(|m| m.borrow_mut().pop()).unwrap_or_default();
+        let mut at = NodeTable::new(self.len());
         let cone = self.cone(roots, &mut at);
         let mut vals: Vec<V> = Vec::with_capacity(cone.len());
         // per instance, what each output reads among its moving arguments
         let mut sites: HashMap<(FuncId, u32, ArgList), Arc<[Arc<[u32]>]>> = HashMap::default();
         for &e in &cone {
-            let val = |c: &ExprId| &vals[at.get(*c).expect("in the cone").0 as usize];
+            let val = |c: &ExprId| &vals[at.get(*c).expect("in the cone") as usize];
             let node = *self.node(e);
             let v = match node {
                 Node::Const(_) | Node::Symbol(_) => leaf(&node),
