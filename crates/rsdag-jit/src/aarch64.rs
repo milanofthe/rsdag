@@ -1,6 +1,6 @@
 //! AArch64 encodings (AAPCS64, which Windows on ARM shares).
 //!
-//! `x19` work, `x20` inputs, `x21` bundles; `x9` holds the current 32 KB
+//! `x19` work, `x20` inputs, `x21` layout; `x9` holds the current 32 KB
 //! window of the work array, `x10` is scratch, `x16` the call target, and
 //! `x22` to `x27` hold the chunk's frequent host routines; `d0` and `d1`
 //! carry call arguments and `d0` the result. The cache is `d8` to `d15`,
@@ -15,7 +15,7 @@ use rsdag::node::{CmpOp, ReduceOp};
 
 const WORK: u32 = 19;
 const INPUTS: u32 = 20;
-const BUNDLES: u32 = 21;
+const LAYOUT: u32 = 21;
 
 // Condition codes after `fcmp`. The unordered case sets C and V and clears N
 // and Z; these choices make every comparison with a NaN false except `ne`.
@@ -269,7 +269,7 @@ impl Isa for A64 {
                             self.mov_imm(10, off as u64);
                             self.w(0x8B00_0000 | (10 << 16) | (INPUTS << 5) | xk);
                         }
-                        IArg::Bundles => self.w(0xAA00_03E0 | (BUNDLES << 16) | xk),
+                        IArg::Layout => self.w(0xAA00_03E0 | (LAYOUT << 16) | xk),
                     }
                 }
             }

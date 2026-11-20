@@ -1,6 +1,6 @@
 //! x86-64 encodings, System V and Windows x64.
 //!
-//! `rbx` work, `r13` inputs, `r14` bundles; `rax` scratch; `xmm0` and
+//! `rbx` work, `r13` inputs, `r14` layout; `rax` scratch; `xmm0` and
 //! `xmm1` carry call arguments, the result and the masks of a select. The
 //! cache is `xmm2` to `xmm15`. Under System V every vector register is
 //! caller-saved, so nothing survives a host call; under Windows `xmm6` to
@@ -32,7 +32,7 @@ use rsdag::semantics::exp_ln::*;
 
 const WORK: u8 = 3; // rbx
 const INPUTS: u8 = 13; // r13
-const BUNDLES: u8 = 14; // r14
+const LAYOUT: u8 = 14; // r14
 const WIN: bool = cfg!(windows);
 /// Integer argument registers: rdi rsi rdx rcx r8 r9, or rcx rdx r8 r9.
 const INT_ARGS: &[u8] = if WIN {
@@ -223,10 +223,10 @@ impl<const L: usize> X64<L> {
                 self.b(0x8D); // lea rk, [r13 + off]
                 self.modrm_mem(rk, INPUTS, off);
             }
-            IArg::Bundles => {
-                self.rex(true, BUNDLES, rk);
+            IArg::Layout => {
+                self.rex(true, LAYOUT, rk);
                 self.b(0x89); // mov rk, r14
-                self.modrm_reg(BUNDLES, rk);
+                self.modrm_reg(LAYOUT, rk);
             }
         }
     }

@@ -6,11 +6,12 @@
 use rsdag::extern_fn::ExternBundle;
 use rsdag::node::{BinOp, ReduceOp, UnaryOp};
 use rsdag::semantics::{binary_f64, reduce_slice, unary_f64};
-use rsdag::tape::calls::{run_call, run_stage, Call, Phase, Shared};
+use rsdag::tape::calls::{run_call, run_stage, Call, Shared};
 use std::sync::Arc;
 
 #[cfg(target_arch = "x86_64")]
 use crate::constants::MAX_LANES;
+use crate::native::Layout;
 
 pub(crate) type Bundles = Vec<Arc<dyn ExternBundle>>;
 
@@ -234,130 +235,57 @@ pub(crate) fn resume_panic() {
     }
 }
 
-/// A call site as the emitted code hands it to [`h_call`]: every size
-/// fixed when the tape was compiled, every place an index into the work
-/// array's regions: its slots `0..gather`, the gather area
-/// `gather..scratch` and the bundles' scratch from `scratch`. The
-/// descriptors live as long as the code that points at them.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub(crate) struct CallDesc {
-    pub(crate) bundle: u64,
-    /// 0 whole, 1 the main phase, 2 the prolog.
-    pub(crate) kind: u64,
-    pub(crate) n_groups: u64,
-    pub(crate) n_args: u64,
-    pub(crate) n_in: u64,
-    pub(crate) n_out: u64,
-    /// The arguments in the gather area; the outputs (the states for a
-    /// prolog) and the states (a main phase) among the slots.
-    pub(crate) args: u64,
-    pub(crate) out: u64,
-    pub(crate) state: u64,
-    pub(crate) gather: u64,
-    pub(crate) scratch: u64,
-    pub(crate) scratch_len: u64,
-    /// Ops the call carries (its instances times its body's), for
-    /// [`h_stage`]'s choice of running in parallel.
-    pub(crate) ops: u64,
-    /// The operands the arguments are gathered from (a slot, or an input
-    /// tagged as in the tape), for a call too wide to gather in its code;
-    /// `0` when the code gathered them.
-    pub(crate) table: u64,
-    /// The argument each of an instance's `n_in` operands is, for a call
-    /// that gathers only some; `0` for all, in order.
-    pub(crate) places: u64,
-    /// The inputs the operands read reach this far.
-    pub(crate) n_inputs: u64,
-}
-
-/// `d` as the tape's call runner takes it.
+/// The work array's regions `layout` names, and the inputs.
 ///
 /// # Safety
-/// `d` describes a call of the code `bundles` belong to.
-unsafe fn call_of<'a>(bundles: &'a Bundles, d: &'a CallDesc) -> Call<'a> {
-    let (ng, ni) = (d.n_groups as usize, d.n_in as usize);
-    let table = |p: u64, n: usize| unsafe { std::slice::from_raw_parts(p as *const u32, n) };
-    Call {
-        bundle: &*bundles[d.bundle as usize],
-        phase: match d.kind {
-            0 => Phase::Whole,
-            1 => Phase::Main,
-            _ => Phase::Prolog,
-        },
-        n_groups: ng,
-        n_args: d.n_args as usize,
-        n_out: d.n_out as usize,
-        operands: (d.table != 0).then(|| table(d.table, ng * ni)),
-        places: (d.places != 0).then(|| table(d.places, ni)),
-        args: d.args as usize,
-        out: d.out as usize,
-        state: d.state as usize,
-        ops: d.ops,
-    }
-}
-
-/// The regions of the work array `d` names, and the inputs its operands
-/// read.
-///
-/// # Safety
-/// `work` and `inputs` are the program's buffers.
+/// `work` and `inputs` are the program's buffers, laid out as `layout`.
 unsafe fn regions<'a>(
-    d: &CallDesc,
+    layout: &Layout,
     work: *mut f64,
     inputs: *const f64,
 ) -> (Shared<f64>, Shared<f64>, &'a [f64]) {
-    let (g, s) = (d.gather as usize, d.scratch as usize);
+    let (g, s) = (layout.gather, layout.scratch);
     unsafe {
         (
             Shared::from_raw(work, g),
             Shared::from_raw(work.add(g), s - g),
-            std::slice::from_raw_parts(inputs, d.n_inputs as usize),
+            std::slice::from_raw_parts(inputs, layout.n_inputs),
         )
     }
 }
 
-/// Every bundle call: whole, main phase over its states, or prolog.
+/// Every bundle call: whole, main phase over its states, or prolog, as the
+/// tape's [`run_call`] runs it.
 pub(crate) extern "C" fn h_call(
-    bundles: *const Bundles,
-    d: *const CallDesc,
+    layout: *const Layout,
+    c: *const Call<'static>,
     work: *mut f64,
     inputs: *const f64,
 ) {
-    let d = unsafe { &*d };
-    let b = unsafe { &*bundles };
+    let (l, c) = unsafe { (&*layout, &*c) };
     // SAFETY: the call's regions are disjoint by the layout.
     guarded(|| unsafe {
-        let c = call_of(b, d);
-        let (slots, gather, inputs) = regions(d, work, inputs);
-        let scratch =
-            std::slice::from_raw_parts_mut(work.add(d.scratch as usize), d.scratch_len as usize);
-        run_call(&c, slots, gather, inputs, 0..c.n_groups, scratch)
+        let (slots, gather, inputs) = regions(l, work, inputs);
+        let scratch = std::slice::from_raw_parts_mut(work.add(l.scratch), l.scratch_len);
+        run_call(c, slots, gather, inputs, 0..c.n_groups, scratch)
     });
 }
 
-/// The calls of a stage ([`rsdag::Stage`]): `n` descriptors from `d` on,
-/// run by the tape's [`run_stage`].
+/// The calls of a stage ([`rsdag::Stage`]): `n` of them from `c` on, run
+/// by the tape's [`run_stage`].
 pub(crate) extern "C" fn h_stage(
-    bundles: *const Bundles,
-    d: *const CallDesc,
+    layout: *const Layout,
+    c: *const Call<'static>,
     n: u64,
     work: *mut f64,
     inputs: *const f64,
 ) {
-    let descs = unsafe { std::slice::from_raw_parts(d, n as usize) };
-    let b = unsafe { &*bundles };
+    let (l, calls) = unsafe { (&*layout, std::slice::from_raw_parts(c, n as usize)) };
     guarded(|| unsafe {
-        let n_inputs = descs.iter().map(|d| d.n_inputs).max().unwrap_or(0);
-        let wide = CallDesc {
-            n_inputs,
-            ..descs[0]
-        };
-        let (slots, gather, inputs) = regions(&wide, work, inputs);
+        let (slots, gather, inputs) = regions(l, work, inputs);
         // SAFETY: the calls of a stage read nothing another one writes
         // (`rsdag`'s stage planning), their arguments apart.
-        let call = |k: usize| call_of(b, &descs[k]);
-        run_stage(descs.len(), call, slots, gather, inputs)
+        run_stage(calls.len(), |k| calls[k], slots, gather, inputs)
     });
 }
 
@@ -379,8 +307,7 @@ impl Place {
 /// A dense kernel as the code hands it over: its kind (0 `Gemv`, 1 `Gemm`,
 /// 2 the solves of `k` right-hand sides, `m` systems of them), its dimensions, where its
 /// operands are (`a`, then `x` or `b`, then the accumulator), the address
-/// of its fold codes (0 without), the byte offset of its outputs, and
-/// the scratch a solve works in (the layout's, apart from slots and gather).
+/// of its fold codes (0 without) and the byte offset of its outputs.
 #[repr(C)]
 pub(crate) struct KernelDesc {
     pub(crate) kind: u64,
@@ -390,15 +317,18 @@ pub(crate) struct KernelDesc {
     pub(crate) operands: [Place; 3],
     pub(crate) codes: u64,
     pub(crate) out: u64,
-    /// The byte offset and the length of the scratch a solve works in.
-    pub(crate) scratch: u64,
-    pub(crate) scratch_len: u64,
 }
 
-/// Run a dense kernel through the reference kernels of `rsdag::semantics`.
-pub(crate) extern "C" fn h_kernel(work: *mut f64, inputs: *const f64, d: *const KernelDesc) {
+/// Run a dense kernel through the reference kernels of `rsdag::semantics`,
+/// a solve in the scratch of `layout`.
+pub(crate) extern "C" fn h_kernel(
+    layout: *const Layout,
+    d: *const KernelDesc,
+    work: *mut f64,
+    inputs: *const f64,
+) {
     use rsdag::semantics as s;
-    let d = unsafe { &*d };
+    let (l, d) = unsafe { (&*layout, &*d) };
     let (m, k, n) = (d.m as usize, d.k as usize, d.n as usize);
     // SAFETY: the code placed every operand, in the work array or the
     // inputs, and the output block apart from all of them (a kernel's
@@ -432,12 +362,8 @@ pub(crate) extern "C" fn h_kernel(work: *mut f64, inputs: *const f64, d: *const 
         (1, None) => s::gemm(a, b, m, k, n, out),
         (1, Some(codes)) => s::gemm_fold(a, b, m, k, n, operand(2, m * n), codes, out),
         _ => {
-            let scratch = unsafe {
-                std::slice::from_raw_parts_mut(
-                    work.byte_add(d.scratch as usize),
-                    d.scratch_len as usize,
-                )
-            };
+            let scratch =
+                unsafe { std::slice::from_raw_parts_mut(work.add(l.scratch), l.scratch_len) };
             s::solve_batch_into(a, b, n, k, m, out, scratch)
         }
     }

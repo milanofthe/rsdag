@@ -104,9 +104,9 @@ mod aarch64;
 pub mod background;
 mod constants;
 mod host;
-mod ir;
 mod isa;
 mod native;
+mod ops;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
