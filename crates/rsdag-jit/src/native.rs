@@ -1812,14 +1812,15 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 self.isa.cmp_select(CmpOp::Le, x, zero, zero, s, r);
                 Some(r)
             }
-            UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Trunc => {
+            UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Trunc if I::round_inline() => {
                 let mode = match uop {
                     UnaryOp::Floor => Round::Floor,
                     UnaryOp::Ceil => Round::Ceil,
                     _ => Round::Trunc,
                 };
                 let r = self.fresh_for(dst);
-                self.isa.round(mode, r, x).then_some(r)
+                self.isa.round(mode, r, x);
+                Some(r)
             }
             UnaryOp::Abs => {
                 let r = self.fresh_for(dst);
@@ -2232,6 +2233,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Lane code writes nothing past its work array: a rounding that calls
+    /// the host (without SSE4.1, as under `RSDAG_SSE2`) passes its lanes
+    /// through the gather area, which the layout holds.
+    #[test]
+    fn lane_code_stays_in_its_work_array() {
+        let mut g: Graph<F64> = Graph::new();
+        let x = g.sym("x");
+        let Node::Symbol(s) = *g.node(x) else {
+            unreachable!()
+        };
+        let roots = [g.floor(x)];
+        let t = Tape::compile(&g, &roots, &[s]);
+        let code = NativeTape::compile_isa::<X64<2>>(&t, &Options::default(), &[]).expect("lanes");
+        let total = code.layout.total;
+        let mark = f64::from_bits(0x7FF8_0000_DEAD_BEEF);
+        let mut work = vec![mark; total + 8];
+        code.run(0..code.chunks.len(), &[2.5, -1.5], &mut work);
+        let o = code.outputs[0] as usize * 2;
+        assert_eq!(work[o..o + 2], [2.0, -2.0]);
+        assert!(
+            work[total..].iter().all(|v| v.to_bits() == mark.to_bits()),
+            "lane code wrote past its work array of {total}"
+        );
     }
 
     #[test]

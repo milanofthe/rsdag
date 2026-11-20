@@ -214,14 +214,16 @@ impl Isa for A64 {
     fn sqrt(&mut self, d: u8, a: u8) {
         self.w(0x1E61_C000 | ((a as u32) << 5) | d as u32);
     }
-    fn round(&mut self, mode: Round, d: u8, a: u8) -> bool {
+    fn round_inline() -> bool {
+        true
+    }
+    fn round(&mut self, mode: Round, d: u8, a: u8) {
         let opc = match mode {
             Round::Floor => 0x1E65_4000, // frintm
             Round::Ceil => 0x1E64_C000,  // frintp
             Round::Trunc => 0x1E65_C000, // frintz
         };
         self.w(opc | ((a as u32) << 5) | d as u32);
-        true
     }
 
     fn cmp_select(&mut self, op: CmpOp, a: u8, b: u8, t: u8, e: u8, d: u8) {

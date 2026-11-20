@@ -102,9 +102,10 @@ pub(crate) trait Isa {
     fn neg(&mut self, d: u8, a: u8);
     fn abs(&mut self, d: u8, a: u8);
     fn sqrt(&mut self, d: u8, a: u8);
-    /// `false` when the instruction is not available; the caller then uses
-    /// the host routine.
-    fn round(&mut self, mode: Round, d: u8, a: u8) -> bool;
+    /// Whether this CPU runs [`round`](Self::round); without it the caller
+    /// uses the host routine.
+    fn round_inline() -> bool;
+    fn round(&mut self, mode: Round, d: u8, a: u8);
     /// Whether [`minmax`](Self::minmax) is available; without it the
     /// caller uses the host routine.
     const MINMAX: bool;

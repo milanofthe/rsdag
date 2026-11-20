@@ -35,12 +35,8 @@ pub(crate) fn routine<I: Isa>(op: &Op) -> Option<*const ()> {
     }
     Some(match *op {
         Op::Unary(op, _) => match op {
-            UnaryOp::Sqrt
-            | UnaryOp::Floor
-            | UnaryOp::Ceil
-            | UnaryOp::Trunc
-            | UnaryOp::Abs
-            | UnaryOp::Sign => return None,
+            UnaryOp::Sqrt | UnaryOp::Abs | UnaryOp::Sign => return None,
+            UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Trunc if I::round_inline() => return None,
             UnaryOp::Exp | UnaryOp::Ln if I::exp_ln_inline() => return None,
             _ => crate::host::unary_addr(op).0,
         },
