@@ -15,6 +15,10 @@
 //! one model card and geometry keeps one state per kind of device in its
 //! caches instead of one per instance. The results are those of every
 //! instance on its own row: a prolog is a function of the pure arguments.
+//! Where every instance reads one operand (a model card bound to all of
+//! them) the values are the same by construction: the rows are found on
+//! the other arguments alone, and only an instance that computes its row
+//! gathers its arguments.
 
 use std::hash::Hasher;
 
@@ -61,6 +65,9 @@ pub struct Call<'a> {
     /// instance gathers only some (see [`Op::Call`](super::Op::Call));
     /// `None` for all, in order.
     pub places: Option<&'a [u32]>,
+    /// A prolog's arguments in which its instances can differ, ascending
+    /// (see [`Op::CallProlog`](super::Op::CallProlog)); `None` for a call.
+    pub own: Option<&'a [u32]>,
     /// Where the arguments are in the gather area, the outputs and (a main
     /// phase) the states among the slots.
     pub args: usize,
@@ -147,9 +154,10 @@ pub unsafe fn run_call<T: Scalar>(
 }
 
 /// The row of every instance of the prolog `c`, after its rows: the first
-/// instance with its pure arguments, bit for bit (see the module docs). A
-/// scalar without a value's bits ([`Scalar::bits`]) keeps every instance
-/// on its own row.
+/// instance with its pure arguments, bit for bit (see the module docs),
+/// told apart by the arguments it owns; with none, every instance reads
+/// the first row. A scalar without a value's bits ([`Scalar::bits`])
+/// keeps every instance on its own row.
 ///
 /// # Safety
 /// As [`run_call`]; the pure arguments are the operands, or gathered
@@ -157,6 +165,9 @@ pub unsafe fn run_call<T: Scalar>(
 pub unsafe fn share_rows<T: Scalar>(c: &Call, slots: Shared<T>, gather: Shared<T>, inputs: &[T]) {
     let (n, na) = (c.n_groups, c.n_args);
     let at = c.out + n * c.n_out;
+    let own = c
+        .own
+        .expect("a prolog names the arguments its instances own");
     let arg = |g: usize, j: usize| match c.operands {
         Some(ops) => match input_index(ops[g * na + j]) {
             Some(i) => inputs.get(i as usize).copied().unwrap_or(T::nan()),
@@ -164,29 +175,51 @@ pub unsafe fn share_rows<T: Scalar>(c: &Call, slots: Shared<T>, gather: Shared<T
         },
         None => unsafe { gather.get(c.args + g * na + j) },
     };
-    let same = |a: usize, b: usize| (0..na).all(|j| arg(a, j).bits() == arg(b, j).bits());
-    let mut first: HashMap<u64, usize> = HashMap::default();
-    for g in 0..n {
-        let mut h = FxHasher::default();
-        let mut identified = true;
-        for j in 0..na {
-            match arg(g, j).bits() {
-                Some(b) => h.write_u64(b),
-                None => identified = false,
-            }
-        }
-        let row = match identified {
-            // a hash both rows give, their values compared: a collision
-            // keeps its own row
-            true => match first.entry(h.finish()) {
-                std::collections::hash_map::Entry::Occupied(e) if same(*e.get(), g) => *e.get(),
-                std::collections::hash_map::Entry::Occupied(_) => g,
-                std::collections::hash_map::Entry::Vacant(e) => *e.insert(g),
-            },
-            false => g,
-        };
-        unsafe { slots.set(at + g, T::from_f64(row as f64)) };
+    let set = |g: usize, row: usize| unsafe { slots.set(at + g, T::from_f64(row as f64)) };
+    // The arguments every instance shares are the first one's.
+    let identified = n > 0 && (0..na).all(|j| arg(0, j).bits().is_some());
+    if !identified || own.is_empty() {
+        (0..n).for_each(|g| set(g, if identified { 0 } else { g }));
+        return;
     }
+    let hash = |g: usize| {
+        let mut h = FxHasher::default();
+        for &j in own {
+            h.write_u64(arg(g, j as usize).bits()?);
+        }
+        Some(h.finish())
+    };
+    let same = |a: usize, b: usize| {
+        own.iter()
+            .all(|&j| arg(a, j as usize).bits() == arg(b, j as usize).bits())
+    };
+    find_rows(n, hash, same, set);
+}
+
+/// The row of each of `n` instances, handed to `set`: the first instance
+/// with its key. `hash` is an instance's key hashed (`None`: a value
+/// without bits, its own row), `same` whether two instances' keys are
+/// equal; a hash two keys give, their values unequal, keeps its own row.
+pub(crate) fn find_rows(
+    n: usize,
+    hash: impl Fn(usize) -> Option<u64>,
+    same: impl Fn(usize, usize) -> bool,
+    mut set: impl FnMut(usize, usize),
+) {
+    crate::scratch::with(|first: &mut HashMap<u64, usize>| {
+        first.clear();
+        for g in 0..n {
+            let row = match hash(g) {
+                Some(h) => match first.entry(h) {
+                    std::collections::hash_map::Entry::Occupied(e) if same(*e.get(), g) => *e.get(),
+                    std::collections::hash_map::Entry::Occupied(_) => g,
+                    std::collections::hash_map::Entry::Vacant(e) => *e.insert(g),
+                },
+                None => g,
+            };
+            set(g, row);
+        }
+    })
 }
 
 /// [`run_call`] on the rows [`share_rows`] found.
@@ -214,7 +247,12 @@ unsafe fn run_part<T: Scalar>(
             Some(i) => inputs.get(i as usize).copied().unwrap_or(T::nan()),
             None => unsafe { slots.get(k as usize) },
         };
-        for g in groups.clone() {
+        // a prolog's instance that reads another's row computes nothing
+        let rows = c.out + c.n_groups * no;
+        let computes = |g: &usize| {
+            c.phase != Phase::Prolog || unsafe { slots.get(rows + g) }.to_f64() as usize == *g
+        };
+        for g in groups.clone().filter(computes) {
             let (from, to) = (&ops[g * ni..(g + 1) * ni], c.args + g * na);
             match c.places {
                 None => from
@@ -328,4 +366,50 @@ pub unsafe fn run_stage<'a, T: Scalar>(
     };
     let total = (0..n).map(|k| pieces(&call(k))).sum();
     decide.wide::<rspool::Here>(total, width, &run);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_rows;
+    use std::hash::Hasher;
+
+    /// The rows of `keys` keyed on the positions `on`, hashed by `hash`.
+    fn rows(keys: &[[f64; 3]], on: &[usize], hash: impl Fn(&[u64]) -> u64) -> Vec<usize> {
+        let bits = |g: usize| {
+            on.iter()
+                .map(|&j| keys[g][j].to_bits())
+                .collect::<Vec<u64>>()
+        };
+        let mut out = vec![usize::MAX; keys.len()];
+        find_rows(
+            keys.len(),
+            |g| Some(hash(&bits(g))),
+            |a, b| bits(a) == bits(b),
+            |g, r| out[g] = r,
+        );
+        out
+    }
+
+    #[test]
+    fn rows_on_the_owned_arguments_are_the_rows_on_all() {
+        // Position 0 and 2 the same for all instances, 1 their own: equal
+        // and unequal instances, 0.0 and -0.0 apart. With a hash every key
+        // gives (every unequal pair collides) and with a real one, keying
+        // the owned position finds the rows keying all of them finds.
+        let qs = [0.2, 0.3, 0.2, 0.2, 0.0, -0.0, 0.3, 0.7, 0.2, 0.0];
+        let keys: Vec<[f64; 3]> = qs.iter().map(|&q| [1.5, q, -2.0]).collect();
+        let fx = |b: &[u64]| {
+            let mut h = rustc_hash::FxHasher::default();
+            b.iter().for_each(|&x| h.write_u64(x));
+            h.finish()
+        };
+        let collide = |_: &[u64]| 7u64;
+        let real = rows(&keys, &[0, 1, 2], fx);
+        assert_eq!(real, [0, 1, 0, 0, 4, 5, 1, 7, 0, 4]);
+        assert_eq!(rows(&keys, &[1], fx), real);
+        // every instance unequal to the first keeps its own row
+        let colliding = rows(&keys, &[0, 1, 2], collide);
+        assert_eq!(colliding, [0, 1, 0, 0, 4, 5, 6, 7, 0, 9]);
+        assert_eq!(rows(&keys, &[1], collide), colliding);
+    }
 }

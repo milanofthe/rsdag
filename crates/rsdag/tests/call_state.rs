@@ -139,3 +139,89 @@ fn instances_of_the_same_parameters_share_a_state_with_the_same_results() {
     };
     rsdag::parallel::install_lent(pool, run);
 }
+
+/// `f(v, c, q)`: a card parameter `c` and an instance parameter `q`, the
+/// prolog's chain over both.
+fn carded(g: &mut Graph<F64>) -> FuncId {
+    let (v, vs) = sym(g, "dev.v");
+    let (c, cs) = sym(g, "dev.c");
+    let (q, qs) = sym(g, "dev.q");
+    let mut k = g.mul(c, q);
+    for i in 0..10 {
+        let a = g.konst_f64(1.0 + 0.01 * i as f64);
+        let e = g.exp(k);
+        let t = g.mul(a, e);
+        k = g.ln(t);
+    }
+    let tv = g.tanh(v);
+    let o = g.mul(tv, k);
+    let f = g.define_func("dev", vec![vs, cs, qs], vec![o]);
+    g.set_param_role(f, 0, ParamRole::State { id: 0 });
+    g.set_param_role(f, 1, ParamRole::Param);
+    g.set_param_role(f, 2, ParamRole::Param);
+    f
+}
+
+#[test]
+fn instances_share_rows_by_the_arguments_they_own() {
+    // One card for all twelve instances, an instance parameter each (some
+    // repeated, 0.0 and -0.0 apart), or one for all. The rows found are
+    // those of keying every pure argument, and the outputs the whole
+    // tape's, bit for bit.
+    let qs = [0.2, 0.3, 0.2, 0.2, 0.0, -0.0, 0.3, 0.7, 0.2, 0.0, 0.7, 0.3];
+    for shared_q in [false, true] {
+        let mut g: Graph<F64> = Graph::new();
+        let f = carded(&mut g);
+        let (card, cs) = sym(&mut g, "card");
+        let (q_all, q_all_s) = sym(&mut g, "q");
+        let (mut syms, mut roots) = (vec![cs, q_all_s], Vec::new());
+        let mut vals = vec![1.5, 0.4];
+        let mut pure = vec![true, true];
+        for (i, &qv) in qs.iter().enumerate() {
+            let (x, xs) = sym(&mut g, &format!("x{i}"));
+            syms.push(xs);
+            vals.push(0.1 * i as f64);
+            pure.push(false);
+            let q = match shared_q {
+                true => q_all,
+                false => {
+                    let (q, qsym) = sym(&mut g, &format!("q{i}"));
+                    syms.push(qsym);
+                    vals.push(qv);
+                    pure.push(true);
+                    q
+                }
+            };
+            roots.push(g.call(f, 0, &[x, card, q]));
+        }
+        let split = Tape::compile_split(&g, &roots, &syms, &pure);
+        let whole = Tape::compile(&g, &roots, &syms);
+        let prolog = (0..split.ops().len())
+            .find(|&i| matches!(split.ops()[i], rsdag::tape::Op::CallProlog { .. }))
+            .expect("a prolog call");
+        let c = split.call(prolog);
+        assert_eq!(c.n_groups, qs.len());
+        let own: &[u32] = if shared_q { &[] } else { &[1] };
+        assert_eq!(c.own, Some(own), "{}", split.dump());
+
+        let mut w = vec![0.0; split.work_len()];
+        split.eval_prolog_into(&vals, &mut w);
+        let rows: Vec<usize> = (0..c.n_groups)
+            .map(|k| w[c.out + c.n_groups * c.n_out + k] as usize)
+            .collect();
+        // every pure argument keyed: the first instance with the same bits
+        let key = |k: usize| -> [u64; 2] {
+            let q = if shared_q { 0.4 } else { qs[k] };
+            [1.5f64.to_bits(), f64::to_bits(q)]
+        };
+        let want: Vec<usize> = (0..qs.len())
+            .map(|k| (0..=k).find(|&j| key(j) == key(k)).unwrap())
+            .collect();
+        assert_eq!(rows, want);
+
+        let (mut got, mut ww, mut out) = (vec![0.0; split.out_len()], Vec::new(), Vec::new());
+        split.eval_main_into(&vals, &mut w, &mut got);
+        whole.eval(&vals, &mut ww, &mut out);
+        assert!(same(&got, &out), "{got:?} vs {out:?}");
+    }
+}
