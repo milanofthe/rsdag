@@ -61,15 +61,6 @@ const EXEMPT: &[(&str, &[&str], &[&str], &str)] = &[
     ),
     (
         "rsdag/src/semantics.rs",
-        &[
-            "MAGIC", "LN2_HI", "LN2_LO", "EP1", "EP2", "EP3", "EP4", "EP5", "LG1", "LG2", "LG3",
-            "LG4", "LG5", "LG6", "LG7",
-        ],
-        &[],
-        "fdlibm's published exp and ln coefficients",
-    ),
-    (
-        "rsdag/src/semantics.rs",
         &["digamma", "trigamma"],
         &[],
         "the recurrence threshold and Bernoulli coefficients of the asymptotic series",
@@ -125,10 +116,6 @@ const CONTRACT: &[(&str, Contract)] = &[
     ("EXP_LIMIT", Contract::Float(80.0)),
     ("LN_FLOOR", Contract::Float(1e-30)),
     ("EXP_UNDERFLOW", Contract::Float(-745.2)),
-    ("LN_HIGH_FRAC_MASK", Contract::Int(0x000f_ffff)),
-    ("LN_SQRT2_CARRY", Contract::Int(0x9_5f64)),
-    ("LN_HIGH_UNIT", Contract::Int(0x10_0000)),
-    ("LN_HIGH_ONE", Contract::Int(0x3ff0_0000)),
     ("F64_EXP_BIAS", Contract::Int(1023)),
 ];
 

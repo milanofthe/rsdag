@@ -37,7 +37,7 @@ pub(crate) fn routine<I: Isa>(op: &Op) -> Option<*const ()> {
         Op::Unary(op, _) => match op {
             UnaryOp::Sqrt | UnaryOp::Abs | UnaryOp::Sign => return None,
             UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Trunc if I::round_inline() => return None,
-            UnaryOp::Exp | UnaryOp::Ln if I::exp_ln_inline() => return None,
+            UnaryOp::Exp | UnaryOp::Ln => return None,
             _ => crate::host::unary_addr(op).0,
         },
         Op::Binary(..) => crate::host::h_binary as *const (),

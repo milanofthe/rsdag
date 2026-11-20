@@ -10,9 +10,9 @@
 //! backend that reproduces these bit for bit reproduces every program.
 
 use crate::constants::{
-    EXP_UNDERFLOW, F64_EXP_BIAS, F64_FRAC_BITS, F64_HIGH_FRAC_BITS, F64_HIGH_WORD,
-    F64_LOW_WORD_MASK, GEMM_COL_BLOCK, GEMM_ROW_BLOCK, GEMV_ROW_BLOCK, LN_HIGH_FRAC_MASK,
-    LN_HIGH_ONE, LN_HIGH_UNIT, LN_SQRT2_CARRY, LU_TRAILING_ROWS,
+    EXP_INV_LN2_N, EXP_LN2_HI_N, EXP_LN2_LO_N, EXP_POLY, EXP_SCALE_BIAS, EXP_TABLE, EXP_TABLE_BITS,
+    EXP_UNDERFLOW, F64_EXP_BIAS, F64_FRAC_BITS, GEMM_COL_BLOCK, GEMM_ROW_BLOCK, GEMV_ROW_BLOCK,
+    LN_LN2_HI, LN_LN2_LO, LN_OFF, LN_POLY, LN_TABLE, LN_TABLE_BITS, LU_TRAILING_ROWS, MAGIC,
 };
 use crate::node::{BinOp, CmpOp, Elementary, ReduceOp, UnaryOp};
 use crate::scalar::Scalar;
@@ -210,87 +210,113 @@ pub fn rand_stream(key: f64, counter: f64) -> f64 {
     ))
 }
 
-pub use crate::constants::{EXP_LIMIT, LN_FLOOR};
+pub use crate::constants::{EXP_AT_LIMIT, EXP_LIMIT, LN_AT_FLOOR, LN_FLOOR};
 
-/// `exp(EXP_LIMIT)`, the slope of the linear tail.
-pub const EXP_AT_LIMIT: f64 = exp_core(EXP_LIMIT);
+/// Whether a multiply-add rounds once on this machine: where the CPU has a
+/// fused multiply-add (x86-64 with AVX and FMA, unless `RSDAG_SSE2` is set;
+/// AArch64 always). Every evaluator decides by this, so on one machine they
+/// agree to the bit; across machines a result may differ in its last bits.
+pub fn fused() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *F.get_or_init(|| {
+            std::env::var_os("RSDAG_SSE2").is_none()
+                && std::is_x86_feature_detected!("avx")
+                && std::is_x86_feature_detected!("fma")
+        })
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        true
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        false
+    }
+}
 
-/// The exponential's and the logarithm's constants, for a backend that
-/// computes them in its own instructions (it must take the same steps).
+/// `a b + c`, rounded once ([`Fused`]) or twice ([`Split`]): the one
+/// primitive the exponential and the logarithm are written over, so the
+/// machine's [`fused`] decides their rounding and every backend follows.
+pub trait MulAdd {
+    fn mul_add(a: f64, b: f64, c: f64) -> f64;
+}
+
+/// The fused multiply-add.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub struct Fused;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+impl MulAdd for Fused {
+    #[inline(always)]
+    fn mul_add(a: f64, b: f64, c: f64) -> f64 {
+        a.mul_add(b, c)
+    }
+}
+
+/// A product and a sum, each rounded.
+pub struct Split;
+impl MulAdd for Split {
+    #[inline(always)]
+    fn mul_add(a: f64, b: f64, c: f64) -> f64 {
+        a * b + c
+    }
+}
+
+/// The exponential's and the logarithm's constants and steps, for a backend
+/// that computes them in its own instructions (it must take the same
+/// steps).
 pub mod exp_ln {
-    pub use super::{exp_core, ln_core};
-    pub use super::{EP1, EP2, EP3, EP4, EP5, INV_LN2, LG1, LG2, LG3, LG4, LG5, LG6, LG7};
-    pub use super::{EXP_AT_LIMIT, EXP_LIMIT, LN_AT_FLOOR, LN_FLOOR};
-    pub use super::{LN2_HI, LN2_LO, MAGIC};
+    pub use super::{exp_core, exp_with, ln_core, ln_with};
+    pub use super::{EXP_INDEX_MASK, EXP_SHIFT, EXP_UNBIAS, LN_EXP_MASK, LN_INDEX_MASK, LN_SHIFT};
     pub use crate::constants::{
-        EXP_UNDERFLOW, F64_EXP_BIAS, F64_FRAC_BITS, F64_HIGH_FRAC_BITS, F64_HIGH_WORD,
-        F64_LOW_WORD_MASK, LN_HIGH_FRAC_MASK, LN_HIGH_ONE, LN_HIGH_UNIT, LN_SQRT2_CARRY,
+        EXP_AT_LIMIT, EXP_INV_LN2_N, EXP_LIMIT, EXP_LN2_HI_N, EXP_LN2_LO_N, EXP_POLY,
+        EXP_SCALE_BIAS, EXP_TABLE, EXP_TABLE_BITS, EXP_UNDERFLOW, F64_EXP_BIAS, F64_FRAC_BITS,
+        LN_AT_FLOOR, LN_FLOOR, LN_LN2_HI, LN_LN2_LO, LN_OFF, LN_POLY, LN_TABLE, LN_TABLE_BITS,
+        MAGIC,
     };
 }
 
-// The exponential and the logarithm are rsdag's own: fdlibm's algorithms
-// (Sun Microsystems, 1993; as in musl and Go), errors below one ulp, written
-// without branches on the value. So every backend computes them the same
-// way, a lane of vector code as a scalar does, the same on every platform,
-// and the native code runs a vector of them as one call.
+/// `exp`'s table index: the low bits of `k`.
+pub const EXP_INDEX_MASK: u64 = (1 << EXP_TABLE_BITS) - 1;
+/// The shift that takes `k` to `k / N` in the exponent field.
+pub const EXP_SHIFT: u32 = F64_FRAC_BITS - EXP_TABLE_BITS;
+/// `2^-EXP_SCALE_BIAS`.
+pub const EXP_UNBIAS: f64 =
+    f64::from_bits(((F64_EXP_BIAS - EXP_SCALE_BIAS) as u64) << F64_FRAC_BITS);
+/// `ln`'s table index: the top fraction bits of `z`, shifted down by
+/// [`LN_SHIFT`].
+pub const LN_INDEX_MASK: u64 = (1 << LN_TABLE_BITS) - 1;
+/// See [`LN_INDEX_MASK`].
+pub const LN_SHIFT: u32 = F64_FRAC_BITS - LN_TABLE_BITS;
+/// The sign and exponent bits of an `f64`.
+pub const LN_EXP_MASK: u64 = u64::MAX << F64_FRAC_BITS;
 
-/// `x + MAGIC - MAGIC` rounds `x` (`|x| < 2^51`) to the nearest integer, its
-/// low bits that integer.
-pub const MAGIC: f64 = 6_755_399_441_055_744.0;
-pub const INV_LN2: f64 = std::f64::consts::LOG2_E;
-/// `ln 2` in two parts, the high one with 32 trailing zero bits (so `k
-/// LN2_HI` is exact for every `k` here).
-#[allow(clippy::excessive_precision)]
-pub const LN2_HI: f64 = 6.931_471_803_691_238_165e-1;
-#[allow(clippy::excessive_precision)]
-pub const LN2_LO: f64 = 1.908_214_929_270_587_700e-10;
-#[allow(clippy::excessive_precision)]
-pub const EP1: f64 = 1.666_666_666_666_660_190_37e-1;
-#[allow(clippy::excessive_precision)]
-pub const EP2: f64 = -2.777_777_777_701_559_338_42e-3;
-#[allow(clippy::excessive_precision)]
-pub const EP3: f64 = 6.613_756_321_437_934_361_17e-5;
-#[allow(clippy::excessive_precision)]
-pub const EP4: f64 = -1.653_390_220_546_525_153_90e-6;
-#[allow(clippy::excessive_precision)]
-pub const EP5: f64 = 4.138_136_797_057_238_460_39e-8;
-#[allow(clippy::excessive_precision)]
-pub const LG1: f64 = 6.666_666_666_666_735_130e-1;
-#[allow(clippy::excessive_precision)]
-pub const LG2: f64 = 3.999_999_999_940_941_908e-1;
-#[allow(clippy::excessive_precision)]
-pub const LG3: f64 = 2.857_142_874_366_239_149e-1;
-#[allow(clippy::excessive_precision)]
-pub const LG4: f64 = 2.222_219_843_214_978_396e-1;
-#[allow(clippy::excessive_precision)]
-pub const LG5: f64 = 1.818_357_216_161_805_012e-1;
-#[allow(clippy::excessive_precision)]
-pub const LG6: f64 = 1.531_383_769_920_937_332e-1;
-#[allow(clippy::excessive_precision)]
-pub const LG7: f64 = 1.479_819_860_511_658_591e-1;
+// The exponential and the logarithm are rsdag's own (the tables and the
+// method in `crate::constants::exp_ln`), written without branches on the
+// value over one multiply-add primitive. So every backend computes them by
+// the same steps, a lane of vector code as a scalar does.
 
-/// `2^k` for `-1022 <= k <= 1023`.
+/// `exp(x)` for `x <= EXP_LIMIT` (and NaN), multiply-adds by `M`: `x = k
+/// ln 2 / N + r`, `exp(x) = 2^(k / N) exp(r)`. Zero below the subnormals.
 #[inline(always)]
-const fn pow2(k: i64) -> f64 {
-    f64::from_bits((k.wrapping_add(F64_EXP_BIAS) as u64) << F64_FRAC_BITS)
-}
-
-/// `exp(x)` for `x <= EXP_LIMIT` (and NaN): `x = k ln 2 + r` with `|r| <=
-/// ln 2 / 2`, `exp(r)` by fdlibm's rational form, scaled by `2^k` in two
-/// halves so a subnormal result rounds once. Zero below the subnormals.
-#[inline(always)]
-pub const fn exp_core(x: f64) -> f64 {
-    let t = x * INV_LN2 + MAGIC;
-    let kf = t - MAGIC;
-    let k = (t.to_bits() as i64).wrapping_sub(MAGIC.to_bits() as i64);
-    let hi = x - kf * LN2_HI;
-    let lo = kf * LN2_LO;
-    let r = hi - lo;
-    let t2 = r * r;
-    let c = r - t2 * (EP1 + t2 * (EP2 + t2 * (EP3 + t2 * (EP4 + t2 * EP5))));
-    let y = 1.0 - ((lo - (r * c) / (2.0 - c)) - hi);
-    let k1 = k >> 1;
-    let v = y * pow2(k1) * pow2(k - k1);
+pub fn exp_with<M: MulAdd>(x: f64) -> f64 {
+    let t = M::mul_add(x, EXP_INV_LN2_N, MAGIC);
+    let kd = t - MAGIC;
+    let ki = t.to_bits();
+    // exact: `kd EXP_LN2_HI_N` has 53 bits, and `x` is near it
+    let r = M::mul_add(kd, -EXP_LN2_HI_N, x);
+    let r = M::mul_add(kd, -EXP_LN2_LO_N, r);
+    let j = (ki & EXP_INDEX_MASK) as usize;
+    let tail = f64::from_bits(EXP_TABLE[2 * j]);
+    let scale = f64::from_bits(EXP_TABLE[2 * j + 1].wrapping_add(ki << EXP_SHIFT));
+    let [c2, c3, c4, c5] = EXP_POLY;
+    let r2 = r * r;
+    let p23 = M::mul_add(r, c3, c2);
+    let p45 = M::mul_add(r, c5, c4);
+    let p = M::mul_add(r2, p23, tail + r);
+    let p = M::mul_add(r2 * r2, p45, p);
+    let v = M::mul_add(scale, p, scale) * EXP_UNBIAS;
     let v = if x < EXP_UNDERFLOW { 0.0 } else { v };
     if x.is_nan() {
         x
@@ -299,36 +325,82 @@ pub const fn exp_core(x: f64) -> f64 {
     }
 }
 
-/// `ln(x)` for normal `x > 0` (and `+inf`, NaN): `x = 2^k m` with `m` in
-/// `[sqrt(2)/2, sqrt(2))`, `ln(m) = ln(1 + f)` by fdlibm's series in `s =
-/// f / (2 + f)`.
+/// `ln(x)` for normal `x > 0` (and `+inf`, NaN), multiply-adds by `M`: `x
+/// = 2^k z`, `log x = k ln 2 + logc + log1p(r)` with `r = (z - c) invc`.
 #[inline(always)]
-pub const fn ln_core(x: f64) -> f64 {
-    let bits = x.to_bits();
-    let high = (bits >> F64_HIGH_WORD) as i64;
-    let hm = high & LN_HIGH_FRAC_MASK;
-    // The mantissa past sqrt(2) moves to the next exponent.
-    let i = (hm + LN_SQRT2_CARRY) & LN_HIGH_UNIT;
-    let k = (high >> F64_HIGH_FRAC_BITS) - F64_EXP_BIAS + (i >> F64_HIGH_FRAC_BITS);
-    let m = f64::from_bits(
-        (((hm | (i ^ LN_HIGH_ONE)) as u64) << F64_HIGH_WORD) | (bits & F64_LOW_WORD_MASK),
-    );
-    let f = m - 1.0;
-    let s = f / (2.0 + f);
-    // `k` as a float, through the rounding constant (no integer conversion).
-    let dk = f64::from_bits(MAGIC.to_bits().wrapping_add(k as u64)) - MAGIC;
-    let z = s * s;
-    let w = z * z;
-    let t1 = w * (LG2 + w * (LG4 + w * LG6));
-    let t2 = z * (LG1 + w * (LG3 + w * (LG5 + w * LG7)));
-    let r = t2 + t1;
-    let hfsq = 0.5 * f * f;
-    let v = dk * LN2_HI - ((hfsq - (s * (hfsq + r) + dk * LN2_LO)) - f);
+pub fn ln_with<M: MulAdd>(x: f64) -> f64 {
+    let ix = x.to_bits();
+    let tmp = ix.wrapping_sub(LN_OFF);
+    let i = ((tmp >> LN_SHIFT) & LN_INDEX_MASK) as usize;
+    let kd = ((tmp as i64) >> F64_FRAC_BITS) as f64;
+    let z = f64::from_bits(ix.wrapping_sub(tmp & LN_EXP_MASK));
+    let [invc, c, logc_hi, logc_lo] = LN_TABLE[i];
+    let r = (z - c) * invc;
+    // exact: `k LN_LN2_HI` and `logc_hi` are multiples of 2^-43 below 2^10
+    let w = M::mul_add(kd, LN_LN2_HI, logc_hi);
+    let hi = w + r;
+    let lo = (w - hi) + r;
+    let lo = lo + M::mul_add(kd, LN_LN2_LO, logc_lo);
+    let a = LN_POLY;
+    let r2 = r * r;
+    let q01 = M::mul_add(r, a[1], a[0]);
+    let q23 = M::mul_add(r, a[3], a[2]);
+    let q45 = M::mul_add(r, a[5], a[4]);
+    let q03 = M::mul_add(r2, q23, q01);
+    let q46 = M::mul_add(r2, a[6], q45);
+    let p = M::mul_add(r2 * r2, q46, q03);
+    let t = M::mul_add(r2, -0.5, lo);
+    let t = M::mul_add(r2 * r, p, t);
+    let v = t + hi;
     if x.is_nan() || x == f64::INFINITY {
         x
     } else {
         v
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+mod fma {
+    use super::{exp_with, ln_with, Fused};
+
+    #[target_feature(enable = "fma")]
+    pub(super) unsafe fn exp(x: f64) -> f64 {
+        exp_with::<Fused>(x)
+    }
+    #[target_feature(enable = "fma")]
+    pub(super) unsafe fn ln(x: f64) -> f64 {
+        ln_with::<Fused>(x)
+    }
+}
+
+/// [`exp_with`] in this machine's rounding ([`fused`]).
+#[inline]
+pub fn exp_core(x: f64) -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    if fused() {
+        // SAFETY: `fused` holds only where the CPU has FMA.
+        return unsafe { fma::exp(x) };
+    }
+    #[cfg(target_arch = "aarch64")]
+    if fused() {
+        return exp_with::<Fused>(x);
+    }
+    exp_with::<Split>(x)
+}
+
+/// [`ln_with`] in this machine's rounding ([`fused`]).
+#[inline]
+pub fn ln_core(x: f64) -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    if fused() {
+        // SAFETY: `fused` holds only where the CPU has FMA.
+        return unsafe { fma::ln(x) };
+    }
+    #[cfg(target_arch = "aarch64")]
+    if fused() {
+        return ln_with::<Fused>(x);
+    }
+    ln_with::<Split>(x)
 }
 
 /// The guarded exponential of [`unary_f64`]: linear above [`EXP_LIMIT`].
@@ -352,9 +424,6 @@ pub fn ln_guarded(x: f64) -> f64 {
         ln_core(x)
     }
 }
-
-/// `ln(LN_FLOOR)`.
-pub const LN_AT_FLOOR: f64 = ln_core(LN_FLOOR);
 
 /// `x^n` for an integer `n`, the reference every evaluator takes: square
 /// and multiply over `|n|` from the low bit, then one division for a

@@ -48,34 +48,14 @@ pub const FOLD_LANES: usize = 4;
 pub const POWF_AS_POWI_MAX: f64 = 64.0;
 
 // The bits of an `f64` that the exponential and the logarithm take apart
-// (fdlibm's reduction, `crate::semantics::exp_core` and `ln_core`), the
-// same in every backend that computes them in its own instructions.
+// (`crate::semantics::exp_core` and `ln_core`), the same in every backend
+// that computes them in its own instructions; their tables and
+// coefficients are in `exp_ln`.
 
 /// The exponent bias of an `f64`: a biased exponent of `1023` is `2^0`.
 pub const F64_EXP_BIAS: i64 = 1023;
 /// The fraction bits of an `f64`, below its exponent.
 pub const F64_FRAC_BITS: u32 = 52;
-/// The shift from an `f64`'s bits to its high word: the sign, the exponent
-/// and the top [`F64_HIGH_FRAC_BITS`] of the fraction, the word `ln`
-/// reduces its argument on.
-pub const F64_HIGH_WORD: u32 = 32;
-/// The fraction bits in the high word.
-pub const F64_HIGH_FRAC_BITS: u32 = F64_FRAC_BITS - F64_HIGH_WORD;
-/// The low word of an `f64`'s bits.
-pub const F64_LOW_WORD_MASK: u64 = 0xffff_ffff;
-/// The fraction bits of the high word.
-pub const LN_HIGH_FRAC_MASK: i64 = 0x000f_ffff;
-/// fdlibm's constant: added to the high word's fraction bits, it carries
-/// into [`LN_HIGH_UNIT`] once they reach `0x6_a09c`, a mantissa of about
-/// `sqrt(2)`; such a mantissa moves to the next exponent, halved, so it
-/// lands in `[sqrt(2)/2, sqrt(2))`.
-pub const LN_SQRT2_CARRY: i64 = 0x9_5f64;
-/// The unit bit of the high word, one above its fraction bits: the carry
-/// of [`LN_SQRT2_CARRY`].
-pub const LN_HIGH_UNIT: i64 = 0x10_0000;
-/// The high word of `1.0`; with the carry flipped in, the exponent of `1`
-/// or of `1/2`, which the reduced mantissa takes.
-pub const LN_HIGH_ONE: i64 = 0x3ff0_0000;
 
 /// The column-panel widths of the blocked elimination in
 /// [`solve_t`](crate::semantics::solve_t): the panel's own updates run one
