@@ -2127,9 +2127,10 @@ impl rsdag::Program for NativeTape {
     }
 }
 
-#[cfg(all(test, target_arch = "x86_64"))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_arch = "x86_64")]
     use crate::x86_64::X64;
     use rsdag::semantics::{exp_guarded, ln_guarded, EXP_LIMIT, LN_FLOOR};
     use rsdag::{Graph, Node, F64};
@@ -2222,6 +2223,7 @@ mod tests {
     /// Lane code writes nothing past its work array: a rounding that calls
     /// the host (without SSE4.1, as under `RSDAG_SSE2`) passes its lanes
     /// through the gather area, which the layout holds.
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn lane_code_stays_in_its_work_array() {
         let mut g: Graph<F64> = Graph::new();
@@ -2244,6 +2246,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn exp_and_ln_inline_are_the_reference_bit_for_bit() {
         check::<X64<1>>();
@@ -2251,5 +2254,11 @@ mod tests {
         if crate::x86_64::features().avx2 {
             check::<X64<4>>();
         }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn exp_and_ln_inline_are_the_reference_bit_for_bit() {
+        check::<crate::aarch64::A64>();
     }
 }
