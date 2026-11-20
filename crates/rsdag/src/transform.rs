@@ -27,8 +27,8 @@ pub(crate) trait Rule<K: Field> {
 }
 
 /// An instance a rewrite meets: function `f` called in context `ctx` of
-/// the source over one argument list, the list and the context's bound
-/// expressions rewritten, each once however many instances share it.
+/// the source over one argument list, the list rewritten, and the context's
+/// bound expressions, rewritten once however many instances share them.
 pub(crate) struct Call<'a, V> {
     pub f: FuncId,
     pub ctx: u32,
@@ -56,18 +56,19 @@ pub(crate) fn rewrite<K: Field, R: Rule<K>>(r: &mut R, roots: &[ExprId]) -> Vec<
     let mut index: HashMap<(FuncId, u32, ArgList), u32> = HashMap::default();
     let mut place: Vec<(u32, u32)> = Vec::with_capacity(cone.nodes.len());
     let mut start: Vec<u32> = Vec::new();
+    let mut found: Vec<(u32, (ExprId, u32))> = Vec::new();
     let g = r.source();
     for &e in &cone.nodes {
         place.push(match *g.node(e) {
             Node::Call(o, l) => {
+                let (f, k) = g.output(o);
                 let fresh = index.len() as u32;
-                let s = *index
-                    .entry((g.output(o).0, g.context_of(o), l))
-                    .or_insert(fresh);
+                let s = *index.entry((f, g.context_of(o), l)).or_insert(fresh);
                 if s == fresh {
                     start.push(0);
                 }
                 start[s as usize] += 1;
+                found.push((s, (e, k)));
                 (s, start[s as usize] - 1)
             }
             _ => (u32::MAX, 0),
@@ -79,10 +80,10 @@ pub(crate) fn rewrite<K: Field, R: Rule<K>>(r: &mut R, roots: &[ExprId]) -> Vec<
     }
     start.push(sum);
     let mut outs: Vec<(ExprId, u32)> = vec![(ExprId(0), 0); sum as usize];
-    for (&e, &(s, k)) in cone.nodes.iter().zip(&place) {
-        if let Node::Call(o, _) = *g.node(e) {
-            outs[(start[s as usize] + k) as usize] = (e, g.output(o).1);
-        }
+    let mut next = start.clone();
+    for (s, call) in found {
+        outs[next[s as usize] as usize] = call;
+        next[s as usize] += 1;
     }
     // per instance, where its calls' values start in `done`
     let mut at_done: Vec<u32> = vec![u32::MAX; index.len()];
