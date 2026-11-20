@@ -116,12 +116,10 @@ struct Count {
 }
 impl Log for Count {
     fn log(&self, _: Level, message: &str) {
-        if message.contains("specialized over its run-time choices") {
+        if message.contains("specialized over run-time choices") {
             self.built.fetch_add(1, Ordering::Relaxed);
         }
-        if message.contains("run-time choices thrash")
-            || message.contains("run-time choices shorten it too little")
-        {
+        if message.contains("specialization over run-time choices off") {
             self.off.fetch_add(1, Ordering::Relaxed);
         }
     }

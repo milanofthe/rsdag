@@ -29,6 +29,9 @@ impl ChoicePolicy {
         flip_cooldown: 32,
         thrash_flips: 8,
         thrash_evals: 8,
+        compile_after: 16,
+        compile_budget: 4,
+        interp_cost: 4,
     };
 }
 
@@ -53,9 +56,6 @@ impl Policy {
         kick_after: 3,
         eager_pass: Some(Duration::from_millis(10)),
         choices: ChoicePolicy::DEFAULT,
-        spec_compile_after: 16,
-        spec_compile_budget: 4,
-        spec_interp_cost: 4,
         variants: VariantPolicy::DEFAULT,
     };
 }
