@@ -45,7 +45,7 @@ pub enum Notation {
 
 /// A number as a label: an integer as one, else four significant digits,
 /// in exponent form beyond `1e5` or below `1e-3`.
-pub fn number(x: f64) -> String {
+fn number(x: f64) -> String {
     if x.fract() == 0.0 && x.abs() < LABEL_INT_MAX {
         return format!("{}", x as i64);
     }

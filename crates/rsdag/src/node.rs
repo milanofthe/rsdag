@@ -54,7 +54,7 @@ pub enum CmpOp {
 
 impl CmpOp {
     /// The operator as written, `>`, `>=`, ...
-    pub fn symbol(self) -> &'static str {
+    pub(crate) fn symbol(self) -> &'static str {
         match self {
             CmpOp::Gt => ">",
             CmpOp::Ge => ">=",
@@ -492,7 +492,7 @@ impl Elementary {
     }
 
     /// The reduction an extremum is, `None` for an op.
-    pub fn reduction(self) -> Option<ReduceOp> {
+    pub(crate) fn reduction(self) -> Option<ReduceOp> {
         match self {
             Elementary::Min => Some(ReduceOp::Min),
             Elementary::Max => Some(ReduceOp::Max),

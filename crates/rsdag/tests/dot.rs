@@ -1,7 +1,7 @@
 //! The graph view as data: one node per expression, a shared subexpression
 //! once, the bodies of the calls in frames.
 
-use rsdag::dot::{number, GraphView, Kind};
+use rsdag::dot::{GraphView, Kind};
 use rsdag::{Graph, ParamRole, F64};
 
 #[test]
@@ -30,12 +30,19 @@ fn a_shared_subexpression_is_one_node() {
 
 #[test]
 fn numbers_are_short() {
-    assert_eq!(number(0.0), "0");
-    assert_eq!(number(-3.0), "-3");
-    assert_eq!(number(0.5), "0.5");
-    assert_eq!(number(0.001), "0.001");
-    assert_eq!(number(5.5406e34), "5.541e34");
-    assert_eq!(number(1.0 / 3.0), "0.3333");
+    for (x, want) in [
+        (0.0, "0"),
+        (-3.0, "-3"),
+        (0.5, "0.5"),
+        (0.001, "0.001"),
+        (5.5406e34, "5.541e34"),
+        (1.0 / 3.0, "0.3333"),
+    ] {
+        let mut g: Graph<F64> = Graph::new();
+        let c = g.konst_f64(x);
+        let d = GraphView::new(&g).root(c, "").data();
+        assert_eq!(d.nodes[0].label, want);
+    }
 }
 
 #[test]
