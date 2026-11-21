@@ -32,8 +32,8 @@ pub struct ChoicePolicy {
     /// rebuilt (rebuilding is O(tape); a cold Newton cascade hops regions).
     pub flip_cooldown: u64,
     /// Choices thrash, and specialization goes off, once at least
-    /// `thrash_flips` flips came at one per fewer than `thrash_evals`
-    /// evaluations.
+    /// `thrash_flips` specializations were dropped and their flips came at
+    /// one per fewer than `thrash_evals` evaluations.
     pub thrash_flips: u64,
     pub thrash_evals: u64,
     /// Guard-holding evaluations before a specialization is compiled.
@@ -65,6 +65,9 @@ pub(crate) struct Specializer {
     unpinned: Vec<bool>,
     evals: u64,
     pub(crate) flips: u64,
+    /// Specializations dropped: region changes, however many evaluations
+    /// of a batch flipped together in one.
+    drops: u64,
     /// No specialization is rebuilt before this evaluation count.
     cooldown_until: u64,
     /// Choices thrash, or the shrink is too small: the full form serves.
@@ -129,7 +132,8 @@ impl Specializer {
         self.stable = 0;
         self.cool(policy);
         self.flips += n;
-        if self.flips >= policy.thrash_flips && self.evals < self.flips * policy.thrash_evals {
+        self.drops += 1;
+        if self.drops >= policy.thrash_flips && self.evals < self.flips * policy.thrash_evals {
             self.turn_off("choices thrash");
             return false;
         }
