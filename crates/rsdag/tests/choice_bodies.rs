@@ -174,6 +174,19 @@ fn bodies_specialize_over_their_choices_and_stay_the_full_bodies() {
         "built, and built again without what flipped: {built}"
     );
     assert_eq!(SINK.off.load(Ordering::Relaxed), 0, "drift keeps it on");
+    // Every instance crossing its regions in one step early in the run,
+    // then holding: one region change, the specialization rebuilt, not
+    // thrash however many instances flipped together.
+    run(64, 30, |_, k| if k == 4 { 1.2 } else { 0.0 });
+    assert!(
+        SINK.built.load(Ordering::Relaxed) > built,
+        "rebuilt after the change"
+    );
+    assert_eq!(
+        SINK.off.load(Ordering::Relaxed),
+        0,
+        "one change of every instance keeps it on"
+    );
     // Instances holding their regions, then jumping across every region at
     // every step: the selects flip until pinning the rest does not pay,
     // and the specialization goes off.
