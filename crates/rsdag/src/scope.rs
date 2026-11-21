@@ -7,7 +7,7 @@
 //! parameters is the order they were asked for rather than an accident of
 //! symbol ids, and a consumer reads what each parameter and output stands
 //! for off the function. Closing interns: the same parameters, roles and
-//! outputs give the same function (see [`Graph::define`]).
+//! outputs give the same function, whatever its name.
 //!
 //! A scope derefs to the graph it builds in, so the ordinary constructors
 //! work on it directly:
