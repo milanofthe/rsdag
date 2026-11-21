@@ -2995,11 +2995,23 @@ impl Program {
                     ..
                 } => {
                     let start = gather(&mut arg_pool, &mut max_args, o);
+                    // The positions where an instance's operand is not the
+                    // first instance's: two operands of one op in one slot
+                    // are one value.
+                    let np = n_pure as usize;
+                    let own = arg_pool.len() as u32;
+                    for j in 0..np {
+                        if (1..n_groups as usize).any(|g| o[g * np + j] != o[j]) {
+                            arg_pool.push(j as u32);
+                        }
+                    }
                     Op::CallProlog {
                         bundle,
                         start,
                         n_groups,
                         n_pure,
+                        own,
+                        n_own: arg_pool.len() as u32 - own,
                         args: 0,
                     }
                 }

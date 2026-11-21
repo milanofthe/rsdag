@@ -98,12 +98,18 @@ pub enum Op {
     },
     /// The prolog of `bundles[b]` for `n_groups` instances, their pure
     /// arguments group-major at `arg_pool[start ..]`, `n_pure` per group:
-    /// instance `g`'s state to `dst + g*state_len ..`.
+    /// instance `g`'s state to `dst + g*state_len ..`. The pure arguments
+    /// in which the instances can differ are the `n_own` positions at
+    /// `arg_pool[own ..]`; at every other position all instances read one
+    /// operand, so only these decide which instances share a state row
+    /// (see [`calls::share_rows`]).
     CallProlog {
         bundle: u32,
         start: u32,
         n_groups: u32,
         n_pure: u32,
+        own: u32,
+        n_own: u32,
         args: u32,
     },
     /// A matrix-vector product: `m` rows of `n` in `a` against `x`, the rows
@@ -596,10 +602,13 @@ impl Tape {
                     start,
                     n_groups,
                     n_pure,
+                    own,
+                    n_own,
                     ..
                 } => format!(
-                    "CallProlog(b{bundle}, {n_groups} x [{}]) -> {n_groups} x {}",
+                    "CallProlog(b{bundle}, {n_groups} x [{}], own {:?}) -> {n_groups} x {}",
                     list(start, n_groups * n_pure),
+                    self.pool(own, n_own),
                     self.bundles[bundle as usize].state_len()
                 ),
                 Op::Gemv { a, x, m, n, acc } => {
@@ -1052,6 +1061,7 @@ impl Tape {
                 n_groups,
                 n_pure,
                 args,
+                ..
             } => {
                 let sl = self.bundles[bundle as usize].state_len() as u32;
                 (
@@ -1069,6 +1079,10 @@ impl Tape {
             }
             _ => panic!("op {i} is not a call"),
         };
+        let own = match *op {
+            Op::CallProlog { own, n_own, .. } => Some(self.pool(own, n_own)),
+            _ => None,
+        };
         let b = &*self.bundles[bundle as usize];
         calls::Call {
             bundle: b,
@@ -1078,6 +1092,7 @@ impl Tape {
             n_out: n_out as usize,
             operands: Some(self.pool(start, n_groups * n_in)),
             places,
+            own,
             args: args as usize,
             out: self.dst[i] as usize,
             state: state as usize,

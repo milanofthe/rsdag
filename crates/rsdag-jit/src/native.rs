@@ -1611,6 +1611,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
             n_out: c.n_out,
             operands: table.then(|| self.keep(operands)),
             places: c.places.filter(|_| table).map(|p| self.keep(p)),
+            own: c.own.map(|o| self.keep(o)),
             args: c.args,
             out: c.out,
             state: c.state,
