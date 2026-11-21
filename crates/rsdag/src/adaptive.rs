@@ -54,14 +54,17 @@ pub struct Policy {
     /// Evaluations before the background compile is kicked off: a couple of
     /// interpreted passes filter out one-shot tapes.
     pub kick_after: u32,
-    /// An interpreted pass at least this long marks the tape as large: its
-    /// compile is kicked at once, and while it is in flight a pass waits
-    /// for it, at most as long as the slowest interpreted pass so far,
-    /// before it interprets. One interpreted pass of a large tape costs
-    /// about what compiling it does, so waiting loses at most one pass and
-    /// saves every pass the compile would otherwise run alongside. `None`
-    /// counts evaluations alone.
-    pub eager_pass: Option<Duration>,
+    /// Whether a pass waits for the native code rather than interpret
+    /// where that is expected to finish it sooner: while the compile is in
+    /// flight, a pass waits when the compile's expected remainder is
+    /// shorter than an interpreted pass (the slowest so far, before any
+    /// the tape's ops times [`INTERPRETED_NS_PER_OP`](crate::constants::INTERPRETED_NS_PER_OP)),
+    /// at most as long as that pass, before it interprets; and a tape whose
+    /// one interpreted pass is expected to cost more than its whole compile
+    /// ([`COMPILE_NS_PER_OP`](crate::constants::COMPILE_NS_PER_OP) per op of
+    /// it and its bodies) has the compile kicked at its first pass. A pass
+    /// so loses at most what it would have spent interpreting.
+    pub wait: bool,
     /// How the program specializes over its region choices (its bodies'
     /// are [`VariantPolicy::choices`](crate::variant::VariantPolicy::choices)).
     pub choices: ChoicePolicy,
@@ -86,6 +89,11 @@ struct Jit {
     evals: AtomicU32,
     /// The slowest pass before the native code, in nanoseconds.
     slowest: AtomicU64,
+    /// An interpreted pass and the compile, as expected before either is
+    /// measured, and when the compile was kicked.
+    pass_prior: Duration,
+    compile_expected: Duration,
+    kicked_at: OnceLock<Instant>,
     /// Set and notified when the compile lands, for the passes waiting.
     landed: (Mutex<bool>, Condvar),
 }
@@ -167,6 +175,7 @@ impl Adaptive {
                 spec: None,
             }))
         });
+        let (pass_prior, compile_expected) = expected(&tape);
         Adaptive {
             tape: Arc::new(tape),
             policy,
@@ -177,6 +186,9 @@ impl Adaptive {
                 kicked: AtomicBool::new(false),
                 evals: AtomicU32::new(0),
                 slowest: AtomicU64::new(0),
+                pass_prior,
+                compile_expected,
+                kicked_at: OnceLock::new(),
                 landed: (Mutex::new(false), Condvar::new()),
             }),
         }
@@ -495,18 +507,20 @@ impl Adaptive {
         }));
     }
 
-    /// Whether an interpreted pass has marked the tape as large (see
-    /// [`Policy::eager_pass`]).
-    fn large(&self) -> bool {
-        let slowest = Duration::from_nanos(self.jit.slowest.load(Ordering::Relaxed));
-        self.policy.eager_pass.is_some_and(|d| slowest >= d)
+    /// What an interpreted pass is expected to take: the slowest so far,
+    /// before any the prior (see [`Policy::wait`]).
+    fn pass(&self) -> Duration {
+        match self.jit.slowest.load(Ordering::Relaxed) {
+            0 => self.jit.pass_prior,
+            ns => Duration::from_nanos(ns),
+        }
     }
 
-    /// The start of a pass to time: one before the native code, where a
-    /// large tape is to be told from a small one.
+    /// The start of a pass to time: one before the native code, where
+    /// waiting for it is weighed against interpreting.
     fn clock(&self) -> Option<Instant> {
         let timed = self.policy.jit
-            && self.policy.eager_pass.is_some()
+            && self.policy.wait
             && self.compiler.is_some()
             && self.jit.compiled.get().is_none();
         timed.then(Instant::now)
@@ -520,36 +534,38 @@ impl Adaptive {
         }
     }
 
-    /// A large tape's compile in flight: wait for it to land, at most as
-    /// long as its slowest interpreted pass, the one that would otherwise
-    /// run alongside it.
+    /// The compile in flight and expected to land before an interpreted
+    /// pass would end: wait for it, at most as long as that pass.
     fn await_native(&self) {
-        if !self.jit.kicked.load(Ordering::Relaxed)
-            || self.jit.compiled.get().is_some()
-            || !self.large()
-        {
+        let Some(kicked) = self.jit.kicked_at.get() else {
+            return;
+        };
+        let pass = self.pass();
+        let remaining = self.jit.compile_expected.saturating_sub(kicked.elapsed());
+        if !self.policy.wait || self.jit.compiled.get().is_some() || remaining >= pass {
             return;
         }
-        let wait = Duration::from_nanos(self.jit.slowest.load(Ordering::Relaxed));
         let (lock, cv) = &self.jit.landed;
         let landed = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = cv.wait_timeout_while(landed, wait, |landed| !*landed);
+        let _ = cv.wait_timeout_while(landed, pass, |landed| !*landed);
     }
 
-    /// Count the call; past the threshold, or once a pass has shown the
-    /// tape large, queue the full-tape compile. A failed compile leaves the
-    /// interpreter in place for good.
+    /// Count the call; past the threshold, or at once where a pass is
+    /// expected to cost more than the compile, queue the full-tape compile.
+    /// A failed compile leaves the interpreter in place for good.
     fn maybe_kick(&self) {
         let Some(compiler) = self.compiler.clone() else {
             return;
         };
         let evals = self.jit.evals.fetch_add(1, Ordering::Relaxed) + 1;
+        let costly = self.policy.wait && self.pass() >= self.jit.compile_expected;
         if !self.policy.jit
-            || (evals < self.policy.kick_after && !self.large())
+            || (evals < self.policy.kick_after && !costly)
             || self.jit.kicked.swap(true, Ordering::Relaxed)
         {
             return;
         }
+        let _ = self.jit.kicked_at.set(Instant::now());
         let (tape, jit) = (self.tape.clone(), self.jit.clone());
         let c = compiler.clone();
         compiler.submit(Box::new(move || {
@@ -634,6 +650,33 @@ impl Session {
             }
         }
     }
+}
+
+/// What an interpreted main pass of `tape` and its compile are expected to
+/// take before either is measured: its ops, a call's as its body's main
+/// ops per instance, at [`INTERPRETED_NS_PER_OP`](crate::constants::INTERPRETED_NS_PER_OP);
+/// its ops and its bodies' at [`COMPILE_NS_PER_OP`](crate::constants::COMPILE_NS_PER_OP).
+fn expected(tape: &Tape) -> (Duration, Duration) {
+    let body = |b: u32| tape.bundles()[b as usize].body();
+    let pass: usize = (tape.ops()[tape.prolog_len()..].iter())
+        .map(|op| match *op {
+            crate::tape::Op::Call {
+                bundle, n_groups, ..
+            } => body(bundle).map_or(1, |b| b.n_ops() - b.prolog_len()) * n_groups as usize,
+            _ => 1,
+        })
+        .sum();
+    let bodies: usize = tape
+        .bundles()
+        .iter()
+        .filter_map(|b| b.body())
+        .map(Tape::n_ops)
+        .sum();
+    let ns = |n: usize, per: f64| Duration::from_nanos((n as f64 * per) as u64);
+    (
+        ns(pass, f64::from(crate::constants::INTERPRETED_NS_PER_OP)),
+        ns(tape.n_ops() + bodies, crate::constants::COMPILE_NS_PER_OP),
+    )
 }
 
 /// The Vec-buffer forms over a [`Program`]: the buffers grow to its

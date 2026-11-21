@@ -114,27 +114,50 @@ fn without_the_jit_it_stays_interpreted_and_correct() {
     assert!(same(&o, &ro));
 }
 
+/// One body called on many instances, its calls summed: one interpreted
+/// pass is expected to cost far more than compiling the program, so the
+/// first pass kicks the compile and waits for it.
 #[test]
-fn a_long_pass_kicks_the_compile_at_once() {
-    use std::time::Duration;
-    for (eager, compiled) in [(Some(Duration::ZERO), true), (None, false)] {
-        let (tape, ins, _) = program(11);
+fn a_pass_dearer_than_the_compile_waits_for_it() {
+    use rsdag::{Node, SymbolId};
+    let mut g: Graph<F64> = Graph::new();
+    let x = g.sym("x");
+    let Node::Symbol(xs) = *g.node(x) else {
+        unreachable!()
+    };
+    let mut y = x;
+    for k in 0..32 {
+        let w = g.konst_f64(0.9 + 1e-3 * k as f64);
+        let t = g.tanh(y);
+        y = g.mul(w, t);
+    }
+    let f = g.define_func("f", vec![xs], vec![y]);
+    let n = 20000;
+    let mut syms: Vec<SymbolId> = Vec::new();
+    let mut calls = Vec::new();
+    for k in 0..n {
+        let e = g.sym(&format!("x{k}"));
+        let Node::Symbol(s) = *g.node(e) else {
+            unreachable!()
+        };
+        syms.push(s);
+        calls.push(g.call(f, 0, &[e]));
+    }
+    let sum = g.reduce(rsdag::ReduceOp::Sum, calls);
+    let ins: Vec<f64> = (0..n).map(|k| 1e-4 * k as f64).collect();
+    for wait in [true, false] {
+        let tape = Tape::compile(&g, &[sum], &syms);
         let policy = Policy {
             kick_after: u32::MAX,
-            eager_pass: eager,
+            wait,
             ..Policy::default()
         };
         let a = Adaptive::new(tape, policy, Some(rsdag_jit::compiler()));
-        let reference = a.tape();
         let (mut w, mut o, mut rw, mut ro) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        // The first pass shows the tape large, the second kicks its compile.
-        for _ in 0..2 {
-            a.eval(&ins, &mut w, &mut o);
-        }
-        rsdag_jit::background::drain();
-        assert_eq!(a.native().is_some(), compiled, "eager {eager:?}");
         a.eval(&ins, &mut w, &mut o);
-        reference.eval(&ins, &mut rw, &mut ro);
-        assert!(same(&o, &ro), "eager {eager:?}");
+        rsdag_jit::background::drain();
+        assert_eq!(a.native().is_some(), wait, "wait {wait}");
+        a.tape().eval(&ins, &mut rw, &mut ro);
+        assert!(same(&o, &ro), "wait {wait}");
     }
 }
