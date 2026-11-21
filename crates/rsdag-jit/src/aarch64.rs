@@ -28,6 +28,7 @@ const LAYOUT: u32 = 21;
 const COND_EQ: u32 = 0x0;
 const COND_NE: u32 = 0x1;
 const COND_MI: u32 = 0x4; // lt
+const COND_PL: u32 = 0x5; // not lt
 const COND_VS: u32 = 0x6; // unordered
 const COND_LS: u32 = 0x9; // le
 const COND_GE: u32 = 0xA;
@@ -257,9 +258,8 @@ impl A64 {
         self.ldp(0, 1, K, k(LN_K_GUARDS)); // LN_FLOOR, LN_AT_FLOOR
         self.ldr(2, K, k(LN_K_GUARDS + 2)); // infinity
         self.fcmp(x, 2);
-        self.fcsel(d, x, d, COND_EQ);
-        self.fcmp(x, x);
-        self.fcsel(d, x, d, COND_VS);
+        self.fcsel(d, x, d, COND_PL); // not below infinity
+
         self.fcmp(x, 0);
         self.fcsel(d, 1, d, COND_LS);
     }

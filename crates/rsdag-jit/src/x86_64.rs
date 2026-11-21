@@ -382,13 +382,19 @@ impl<const L: usize> X64<L> {
     fn madd(&mut self, d: u8, a: u8, b: Operand, c: Operand) {
         use Arith::*;
         if !self.fma {
+            // the product into `d`, or into `xmm0` where `d` holds `c`
+            let p = match c {
+                Operand::R(c) if c == d => 0,
+                _ => d,
+            };
             match b {
-                Operand::R(b) => self.f(Mul, 0, a, b),
-                Operand::C(b) => self.fc(Mul, 0, a, b),
+                Operand::R(b) => self.f(Mul, p, a, b),
+                Operand::C(b) => self.fc(Mul, p, a, b),
             }
             match c {
-                Operand::R(c) => self.f(Add, d, 0, c),
-                Operand::C(c) => self.fc(Add, d, 0, c),
+                Operand::R(_) if p == 0 => self.f(Add, d, d, 0),
+                Operand::R(c) => self.f(Add, d, d, c),
+                Operand::C(c) => self.fc(Add, d, d, c),
             }
             return;
         }
@@ -462,7 +468,7 @@ impl<const L: usize> X64<L> {
         self.b(n as u8);
     }
     /// `xmm0 = (x pred c) ? all ones : 0`, `c` from the pool, `pred` one
-    /// of VEX's 32 (of them `EQ_OQ`, `LT_OQ`, `LE_OQ`, `GT_OQ` without AVX).
+    /// of VEX's 32 (of them `LT_OQ`, `LE_OQ`, `NLT_UQ`, `GT_OQ` without AVX).
     fn cmp_c(&mut self, x: u8, c: f64, pred: u8) {
         if self.avx {
             self.vex(Self::PP, 1, 0, x, 0);
@@ -668,9 +674,8 @@ impl<const L: usize> X64<L> {
         self.fc(Sub, b, b, LN_K_MAGIC); // kd
         self.int_c(Int::And, c, a, LN_EXP_MASK);
         self.int(Int::Sub, e, x, c); // z
-        self.shift(false, c, a, LN_SHIFT);
-        self.int_c(Int::And, c, c, LN_INDEX_MASK);
-        self.shift(true, c, c, LN_ROW_SHIFT);
+        self.shift(false, c, a, LN_SHIFT - LN_ROW_SHIFT);
+        self.int_c(Int::And, c, c, LN_INDEX_MASK << LN_ROW_SHIFT); // the row's offset
         self.rows(LN_TABLE.as_ptr().cast(), c, &[a, c, f, d], s); // invc, c, logc
         self.f(Sub, e, e, c);
         self.f(Mul, e, e, a); // r
@@ -693,10 +698,8 @@ impl<const L: usize> X64<L> {
         self.f(Mul, s, s, e);
         self.madd(a, s, R(b), R(a));
         self.f(Add, d, a, c);
-        // infinity and NaN kept, the floor
-        self.cmp_c(x, f64::INFINITY, EQ_OQ);
-        self.keep_x(d, x);
-        self.cmp_mask(x, x, UNORD_Q);
+        // infinity and NaN kept (not below infinity), the floor
+        self.cmp_c(x, f64::INFINITY, NLT_UQ);
         self.keep_x(d, x);
         self.fconst(s, LN_AT_FLOOR);
         self.cmp_c(x, LN_FLOOR, LE_OQ);
@@ -741,9 +744,9 @@ enum Int {
     Xor = 0xEF,
 }
 
-// VEX comparison predicates, ordered (false on a NaN) but `UNORD_Q`; the
-// legacy `cmpsd` has the low three bits of the first four.
-const EQ_OQ: u8 = 0x00;
+// VEX comparison predicates, ordered (false on a NaN) but `UNORD_Q` and
+// `NLT_UQ`; the legacy `cmpsd` has their low three bits, but for `GT_OQ`.
+const NLT_UQ: u8 = 0x15;
 const LT_OQ: u8 = 0x11;
 const LE_OQ: u8 = 0x12;
 const UNORD_Q: u8 = 0x03;
