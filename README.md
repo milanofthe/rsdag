@@ -3,8 +3,8 @@
 Expression graph backend for hybrid event and continuous ODE and DAE
 simulators: a hash-consed expression graph with functions and calls,
 forward and reverse differentiation, a flat instruction tape split into a
-per-parameter prolog and a per-iteration main phase, an interpreter over
-any scalar type, and a native code backend for AArch64 and x86-64.
+per-parameter prolog and a per-iteration main phase, an interpreter, and
+a native code backend for AArch64 and x86-64.
 
 ![Pipeline](docs/diagrams/pipeline.svg)
 

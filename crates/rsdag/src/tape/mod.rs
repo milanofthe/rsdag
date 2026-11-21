@@ -22,7 +22,7 @@
 //! - **The special functions.** [`crate::semantics::digamma`],
 //!   [`crate::semantics::trigamma`] and [`crate::semantics::rand_uniform`]
 //!   are defined there, not taken from a platform library.
-//! - **The fold orders.** [`crate::semantics::reduce_slice_t`] and
+//! - **The fold orders.** [`crate::semantics::reduce_slice`] and
 //!   [`crate::semantics::dot_slice`] fold with four accumulators merged as
 //!   `(a0 + a1) + (a2 + a3)`, then the tail in order; a kernel is those
 //!   folds row by row.
@@ -33,7 +33,6 @@ use std::sync::Arc;
 
 use crate::extern_fn::{ExternBundle, Instances};
 use crate::node::{BinOp, CmpOp, ReduceOp, UnaryOp};
-use crate::scalar::Scalar;
 
 /// The tag bit of an operand that names an input rather than a slot.
 pub const INPUT: u32 = 1 << 31;
@@ -185,12 +184,12 @@ impl Fold {
     /// The product `d` folded against the accumulator `a` (unused by a
     /// plain or negating fold).
     #[inline]
-    pub fn fold<T: Scalar>(self, a: T, d: T) -> T {
+    pub fn fold(self, a: f64, d: f64) -> f64 {
         match self.0 & Self::KIND {
             0 => d,
-            1 => a.sub(d),
-            2 => a.add(d),
-            _ => d.neg(),
+            1 => a - d,
+            2 => a + d,
+            _ => -d,
         }
     }
     /// Whether the fold reads the accumulator operand.
@@ -849,37 +848,35 @@ impl Tape {
     /// array, a right-hand side, a numpy array). `work` must be at least
     /// [`work_len`](Self::work_len) long, `out` exactly
     /// [`out_len`](Self::out_len).
-    pub fn eval_into<T: Scalar>(&self, inputs: &[T], work: &mut [T], out: &mut [T]) {
+    pub fn eval_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]) {
         assert!(work.len() >= self.work_len(), "work buffer too short");
         assert_eq!(out.len(), self.out_len(), "output buffer of the wrong size");
         self.run_range(inputs, work, 0, self.ops.len(), &mut NoTrace);
         self.write(inputs, work, out);
     }
 
-    /// Evaluate the tape in any execution scalar (`f64`, `f32`,
-    /// `Complex<f64>`): constants convert from their `f64` lowering, every
-    /// op goes through [`Scalar`]'s reference arithmetic for `T`, so a value
-    /// cannot depend on which scalar computed it beyond the scalar itself.
-    /// `work` is resized and reused; `out` receives one value per output.
+    /// Evaluate the tape, every op through the reference arithmetic of
+    /// [`crate::semantics`]. `work` is resized and reused; `out` receives one
+    /// value per output.
     ///
     /// The `Vec` form is the convenience over
     /// [`eval_into`](Self::eval_into), the one a caller in an inner loop wants.
-    pub fn eval<T: Scalar>(&self, inputs: &[T], work: &mut Vec<T>, out: &mut Vec<T>) {
+    pub fn eval(&self, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
         self.eval_with(inputs, work, out, &mut NoTrace);
     }
 
     /// [`eval`](Self::eval) with every `Select` decision reported to `sink`;
     /// a `Vec<u8>` sink is the choice trace [`specialize`](Self::specialize)
     /// takes (the caller clears it first).
-    pub fn eval_with<T: Scalar, S: TraceSink>(
+    pub fn eval_with<S: TraceSink>(
         &self,
-        inputs: &[T],
-        work: &mut Vec<T>,
-        out: &mut Vec<T>,
+        inputs: &[f64],
+        work: &mut Vec<f64>,
+        out: &mut Vec<f64>,
         sink: &mut S,
     ) {
         if work.len() < self.buffer_len() {
-            work.resize(self.buffer_len(), T::zero());
+            work.resize(self.buffer_len(), 0.0);
         }
         self.run_range(inputs, work, 0, self.ops.len(), sink);
         self.collect(inputs, work, out);
@@ -890,13 +887,13 @@ impl Tape {
         self.n_work + self.max_args + self.lent
     }
 
-    fn collect<T: Scalar>(&self, inputs: &[T], work: &[T], out: &mut Vec<T>) {
+    fn collect(&self, inputs: &[f64], work: &[f64], out: &mut Vec<f64>) {
         out.clear();
         out.extend(self.outputs.iter().map(|&k| read(inputs, work, k)));
     }
 
     /// [`collect`](Self::collect) into a slice the caller sized.
-    fn write<T: Scalar>(&self, inputs: &[T], work: &[T], out: &mut [T]) {
+    fn write(&self, inputs: &[f64], work: &[f64], out: &mut [f64]) {
         write_outputs(&self.outputs, inputs, work, out);
     }
 
@@ -919,9 +916,9 @@ impl Tape {
     /// buffer length; nothing is cleared, every slot is written before read).
     /// A Newton loop calls this once per parameter binding, then
     /// [`eval_main`](Self::eval_main) per iteration over the *same* buffer.
-    pub fn eval_prolog<T: Scalar>(&self, inputs: &[T], work: &mut Vec<T>) {
+    pub fn eval_prolog(&self, inputs: &[f64], work: &mut Vec<f64>) {
         if work.len() < self.buffer_len() {
-            work.resize(self.buffer_len(), T::zero());
+            work.resize(self.buffer_len(), 0.0);
         }
         self.run_range(inputs, work, 0, self.prolog_ops, &mut NoTrace);
     }
@@ -929,15 +926,15 @@ impl Tape {
     /// Evaluate the main phase over a `work` buffer prepared by
     /// [`eval_prolog`](Self::eval_prolog) (prolog results are pinned slots, so
     /// repeated main passes may not clear or resize the buffer).
-    pub fn eval_main<T: Scalar>(&self, inputs: &[T], work: &mut [T], out: &mut Vec<T>) {
-        out.resize(self.out_len(), T::zero());
+    pub fn eval_main(&self, inputs: &[f64], work: &mut [f64], out: &mut Vec<f64>) {
+        out.resize(self.out_len(), 0.0);
         self.eval_main_into(inputs, work, out);
     }
 
     /// [`eval_main`](Self::eval_main) into a slice the caller sized: the form
     /// a Newton loop uses, one prolog per parameter binding and this per
     /// iteration, with no allocation in either.
-    pub fn eval_main_into<T: Scalar>(&self, inputs: &[T], work: &mut [T], out: &mut [T]) {
+    pub fn eval_main_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]) {
         assert!(
             work.len() >= self.work_len(),
             "eval_main requires a work buffer prepared by eval_prolog"
@@ -950,11 +947,11 @@ impl Tape {
     /// [`eval_main_into`](Self::eval_main_into), each `Select` of the main
     /// phase reporting its choice to `sink` in stream order: the trace
     /// [`specialize_main`](Self::specialize_main) shortens against.
-    pub fn eval_main_with<T: Scalar, S: TraceSink>(
+    pub fn eval_main_with<S: TraceSink>(
         &self,
-        inputs: &[T],
-        work: &mut [T],
-        out: &mut [T],
+        inputs: &[f64],
+        work: &mut [f64],
+        out: &mut [f64],
         sink: &mut S,
     ) {
         assert!(
@@ -967,17 +964,17 @@ impl Tape {
     }
 
     /// [`eval_prolog`](Self::eval_prolog) over a buffer the caller sized.
-    pub fn eval_prolog_into<T: Scalar>(&self, inputs: &[T], work: &mut [T]) {
+    pub fn eval_prolog_into(&self, inputs: &[f64], work: &mut [f64]) {
         assert!(work.len() >= self.work_len(), "work buffer too short");
         self.run_range(inputs, work, 0, self.prolog_ops, &mut NoTrace);
     }
 
     /// Execute ops `lo..hi` over a fully-sized work buffer, feeding each
     /// `Select` decision to `sink` (the no-op sink costs nothing).
-    fn run_range<T: Scalar, S: TraceSink>(
+    fn run_range<S: TraceSink>(
         &self,
-        inputs: &[T],
-        work: &mut [T],
+        inputs: &[f64],
+        work: &mut [f64],
         lo: usize,
         hi: usize,
         sink: &mut S,
@@ -986,10 +983,10 @@ impl Tape {
         let reach = self.interp.reach;
         if inputs.len() < reach {
             // the ops read their inputs unchecked: the missing ones as NaN
-            return crate::scratch::with(|all: &mut Vec<T>| {
+            return crate::scratch::with(|all: &mut Vec<f64>| {
                 all.clear();
                 all.extend_from_slice(inputs);
-                all.resize(reach, T::nan());
+                all.resize(reach, f64::NAN);
                 self.run_range(all, work, lo, hi, sink)
             });
         }
@@ -1010,20 +1007,14 @@ impl Tape {
                 if !S::RECORDS && r.hi as usize <= hi {
                     let slots = Shared::new(work);
                     let piece = |k: usize| {
-                        crate::scratch::with_len(self.max_args, T::zero(), |s| {
+                        crate::scratch::with_len(self.max_args, 0.0, |s| {
                             let ops = r.piece(k);
                             // SAFETY: a region's pieces hold no kernel and
                             // write slots no other piece reads or writes
                             // (`emit`); the inputs reach `reach`.
                             unsafe {
                                 let p = slots.ptr();
-                                self.lanes::<T, NoTrace, 1>(
-                                    ops,
-                                    p,
-                                    inputs.as_ptr(),
-                                    s,
-                                    &mut NoTrace,
-                                )
+                                self.lanes::<NoTrace, 1>(ops, p, inputs.as_ptr(), s, &mut NoTrace)
                             };
                         })
                     };
@@ -1066,7 +1057,7 @@ impl Tape {
                 // SAFETY: `work` holds the slots, the inputs reach `reach`.
                 i = unsafe {
                     let p = work.as_mut_ptr();
-                    self.lanes::<T, S, 1>(i..end, p, inputs.as_ptr(), scratch, sink)
+                    self.lanes::<S, 1>(i..end, p, inputs.as_ptr(), scratch, sink)
                 };
                 continue;
             }
@@ -1091,8 +1082,8 @@ impl Tape {
                         (c, f.codes)
                     });
                     let base = work.as_mut_ptr();
-                    let av: &[T] = dense_slice(inputs, base, scratch, ra, m * n);
-                    let xv: &[T] = dense_slice(inputs, base, scratch, rx, n);
+                    let av: &[f64] = dense_slice(inputs, base, scratch, ra, m * n);
+                    let xv: &[f64] = dense_slice(inputs, base, scratch, rx, n);
                     // The kernel's outputs are fresh slots: no operand, the
                     // accumulator included, lives where they go.
                     let reads = [
@@ -1102,12 +1093,12 @@ impl Tape {
                     ];
                     let out = unsafe { out_block(base, work.len(), d, m, &reads) };
                     match rc {
-                        None => T::gemv(av, xv, m, n, out),
+                        None => crate::semantics::gemv(av, xv, m, n, out),
                         Some((rc, codes)) => {
-                            let cv: Option<&[T]> =
+                            let cv: Option<&[f64]> =
                                 rc.map(|rc| dense_slice(inputs, base, scratch, rc, m));
                             let codes = &self.arg_pool[codes as usize..codes as usize + m];
-                            T::gemv_fold(av, xv, m, n, cv, codes, out);
+                            crate::semantics::gemv_fold(av, xv, m, n, cv, codes, out);
                         }
                     }
                 }
@@ -1124,8 +1115,8 @@ impl Tape {
                         (c, f.codes)
                     });
                     let base = work.as_mut_ptr();
-                    let av: &[T] = dense_slice(inputs, base, scratch, ra, m * k);
-                    let bv: &[T] = dense_slice(inputs, base, scratch, rb, n * k);
+                    let av: &[f64] = dense_slice(inputs, base, scratch, ra, m * k);
+                    let bv: &[f64] = dense_slice(inputs, base, scratch, rb, n * k);
                     let reads = [
                         Some((ra, m * k)),
                         Some((rb, n * k)),
@@ -1133,12 +1124,12 @@ impl Tape {
                     ];
                     let out = unsafe { out_block(base, work.len(), d, m * n, &reads) };
                     match rc {
-                        None => T::gemm(av, bv, m, k, n, out),
+                        None => crate::semantics::gemm(av, bv, m, k, n, out),
                         Some((rc, codes)) => {
-                            let cv: Option<&[T]> =
+                            let cv: Option<&[f64]> =
                                 rc.map(|rc| dense_slice(inputs, base, scratch, rc, m * n));
                             let codes = &self.arg_pool[codes as usize..codes as usize + m * n];
-                            T::gemm_fold(av, bv, m, k, n, cv, codes, out);
+                            crate::semantics::gemm_fold(av, bv, m, k, n, cv, codes, out);
                         }
                     }
                 }
@@ -1151,8 +1142,8 @@ impl Tape {
                     let (ra, rb) =
                         dense_operands(inputs, work, scratch, &self.arg_pool, a, la, b, lb);
                     let base = work.as_mut_ptr();
-                    let av: &[T] = dense_slice(inputs, base, scratch, ra, la);
-                    let bv: &[T] = dense_slice(inputs, base, scratch, rb, lb);
+                    let av: &[f64] = dense_slice(inputs, base, scratch, ra, la);
+                    let bv: &[f64] = dense_slice(inputs, base, scratch, rb, lb);
                     let reads = [Some((ra, la)), Some((rb, lb)), None];
                     let out = unsafe { out_block(base, work.len(), d, lb, &reads) };
                     solve_batch_into(av, bv, n, k, count, out, lent);
@@ -1165,8 +1156,8 @@ impl Tape {
 
     /// Ops `ops` up to the first kernel, each over `B` instances side by
     /// side: lane `l` of slot `k` at `slots[k * B + l]`, of input `i` at
-    /// `inputs[i * B + l]`. Every lane runs the ops as the scalar `T`
-    /// defines them, one after the other in stream order, so each instance
+    /// `inputs[i * B + l]`. Every lane runs the ops as
+    /// [`crate::semantics`] defines them, one after the other in stream order, so each instance
     /// gets the bits it gets alone; `scratch` holds the widest list. Returns
     /// the op it stopped at.
     ///
@@ -1175,18 +1166,20 @@ impl Tape {
     /// `slots` holds `n_slots() * B` values and `inputs` `reach * B`;
     /// nothing else accesses the slots the ops write while this runs, nor
     /// writes those they read.
-    unsafe fn lanes<T: Scalar, S: TraceSink, const B: usize>(
+    unsafe fn lanes<S: TraceSink, const B: usize>(
         &self,
         ops: std::ops::Range<usize>,
-        slots: *mut T,
-        inputs: *const T,
-        scratch: &mut [T],
+        slots: *mut f64,
+        inputs: *const f64,
+        scratch: &mut [f64],
         sink: &mut S,
     ) -> usize {
-        use crate::semantics::reduce_slice_t;
+        use crate::semantics::{
+            binary_f64, cmp_bool, dot_slice, powi_f64, reduce_slice, unary_f64,
+        };
         use std::array::from_fn;
         // `Interp::new` checked every operand against the slots and `reach`.
-        let at = |k: u32| -> *const [T; B] {
+        let at = |k: u32| -> *const [f64; B] {
             match k & INPUT != 0 {
                 true => unsafe { inputs.add((k & !INPUT) as usize * B) }.cast(),
                 false => unsafe { slots.add(k as usize * B) }.cast(),
@@ -1196,48 +1189,48 @@ impl Tape {
         let list = |start: u32, len: u32| &self.arg_pool[start as usize..(start + len) as usize];
         let (start, end) = (ops.start, ops.end);
         for (j, x) in self.interp.ins[start..end].iter().enumerate() {
-            let v: [T; B] = match x.code {
+            let v: [f64; B] = match x.code {
                 Code::Kernel => return start + j,
                 Code::Const => {
                     let bits = u64::from(x.a) | u64::from(x.b) << u32::BITS;
-                    [T::from_f64(f64::from_bits(bits)); B]
+                    [f64::from_bits(bits); B]
                 }
                 Code::Add => {
                     let (a, b) = (get(x.a), get(x.b));
-                    from_fn(|l| a[l].add(b[l]))
+                    from_fn(|l| a[l] + b[l])
                 }
                 Code::Mul => {
                     let (a, b) = (get(x.a), get(x.b));
-                    from_fn(|l| a[l].mul(b[l]))
+                    from_fn(|l| a[l] * b[l])
                 }
                 // The product and the sum round separately: a fused
                 // dispatch, not a fused rounding.
                 Code::MulAdd => {
                     let (a, b, c) = (get(x.a), get(x.b), get(x.c));
-                    from_fn(|l| a[l].mul(b[l]).add(c[l]))
+                    from_fn(|l| a[l] * b[l] + c[l])
                 }
                 Code::Sub => {
                     let (a, b) = (get(x.a), get(x.b));
-                    from_fn(|l| a[l].sub(b[l]))
+                    from_fn(|l| a[l] - b[l])
                 }
-                Code::Neg => get(x.a).map(T::neg),
-                Code::Powi => get(x.a).map(|a| a.powi(x.b as i32)),
+                Code::Neg => get(x.a).map(|a| -a),
+                Code::Powi => get(x.a).map(|a| powi_f64(a, x.b as i32)),
                 // the common ones with the function known where it inlines
-                Code::Unary(UnaryOp::Exp) => get(x.a).map(|a| T::unary(UnaryOp::Exp, a)),
-                Code::Unary(UnaryOp::Ln) => get(x.a).map(|a| T::unary(UnaryOp::Ln, a)),
-                Code::Unary(f) => get(x.a).map(|a| T::unary(f, a)),
+                Code::Unary(UnaryOp::Exp) => get(x.a).map(|a| unary_f64(UnaryOp::Exp, a)),
+                Code::Unary(UnaryOp::Ln) => get(x.a).map(|a| unary_f64(UnaryOp::Ln, a)),
+                Code::Unary(f) => get(x.a).map(|a| unary_f64(f, a)),
                 Code::Binary(f) => {
                     let (a, b) = (get(x.a), get(x.b));
-                    from_fn(|l| T::binary(f, a[l], b[l]))
+                    from_fn(|l| binary_f64(f, a[l], b[l]))
                 }
                 Code::Cmp(f) => {
                     let (a, b) = (get(x.a), get(x.b));
-                    from_fn(|l| T::cmp(f, a[l], b[l]))
+                    from_fn(|l| if cmp_bool(f, a[l], b[l]) { 1.0 } else { 0.0 })
                 }
                 Code::Select => {
                     let (c, t, e) = (get(x.a), get(x.b), get(x.c));
                     from_fn(|l| {
-                        let taken = c[l].is_true();
+                        let taken = c[l] != 0.0;
                         sink.select(taken);
                         if taken {
                             t[l]
@@ -1252,7 +1245,7 @@ impl Tape {
                         for (s, &k) in scratch.iter_mut().zip(ks) {
                             *s = unsafe { (*at(k))[l] };
                         }
-                        reduce_slice_t(f, &scratch[..ks.len()])
+                        reduce_slice(f, &scratch[..ks.len()])
                     })
                 }
                 Code::Dot => {
@@ -1261,11 +1254,11 @@ impl Tape {
                         for (s, &k) in scratch.iter_mut().zip(ks) {
                             *s = unsafe { (*at(k))[l] };
                         }
-                        T::dot_slice(&scratch[..n], &scratch[n..2 * n])
+                        dot_slice(&scratch[..n], &scratch[n..2 * n])
                     })
                 }
             };
-            unsafe { *slots.add(x.d as usize * B).cast::<[T; B]>() = v };
+            unsafe { *slots.add(x.d as usize * B).cast::<[f64; B]>() = v };
         }
         end
     }
@@ -1429,7 +1422,7 @@ impl Tape {
                 // the inputs up to `reach`; the tape has no kernel.
                 unsafe {
                     let (p, i) = (slots.as_mut_ptr(), inputs.as_ptr());
-                    self.lanes::<f64, NoTrace, B>(ops, p, i, scratch, &mut NoTrace)
+                    self.lanes::<NoTrace, B>(ops, p, i, scratch, &mut NoTrace)
                 };
             }
             for l in 0..live {
@@ -1733,7 +1726,7 @@ static OUTPUTS: crate::parallel::Rate =
 /// ([`crate::parallel`]) when there are enough of them (a circuit's
 /// Jacobian entries, gathered from all over the slots), one after the other
 /// otherwise. Every backend writes its outputs so.
-pub fn write_outputs<T: Scalar>(outputs: &[u32], inputs: &[T], work: &[T], out: &mut [T]) {
+pub fn write_outputs(outputs: &[u32], inputs: &[f64], work: &[f64], out: &mut [f64]) {
     let n = outputs.len().min(out.len());
     let pieces = n.div_ceil(OUTPUT_BLOCK);
     let dst = Shared::new(out);
@@ -1749,9 +1742,9 @@ pub fn write_outputs<T: Scalar>(outputs: &[u32], inputs: &[T], work: &[T], out: 
 /// The value of an operand: a slot, or an input when tagged (a missing
 /// input is `NaN`).
 #[inline]
-pub fn read<T: Scalar>(inputs: &[T], work: &[T], k: u32) -> T {
+pub fn read(inputs: &[f64], work: &[f64], k: u32) -> f64 {
     match input_index(k) {
-        Some(i) => inputs.get(i as usize).copied().unwrap_or(T::nan()),
+        Some(i) => inputs.get(i as usize).copied().unwrap_or(f64::NAN),
         None => work[k as usize],
     }
 }
@@ -1771,13 +1764,13 @@ enum Dense {
 /// derived from too (see [`out_block`]): a run read in place is disjoint
 /// from that block (the allocator gives a kernel a fresh block), and both
 /// come from one pointer, so neither borrow invalidates the other.
-fn dense_slice<'a, T: Scalar>(
-    inputs: &'a [T],
-    work: *mut T,
-    scratch: &'a [T],
+fn dense_slice<'a>(
+    inputs: &'a [f64],
+    work: *mut f64,
+    scratch: &'a [f64],
     d: Dense,
     len: usize,
-) -> &'a [T] {
+) -> &'a [f64] {
     match d {
         Dense::Inputs(k) => &inputs[k..k + len],
         Dense::Scratch(s) => &scratch[s..s + len],
@@ -1796,13 +1789,13 @@ fn dense_slice<'a, T: Scalar>(
 /// `work` points to `work_len` initialized values that nothing else
 /// borrows for the returned lifetime except the in-place reads, which lie
 /// outside the block.
-unsafe fn out_block<'a, T>(
-    work: *mut T,
+unsafe fn out_block<'a>(
+    work: *mut f64,
     work_len: usize,
     d: usize,
     len: usize,
     reads: &[Option<(Dense, usize)>],
-) -> &'a mut [T] {
+) -> &'a mut [f64] {
     assert!(
         d + len <= work_len,
         "kernel output block past the work array"
@@ -1821,10 +1814,10 @@ unsafe fn out_block<'a, T>(
 /// Where a dense operand is read from: in place (a run of inputs the inputs
 /// reach, a run of work slots), or gathered into `scratch` from `*at` on,
 /// which advances past it.
-fn place_operand<T: Scalar>(
-    inputs: &[T],
-    work: &[T],
-    scratch: &mut [T],
+fn place_operand(
+    inputs: &[f64],
+    work: &[f64],
+    scratch: &mut [f64],
     pool: &[u32],
     src: Src,
     len: usize,
@@ -1834,7 +1827,7 @@ fn place_operand<T: Scalar>(
         Src::Inputs(k) if inputs.len() >= k as usize + len => Dense::Inputs(k as usize),
         Src::Inputs(k) => {
             for j in 0..len {
-                scratch[*at + j] = inputs.get(k as usize + j).copied().unwrap_or(T::nan());
+                scratch[*at + j] = inputs.get(k as usize + j).copied().unwrap_or(f64::NAN);
             }
             *at += len;
             Dense::Scratch(*at - len)
@@ -1854,10 +1847,10 @@ fn place_operand<T: Scalar>(
 /// Resolve a kernel's two dense operands, `a` first, then `b` (see
 /// [`place_operand`]).
 #[allow(clippy::too_many_arguments)]
-fn dense_operands<T: Scalar>(
-    inputs: &[T],
-    work: &[T],
-    scratch: &mut [T],
+fn dense_operands(
+    inputs: &[f64],
+    work: &[f64],
+    scratch: &mut [f64],
     pool: &[u32],
     a: Src,
     len_a: usize,

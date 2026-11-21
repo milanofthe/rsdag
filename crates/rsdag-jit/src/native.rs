@@ -1420,7 +1420,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 }
                 2 => self.bin2(Arith::Mul, dst, a, a),
                 n if powi_inline(n) => {
-                    // `semantics::powi_t`'s binary exponentiation, product
+                    // `semantics::powi_f64`'s binary exponentiation, product
                     // for product, so the result is the reference's bits.
                     let x = self.get(a);
                     let (mut base, mut acc, mut e) = (x, None::<u8>, n.unsigned_abs());

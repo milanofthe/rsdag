@@ -21,7 +21,6 @@ pub mod node;
 pub mod nonlinearity;
 pub mod parallel;
 pub mod role;
-pub mod scalar;
 pub mod scope;
 pub mod scratch;
 pub mod semantics;
@@ -55,7 +54,6 @@ pub use nonlinearity::{nonlinearity_of, Degree, Nonlinearity, UnarySet};
 #[cfg(feature = "exact")]
 pub use num_rational::BigRational;
 pub use role::{Crossing, OutputRole, ParamRole, Signature};
-pub use scalar::Scalar;
 pub use scope::Scope;
 pub use tape::{
     Guards, Lowered, NoTrace, ParamSelects, Program, Region, SpecializedTape, Tape, TraceSink,

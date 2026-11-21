@@ -15,66 +15,45 @@ use crate::constants::{
     LU_UNBLOCKED_MAX, MAGIC,
 };
 use crate::node::{BinOp, CmpOp, Elementary, ReduceOp, UnaryOp};
-use crate::scalar::Scalar;
 use crate::tape::Fold;
 
 pub use crate::constants::FOLD_LANES;
 
-/// The reduction of a slice in `T`: four accumulators ([`FOLD_LANES`]),
-/// merged as `(a0 + a1) + (a2 + a3)`, then the tail in order. The one fold order every
-/// evaluator uses, so results agree to the bit; for fewer than four operands
-/// the accumulators start at the identity and the result is the sequential
-/// fold's exactly.
-pub fn reduce_slice_t<T: Scalar>(op: ReduceOp, xs: &[T]) -> T {
+/// The reduction of a slice: four accumulators ([`FOLD_LANES`]), merged
+/// as `(a0 + a1) + (a2 + a3)`, then the tail in order. The one fold order
+/// every evaluator uses, so results agree to the bit; for fewer than four
+/// operands the accumulators start at the identity and the result is the
+/// sequential fold's exactly.
+pub fn reduce_slice(op: ReduceOp, xs: &[f64]) -> f64 {
     match op {
-        ReduceOp::Sum => {
-            let mut a = [T::zero(); FOLD_LANES];
-            let ch = xs.len() / FOLD_LANES;
-            for c in 0..ch {
-                for l in 0..FOLD_LANES {
-                    a[l] = a[l].add(xs[FOLD_LANES * c + l]);
-                }
-            }
-            let mut acc = (a[0].add(a[1])).add(a[2].add(a[3]));
-            for &x in &xs[ch * FOLD_LANES..] {
-                acc = acc.add(x);
-            }
-            acc
-        }
-        ReduceOp::Product => {
-            let mut a = [T::one(); FOLD_LANES];
-            let ch = xs.len() / FOLD_LANES;
-            for c in 0..ch {
-                for l in 0..FOLD_LANES {
-                    a[l] = a[l].mul(xs[FOLD_LANES * c + l]);
-                }
-            }
-            let mut acc = (a[0].mul(a[1])).mul(a[2].mul(a[3]));
-            for &x in &xs[ch * FOLD_LANES..] {
-                acc = acc.mul(x);
-            }
-            acc
-        }
-        ReduceOp::Min => {
-            let mut it = xs.iter();
-            match it.next() {
-                None => T::from_f64(f64::INFINITY),
-                Some(&f) => it.fold(f, |acc, &x| acc.min(x)),
-            }
-        }
-        ReduceOp::Max => {
-            let mut it = xs.iter();
-            match it.next() {
-                None => T::from_f64(f64::NEG_INFINITY),
-                Some(&f) => it.fold(f, |acc, &x| acc.max(x)),
-            }
-        }
+        ReduceOp::Sum => fold_lanes(xs, 0.0, |a, x| a + x),
+        ReduceOp::Product => fold_lanes(xs, 1.0, |a, x| a * x),
+        ReduceOp::Min => fold_first(xs, f64::INFINITY, f64::min),
+        ReduceOp::Max => fold_first(xs, f64::NEG_INFINITY, f64::max),
     }
 }
 
-/// [`reduce_slice_t`] in `f64`.
-pub fn reduce_slice(op: ReduceOp, xs: &[f64]) -> f64 {
-    reduce_slice_t(op, xs)
+/// The fold of [`reduce_slice`] by `f` from the identity `id`.
+#[inline(always)]
+fn fold_lanes(xs: &[f64], id: f64, f: impl Fn(f64, f64) -> f64) -> f64 {
+    let mut a = [id; FOLD_LANES];
+    let ch = xs.len() / FOLD_LANES;
+    for c in 0..ch {
+        for l in 0..FOLD_LANES {
+            a[l] = f(a[l], xs[FOLD_LANES * c + l]);
+        }
+    }
+    let acc = f(f(a[0], a[1]), f(a[2], a[3]));
+    (xs[ch * FOLD_LANES..].iter()).fold(acc, |acc, &x| f(acc, x))
+}
+
+/// `xs` folded by `f` from its first value, `empty` without one.
+#[inline(always)]
+fn fold_first(xs: &[f64], empty: f64, f: impl Fn(f64, f64) -> f64) -> f64 {
+    match xs.split_first() {
+        None => empty,
+        Some((&x, rest)) => rest.iter().fold(x, |acc, &x| f(acc, x)),
+    }
 }
 
 /// Canonical evaluation of an [`Elementary`] at `args` (as many as its
@@ -410,33 +389,28 @@ pub fn ln_guarded(x: f64) -> f64 {
 /// `1 / x`, the forms native code emits inline. Not the platform's `powi`,
 /// whose rounding is unspecified and differs between targets (a runtime
 /// `x.powi(-1)` is not `1 / x` on every one).
-pub fn powi_t<T: Scalar>(x: T, n: i32) -> T {
+pub fn powi_f64(x: f64, n: i32) -> f64 {
     let mut e = n.unsigned_abs();
     let mut base = x;
-    let mut acc: Option<T> = None;
+    let mut acc: Option<f64> = None;
     while e > 0 {
         if e & 1 == 1 {
             acc = Some(match acc {
                 None => base,
-                Some(a) => a.mul(base),
+                Some(a) => a * base,
             });
         }
         e >>= 1;
         if e > 0 {
-            base = base.mul(base);
+            base *= base;
         }
     }
-    let r = acc.unwrap_or_else(T::one);
+    let r = acc.unwrap_or(1.0);
     if n < 0 {
-        T::one().div(r)
+        1.0 / r
     } else {
         r
     }
-}
-
-/// [`powi_t`] on `f64`.
-pub fn powi_f64(x: f64, n: i32) -> f64 {
-    powi_t(x, n)
 }
 
 /// Evaluate a unary op on a real argument. Single source of truth shared by the
@@ -518,7 +492,7 @@ pub fn cmp_bool<T: PartialOrd>(op: CmpOp, x: T, y: T) -> bool {
     }
 }
 
-/// The inner product in the fold of [`reduce_slice_t`] over the products.
+/// The inner product in the fold of [`reduce_slice`] over the products.
 pub fn dot_slice(a: &[f64], b: &[f64]) -> f64 {
     crate::simd::dot(a, b)
 }
@@ -627,24 +601,17 @@ pub fn solve_many_into(
 /// solution is bit-identical to its system's own [`solve_many_into`]; the
 /// systems share the `scratch` of one.
 #[allow(clippy::too_many_arguments)]
-pub fn solve_batch_into<T: Scalar>(
-    a: &[T],
-    b: &[T],
+pub fn solve_batch_into(
+    a: &[f64],
+    b: &[f64],
     n: usize,
     k: usize,
     count: usize,
-    out: &mut [T],
-    scratch: &mut [T],
+    out: &mut [f64],
+    scratch: &mut [f64],
 ) {
-    T::solve_batch(
-        a,
-        b,
-        n,
-        k,
-        count,
-        out,
-        &mut scratch[..solve_scratch_len(n, k)],
-    )
+    let scratch = &mut scratch[..solve_scratch_len(n, k)];
+    crate::simd::solve_batch(a, b, n, k, count, out, scratch)
 }
 
 /// The column panel of the elimination of `n` unknowns, 0 unblocked.

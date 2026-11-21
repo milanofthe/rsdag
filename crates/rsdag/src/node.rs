@@ -88,16 +88,6 @@ impl ReduceOp {
             ReduceOp::Max => "max",
         }
     }
-
-    /// Combine an accumulator with the next element (left fold).
-    pub(crate) fn combine(self, acc: f64, x: f64) -> f64 {
-        match self {
-            ReduceOp::Sum => acc + x,
-            ReduceOp::Product => acc * x,
-            ReduceOp::Min => acc.min(x),
-            ReduceOp::Max => acc.max(x),
-        }
-    }
 }
 
 /// Transcendental / elementary unary functions, needed by nonlinear device

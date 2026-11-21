@@ -1,6 +1,6 @@
 //! The dense kernels behind [`crate::semantics`]. The dot-fold kernels
 //! (four accumulators, merged as `(0 + 1) + (2 + 3)`, then the tail in
-//! order: the fold of [`crate::semantics::reduce_slice_t`] over the
+//! order: the fold of [`crate::semantics::reduce_slice`] over the
 //! products) are written once over a four-lane vector [`Quad`] whose lane
 //! `l` is accumulator `l`. Every product and every sum rounds once, nothing
 //! is fused, so no result depends on the vector width.
