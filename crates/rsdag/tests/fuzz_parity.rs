@@ -7,6 +7,7 @@
 //! draws from the same population and a new op is covered here the moment it
 //! is drawable there.
 
+use rsdag::Program;
 use std::collections::HashMap;
 
 use rsdag::node::Node;

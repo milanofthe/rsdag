@@ -3,6 +3,7 @@
 //! thread's: the idle workers of a thread pool tidy their queues on their own
 //! threads now and then, which a process-wide count would pick up.
 
+use rsdag::Program;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 

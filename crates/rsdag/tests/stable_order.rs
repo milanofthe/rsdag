@@ -3,6 +3,7 @@
 //! the same bits after any unrelated construction and in any build order.
 
 use rsdag::synth::{build, inputs, Spec, Vocabulary};
+use rsdag::Program;
 use rsdag::{differentiate, sparse_jacobian, ExprId, Graph, Node, ReduceOp, SymbolId, Tape, F64};
 
 fn syms(g: &mut Graph<F64>, n: usize) -> (Vec<ExprId>, Vec<SymbolId>) {

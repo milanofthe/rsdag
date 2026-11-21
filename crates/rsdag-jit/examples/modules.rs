@@ -41,6 +41,7 @@
 //!     cargo run --release -p rsdag-jit --example modules -- [--values <dir>] [--composed <dir>] [--threads <n>[,<n>...]]
 //!         [--rounds <n>] [--native] [--interleave <MB>] [--no-folded] [--lanes <mode>] [--no-variants] <module.json>...
 
+use rsdag::Program;
 mod common;
 use std::time::Instant;
 

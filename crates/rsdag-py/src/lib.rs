@@ -19,6 +19,7 @@
 // `PyResult` method; the conversions are the macro's, not ours.
 #![allow(clippy::useless_conversion)]
 
+use rsdag::Program as _;
 mod constants;
 
 use std::cell::RefCell;

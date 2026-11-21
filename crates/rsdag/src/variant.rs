@@ -52,7 +52,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use crate::extern_fn::{BackendCache, BodyBackend, BodyCompiler, ExternBundle, Instances};
 use crate::func::InterpretedBody;
 use crate::hooks::{log, Level};
-use crate::tape::{Guards, ParamSelects, Tape};
+use crate::tape::{Guards, ParamSelects, Program as _, Tape};
 
 use crate::constants::{PERCENT, TRACED};
 

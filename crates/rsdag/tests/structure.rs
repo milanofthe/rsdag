@@ -3,6 +3,7 @@
 //! cost, and does the interface order matter.
 
 use rsdag::synth::{build, Spec};
+use rsdag::Program;
 use rsdag::{
     substitute, ExprId, FuncId, Graph, Node, Output, OutputRole, ParamRole, Scope, SymbolId, Tape,
     F64,

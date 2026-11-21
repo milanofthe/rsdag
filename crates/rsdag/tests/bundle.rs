@@ -2,6 +2,7 @@
 //! each read the right slot, and the body must run exactly once per eval no
 //! matter how many outputs share the call.
 
+use rsdag::Program;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 

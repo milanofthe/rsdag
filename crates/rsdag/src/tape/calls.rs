@@ -128,7 +128,7 @@ impl Shared {
     /// No other piece of work reads or writes `at..at + n` while the slice
     /// lives.
     #[allow(clippy::mut_from_ref)]
-    unsafe fn slice_mut<'a>(self, at: usize, n: usize) -> &'a mut [f64] {
+    pub(super) unsafe fn slice_mut<'a>(self, at: usize, n: usize) -> &'a mut [f64] {
         assert!(at + n <= self.1);
         unsafe { std::slice::from_raw_parts_mut(self.0.add(at), n) }
     }

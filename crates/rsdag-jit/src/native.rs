@@ -34,7 +34,7 @@ use rayon::prelude::*;
 use rsdag::node::{BinOp, CmpOp, ReduceOp, UnaryOp};
 use rsdag::tape::calls::{Call, Phase};
 use rsdag::tape::{input_index, read, Accum, Fold, Op, Operand, Src, INPUT};
-use rsdag::{ExternBundle, Instances, Tape};
+use rsdag::{ExternBundle, Instances, Program, Tape};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
@@ -85,7 +85,7 @@ pub struct NativeTape {
     /// Boxed: the code's host calls hold its address.
     layout: Box<Layout>,
     n_ops: usize,
-    /// The tape's state prefix (see [`Tape::state_len`]); the slot layout
+    /// The tape's state prefix (see [`Program::state_len`](rsdag::Program::state_len)); the slot layout
     /// is the tape's, so an interpreter's state serves here and back.
     state_len: usize,
     /// Instances per run: `1`, or the lane code's width (see
@@ -658,7 +658,7 @@ impl NativeTape {
     /// Compile as `opts` says, keeping the slots `live` written to the work
     /// array at the end of the program, as the outputs are: what a consumer
     /// that reads a specialized tape's prolog guards from `work` after
-    /// [`eval_prolog`](Self::eval_prolog) passes
+    /// [`eval_prolog_into`](rsdag::Program::eval_prolog_into) passes
     /// ([`rsdag::SpecializedTape::prolog_guards`]).
     pub fn compile_opts(tape: &Tape, opts: &Options, live: &[u32]) -> Result<NativeTape, JitError> {
         Self::compile_isa::<Arch>(tape, opts, live)
@@ -859,14 +859,16 @@ impl NativeTape {
         })
     }
 
-    fn padded<'a>(&self, inputs: &'a [f64], buf: &'a mut Vec<f64>) -> &'a [f64] {
-        if inputs.len() < self.layout.n_inputs {
-            buf.clear();
-            buf.extend_from_slice(inputs);
-            buf.resize(self.layout.n_inputs, f64::NAN);
-            buf
-        } else {
-            inputs
+    /// `inputs` with at least `n_inputs` values, the missing ones `NaN`.
+    fn padded<R>(&self, inputs: &[f64], f: impl FnOnce(&[f64]) -> R) -> R {
+        match inputs.len() < self.layout.n_inputs {
+            true => rsdag::scratch::with(|buf: &mut Vec<f64>| {
+                buf.clear();
+                buf.extend_from_slice(inputs);
+                buf.resize(self.layout.n_inputs, f64::NAN);
+                f(buf)
+            }),
+            false => f(inputs),
         }
     }
 
@@ -911,58 +913,31 @@ impl NativeTape {
         }
     }
 
-    fn collect(&self, inputs: &[f64], work: &[f64], out: &mut Vec<f64>) {
-        out.clear();
-        out.extend(self.outputs.iter().map(|&s| read(inputs, work, s)));
-    }
-
     /// The bundles the calls call, by index, each as this backend runs it;
     /// mirrors [`Tape::bundles`].
     pub fn bundles(&self) -> &[Arc<dyn ExternBundle>] {
         &self.bundles
     }
 
-    /// Evaluate the parameter-pure prolog into `work` (grown here to the
-    /// tape's layout; nothing is cleared, every slot is written before it is
-    /// read); mirrors [`Tape::eval_prolog`]. Pair with [`eval_main`](Self::eval_main).
-    pub fn eval_prolog(&self, inputs: &[f64], work: &mut Vec<f64>) {
-        let mut buf = Vec::new();
-        let ins = self.padded(inputs, &mut buf);
-        if work.len() < self.layout.total {
-            work.resize(self.layout.total, 0.0);
-        }
-        self.run(0..self.prolog_chunks, ins, work);
-    }
-
-    /// Evaluate the main phase over a buffer prepared by
-    /// [`eval_prolog`](Self::eval_prolog); mirrors [`Tape::eval_main`].
-    pub fn eval_main(&self, inputs: &[f64], work: &mut [f64], out: &mut Vec<f64>) {
-        let mut buf = Vec::new();
-        let ins = self.padded(inputs, &mut buf);
-        self.run(self.prolog_chunks..self.chunks.len(), ins, work);
-        self.collect(ins, work, out);
-    }
-
-    /// Evaluate the whole tape; mirrors [`Tape::eval`].
-    pub fn eval(&self, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
-        let mut buf = Vec::new();
-        let ins = self.padded(inputs, &mut buf);
-        if work.len() < self.layout.total {
-            work.resize(self.layout.total, 0.0);
-        }
-        self.run(0..self.chunks.len(), ins, work);
-        self.collect(ins, work, out);
-    }
-
-    /// Write the outputs from `work` (and `inputs`, for an output that is
-    /// an input) into a slice the caller sized.
-    fn write(&self, inputs: &[f64], work: &[f64], out: &mut [f64]) {
-        assert_eq!(
-            out.len(),
-            self.outputs.len(),
-            "output buffer of the wrong size"
-        );
-        rsdag::tape::write_outputs(&self.outputs, inputs, work, out);
+    /// Ops `range` of chunks over `inputs`, then the outputs into `out`.
+    fn eval_range(
+        &self,
+        range: std::ops::Range<usize>,
+        inputs: &[f64],
+        work: &mut [f64],
+        out: Option<&mut [f64]>,
+    ) {
+        self.padded(inputs, |inputs| {
+            self.run(range, inputs, work);
+            if let Some(out) = out {
+                assert_eq!(
+                    out.len(),
+                    self.outputs.len(),
+                    "output buffer of the wrong size"
+                );
+                rsdag::tape::write_outputs(&self.outputs, inputs, work, out);
+            }
+        })
     }
 
     /// Evaluate many instances in parallel: `inputs` holds `n` input
@@ -974,7 +949,6 @@ impl NativeTape {
     /// devices, a parameter sweep or an ensemble amounts to. The serial
     /// form is [`Program::eval_many_into`](rsdag::Program::eval_many_into).
     pub fn eval_many(&self, inputs: &[f64], stride: usize, out: &mut Vec<f64>) {
-        use rsdag::Program;
         let n = inputs.len().checked_div(stride).unwrap_or(0);
         let n_out = self.outputs.len();
         out.clear();
@@ -2123,15 +2097,18 @@ impl rsdag::Program for NativeTape {
         self.state_len
     }
     fn eval_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]) {
-        self.run(0..self.chunks.len(), inputs, work);
-        self.write(inputs, work, out);
+        self.eval_range(0..self.chunks.len(), inputs, work, Some(out));
     }
     fn eval_prolog_into(&self, inputs: &[f64], work: &mut [f64]) {
-        self.run(0..self.prolog_chunks, inputs, work);
+        self.eval_range(0..self.prolog_chunks, inputs, work, None);
     }
     fn eval_main_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]) {
-        self.run(self.prolog_chunks..self.chunks.len(), inputs, work);
-        self.write(inputs, work, out);
+        self.eval_range(
+            self.prolog_chunks..self.chunks.len(),
+            inputs,
+            work,
+            Some(out),
+        );
     }
 }
 

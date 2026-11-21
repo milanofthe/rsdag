@@ -5,6 +5,7 @@
 use rsdag::node::UnaryOp;
 use rsdag::semantics::{unary_f64, LN_FLOOR};
 use rsdag::BigRational;
+use rsdag::Program;
 use rsdag::{differentiate, ExprId, Graph, Node, SymbolId, Tape, F64};
 
 fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {

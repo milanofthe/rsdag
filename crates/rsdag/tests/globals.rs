@@ -6,6 +6,7 @@
 //! caller binding a global by a parameter of its own name. Each against the
 //! program with every call inlined, where the globals are plain symbols.
 
+use rsdag::Program;
 use std::collections::HashMap;
 
 use rsdag::{

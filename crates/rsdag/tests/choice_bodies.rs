@@ -5,6 +5,7 @@
 //! while instances cross their regions, while they thrash, and through the
 //! derivatives.
 
+use rsdag::Program;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rsdag::hooks::{self, Level, Log};

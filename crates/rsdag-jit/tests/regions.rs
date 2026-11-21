@@ -3,6 +3,7 @@
 //! interpreter and in native code; no piece writes a slot another piece
 //! reads or writes.
 
+use rsdag::Program;
 use std::collections::HashSet;
 use std::sync::Arc;
 

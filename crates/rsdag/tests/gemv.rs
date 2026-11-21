@@ -3,6 +3,7 @@
 //! otherwise, bit-identical to the rows as separate dots, and surviving
 //! specialization.
 
+use rsdag::Program;
 use std::collections::HashMap;
 
 use rsdag::{ExprId, Graph, SymbolId, Tape, F64};

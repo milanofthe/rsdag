@@ -2,6 +2,7 @@
 //! program: a view computes what its own compilation computes, value for
 //! value, and its calls run bodies of the outputs it reads only.
 
+use rsdag::Program;
 use rsdag::{
     sparse_jacobian, tape::Op, ExprId, FuncId, Graph, Lowered, Node, OutputRole, ParamRole,
     ReduceOp, Scope, SymbolId, Tape, F64,

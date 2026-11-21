@@ -4,6 +4,7 @@
 //!
 //!     cargo run --release -p rsdag-jit --example sweep --features rsdag/synth > docs/bench/data/ops.csv
 
+use rsdag::Program;
 mod common;
 use common::per_call;
 use rsdag::synth::{build, inputs, Spec, Vocabulary};

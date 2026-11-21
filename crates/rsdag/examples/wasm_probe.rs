@@ -6,6 +6,7 @@
 //!     cargo build --release -p rsdag --example wasm_probe --target wasm32-unknown-unknown --features exact,serde
 //!     python3 scripts/wasm_imports.py target/wasm32-unknown-unknown/release/examples/wasm_probe.wasm
 
+use rsdag::Program;
 use std::hint::black_box;
 
 use rsdag::{sparse_jacobian, Graph, Node, Tape, F64};

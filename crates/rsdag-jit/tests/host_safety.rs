@@ -3,6 +3,7 @@
 //! bundle whose output count changed after compile is refused instead of
 //! being handed a write past its block.
 
+use rsdag::Program;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

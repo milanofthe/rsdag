@@ -1,6 +1,6 @@
 //! Native backend for the evaluation [`Tape`](rsdag::Tape).
 //!
-//! The tape is the evaluation IR; [`Tape::eval`](rsdag::Tape::eval) is the
+//! The tape is the evaluation IR; [`Program::eval_into`](rsdag::Program::eval_into) on a [`Tape`](rsdag::Tape) is the
 //! interpreting backend and [`NativeTape`] the native one: the op stream
 //! emitted straight to AArch64 or x86-64 machine code (compiled at around
 //! 100 to 200 ns per op), with the interpreter's storage model as the register allocator's

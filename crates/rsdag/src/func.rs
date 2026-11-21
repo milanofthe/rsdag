@@ -33,6 +33,7 @@ use rustc_hash::FxHashMap as HashMap;
 use crate::extern_fn::ExternBundle;
 use crate::node::{ExprId, SymbolId};
 use crate::role::{OutputRole, ParamRole};
+use crate::tape::Program as _;
 
 /// Index of a function in a [`Graph`](crate::graph::Graph).
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

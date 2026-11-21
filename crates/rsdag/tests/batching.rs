@@ -2,6 +2,7 @@
 //! call whatever their arguments are, and instances that feed instances
 //! batch by call depth.
 
+use rsdag::Program;
 use std::collections::HashMap;
 
 use rsdag::{ExprId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};

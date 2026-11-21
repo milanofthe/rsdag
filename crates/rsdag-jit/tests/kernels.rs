@@ -2,6 +2,7 @@
 //! products and the dense solve, inputs read in place and gathered slots,
 //! bit-identical to the interpreter.
 
+use rsdag::Program;
 use rsdag::{ExprId, Graph, SymbolId, Tape, F64};
 use rsdag_jit::NativeTape;
 

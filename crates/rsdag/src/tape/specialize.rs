@@ -5,7 +5,7 @@
 use rustc_hash::FxHashSet;
 
 use super::compile::{Inst, Kind, Program, Ref};
-use super::{input_index, Op, Tape};
+use super::{input_index, Op, Program as _, Tape};
 use crate::node::{CmpOp, ReduceOp};
 
 /// A pinned select: its condition, the arm it took and the choice.
@@ -340,7 +340,12 @@ impl SpecializedTape {
     /// Evaluate the main phase over a buffer prepared by
     /// [`eval_prolog_checked`](Self::eval_prolog_checked), guard-checked like
     /// [`eval_checked`](Self::eval_checked).
-    pub fn eval_main_checked(&self, inputs: &[f64], work: &mut [f64], out: &mut Vec<f64>) -> bool {
+    pub fn eval_main_checked(
+        &self,
+        inputs: &[f64],
+        work: &mut Vec<f64>,
+        out: &mut Vec<f64>,
+    ) -> bool {
         self.tape.eval_main(inputs, work, out);
         self.check_outputs(out)
     }

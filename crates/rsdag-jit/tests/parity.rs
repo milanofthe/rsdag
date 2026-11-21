@@ -6,6 +6,7 @@
 //! hard rather than incidentally.
 
 use rsdag::synth::{cases, Spec, Vocabulary};
+use rsdag::Program;
 use rsdag::{Graph, OutputRole, ParamRole, Scope, Tape};
 use rsdag_jit::{NativeTape, Options};
 

@@ -3,6 +3,7 @@
 //! as separate dots, whatever order the entries were built in, and
 //! surviving specialization.
 
+use rsdag::Program;
 use std::collections::HashMap;
 
 use rsdag::{ExprId, Graph, SymbolId, Tape, F64};

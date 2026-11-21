@@ -3,6 +3,7 @@
 //! bit-identical to the interpreter on short lists (inline instructions)
 //! and long ones (the host routine).
 
+use rsdag::Program;
 use rsdag::{ExprId, Graph, ReduceOp, SymbolId, Tape, F64};
 use rsdag_jit::NativeTape;
 

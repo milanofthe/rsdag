@@ -3,6 +3,7 @@
 //! episodes, and the native code landing in the middle of an episode.
 
 use rsdag::synth::{build, inputs, Rng, Spec, Vocabulary};
+use rsdag::Program;
 use rsdag::{Adaptive, OutputRole, ParamRole, Policy, Scope};
 use rsdag::{Graph, Tape, F64};
 

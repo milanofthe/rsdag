@@ -606,21 +606,54 @@ pub struct Tape {
 /// A compiled program as a solver drives it, whichever backend runs it:
 /// buffers the caller owns and sizes from [`work_len`](Self::work_len) and
 /// [`out_len`](Self::out_len), the prolog/main split, and the state layout
-/// of [`Tape::state_len`], so a prolog one backend ran serves another's
-/// main phase. [`Tape`] implements it, and so does the native code.
+/// of [`state_len`](Self::state_len), so a prolog one backend ran serves
+/// another's main phase. [`Tape`] implements it, and so does the native
+/// code. Nothing is allocated and nothing returned: `out` may point
+/// anywhere (a factorization's value array, a right-hand side, a numpy
+/// array). An input past the end of `inputs` reads as `NaN`.
 pub trait Program: Send + Sync {
-    /// Inputs the program reads; `inputs` holds at least this many.
+    /// Inputs the program reads.
     fn n_inputs(&self) -> usize;
+    /// The length `work` has at least: the slots, then the gather area and
+    /// the scratch lent to called bodies and dense solves.
     fn work_len(&self) -> usize;
+    /// Number of outputs, the length `out` has.
     fn out_len(&self) -> usize;
-    /// The prolog's results are `work[..state_len]`.
+    /// The values the prolog leaves for the main phase are
+    /// `work[..state_len]`: everything a later main phase needs of a prolog
+    /// run, so an instance's prolog result is saved and restored as this
+    /// prefix. The layout is the tape's, shared by every backend; `0`
+    /// without a split.
     fn state_len(&self) -> usize;
     /// Everything, prolog and main.
     fn eval_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]);
-    /// The parameter-pure prolog, into `work`.
+    /// The parameter-pure prolog, into `work`: once per parameter binding,
+    /// then the main phase per iteration over the same buffer.
     fn eval_prolog_into(&self, inputs: &[f64], work: &mut [f64]);
     /// The main phase over a `work` whose state a prolog left.
     fn eval_main_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]);
+    /// [`eval_into`](Program::eval_into) over `Vec`s: `work` grown to
+    /// [`work_len`](Self::work_len) (never shrunk or cleared, so a state a
+    /// prolog left stays) and `out` sized to [`out_len`](Self::out_len).
+    /// The convenience where an allocation on the first call does not
+    /// matter; [`eval_prolog`](Self::eval_prolog) and
+    /// [`eval_main`](Self::eval_main) are the phases so.
+    fn eval(&self, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
+        fit(self.work_len(), work, Some((self.out_len(), &mut *out)));
+        self.eval_into(inputs, work, out);
+    }
+    /// [`eval_prolog_into`](Program::eval_prolog_into) over a `Vec` (see
+    /// [`eval`](Self::eval)).
+    fn eval_prolog(&self, inputs: &[f64], work: &mut Vec<f64>) {
+        fit(self.work_len(), work, None);
+        self.eval_prolog_into(inputs, work);
+    }
+    /// [`eval_main_into`](Program::eval_main_into) over `Vec`s (see
+    /// [`eval`](Self::eval)).
+    fn eval_main(&self, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
+        fit(self.work_len(), work, Some((self.out_len(), &mut *out)));
+        self.eval_main_into(inputs, work, out);
+    }
     /// Instances of `stride` inputs back to back (`stride` at least
     /// [`n_inputs`](Self::n_inputs)), their outputs back to back into `out`,
     /// one after the other over one `work`. Running parts of a batch in
@@ -641,27 +674,38 @@ pub trait Program: Send + Sync {
     }
 }
 
+/// `work` grown to `work_len`, `out` sized.
+fn fit(work_len: usize, work: &mut Vec<f64>, out: Option<(usize, &mut Vec<f64>)>) {
+    if work.len() < work_len {
+        work.resize(work_len, 0.0);
+    }
+    if let Some((n, out)) = out {
+        out.resize(n, 0.0);
+    }
+}
+
 impl Program for Tape {
     fn n_inputs(&self) -> usize {
         self.n_inputs
     }
     fn work_len(&self) -> usize {
-        Tape::work_len(self)
+        self.n_work + self.max_args + self.lent
     }
     fn out_len(&self) -> usize {
-        Tape::out_len(self)
+        self.outputs.len()
     }
     fn state_len(&self) -> usize {
-        Tape::state_len(self)
+        self.state_len
     }
     fn eval_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]) {
-        Tape::eval_into(self, inputs, work, out)
+        self.run_with(0, inputs, work, out, &mut NoTrace)
     }
     fn eval_prolog_into(&self, inputs: &[f64], work: &mut [f64]) {
-        Tape::eval_prolog_into(self, inputs, work)
+        assert!(work.len() >= self.work_len(), "work buffer too short");
+        self.run_range(inputs, work, 0, self.prolog_ops, &mut NoTrace);
     }
     fn eval_main_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]) {
-        Tape::eval_main_into(self, inputs, work, out)
+        self.eval_main_with(inputs, work, out, &mut NoTrace)
     }
 }
 
@@ -690,7 +734,7 @@ impl TraceSink for Vec<u8> {
 }
 
 impl Tape {
-    /// Number of work slots needed by [`eval`](Self::eval).
+    /// Number of work slots an evaluation writes (without the gather area).
     pub fn n_slots(&self) -> usize {
         self.n_work
     }
@@ -831,43 +875,9 @@ impl Tape {
         self.n_selects
     }
 
-    /// Work slots an evaluation needs: the slots themselves plus the gather
-    /// scratch. A caller that owns its buffers sizes them with this and
-    /// [`out_len`](Self::out_len) once, before the loop that uses them.
-    pub fn work_len(&self) -> usize {
-        self.buffer_len()
-    }
-
-    /// Number of outputs, the length [`eval_into`](Self::eval_into) writes.
-    pub fn out_len(&self) -> usize {
-        self.outputs.len()
-    }
-
-    /// Evaluate into buffers the caller owns: nothing is allocated, nothing
-    /// is returned, and `out` may point anywhere (a factorization's value
-    /// array, a right-hand side, a numpy array). `work` must be at least
-    /// [`work_len`](Self::work_len) long, `out` exactly
-    /// [`out_len`](Self::out_len).
-    pub fn eval_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]) {
-        assert!(work.len() >= self.work_len(), "work buffer too short");
-        assert_eq!(out.len(), self.out_len(), "output buffer of the wrong size");
-        self.run_range(inputs, work, 0, self.ops.len(), &mut NoTrace);
-        self.write(inputs, work, out);
-    }
-
-    /// Evaluate the tape, every op through the reference arithmetic of
-    /// [`crate::semantics`]. `work` is resized and reused; `out` receives one
-    /// value per output.
-    ///
-    /// The `Vec` form is the convenience over
-    /// [`eval_into`](Self::eval_into), the one a caller in an inner loop wants.
-    pub fn eval(&self, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
-        self.eval_with(inputs, work, out, &mut NoTrace);
-    }
-
-    /// [`eval`](Self::eval) with every `Select` decision reported to `sink`;
-    /// a `Vec<u8>` sink is the choice trace [`specialize`](Self::specialize)
-    /// takes (the caller clears it first).
+    /// [`eval`](Program::eval) with every `Select` decision reported to
+    /// `sink`; a `Vec<u8>` sink is the choice trace
+    /// [`specialize`](Self::specialize) takes (the caller clears it first).
     pub fn eval_with<S: TraceSink>(
         &self,
         inputs: &[f64],
@@ -875,77 +885,12 @@ impl Tape {
         out: &mut Vec<f64>,
         sink: &mut S,
     ) {
-        if work.len() < self.buffer_len() {
-            work.resize(self.buffer_len(), 0.0);
-        }
-        self.run_range(inputs, work, 0, self.ops.len(), sink);
-        self.collect(inputs, work, out);
+        fit(self.work_len(), work, Some((self.out_len(), &mut *out)));
+        self.run_with(0, inputs, work, out, sink)
     }
 
-    /// The work buffer: the slots, the gather, then what is lent.
-    fn buffer_len(&self) -> usize {
-        self.n_work + self.max_args + self.lent
-    }
-
-    fn collect(&self, inputs: &[f64], work: &[f64], out: &mut Vec<f64>) {
-        out.clear();
-        out.extend(self.outputs.iter().map(|&k| read(inputs, work, k)));
-    }
-
-    /// [`collect`](Self::collect) into a slice the caller sized.
-    fn write(&self, inputs: &[f64], work: &[f64], out: &mut [f64]) {
-        write_outputs(&self.outputs, inputs, work, out);
-    }
-
-    /// The values the prolog leaves for the main phase are `work[..n]`:
-    /// everything a later [`eval_main_into`](Self::eval_main_into) needs of a
-    /// prolog run, so an instance's prolog result is saved and restored as
-    /// this prefix. The layout is the tape's, shared by every backend. `0`
-    /// without a split.
-    pub fn state_len(&self) -> usize {
-        self.state_len
-    }
-
-    /// Instruction count of the parameter-pure prolog (0 when compiled without
-    /// [`compile_split`](Self::compile_split)).
-    pub fn prolog_len(&self) -> usize {
-        self.prolog_ops
-    }
-
-    /// Evaluate the parameter-pure prolog into `work` (grown here to the
-    /// buffer length; nothing is cleared, every slot is written before read).
-    /// A Newton loop calls this once per parameter binding, then
-    /// [`eval_main`](Self::eval_main) per iteration over the *same* buffer.
-    pub fn eval_prolog(&self, inputs: &[f64], work: &mut Vec<f64>) {
-        if work.len() < self.buffer_len() {
-            work.resize(self.buffer_len(), 0.0);
-        }
-        self.run_range(inputs, work, 0, self.prolog_ops, &mut NoTrace);
-    }
-
-    /// Evaluate the main phase over a `work` buffer prepared by
-    /// [`eval_prolog`](Self::eval_prolog) (prolog results are pinned slots, so
-    /// repeated main passes may not clear or resize the buffer).
-    pub fn eval_main(&self, inputs: &[f64], work: &mut [f64], out: &mut Vec<f64>) {
-        out.resize(self.out_len(), 0.0);
-        self.eval_main_into(inputs, work, out);
-    }
-
-    /// [`eval_main`](Self::eval_main) into a slice the caller sized: the form
-    /// a Newton loop uses, one prolog per parameter binding and this per
-    /// iteration, with no allocation in either.
-    pub fn eval_main_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]) {
-        assert!(
-            work.len() >= self.work_len(),
-            "eval_main requires a work buffer prepared by eval_prolog"
-        );
-        assert_eq!(out.len(), self.out_len(), "output buffer of the wrong size");
-        self.run_range(inputs, work, self.prolog_ops, self.ops.len(), &mut NoTrace);
-        self.write(inputs, work, out);
-    }
-
-    /// [`eval_main_into`](Self::eval_main_into), each `Select` of the main
-    /// phase reporting its choice to `sink` in stream order: the trace
+    /// [`eval_main_into`](Program::eval_main_into), each `Select` of the
+    /// main phase reporting its choice to `sink` in stream order: the trace
     /// [`specialize_main`](Self::specialize_main) shortens against.
     pub fn eval_main_with<S: TraceSink>(
         &self,
@@ -954,19 +899,28 @@ impl Tape {
         out: &mut [f64],
         sink: &mut S,
     ) {
-        assert!(
-            work.len() >= self.work_len(),
-            "eval_main requires a work buffer prepared by eval_prolog"
-        );
-        assert_eq!(out.len(), self.out_len(), "output buffer of the wrong size");
-        self.run_range(inputs, work, self.prolog_ops, self.ops.len(), sink);
-        self.write(inputs, work, out);
+        self.run_with(self.prolog_ops, inputs, work, out, sink)
     }
 
-    /// [`eval_prolog`](Self::eval_prolog) over a buffer the caller sized.
-    pub fn eval_prolog_into(&self, inputs: &[f64], work: &mut [f64]) {
+    /// Ops `lo..` and the outputs.
+    fn run_with<S: TraceSink>(
+        &self,
+        lo: usize,
+        inputs: &[f64],
+        work: &mut [f64],
+        out: &mut [f64],
+        sink: &mut S,
+    ) {
         assert!(work.len() >= self.work_len(), "work buffer too short");
-        self.run_range(inputs, work, 0, self.prolog_ops, &mut NoTrace);
+        assert_eq!(out.len(), self.out_len(), "output buffer of the wrong size");
+        self.run_range(inputs, work, lo, self.ops.len(), sink);
+        write_outputs(&self.outputs, inputs, work, out);
+    }
+
+    /// Instruction count of the parameter-pure prolog (0 when compiled without
+    /// [`compile_split`](Self::compile_split)).
+    pub fn prolog_len(&self) -> usize {
+        self.prolog_ops
     }
 
     /// Execute ops `lo..hi` over a fully-sized work buffer, feeding each
@@ -1265,7 +1219,7 @@ impl Tape {
 
     /// The whole tape for the instances `at`, their arguments in `args`,
     /// their first `n_out` outputs into `out`: each instance's as
-    /// [`eval_into`](Self::eval_into) computes them, bit for bit, in blocks
+    /// [`eval_into`](Program::eval_into) computes them, bit for bit, in blocks
     /// of instances side by side.
     pub fn eval_batch(&self, args: &[f64], out: &mut [f64], n_out: usize, at: &Instances) {
         self.outputs_batch(0..self.ops.len(), args, None, out, n_out, at);
@@ -1274,7 +1228,7 @@ impl Tape {
     /// The prolog for the instances `at`, their pure arguments in `pure`
     /// (`at.n_args` each, the inputs `flags` marks in order, the others
     /// `NaN`), each instance's state into its row of `states`: what
-    /// [`eval_prolog_into`](Self::eval_prolog_into) leaves in
+    /// [`eval_prolog_into`](Program::eval_prolog_into) leaves in
     /// `work[..state_len]`, bit for bit.
     pub fn prolog_batch(&self, flags: &[bool], pure: &[f64], states: &mut [f64], at: &Instances) {
         let (na, sl, st) = (at.n_args, self.state_len, at.stride);
@@ -1302,7 +1256,7 @@ impl Tape {
     /// The main phase for the instances `at` over their states, their rows
     /// of `states` as a prolog left them, their arguments in `args`, their
     /// first `n_out` outputs into `out`: each instance's as
-    /// [`eval_main_into`](Self::eval_main_into) computes them, bit for
+    /// [`eval_main_into`](Program::eval_main_into) computes them, bit for
     /// bit.
     pub fn main_batch(
         &self,
@@ -1726,17 +1680,26 @@ static OUTPUTS: crate::parallel::Rate =
 /// ([`crate::parallel`]) when there are enough of them (a circuit's
 /// Jacobian entries, gathered from all over the slots), one after the other
 /// otherwise. Every backend writes its outputs so.
+#[inline]
 pub fn write_outputs(outputs: &[u32], inputs: &[f64], work: &[f64], out: &mut [f64]) {
     let n = outputs.len().min(out.len());
-    let pieces = n.div_ceil(OUTPUT_BLOCK);
-    let dst = Shared::new(out);
-    let block = |k: usize| {
-        for i in k * OUTPUT_BLOCK..((k + 1) * OUTPUT_BLOCK).min(n) {
-            // SAFETY: the blocks write disjoint outputs.
-            unsafe { dst.set(i, read(inputs, work, outputs[i])) };
+    let block = |o: &mut [f64], ks: &[u32]| {
+        for (o, &k) in o.iter_mut().zip(ks) {
+            *o = read(inputs, work, k);
         }
     };
-    crate::parallel::run_rated(pieces, n as f64, &OUTPUTS, &block);
+    let pieces = n.div_ceil(OUTPUT_BLOCK);
+    if pieces <= 1 {
+        // one block: nothing to share out, nothing for the rate to learn
+        return block(&mut out[..n], &outputs[..n]);
+    }
+    let dst = Shared::new(out);
+    let piece = |p: usize| {
+        let (lo, hi) = (p * OUTPUT_BLOCK, ((p + 1) * OUTPUT_BLOCK).min(n));
+        // SAFETY: the pieces write disjoint outputs.
+        block(unsafe { dst.slice_mut(lo, hi - lo) }, &outputs[lo..hi])
+    };
+    crate::parallel::run_rated(pieces, n as f64, &OUTPUTS, &piece);
 }
 
 /// The value of an operand: a slot, or an input when tagged (a missing

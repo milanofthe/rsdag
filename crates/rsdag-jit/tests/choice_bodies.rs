@@ -5,6 +5,7 @@
 //! are first needed or in the background while the evaluations go on.
 
 use rsdag::variant::VariantPolicy;
+use rsdag::Program;
 use rsdag::{
     BodyBackend, ChoicePolicy, CmpOp, ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope,
     SymbolId, Tape, F64,
