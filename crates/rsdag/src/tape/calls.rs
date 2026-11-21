@@ -394,7 +394,7 @@ pub unsafe fn run_stage<'a>(
                     continue;
                 }
                 let ops: f64 = (k..n)
-                    .map(|j| call(j))
+                    .map(&call)
                     .filter(|c| std::ptr::eq(c.bundle.rate(), rate))
                     .map(|c| c.ops as f64)
                     .sum();
