@@ -57,9 +57,6 @@ pub use num_rational::BigRational;
 pub use role::{Crossing, OutputRole, ParamRole, Signature};
 pub use scalar::Scalar;
 pub use scope::Scope;
-pub use semantics::{
-    binary_f64, cmp_bool, dot_slice, reduce_slice, unary_f64, EXP_LIMIT, LN_FLOOR,
-};
 pub use tape::{
     Guards, Lowered, NoTrace, ParamSelects, Program, Region, SpecializedTape, Tape, TraceSink,
 };

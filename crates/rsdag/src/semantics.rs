@@ -574,7 +574,7 @@ pub fn gemm_fold(
 }
 
 /// The self folds of `out` (products stored plain), in place.
-pub fn fold_in_place(codes: &[u32], c: Option<&[f64]>, out: &mut [f64]) {
+pub(crate) fn fold_in_place(codes: &[u32], c: Option<&[f64]>, out: &mut [f64]) {
     for i in 0..out.len() {
         let f = Fold(codes[i]);
         if f.is_plain() {
