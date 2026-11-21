@@ -381,7 +381,27 @@ pub unsafe fn run_stage<'a>(
         run_groups(&c, g0..(g0 + bs).min(c.n_groups));
     };
     let total = (0..n).map(|k| pieces(&call(k))).sum();
-    decide.wide::<rspool::Here>(total, width, &run);
+    // A measured run's pieces show what the estimate was off by: each
+    // call's rate (once, however many calls share it) learns that, only ever
+    // lower (`Rate::learn_wide`), so the stage's next estimate is the time
+    // its pieces ran.
+    if let Some(busy) = decide.wide_busy::<rspool::Here>(total, width, &run) {
+        if work > 0.0 {
+            let off = busy / work;
+            for k in 0..n {
+                let rate = call(k).bundle.rate();
+                if (0..k).any(|j| std::ptr::eq(call(j).bundle.rate(), rate)) {
+                    continue;
+                }
+                let ops: f64 = (k..n)
+                    .map(|j| call(j))
+                    .filter(|c| std::ptr::eq(c.bundle.rate(), rate))
+                    .map(|c| c.ops as f64)
+                    .sum();
+                rate.learn_wide(off * ops * rate.ns_per_op(), ops);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
