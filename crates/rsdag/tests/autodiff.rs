@@ -534,7 +534,7 @@ fn a_jacobian_through_wide_calls_makes_only_its_entries() {
     // f(x)_k = x_k exp(x_{k+1}), cyclic: each output reads two of N parameters
     let mut s = Scope::new(&mut g, "f");
     let xs: Vec<ExprId> = (0..N)
-        .map(|k| s.param(format!("x{k}").as_str(), ParamRole::Free))
+        .map(|k| s.param(&format!("x{k}"), ParamRole::Free))
         .collect();
     let outs: Vec<ExprId> = (0..N)
         .map(|k| {
@@ -546,7 +546,7 @@ fn a_jacobian_through_wide_calls_makes_only_its_entries() {
     // h(y)_k = f(y)_k + y_k: a body that is all calls into f
     let mut s = Scope::new(&mut g, "h");
     let ys: Vec<ExprId> = (0..N)
-        .map(|k| s.param(format!("y{k}").as_str(), ParamRole::Free))
+        .map(|k| s.param(&format!("y{k}"), ParamRole::Free))
         .collect();
     let outs: Vec<ExprId> = (0..N)
         .map(|k| {

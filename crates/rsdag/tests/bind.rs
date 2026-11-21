@@ -29,7 +29,7 @@ fn device(g: &mut Graph<F64>) -> FuncId {
     let va = s.param("va", ParamRole::State { id: 0 });
     let vb = s.param("vb", ParamRole::State { id: 1 });
     let c: Vec<ExprId> = (0..CARD)
-        .map(|k| s.param(format!("c{k}").as_str(), ParamRole::Param))
+        .map(|k| s.param(&format!("c{k}"), ParamRole::Param))
         .collect();
     let w = s.param("w", ParamRole::Param);
     let dv = s.sub(va, vb);
@@ -305,7 +305,7 @@ fn inlining_reaches_every_binding_of_one_argument_list() {
     s.param(sw, ParamRole::Free);
     for c in 0..2 {
         for k in 0..CARD {
-            s.global(format!("card{c}.{k}").as_str());
+            s.global(&format!("card{c}.{k}"));
         }
     }
     let pair = s.close([(body, OutputRole::Plain)]);

@@ -45,6 +45,12 @@ impl Formal for &str {
     }
 }
 
+impl Formal for &String {
+    fn symbol<K: Field>(self, graph: &mut Graph<K>) -> SymbolId {
+        graph.symbol_id(self)
+    }
+}
+
 impl Formal for SymbolId {
     fn symbol<K: Field>(self, _: &mut Graph<K>) -> SymbolId {
         self

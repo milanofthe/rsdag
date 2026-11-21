@@ -40,21 +40,16 @@ fn main() {
         // k + 1 and the one from k - 1 to k
         let mut s = Scope::new(&mut g, "body");
         let v: Vec<ExprId> = (0..n)
-            .map(|k| s.param(format!("v{k}").as_str(), ParamRole::State { id: k as u32 }))
+            .map(|k| s.param(&format!("v{k}"), ParamRole::State { id: k as u32 }))
             .collect();
         let vd: Vec<ExprId> = (0..n)
-            .map(|k| {
-                s.param(
-                    format!("vd{k}").as_str(),
-                    ParamRole::StateDot { id: k as u32 },
-                )
-            })
+            .map(|k| s.param(&format!("vd{k}"), ParamRole::StateDot { id: k as u32 }))
             .collect();
         let p: Vec<ExprId> = (0..n)
-            .map(|k| s.param(format!("p{k}").as_str(), ParamRole::Param))
+            .map(|k| s.param(&format!("p{k}"), ParamRole::Param))
             .collect();
         let c: Vec<ExprId> = (0..n)
-            .map(|k| s.param(format!("c{k}").as_str(), ParamRole::Param))
+            .map(|k| s.param(&format!("c{k}"), ParamRole::Param))
             .collect();
         let currents: Vec<ExprId> = (0..n)
             .map(|k| s.call(d, 0, &[v[k], v[(k + 1) % n], p[k]]))

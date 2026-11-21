@@ -25,10 +25,10 @@ fn body(g: &mut Graph<F64>) -> FuncId {
     let dev = s.close([(sb, OutputRole::Plain), (a, OutputRole::Plain)]);
     let mut s = Scope::new(g, "body");
     let v: Vec<ExprId> = (0..N)
-        .map(|k| s.param(format!("v{k}").as_str(), ParamRole::State { id: k as u32 }))
+        .map(|k| s.param(&format!("v{k}"), ParamRole::State { id: k as u32 }))
         .collect();
     let p: Vec<ExprId> = (0..N)
-        .map(|k| s.param(format!("p{k}").as_str(), ParamRole::Param))
+        .map(|k| s.param(&format!("p{k}"), ParamRole::Param))
         .collect();
     let outs: Vec<ExprId> = (0..N)
         .map(|k| {
@@ -159,10 +159,10 @@ fn composite_functions_inline_and_leaves_stay_calls() {
     // top(u, p) = body(u, p) + body(u shifted, p), one instance each
     let mut s = Scope::new(&mut g, "top");
     let u: Vec<ExprId> = (0..N)
-        .map(|k| s.param(format!("u{k}").as_str(), ParamRole::Free))
+        .map(|k| s.param(&format!("u{k}"), ParamRole::Free))
         .collect();
     let p: Vec<ExprId> = (0..N)
-        .map(|k| s.param(format!("q{k}").as_str(), ParamRole::Free))
+        .map(|k| s.param(&format!("q{k}"), ParamRole::Free))
         .collect();
     let a: Vec<ExprId> = u.iter().chain(&p).copied().collect();
     let b: Vec<ExprId> = (0..N)

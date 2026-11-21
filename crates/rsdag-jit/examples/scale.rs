@@ -57,7 +57,7 @@ fn device(g: &mut Graph<F64>, card: usize) -> FuncId {
     let w = s.param("w", ParamRole::Param);
     let l = s.param("l", ParamRole::Param);
     let c: Vec<ExprId> = (0..card)
-        .map(|k| s.param(format!("c{k}").as_str(), ParamRole::Param))
+        .map(|k| s.param(&format!("c{k}"), ParamRole::Param))
         .collect();
     let weights: Vec<ExprId> = (0..card)
         .map(|k| s.konst_f64(1e-3 / (1.0 + k as f64)))
@@ -100,16 +100,16 @@ fn gate(g: &mut Graph<F64>, dev: FuncId, card: usize, bound: Option<[Bound; 2]>)
     let (cn, cp): (Vec<ExprId>, Vec<ExprId>) = match bound {
         Some(_) => {
             for k in 0..2 * card {
-                s.global(format!("card{k}").as_str());
+                s.global(&format!("card{k}"));
             }
             (Vec::new(), Vec::new())
         }
         None => (
             (0..card)
-                .map(|k| s.param(format!("n{k}").as_str(), ParamRole::Param))
+                .map(|k| s.param(&format!("n{k}"), ParamRole::Param))
                 .collect(),
             (0..card)
-                .map(|k| s.param(format!("p{k}").as_str(), ParamRole::Param))
+                .map(|k| s.param(&format!("p{k}"), ParamRole::Param))
                 .collect(),
         ),
     };
@@ -211,12 +211,7 @@ fn run(gates: usize, card: usize, once: bool, bind: bool, inline_first: bool) {
         // the block over formal nodes, placed once on the top-level ones
         let mut s = Scope::new(&mut g, "block");
         let fv: Vec<ExprId> = (0..n + gates)
-            .map(|k| {
-                s.param(
-                    format!("blk.v{k}").as_str(),
-                    ParamRole::State { id: k as u32 },
-                )
-            })
+            .map(|k| s.param(&format!("blk.v{k}"), ParamRole::State { id: k as u32 }))
             .collect();
         let fvdd = s.param(
             "blk.vdd",
@@ -225,7 +220,7 @@ fn run(gates: usize, card: usize, once: bool, bind: bool, inline_first: bool) {
             },
         );
         let fc: Vec<ExprId> = (0..card_e.len())
-            .map(|k| s.param(format!("blk.card{k}").as_str(), ParamRole::Param))
+            .map(|k| s.param(&format!("blk.card{k}"), ParamRole::Param))
             .collect();
         let outs = residuals(&mut s, gt, &fv, fvdd, &fc, gates, n);
         let n_out = outs.len() as u32;
