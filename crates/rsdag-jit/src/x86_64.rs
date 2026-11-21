@@ -567,6 +567,52 @@ impl<const L: usize> X64<L> {
         self.b(0x7E);
         self.modrm_reg(x, g);
     }
+    /// `movq x, g`: the general register `g` into a register's first lane.
+    fn gpr_to_lane(&mut self, x: u8, g: u8) {
+        if self.avx {
+            self.vex3(true, 1, 1, 0, x, 0, 0, g);
+        } else {
+            self.b(0x66);
+            self.b(0x48 | ((x >> 3) << 2) | (g >> 3));
+            self.b(0x0F);
+        }
+        self.b(0x6E);
+        self.modrm_reg(x, g);
+    }
+    /// `cvtsi2sd x, g`: the signed integer `g` as a double into `x`'s first
+    /// lane (exact for the exponents here).
+    fn int_to_float(&mut self, x: u8, g: u8) {
+        if self.avx {
+            self.vex3(true, 3, 1, 0, x, x, 0, g);
+        } else {
+            self.b(0xF2);
+            self.b(0x48 | ((x >> 3) << 2) | (g >> 3));
+            self.b(0x0F);
+        }
+        self.b(0x2A);
+        self.modrm_reg(x, g);
+    }
+    /// `op d, s` on 64-bit general registers (`op r/m64, r64`).
+    fn gpr_rr(&mut self, op: u8, d: u8, s: u8) {
+        self.rex(true, s, d);
+        self.b(op);
+        self.modrm_reg(s, d);
+    }
+    /// A shift of a 64-bit general register by `n` (`C1 /ext ib`).
+    fn gpr_shift(&mut self, ext: u8, d: u8, n: u32) {
+        self.rex(true, 0, d);
+        self.b(0xC1);
+        self.modrm_reg(ext, d);
+        self.b(n as u8);
+    }
+    /// `and d, imm32` on a 64-bit general register.
+    fn gpr_and(&mut self, d: u8, v: u64) {
+        let v = u32::try_from(v).expect("a mask of 32 bits");
+        self.rex(true, 0, d);
+        self.b(0x81);
+        self.modrm_reg(4, d);
+        self.bytes(&v.to_le_bytes());
+    }
     /// `g` = the second lane of `x` (`vpextrq g, x, 1`; without AVX through
     /// `xmm0`).
     fn lane1_to_gpr(&mut self, g: u8, x: u8) {
@@ -599,6 +645,11 @@ impl<const L: usize> X64<L> {
             self.lane_to_gpr(g[2], idx);
             self.lane1_to_gpr(g[3], idx);
         }
+        self.rows_from(table, cols, tmp);
+    }
+    /// [`rows`](Self::rows) with the offsets already in [`INDEX_GPRS`].
+    fn rows_from(&mut self, table: *const u8, cols: &[u8], tmp: u8) {
+        let g = &INDEX_GPRS[..L];
         self.mov_imm(TABLE, table as u64);
         for (p, pair) in cols.chunks(2).enumerate() {
             let at = (p * PAIR_BYTES) as u8;
@@ -666,17 +717,37 @@ impl<const L: usize> X64<L> {
         use Arith::*;
         use Operand::{C, R};
         let s = 1;
-        // x = 2^k z
-        self.int_c(Int::Sub, a, x, LN_OFF); // tmp
-        self.shift(false, b, a, F64_FRAC_BITS);
-        self.int_c(Int::Xor, b, b, LN_K_OFFSET);
-        self.int_c(Int::Add, b, b, MAGIC.to_bits());
-        self.fc(Sub, b, b, LN_K_MAGIC); // kd
-        self.int_c(Int::And, c, a, LN_EXP_MASK);
-        self.int(Int::Sub, e, x, c); // z
-        self.shift(false, c, a, LN_SHIFT - LN_ROW_SHIFT);
-        self.int_c(Int::And, c, c, LN_INDEX_MASK << LN_ROW_SHIFT); // the row's offset
-        self.rows(LN_TABLE.as_ptr().cast(), c, &[a, c, f, d], s); // invc, c, logc
+        // x = 2^k z, and the row's offset
+        let table = LN_TABLE.as_ptr().cast();
+        if L == 1 {
+            // one lane: the integer steps in general registers
+            let [t, k, ix] = [INDEX_GPRS[0], INDEX_GPRS[1], INDEX_GPRS[2]];
+            self.lane_to_gpr(ix, x);
+            self.mov_imm(k, LN_OFF);
+            self.gpr_rr(GPR_MOV, t, ix);
+            self.gpr_rr(GPR_SUB, t, k); // tmp
+            self.gpr_rr(GPR_MOV, k, t);
+            self.gpr_shift(GPR_SAR, k, F64_FRAC_BITS); // k
+            self.zero(b);
+            self.int_to_float(b, k); // kd
+            self.gpr_shift(GPR_SHL, k, F64_FRAC_BITS);
+            self.gpr_rr(GPR_SUB, ix, k);
+            self.gpr_to_lane(e, ix); // z
+            self.gpr_shift(GPR_SHR, t, LN_SHIFT - LN_ROW_SHIFT);
+            self.gpr_and(t, LN_INDEX_MASK << LN_ROW_SHIFT);
+            self.rows_from(table, &[a, c, f, d], s); // invc, c, logc
+        } else {
+            self.int_c(Int::Sub, a, x, LN_OFF); // tmp
+            self.shift(false, b, a, F64_FRAC_BITS);
+            self.int_c(Int::Xor, b, b, LN_K_OFFSET);
+            self.int_c(Int::Add, b, b, MAGIC.to_bits());
+            self.fc(Sub, b, b, LN_K_MAGIC); // kd
+            self.int_c(Int::And, c, a, LN_EXP_MASK);
+            self.int(Int::Sub, e, x, c); // z
+            self.shift(false, c, a, LN_SHIFT - LN_ROW_SHIFT);
+            self.int_c(Int::And, c, c, LN_INDEX_MASK << LN_ROW_SHIFT);
+            self.rows(table, c, &[a, c, f, d], s); // invc, c, logc
+        }
         self.f(Sub, e, e, c);
         self.f(Mul, e, e, a); // r
         self.madd(a, b, C(LN_LN2_HI), R(f)); // w
@@ -713,6 +784,14 @@ enum Operand {
     R(u8),
     C(f64),
 }
+
+// General-register opcodes: `mov` and `sub` (`op r/m64, r64`), and the
+// shifts' ModRM extensions under `C1`.
+const GPR_MOV: u8 = 0x89;
+const GPR_SUB: u8 = 0x29;
+const GPR_SHL: u8 = 4;
+const GPR_SHR: u8 = 5;
+const GPR_SAR: u8 = 7;
 
 const FMA132: u8 = 0x98;
 const FMA213: u8 = 0xA8;
