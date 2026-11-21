@@ -5,7 +5,9 @@
 use std::sync::Arc;
 
 use rsdag::parallel::{self, Lent};
-use rsdag::{ExprId, FuncId, Graph, Node, ParamRole, ReduceOp, Scope, SymbolId, Tape, F64};
+use rsdag::{
+    ExprId, FuncId, Graph, Node, OutputRole, ParamRole, ReduceOp, Scope, SymbolId, Tape, F64,
+};
 use rsdag_jit::{NativeTape, Options};
 
 const N: usize = 96;
@@ -22,10 +24,10 @@ fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
 /// instance for a stage to be worth a pool.
 fn device(g: &mut Graph<F64>, name: &str, k: f64) -> FuncId {
     let mut s = Scope::new(g, name);
-    let a = s.param_with_role("a", ParamRole::State { id: 0 });
-    let b = s.param_with_role("b", ParamRole::State { id: 1 });
-    let p0 = s.param_with_role("p0", ParamRole::Param);
-    let p1 = s.param_with_role("p1", ParamRole::Param);
+    let a = s.param("a", ParamRole::State { id: 0 });
+    let b = s.param("b", ParamRole::State { id: 1 });
+    let p0 = s.param("p0", ParamRole::Param);
+    let p1 = s.param("p1", ParamRole::Param);
     let mut pe = p0;
     for i in 0..20 {
         let c = s.konst_f64(k + 0.01 * i as f64);
@@ -40,7 +42,7 @@ fn device(g: &mut Graph<F64>, name: &str, k: f64) -> FuncId {
     let ab = s.mul(a, b);
     let q = s.sin(ab);
     let q = s.mul(pe, q);
-    s.close(vec![i, q])
+    s.close([(i, OutputRole::Plain), (q, OutputRole::Plain)])
 }
 
 fn ring() -> (Graph<F64>, Vec<ExprId>, Vec<SymbolId>, Vec<bool>) {

@@ -6,7 +6,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use rsdag::{Graph, Node, Tape, F64};
+use rsdag::{Graph, Node, OutputRole, ParamRole, Scope, Tape, F64};
 
 thread_local!(static ALLOCS: Cell<usize> = const { Cell::new(0) });
 
@@ -77,7 +77,11 @@ fn the_evaluation_paths_do_not_allocate() {
     );
 
     // The same as a function body, called from a program.
-    let f = g.define_func("body", syms.clone(), roots);
+    let mut s = Scope::new(&mut g, "body");
+    for &x in &syms {
+        s.param(x, ParamRole::Free);
+    }
+    let f = s.close(roots.into_iter().map(|e| (e, OutputRole::Plain)));
     let calls = g.calls(f, &[0, 1, 2, 3], &xs);
     let tape = Tape::compile(&g, &calls, &syms);
     let mut work = vec![0.0; tape.work_len()];

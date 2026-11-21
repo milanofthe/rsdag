@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 
 use rsdag::{
-    eval, sparse_jacobian, substitute, ExprId, FuncId, Graph, Node, ParamRole, ReduceOp, Scope,
-    SymbolId, Tape, F64,
+    eval, sparse_jacobian, substitute, ExprId, FuncId, Graph, Node, OutputRole, ParamRole,
+    ReduceOp, Scope, SymbolId, Tape, F64,
 };
 use rustc_hash::FxHashMap;
 
@@ -26,12 +26,12 @@ const CARD: usize = 6;
 /// parameter.
 fn device(g: &mut Graph<F64>) -> FuncId {
     let mut s = Scope::new(g, "d");
-    let va = s.param_with_role("va", ParamRole::State { id: 0 });
-    let vb = s.param_with_role("vb", ParamRole::State { id: 1 });
+    let va = s.param("va", ParamRole::State { id: 0 });
+    let vb = s.param("vb", ParamRole::State { id: 1 });
     let c: Vec<ExprId> = (0..CARD)
-        .map(|k| s.param_with_role(&format!("c{k}"), ParamRole::Param))
+        .map(|k| s.param(format!("c{k}").as_str(), ParamRole::Param))
         .collect();
-    let w = s.param_with_role("w", ParamRole::Param);
+    let w = s.param("w", ParamRole::Param);
     let dv = s.sub(va, vb);
     let k = s.reduce(ReduceOp::Sum, c.clone());
     let th = s.tanh(dv);
@@ -41,7 +41,7 @@ fn device(g: &mut Graph<F64>) -> FuncId {
     let i = s.add(i, e);
     let i = s.mul(i, w);
     let q = s.mul(c[2], vb);
-    s.close(vec![i, q])
+    s.close([(i, OutputRole::Plain), (q, OutputRole::Plain)])
 }
 
 struct Built {
@@ -299,7 +299,16 @@ fn inlining_reaches_every_binding_of_one_argument_list() {
         })
         .collect();
     let body = g.reduce(ReduceOp::Sum, terms);
-    let pair = g.define_func("pair", vec![sa, sb, sw], vec![body]);
+    let mut s = Scope::new(&mut g, "pair");
+    s.param(sa, ParamRole::Free);
+    s.param(sb, ParamRole::Free);
+    s.param(sw, ParamRole::Free);
+    for c in 0..2 {
+        for k in 0..CARD {
+            s.global(format!("card{c}.{k}").as_str());
+        }
+    }
+    let pair = s.close([(body, OutputRole::Plain)]);
     let args: Vec<ExprId> = ["v0", "v1", "w0"]
         .iter()
         .map(|n| sym(&mut g, n).0)

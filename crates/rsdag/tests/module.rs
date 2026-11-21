@@ -17,7 +17,7 @@ fn a_module_round_trips_bit_exactly() {
         };
         let mut g: Graph<F64> = Graph::new();
         let (roots, syms) = build(&mut g, &mut spec);
-        let f = Scope::new(&mut g, "f").close(roots.clone());
+        let f = Scope::new(&mut g, "f").close(roots.iter().map(|&e| (e, OutputRole::Plain)));
 
         let module = g.to_module();
         let (loaded, map) = Graph::from_module(&module).unwrap();
@@ -92,7 +92,7 @@ fn a_module_survives_json() {
         let k = g.konst_f64(v);
         roots.push(k);
     }
-    Scope::new(&mut g, "f").close(roots.clone());
+    Scope::new(&mut g, "f").close(roots.iter().map(|&e| (e, OutputRole::Plain)));
     let module = g.to_module();
     let text = serde_json::to_string(&module).expect("serialize");
     let back: Module<F64> = serde_json::from_str(&text).expect("deserialize");
@@ -116,19 +116,19 @@ fn a_module_survives_json() {
 fn calls_and_nested_functions_round_trip() {
     let mut g: Graph<F64> = Graph::new();
     let mut s = rsdag::Scope::new(&mut g, "gain");
-    let u = s.param_with_role("u", ParamRole::Free);
-    let k = s.param_with_role("k", ParamRole::Free);
+    let u = s.param("u", ParamRole::Free);
+    let k = s.param("k", ParamRole::Free);
     let y = s.mul(k, u);
-    let gain = s.close(vec![y]);
+    let gain = s.close([(y, OutputRole::Plain)]);
 
     let mut s = rsdag::Scope::new(&mut g, "chain");
-    let x = s.param_with_role("x", ParamRole::Free);
+    let x = s.param("x", ParamRole::Free);
     let a = s.konst_f64(2.0);
     let b = s.konst_f64(3.0);
     let mid = s.call(gain, 0, &[x, a]);
     let out = s.call(gain, 0, &[mid, b]);
     let e = s.exp(out);
-    let chain = s.close(vec![e]);
+    let chain = s.close([(e, OutputRole::Plain)]);
     let root = match g.func(chain).outputs()[0] {
         rsdag::Output::Expr(e) => e,
         _ => unreachable!(),
@@ -175,13 +175,14 @@ fn an_extern_function_round_trips_with_its_body_resolved_by_name() {
     let y = g.sym("y");
     let f = g.define_extern_func(
         "pair",
-        2,
+        &[ParamRole::Free; 2],
         Arc::new(Pair),
-        vec![
+        [
             rsdag::Output::Slot(0),
             rsdag::Output::Slot(1),
             rsdag::Output::Zero,
-        ],
+        ]
+        .map(|o| (o, OutputRole::Plain)),
     );
     let sum = g.call(f, 0, &[x, y]);
     let prod = g.call(f, 1, &[x, y]);
@@ -228,7 +229,7 @@ fn derivatives_demanded_after_a_call_round_trip() {
         let s = g.sin(x);
         g.mul(s, y)
     };
-    let f = Scope::new(&mut g, "f").close(vec![body]);
+    let f = Scope::new(&mut g, "f").close([(body, OutputRole::Plain)]);
     let (a, b) = (g.sym("a"), g.sym("b"));
     let c = g.call(f, 0, &[a, b]);
     let syms = [SymbolId(2), SymbolId(3)];
@@ -265,7 +266,12 @@ fn a_declared_extern_derivative_survives_a_reload() {
     let mut g: Graph<F64> = Graph::new();
     let x = g.sym("x");
     let y = g.sym("y");
-    let f = g.define_extern_func("pair", 2, Arc::new(Pair), vec![rsdag::Output::Slot(0)]);
+    let f = g.define_extern_func(
+        "pair",
+        &[ParamRole::Free; 2],
+        Arc::new(Pair),
+        [(rsdag::Output::Slot(0), OutputRole::Plain)],
+    );
     // Declared as the slot `a * b` (a stand-in: the test reads the index).
     let k = g.declare_derivative(f, 0, 0, rsdag::Output::Slot(1));
     let sum = g.call(f, 0, &[x, y]);
@@ -292,7 +298,12 @@ fn loading_a_module_with_externs_without_bodies_says_so() {
     use std::sync::Arc;
     let mut g: Graph<F64> = Graph::new();
     let x = g.sym("x");
-    let f = g.define_extern_func("pair", 2, Arc::new(Pair), vec![rsdag::Output::Slot(0)]);
+    let f = g.define_extern_func(
+        "pair",
+        &[ParamRole::Free; 2],
+        Arc::new(Pair),
+        [(rsdag::Output::Slot(0), OutputRole::Plain)],
+    );
     let _ = g.call(f, 0, &[x, x]);
     let module = g.to_module();
     let err = Graph::from_module(&module).err();
@@ -310,7 +321,7 @@ fn a_broken_module_is_refused_not_panicked_on() {
     let s = g.add(x, y);
     let t = g.sin(s);
     let d = g.dot(vec![x, y], vec![y, t]);
-    let _ = Scope::new(&mut g, "f").close(vec![d]);
+    let _ = Scope::new(&mut g, "f").close([(d, OutputRole::Plain)]);
     let good = g.to_module();
     assert!(Graph::from_module(&good).is_ok());
 

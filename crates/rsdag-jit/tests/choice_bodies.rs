@@ -6,7 +6,8 @@
 
 use rsdag::variant::VariantPolicy;
 use rsdag::{
-    BodyBackend, ChoicePolicy, CmpOp, ExprId, FuncId, Graph, Node, ParamRole, SymbolId, Tape, F64,
+    BodyBackend, ChoicePolicy, CmpOp, ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope,
+    SymbolId, Tape, F64,
 };
 use rsdag_jit::{Lanes, NativeTape, Options};
 
@@ -45,10 +46,10 @@ fn device(g: &mut Graph<F64>) -> FuncId {
     }
     let e = g.exp(v);
     let o1 = g.mul(e, p);
-    let f = g.define_func("dev", vec![vs, ps], vec![y, o1]);
-    g.set_param_role(f, 0, ParamRole::State { id: 0 });
-    g.set_param_role(f, 1, ParamRole::Param);
-    f
+    let mut s = Scope::new(g, "dev");
+    s.param(vs, ParamRole::State { id: 0 });
+    s.param(ps, ParamRole::Param);
+    s.close([(y, OutputRole::Plain), (o1, OutputRole::Plain)])
 }
 
 /// `n` instances, each `f(x_i, p_i)`, both outputs summed; specializing

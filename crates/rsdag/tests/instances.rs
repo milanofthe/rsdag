@@ -2,7 +2,9 @@
 //! walks calls (rewriting, specializing, differentiating, compiling) works
 //! on the list once per instance. The results are the inlined graph's.
 
-use rsdag::{sparse_jacobian, ExprId, FuncId, Graph, Node, ParamRole, Scope, SymbolId, Tape, F64};
+use rsdag::{
+    sparse_jacobian, ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64,
+};
 
 const N: usize = 40;
 
@@ -18,20 +20,17 @@ fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
 /// + 3 v_{k+2}, every output reading four of the 2 N parameters.
 fn body(g: &mut Graph<F64>) -> FuncId {
     let mut s = Scope::new(g, "dev");
-    let (a, b) = (
-        s.param_with_role("a", ParamRole::Free),
-        s.param_with_role("b", ParamRole::Free),
-    );
+    let (a, b) = (s.param("a", ParamRole::Free), s.param("b", ParamRole::Free));
     let sb = s.sin(b);
-    let dev = s.close(vec![sb, a]);
+    let dev = s.close([(sb, OutputRole::Plain), (a, OutputRole::Plain)]);
     let mut s = Scope::new(g, "body");
     let v: Vec<ExprId> = (0..N)
-        .map(|k| s.param_with_role(&format!("v{k}"), ParamRole::State { id: k as u32 }))
+        .map(|k| s.param(format!("v{k}").as_str(), ParamRole::State { id: k as u32 }))
         .collect();
     let p: Vec<ExprId> = (0..N)
-        .map(|k| s.param_with_role(&format!("p{k}"), ParamRole::Param))
+        .map(|k| s.param(format!("p{k}").as_str(), ParamRole::Param))
         .collect();
-    let outs = (0..N)
+    let outs: Vec<ExprId> = (0..N)
         .map(|k| {
             let sq = s.pow_i(v[k], 2);
             let q = s.mul(p[k], sq);
@@ -42,7 +41,7 @@ fn body(g: &mut Graph<F64>) -> FuncId {
             s.add(qc, lin)
         })
         .collect();
-    s.close(outs)
+    s.close(outs.into_iter().map(|e| (e, OutputRole::Plain)))
 }
 
 #[test]
@@ -160,10 +159,10 @@ fn composite_functions_inline_and_leaves_stay_calls() {
     // top(u, p) = body(u, p) + body(u shifted, p), one instance each
     let mut s = Scope::new(&mut g, "top");
     let u: Vec<ExprId> = (0..N)
-        .map(|k| s.param_with_role(&format!("u{k}"), ParamRole::Free))
+        .map(|k| s.param(format!("u{k}").as_str(), ParamRole::Free))
         .collect();
     let p: Vec<ExprId> = (0..N)
-        .map(|k| s.param_with_role(&format!("q{k}"), ParamRole::Free))
+        .map(|k| s.param(format!("q{k}").as_str(), ParamRole::Free))
         .collect();
     let a: Vec<ExprId> = u.iter().chain(&p).copied().collect();
     let b: Vec<ExprId> = (0..N)
@@ -174,7 +173,7 @@ fn composite_functions_inline_and_leaves_stay_calls() {
     let fa = s.calls(f, &outs, &a);
     let fb = s.calls(f, &outs, &b);
     let sums: Vec<ExprId> = fa.iter().zip(&fb).map(|(&x, &y)| s.add(x, y)).collect();
-    let top = s.close(sums);
+    let top = s.close(sums.into_iter().map(|e| (e, OutputRole::Plain)));
     let mut args = Vec::new();
     let mut ins = Vec::new();
     for k in 0..2 * N {

@@ -29,8 +29,8 @@ use common::per_call;
 use std::time::Instant;
 
 use rsdag::{
-    sparse_jacobian, Bound, ExprId, FuncId, Graph, Node, ParamRole, ReduceOp, Scope, SymbolId,
-    Tape, F64,
+    sparse_jacobian, Bound, ExprId, FuncId, Graph, Node, OutputRole, ParamRole, ReduceOp, Scope,
+    SymbolId, Tape, F64,
 };
 use rsdag_jit::NativeTape;
 
@@ -51,13 +51,13 @@ fn ms(t: Instant) -> f64 {
 /// instance's a ratio; the current from `d` to `s` and its negation out.
 fn device(g: &mut Graph<F64>, card: usize) -> FuncId {
     let mut s = Scope::new(g, "device");
-    let vd = s.param_with_role("d", ParamRole::State { id: 0 });
-    let vg = s.param_with_role("g", ParamRole::State { id: 1 });
-    let vs = s.param_with_role("s", ParamRole::State { id: 2 });
-    let w = s.param_with_role("w", ParamRole::Param);
-    let l = s.param_with_role("l", ParamRole::Param);
+    let vd = s.param("d", ParamRole::State { id: 0 });
+    let vg = s.param("g", ParamRole::State { id: 1 });
+    let vs = s.param("s", ParamRole::State { id: 2 });
+    let w = s.param("w", ParamRole::Param);
+    let l = s.param("l", ParamRole::Param);
     let c: Vec<ExprId> = (0..card)
-        .map(|k| s.param_with_role(&format!("c{k}"), ParamRole::Param))
+        .map(|k| s.param(format!("c{k}").as_str(), ParamRole::Param))
         .collect();
     let weights: Vec<ExprId> = (0..card)
         .map(|k| s.konst_f64(1e-3 / (1.0 + k as f64)))
@@ -81,7 +81,7 @@ fn device(g: &mut Graph<F64>, card: usize) -> FuncId {
     let id = s.mul(id, clm);
     let id = s.mul(id, th);
     let is = s.neg(id);
-    s.close(vec![id, is])
+    s.close([(id, OutputRole::Plain), (is, OutputRole::Plain)])
 }
 
 /// The gate over `(a, b, y, vdd, m)` and both cards: two devices of card
@@ -92,7 +92,7 @@ fn gate(g: &mut Graph<F64>, dev: FuncId, card: usize, bound: Option<[Bound; 2]>)
     let node: Vec<ExprId> = ["a", "b", "y", "vdd", "m"]
         .iter()
         .enumerate()
-        .map(|(k, n)| s.param_with_role(n, ParamRole::State { id: k as u32 }))
+        .map(|(k, n)| s.param(*n, ParamRole::State { id: k as u32 }))
         .collect();
     let (a, b, y, vdd, m) = (node[0], node[1], node[2], node[3], node[4]);
     // the cards: parameters passed down, or bound into the devices and
@@ -100,16 +100,16 @@ fn gate(g: &mut Graph<F64>, dev: FuncId, card: usize, bound: Option<[Bound; 2]>)
     let (cn, cp): (Vec<ExprId>, Vec<ExprId>) = match bound {
         Some(_) => {
             for k in 0..2 * card {
-                s.global(&format!("card{k}"));
+                s.global(format!("card{k}").as_str());
             }
             (Vec::new(), Vec::new())
         }
         None => (
             (0..card)
-                .map(|k| s.param_with_role(&format!("n{k}"), ParamRole::Param))
+                .map(|k| s.param(format!("n{k}").as_str(), ParamRole::Param))
                 .collect(),
             (0..card)
-                .map(|k| s.param_with_role(&format!("p{k}"), ParamRole::Param))
+                .map(|k| s.param(format!("p{k}").as_str(), ParamRole::Param))
                 .collect(),
         ),
     };
@@ -133,7 +133,11 @@ fn gate(g: &mut Graph<F64>, dev: FuncId, card: usize, bound: Option<[Bound; 2]>)
     let iy = s.reduce(ReduceOp::Sum, vec![p1[0], p2[0], n1[0]]);
     let im = s.reduce(ReduceOp::Sum, vec![n1[1], n2[0]]);
     let ivdd = s.reduce(ReduceOp::Sum, vec![p1[1], p2[1]]);
-    s.close(vec![iy, im, ivdd])
+    s.close([
+        (iy, OutputRole::Plain),
+        (im, OutputRole::Plain),
+        (ivdd, OutputRole::Plain),
+    ])
 }
 
 /// The gates' wiring over `n` nodes: gate `k` reads two nodes, drives one
@@ -207,20 +211,25 @@ fn run(gates: usize, card: usize, once: bool, bind: bool, inline_first: bool) {
         // the block over formal nodes, placed once on the top-level ones
         let mut s = Scope::new(&mut g, "block");
         let fv: Vec<ExprId> = (0..n + gates)
-            .map(|k| s.param_with_role(&format!("blk.v{k}"), ParamRole::State { id: k as u32 }))
+            .map(|k| {
+                s.param(
+                    format!("blk.v{k}").as_str(),
+                    ParamRole::State { id: k as u32 },
+                )
+            })
             .collect();
-        let fvdd = s.param_with_role(
+        let fvdd = s.param(
             "blk.vdd",
             ParamRole::State {
                 id: (n + gates) as u32,
             },
         );
         let fc: Vec<ExprId> = (0..card_e.len())
-            .map(|k| s.param_with_role(&format!("blk.card{k}"), ParamRole::Param))
+            .map(|k| s.param(format!("blk.card{k}").as_str(), ParamRole::Param))
             .collect();
         let outs = residuals(&mut s, gt, &fv, fvdd, &fc, gates, n);
         let n_out = outs.len() as u32;
-        let block = s.close(outs);
+        let block = s.close(outs.into_iter().map(|e| (e, OutputRole::Plain)));
         let args: Vec<ExprId> = top
             .iter()
             .map(|&(e, _)| e)

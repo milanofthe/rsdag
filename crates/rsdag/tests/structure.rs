@@ -34,12 +34,10 @@ fn contains_call(g: &Graph<F64>, e: ExprId) -> bool {
 /// A gain block `y = k * u`, as a function with roles.
 fn gain(g: &mut Graph<F64>, name: &str) -> FuncId {
     let mut s = Scope::new(g, name);
-    let u = s.param_with_role("u", ParamRole::Input { port: 0, elem: 0 });
-    let k = s.param_with_role("k", ParamRole::Param);
+    let u = s.param("u", ParamRole::Input { port: 0, elem: 0 });
+    let k = s.param("k", ParamRole::Param);
     let y = s.mul(k, u);
-    let f = s.close(vec![y]);
-    g.set_output_role(f, 0, OutputRole::Output { port: 0, elem: 0 });
-    f
+    s.close([(y, OutputRole::Output { port: 0, elem: 0 })])
 }
 
 /// Hierarchy is a call graph: a subsystem is a function whose body calls
@@ -54,22 +52,20 @@ fn subsystems_nest_and_instances_keep_their_parameters() {
     // its own gain: the parameters are arguments, so one definition serves
     // both instances.
     let mut s = Scope::new(&mut g, "chain");
-    let u = s.param_with_role("u", ParamRole::Input { port: 0, elem: 0 });
-    let k1 = s.param_with_role("k1", ParamRole::Param);
-    let k2 = s.param_with_role("k2", ParamRole::Param);
+    let u = s.param("u", ParamRole::Input { port: 0, elem: 0 });
+    let k1 = s.param("k1", ParamRole::Param);
+    let k2 = s.param("k2", ParamRole::Param);
     let mid = s.call(inner, 0, &[u, k1]);
     let out = s.call(inner, 0, &[mid, k2]);
-    let chain = s.close(vec![out]);
-    g.set_output_role(chain, 0, OutputRole::Output { port: 0, elem: 0 });
+    let chain = s.close([(out, OutputRole::Output { port: 0, elem: 0 })]);
 
     // A third level: the whole subsystem instantiated inside another one.
     let mut s = Scope::new(&mut g, "system");
-    let x = s.param_with_role("x", ParamRole::Input { port: 0, elem: 0 });
+    let x = s.param("x", ParamRole::Input { port: 0, elem: 0 });
     let a = s.konst_f64(2.0);
     let b = s.konst_f64(3.0);
     let y = s.call(chain, 0, &[x, a, b]);
-    let sys = s.close(vec![y]);
-    g.set_output_role(sys, 0, OutputRole::Output { port: 0, elem: 0 });
+    let sys = s.close([(y, OutputRole::Output { port: 0, elem: 0 })]);
 
     // The hierarchy is intact in the graph: the system's output is a call.
     assert!(matches!(g.node(expr_of(&g, sys, 0)), Node::Call(..)));

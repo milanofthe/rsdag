@@ -148,7 +148,9 @@ fn select_and_opaque_autodiff() {
     let p = ctx.sym("p");
     let ps = ctx.symbol_id("p");
     let p3 = ctx.pow_i(p, 3);
-    let f = ctx.define_func("cube", vec![ps], vec![p3]);
+    let mut s = Scope::new(&mut ctx, "cube");
+    s.param(ps, ParamRole::Free);
+    let f = s.close([(p3, OutputRole::Plain)]);
     let g = ctx.call(f, 0, &[two_x]);
     let dg = differentiate(&mut ctx, g, xid);
     assert!(!ctx.is_zero(dg));
@@ -218,7 +220,9 @@ fn gradient_handles_calls_and_absent_symbols() {
     let p = ctx.sym("p");
     let ps = ctx.symbol_id("p");
     let p3 = ctx.pow_i(p, 3);
-    let f = ctx.define_func("cube", vec![ps], vec![p3]);
+    let mut s = Scope::new(&mut ctx, "cube");
+    s.param(ps, ParamRole::Free);
+    let f = s.close([(p3, OutputRole::Plain)]);
     let g = ctx.call(f, 0, &[two_x]);
     let xs = ctx.symbol_id("x");
     let ws = ctx.symbol_id("w");
@@ -371,7 +375,10 @@ fn derivatives_skip_what_does_not_move() {
     let (ps, qs) = (g.symbol_id("p"), g.symbol_id("q"));
     let pq = g.mul(p, q);
     let body = g.sin(pq);
-    let h = g.define_func("h", vec![ps, qs], vec![body]);
+    let mut s = Scope::new(&mut g, "h");
+    s.param(ps, ParamRole::Free);
+    s.param(qs, ParamRole::Free);
+    let h = s.close([(body, OutputRole::Plain)]);
     let three = g.konst_int(3);
     let call = g.call(h, 0, &[x, three]);
     let rev = gradient(&mut g, call, &[xs, zs]);
@@ -431,7 +438,11 @@ fn many_moving_call_arguments_take_one_vector_jacobian_call() {
             acc = g.add(acc, t);
         }
         let body = g.sin(acc);
-        let f = g.define_func("dev", pids, vec![body]);
+        let mut s = Scope::new(g, "dev");
+        for p in pids {
+            s.param(p, ParamRole::Free);
+        }
+        let f = s.close([(body, OutputRole::Plain)]);
         let args: Vec<ExprId> = (0..n).map(|k| g.sym(&format!("a{k}"))).collect();
         let call = g.call(f, 0, &args);
         let aids = (0..n).map(|k| g.symbol_id(&format!("a{k}"))).collect();
@@ -468,29 +479,29 @@ fn the_support_reads_through_nested_calls() {
     // f(a, b, c) = [a b, a > 0 ? sin(c) : c]
     let mut s = Scope::new(&mut g, "f");
     let (a, b, c) = (
-        s.param_with_role("a", ParamRole::Free),
-        s.param_with_role("b", ParamRole::Free),
-        s.param_with_role("c", ParamRole::Free),
+        s.param("a", ParamRole::Free),
+        s.param("b", ParamRole::Free),
+        s.param("c", ParamRole::Free),
     );
     let ab = s.mul(a, b);
     let zero = s.zero();
     let pos = s.cmp(CmpOp::Gt, a, zero);
     let sc = s.sin(c);
     let pick = s.select(pos, sc, c);
-    let f = s.close(vec![ab, pick]);
+    let f = s.close([(ab, OutputRole::Plain), (pick, OutputRole::Plain)]);
     // g(x, y, z, w) = [f0(x, y, z) + w, f1(x, y, z w)]
     let mut s = Scope::new(&mut g, "g");
     let (x, y, z, w) = (
-        s.param_with_role("x", ParamRole::Free),
-        s.param_with_role("y", ParamRole::Free),
-        s.param_with_role("z", ParamRole::Free),
-        s.param_with_role("w", ParamRole::Free),
+        s.param("x", ParamRole::Free),
+        s.param("y", ParamRole::Free),
+        s.param("z", ParamRole::Free),
+        s.param("w", ParamRole::Free),
     );
     let f0 = s.call(f, 0, &[x, y, z]);
     let g0 = s.add(f0, w);
     let zw = s.mul(z, w);
     let g1 = s.call(f, 1, &[x, y, zw]);
-    let gf = s.close(vec![g0, g1]);
+    let gf = s.close([(g0, OutputRole::Plain), (g1, OutputRole::Plain)]);
     // the columns of a call's Jacobian: the arguments its output reads
     let names = ["p", "q", "r", "t"];
     let args: Vec<ExprId> = names.iter().map(|n| g.sym(n)).collect();
@@ -523,7 +534,7 @@ fn a_jacobian_through_wide_calls_makes_only_its_entries() {
     // f(x)_k = x_k exp(x_{k+1}), cyclic: each output reads two of N parameters
     let mut s = Scope::new(&mut g, "f");
     let xs: Vec<ExprId> = (0..N)
-        .map(|k| s.param_with_role(&format!("x{k}"), ParamRole::Free))
+        .map(|k| s.param(format!("x{k}").as_str(), ParamRole::Free))
         .collect();
     let outs: Vec<ExprId> = (0..N)
         .map(|k| {
@@ -531,11 +542,11 @@ fn a_jacobian_through_wide_calls_makes_only_its_entries() {
             s.mul(xs[k], e)
         })
         .collect();
-    let f = s.close(outs);
+    let f = s.close(outs.into_iter().map(|e| (e, OutputRole::Plain)));
     // h(y)_k = f(y)_k + y_k: a body that is all calls into f
     let mut s = Scope::new(&mut g, "h");
     let ys: Vec<ExprId> = (0..N)
-        .map(|k| s.param_with_role(&format!("y{k}"), ParamRole::Free))
+        .map(|k| s.param(format!("y{k}").as_str(), ParamRole::Free))
         .collect();
     let outs: Vec<ExprId> = (0..N)
         .map(|k| {
@@ -543,7 +554,7 @@ fn a_jacobian_through_wide_calls_makes_only_its_entries() {
             s.add(c, ys[k])
         })
         .collect();
-    let h = s.close(outs);
+    let h = s.close(outs.into_iter().map(|e| (e, OutputRole::Plain)));
     let us: Vec<ExprId> = (0..N).map(|k| g.sym(&format!("u{k}"))).collect();
     let wrt: Vec<SymbolId> = (0..N).map(|k| g.symbol_id(&format!("u{k}"))).collect();
     let rows: Vec<ExprId> = (0..N).map(|k| g.call(h, k as u32, &us)).collect();
@@ -597,7 +608,9 @@ fn a_call_site_with_several_outputs_and_their_derivatives_takes_one_vjp() {
         let qs = g.symbol_id("q");
         let eq = g.exp(q);
         let qe = g.mul(q, eq);
-        let inner = g.define_func("inner", vec![qs], vec![qe]);
+        let mut s = Scope::new(g, "inner");
+        s.param(qs, ParamRole::Free);
+        let inner = s.close([(qe, OutputRole::Plain)]);
         // dev(p) = [sum_k p_k inner(p_{k+1}), prod-ish second output]
         let ps: Vec<ExprId> = (0..n).map(|k| g.sym(&format!("p{k}"))).collect();
         let pids: Vec<SymbolId> = (0..n).map(|k| g.symbol_id(&format!("p{k}"))).collect();
@@ -611,7 +624,11 @@ fn a_call_site_with_several_outputs_and_their_derivatives_takes_one_vjp() {
             let st = g.mul(s, ps[(k + 3) % n]);
             sq = g.add(sq, st);
         }
-        let f = g.define_func("dev", pids, vec![acc, sq]);
+        let mut s = Scope::new(g, "dev");
+        for p in pids {
+            s.param(p, ParamRole::Free);
+        }
+        let f = s.close([(acc, OutputRole::Plain), (sq, OutputRole::Plain)]);
         let args: Vec<ExprId> = (0..n)
             .map(|k| {
                 let a = g.sym(&format!("a{k}"));

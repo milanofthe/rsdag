@@ -4,7 +4,10 @@
 //! branches.
 
 use rsdag::variant::VariantPolicy;
-use rsdag::{BodyBackend, CmpOp, ExprId, FuncId, Graph, Node, ParamRole, SymbolId, Tape, F64};
+use rsdag::{
+    BodyBackend, CmpOp, ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape,
+    F64,
+};
 
 fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
     let e = g.sym(name);
@@ -50,11 +53,11 @@ pub fn device(g: &mut Graph<F64>) -> FuncId {
     let tv = g.tanh(v);
     let pv = g.mul(vv, p);
     let o1 = g.select(pos, pv, tv);
-    let f = g.define_func("dev", vec![vs, ps, qs], vec![o0, o1]);
-    g.set_param_role(f, 0, ParamRole::State { id: 0 });
-    g.set_param_role(f, 1, ParamRole::Param);
-    g.set_param_role(f, 2, ParamRole::Param);
-    f
+    let mut s = Scope::new(g, "dev");
+    s.param(vs, ParamRole::State { id: 0 });
+    s.param(ps, ParamRole::Param);
+    s.param(qs, ParamRole::Param);
+    s.close([(o0, OutputRole::Plain), (o1, OutputRole::Plain)])
 }
 
 pub struct Circuit {
@@ -204,10 +207,11 @@ fn a_decided_prolog_select_stays_in_the_state() {
     let s = g.select(pos, q, p);
     let heavy = chain(&mut g, v, 40, 0.9);
     let o = g.mul(heavy, s);
-    let f = g.define_func("dev", vec![vs, ps, qs], vec![o]);
-    g.set_param_role(f, 0, ParamRole::State { id: 0 });
-    g.set_param_role(f, 1, ParamRole::Param);
-    g.set_param_role(f, 2, ParamRole::Param);
+    let mut s = Scope::new(&mut g, "dev");
+    s.param(vs, ParamRole::State { id: 0 });
+    s.param(ps, ParamRole::Param);
+    s.param(qs, ParamRole::Param);
+    let f = s.close([(o, OutputRole::Plain)]);
     let (mut roots, mut syms, mut pure) = (Vec::new(), Vec::new(), Vec::new());
     for i in 0..4 {
         let (x, xs) = sym(&mut g, &format!("x{i}"));

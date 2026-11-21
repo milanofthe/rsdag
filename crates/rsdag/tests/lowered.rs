@@ -3,8 +3,8 @@
 //! value, and its calls run bodies of the outputs it reads only.
 
 use rsdag::{
-    sparse_jacobian, tape::Op, ExprId, FuncId, Graph, Lowered, Node, ParamRole, ReduceOp, Scope,
-    SymbolId, Tape, F64,
+    sparse_jacobian, tape::Op, ExprId, FuncId, Graph, Lowered, Node, OutputRole, ParamRole,
+    ReduceOp, Scope, SymbolId, Tape, F64,
 };
 
 fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
@@ -19,15 +19,15 @@ fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
 /// instance parameter, those pure with `roles` (a body with a prolog).
 fn device(g: &mut Graph<F64>, roles: bool) -> FuncId {
     let mut s = Scope::new(g, "d");
-    let va = s.param_with_role("va", ParamRole::State { id: 0 });
-    let vb = s.param_with_role("vb", ParamRole::State { id: 1 });
+    let va = s.param("va", ParamRole::State { id: 0 });
+    let vb = s.param("vb", ParamRole::State { id: 1 });
     let role = if roles {
         ParamRole::Param
     } else {
         ParamRole::State { id: 2 }
     };
-    let k = s.param_with_role("k", role);
-    let w = s.param_with_role("w", role);
+    let k = s.param("k", role);
+    let w = s.param("w", role);
     let dv = s.sub(va, vb);
     let kw = s.mul(k, w);
     let th = s.tanh(dv);
@@ -36,7 +36,7 @@ fn device(g: &mut Graph<F64>, roles: bool) -> FuncId {
     let i = s.add(i, e);
     let q = s.mul(kw, vb);
     let q = s.mul(q, va);
-    s.close(vec![i, q])
+    s.close([(i, OutputRole::Plain), (q, OutputRole::Plain)])
 }
 
 struct System {
@@ -58,14 +58,19 @@ fn ring(n: usize, roles: bool) -> System {
     let (a, sa) = sym(&mut g, "cell.a");
     let (b, sb) = sym(&mut g, "cell.b");
     let (w, sw) = sym(&mut g, "cell.w");
-    let (k, _) = sym(&mut g, "k");
+    let (k, sk) = sym(&mut g, "k");
     let half = g.konst_f64(0.5);
     let w2 = g.mul(w, half);
     let first = g.calls(d, &[0, 1], &[a, b, k, w]);
     let second = g.calls(d, &[0, 1], &[b, a, k, w2]);
     let i = g.add(first[0], second[0]);
     let q = g.add(first[1], second[1]);
-    let cell = g.define_func("cell", vec![sa, sb, sw], vec![i, q]);
+    let mut s = Scope::new(&mut g, "cell");
+    s.param(sa, ParamRole::Free);
+    s.param(sb, ParamRole::Free);
+    s.param(sw, ParamRole::Free);
+    s.global(sk);
+    let cell = s.close([(i, OutputRole::Plain), (q, OutputRole::Plain)]);
     let v: Vec<(ExprId, SymbolId)> = (0..n).map(|j| sym(&mut g, &format!("v{j}"))).collect();
     let ws: Vec<(ExprId, SymbolId)> = (0..n).map(|j| sym(&mut g, &format!("w{j}"))).collect();
     let mut terms: Vec<Vec<ExprId>> = vec![Vec::new(); n];

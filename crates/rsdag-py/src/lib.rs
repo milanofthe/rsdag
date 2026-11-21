@@ -34,7 +34,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyFloat, PyList, PyTuple};
 
 use rsdag::{
-    BinOp, CmpOp, Elementary, ExprId, FuncId, Graph, ReduceOp, SymbolId, Tape, UnaryOp, F64,
+    BinOp, CmpOp, Elementary, ExprId, FuncId, Graph, OutputRole, ParamRole, ReduceOp, SymbolId,
+    Tape, UnaryOp, F64,
 };
 
 /// A trace's graph, and the programs called in it by program id, as the
@@ -479,7 +480,11 @@ impl Scope {
     /// where they call others, batched where they are leaves).
     fn program(&self, roots: &[ExprId]) -> Program {
         let mut g = self.g.graph.borrow_mut();
-        let f = g.define_func("program", self.inputs.clone(), roots.to_vec());
+        let mut s = rsdag::Scope::new(&mut g, "program");
+        for &x in &self.inputs {
+            s.param(x, ParamRole::Free);
+        }
+        let f = s.close(roots.iter().map(|&e| (e, OutputRole::Plain)));
         let mut own = Graph::new();
         let func = own.import(&g, f, &mut Default::default());
         let tape = Tape::compile(&g, roots, &self.inputs);

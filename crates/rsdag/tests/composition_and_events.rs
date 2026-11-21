@@ -19,14 +19,15 @@ use rsdag::{
 fn lag(name: &str) -> (Graph<F64>, rsdag::Module<F64>) {
     let mut g: Graph<F64> = Graph::new();
     let mut s = Scope::new(&mut g, name);
-    let x = s.param_with_role("x", ParamRole::State { id: 0 });
-    let u = s.param_with_role("u", ParamRole::Input { port: 0, elem: 0 });
-    let tau = s.param_with_role("tau", ParamRole::Param);
+    let x = s.param("x", ParamRole::State { id: 0 });
+    let u = s.param("u", ParamRole::Input { port: 0, elem: 0 });
+    let tau = s.param("tau", ParamRole::Param);
     let d = s.sub(u, x);
     let dx = s.div(d, tau);
-    let f = s.close(vec![dx, x]);
-    g.set_output_role(f, 0, OutputRole::StateDeriv { id: 0 });
-    g.set_output_role(f, 1, OutputRole::Output { port: 0, elem: 0 });
+    s.close([
+        (dx, OutputRole::StateDeriv { id: 0 }),
+        (x, OutputRole::Output { port: 0, elem: 0 }),
+    ]);
     let module = g.to_module();
     (g, module)
 }
@@ -36,8 +37,8 @@ fn lag(name: &str) -> (Graph<F64>, rsdag::Module<F64>) {
 fn saturation(name: &str) -> (Graph<F64>, rsdag::Module<F64>) {
     let mut g: Graph<F64> = Graph::new();
     let mut s = Scope::new(&mut g, name);
-    let u = s.param_with_role("u", ParamRole::Input { port: 0, elem: 0 });
-    let k = s.param_with_role("k", ParamRole::Param);
+    let u = s.param("u", ParamRole::Input { port: 0, elem: 0 });
+    let k = s.param("k", ParamRole::Param);
     let v = s.mul(k, u);
     let hi = s.konst_f64(1.0);
     let lo = s.konst_f64(-1.0);
@@ -45,8 +46,7 @@ fn saturation(name: &str) -> (Graph<F64>, rsdag::Module<F64>) {
     let capped = s.select(over, hi, v);
     let under = s.cmp(rsdag::CmpOp::Lt, capped, lo);
     let y = s.select(under, lo, capped);
-    let f = s.close(vec![y]);
-    g.set_output_role(f, 0, OutputRole::Output { port: 0, elem: 0 });
+    s.close([(y, OutputRole::Output { port: 0, elem: 0 })]);
     let module = g.to_module();
     (g, module)
 }
@@ -125,19 +125,20 @@ fn an_event_is_a_guard_output_and_a_state_write() {
 
     // Crossing: the ball hits the floor when its height reaches zero.
     let mut s = Scope::new(&mut g, "bounce");
-    let h = s.param_with_role("h", ParamRole::State { id: 0 });
-    let v = s.param_with_role("v", ParamRole::State { id: 1 });
+    let h = s.param("h", ParamRole::State { id: 0 });
+    let v = s.param("v", ParamRole::State { id: 1 });
     let guard = h;
     let dh = v;
     let gravity = s.konst_f64(-9.81);
-    let f = s.close(vec![guard, dh, gravity]);
     let guard_role = OutputRole::Guard {
         id: 0,
         dir: rsdag::Crossing::Falling,
     };
-    g.set_output_role(f, 0, guard_role);
-    g.set_output_role(f, 1, OutputRole::StateDeriv { id: 0 });
-    g.set_output_role(f, 2, OutputRole::StateDeriv { id: 1 });
+    let f = s.close([
+        (guard, guard_role),
+        (dh, OutputRole::StateDeriv { id: 0 }),
+        (gravity, OutputRole::StateDeriv { id: 1 }),
+    ]);
     let params = g.func(f).params().to_vec();
 
     // The roles select the event's parts without any lookup by name.
@@ -156,11 +157,10 @@ fn an_event_is_a_guard_output_and_a_state_write() {
 
     // The effect: a second function writing the reflected velocity.
     let mut e = Scope::new(&mut g, "bounce_effect");
-    let ve = e.param_with_role("v", ParamRole::State { id: 1 });
+    let ve = e.param("v", ParamRole::State { id: 1 });
     let restitution = e.konst_f64(-0.8);
     let v_new = e.mul(restitution, ve);
-    let eff = e.close(vec![v_new]);
-    g.set_output_role(eff, 0, OutputRole::StateWrite { id: 1 });
+    let eff = e.close([(v_new, OutputRole::StateWrite { id: 1 })]);
     assert_eq!(
         g.func(eff)
             .exprs_with_role(|r| matches!(r, OutputRole::StateWrite { .. }))

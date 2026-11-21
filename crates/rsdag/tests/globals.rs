@@ -9,8 +9,8 @@
 use std::collections::HashMap;
 
 use rsdag::{
-    eval, sparse_jacobian, substitute, ExprId, FuncId, Graph, Node, ParamRole, ReduceOp, Scope,
-    SymbolId, Tape, F64,
+    eval, sparse_jacobian, substitute, ExprId, FuncId, Graph, Node, OutputRole, ParamRole,
+    ReduceOp, Scope, SymbolId, Tape, F64,
 };
 use rustc_hash::FxHashMap;
 
@@ -28,8 +28,8 @@ fn device(g: &mut Graph<F64>) -> FuncId {
     let mut s = Scope::new(g, "d");
     let t1 = s.global("t1");
     let t2 = s.global("t2");
-    let va = s.param_with_role("va", ParamRole::State { id: 0 });
-    let vb = s.param_with_role("vb", ParamRole::State { id: 1 });
+    let va = s.param("va", ParamRole::State { id: 0 });
+    let vb = s.param("vb", ParamRole::State { id: 1 });
     let dv = s.sub(va, vb);
     let th = s.tanh(dv);
     let i = s.mul(t1, th);
@@ -37,20 +37,24 @@ fn device(g: &mut Graph<F64>) -> FuncId {
     let e = s.exp(x);
     let i = s.add(i, e);
     let n = s.neg(i);
-    s.close(vec![i, n])
+    s.close([(i, OutputRole::Plain), (n, OutputRole::Plain)])
 }
 
 /// `gate(a, b, c)`: a device from `a` to `b` and one from `b` to `c`; the
 /// currents into `a`, `b`, `c`.
 fn gate(g: &mut Graph<F64>, d: FuncId) -> FuncId {
     let mut s = Scope::new(g, "gate");
-    let a = s.param_with_role("a", ParamRole::State { id: 0 });
-    let b = s.param_with_role("b", ParamRole::State { id: 1 });
-    let c = s.param_with_role("c", ParamRole::State { id: 2 });
+    let a = s.param("a", ParamRole::State { id: 0 });
+    let b = s.param("b", ParamRole::State { id: 1 });
+    let c = s.param("c", ParamRole::State { id: 2 });
     let ab = s.calls(d, &[0, 1], &[a, b]);
     let bc = s.calls(d, &[0, 1], &[b, c]);
     let ib = s.reduce(ReduceOp::Sum, vec![ab[1], bc[0]]);
-    s.close(vec![ab[0], ib, bc[1]])
+    s.close([
+        (ab[0], OutputRole::Plain),
+        (ib, OutputRole::Plain),
+        (bc[1], OutputRole::Plain),
+    ])
 }
 
 struct Circuit {
@@ -210,12 +214,12 @@ fn a_parameter_binds_a_global_of_its_name_below() {
     let mut g: Graph<F64> = Graph::new();
     let d = device(&mut g);
     let mut s = Scope::new(&mut g, "gate2");
-    let a = s.param_with_role("a", ParamRole::State { id: 0 });
-    let b = s.param_with_role("b", ParamRole::State { id: 1 });
-    let t1 = s.param_with_role("t1", ParamRole::Param);
+    let a = s.param("a", ParamRole::State { id: 0 });
+    let b = s.param("b", ParamRole::State { id: 1 });
+    let t1 = s.param("t1", ParamRole::Param);
     let i = s.calls(d, &[0], &[a, b]);
     let twice = s.mul(i[0], t1);
-    let gate2 = s.close(vec![twice]);
+    let gate2 = s.close([(twice, OutputRole::Plain)]);
     assert_eq!(g.globals(gate2).len(), 1, "t2 only: t1 is a parameter");
     let (x, xs) = sym(&mut g, "x");
     let (y, ys) = sym(&mut g, "y");

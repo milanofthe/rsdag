@@ -45,7 +45,8 @@ mod common;
 use std::time::Instant;
 
 use rsdag::{
-    sparse_jacobian, substitute, ExprId, Graph, Module, Output, OutputRole, ParamRole, Tape, F64,
+    sparse_jacobian, substitute, ExprId, Graph, Module, Output, OutputRole, ParamRole, Scope,
+    SymbolId, Tape, F64,
 };
 use rsdag_jit::{Lanes, NativeTape, Options};
 
@@ -510,13 +511,18 @@ fn write_composed(
         })
         .collect();
     let program = g.inline_composite(&outs);
-    let c = g.define_func("circuit", params, program);
-    for (k, &r) in roles.iter().enumerate() {
-        g.set_param_role(c, k as u32, r);
+    // what the inlined bodies read past the parameters stays global
+    let globals: Vec<SymbolId> = (g.mentioned_symbols_in(&program).into_iter())
+        .filter(|s| !params.contains(s))
+        .collect();
+    let mut s = Scope::new(g, "circuit");
+    for (p, r) in params.into_iter().zip(roles) {
+        s.param(p, r);
     }
-    for (k, &r) in out_roles.iter().enumerate() {
-        g.set_output_role(c, k as u32, r);
+    for x in globals {
+        s.global(x);
     }
+    let c = s.close(program.into_iter().zip(out_roles));
     let mut out = v.clone();
     out["module"] = serde_json::to_value(g.to_module()).expect("a module as JSON");
     out["circuit"] = serde_json::json!(c.0);
