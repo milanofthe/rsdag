@@ -41,6 +41,7 @@
 //!     cargo run --release -p rsdag-jit --example modules -- [--values <dir>] [--composed <dir>] [--threads <n>[,<n>...]]
 //!         [--rounds <n>] [--native] [--interleave <MB>] [--no-folded] [--lanes <mode>] [--no-variants] <module.json>...
 
+mod common;
 use std::time::Instant;
 
 use rsdag::{
@@ -58,7 +59,7 @@ fn interleave() {
     }
 }
 
-/// Seconds per call: the best of five batches of at least 50 ms; with
+/// Seconds per call ([`common::per_call`]); with
 /// `--interleave`, the calls alone, the buffer written before each.
 fn per_call(mut f: impl FnMut()) -> f64 {
     if !INTERLEAVE.lock().unwrap().is_empty() {
@@ -76,28 +77,7 @@ fn per_call(mut f: impl FnMut()) -> f64 {
         }
         return best;
     }
-    let mut reps = 1usize;
-    let mut dt;
-    loop {
-        let t = Instant::now();
-        for _ in 0..reps {
-            f();
-        }
-        dt = t.elapsed().as_secs_f64();
-        if dt > 0.05 {
-            break;
-        }
-        reps *= 4;
-    }
-    let mut best = dt / reps as f64;
-    for _ in 0..4 {
-        let t = Instant::now();
-        for _ in 0..reps {
-            f();
-        }
-        best = best.min(t.elapsed().as_secs_f64() / reps as f64);
-    }
-    best
+    common::per_call(f)
 }
 
 fn timed<R>(f: impl FnOnce() -> R) -> (R, f64) {

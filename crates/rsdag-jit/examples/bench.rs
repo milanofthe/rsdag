@@ -3,19 +3,12 @@
 //!
 //!     cargo run --release -p rsdag-jit --example bench --features rsdag/synth
 
+mod common;
+use common::per_call;
 use rsdag::synth::{build, inputs, Spec, Vocabulary};
 use rsdag::{ExprId, Graph, SymbolId, Tape, F64};
 use rsdag_jit::NativeTape;
 use std::time::Instant;
-
-fn per_call<F: FnMut()>(mut f: F, reps: usize) -> f64 {
-    f();
-    let t = Instant::now();
-    for _ in 0..reps {
-        f();
-    }
-    t.elapsed().as_secs_f64() * 1e9 / reps as f64
-}
 
 fn lorenz(g: &mut Graph<F64>) -> (Vec<ExprId>, Vec<SymbolId>) {
     let (x, y, z) = (g.sym("x"), g.sym("y"), g.sym("z"));
@@ -58,14 +51,13 @@ fn synthetic(seed: u64, steps: usize, vocab: Vocabulary) -> (Tape, Vec<f64>) {
 
 fn row(name: &str, tape: &Tape, ins: &[f64]) {
     let n = tape.n_ops().max(1);
-    let reps = (2_000_000 / n).clamp(20, 20_000);
     let (mut w, mut o) = (Vec::new(), Vec::new());
-    let t_i = per_call(|| tape.eval(ins, &mut w, &mut o), reps) / n as f64;
+    let t_i = per_call(|| tape.eval(ins, &mut w, &mut o)) * 1e9 / n as f64;
     let t0 = Instant::now();
     let native = NativeTape::compile(tape).expect("native compile");
     let t_c = t0.elapsed().as_secs_f64() * 1e9 / n as f64;
     let (mut nw, mut no) = (Vec::new(), Vec::new());
-    let t_n = per_call(|| native.eval(ins, &mut nw, &mut no), reps) / n as f64;
+    let t_n = per_call(|| native.eval(ins, &mut nw, &mut no)) * 1e9 / n as f64;
     tape.eval(ins, &mut w, &mut o);
     // A NaN's payload is no part of any guarantee.
     let same = o

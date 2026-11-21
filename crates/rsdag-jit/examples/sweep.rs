@@ -4,18 +4,12 @@
 //!
 //!     cargo run --release -p rsdag-jit --example sweep --features rsdag/synth > docs/bench/data/ops.csv
 
+mod common;
+use common::per_call;
 use rsdag::synth::{build, inputs, Spec, Vocabulary};
 use rsdag::{Graph, Tape, F64};
 use rsdag_jit::NativeTape;
 use std::time::Instant;
-fn per_call(mut f: impl FnMut(), reps: usize) -> f64 {
-    f();
-    let t = Instant::now();
-    for _ in 0..reps {
-        f();
-    }
-    t.elapsed().as_secs_f64() * 1e9 / reps as f64
-}
 fn main() {
     println!("vocab,steps,ops,interp_ns_per_op,native_ns_per_op,compile_ns_per_op,tape_compile_ns_per_op");
     for (name, vocab) in [
@@ -45,14 +39,13 @@ fn main() {
                 / tape.n_ops().max(1) as f64;
             let ins = inputs(&mut spec.rng(), syms.len());
             let n = tape.n_ops().max(1);
-            let reps = (4_000_000 / n).clamp(3, 20_000);
             let (mut w, mut o) = (Vec::new(), Vec::new());
-            let t_i = per_call(|| tape.eval(&ins, &mut w, &mut o), reps) / n as f64;
+            let t_i = per_call(|| tape.eval(&ins, &mut w, &mut o)) * 1e9 / n as f64;
             let t0 = Instant::now();
             let native = NativeTape::compile(&tape).expect("compile");
             let t_c = t0.elapsed().as_secs_f64() * 1e9 / n as f64;
             let (mut nw, mut no) = (Vec::new(), Vec::new());
-            let t_n = per_call(|| native.eval(&ins, &mut nw, &mut no), reps) / n as f64;
+            let t_n = per_call(|| native.eval(&ins, &mut nw, &mut no)) * 1e9 / n as f64;
             println!("{name},{steps},{n},{t_i:.3},{t_n:.3},{t_c:.2},{t_t:.2}");
         }
     }

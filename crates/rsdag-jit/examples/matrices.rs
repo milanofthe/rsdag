@@ -8,36 +8,11 @@
 //!
 //!     cargo run --release -p rsdag-jit --example matrices > docs/bench/data/matrices.csv
 
-use std::time::Instant;
+mod common;
+use common::per_call;
 
 use rsdag::{ExprId, Graph, SymbolId, Tape, F64};
 use rsdag_jit::NativeTape;
-
-/// Seconds per call: the best of five batches of at least 20 ms.
-fn per_call(mut f: impl FnMut()) -> f64 {
-    let mut reps = 1usize;
-    let mut dt;
-    loop {
-        let t = Instant::now();
-        for _ in 0..reps {
-            f();
-        }
-        dt = t.elapsed().as_secs_f64();
-        if dt > 0.02 {
-            break;
-        }
-        reps *= 4;
-    }
-    let mut best = dt / reps as f64;
-    for _ in 0..4 {
-        let t = Instant::now();
-        for _ in 0..reps {
-            f();
-        }
-        best = best.min(t.elapsed().as_secs_f64() / reps as f64);
-    }
-    best
-}
 
 /// The graph of `count` instances of `kind` at size `n`, its roots and its
 /// inputs' values.
