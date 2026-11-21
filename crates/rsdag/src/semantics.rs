@@ -1,8 +1,7 @@
 //! The reference semantics: what every op computes, in one place.
 //!
-//! The arena sweep, the tape interpreter, the native backend's host
-//! routines and the numeric twin of [`Builder`](crate::Builder) all take
-//! their arithmetic from here, so a value cannot depend on which of them
+//! The arena sweep, the tape interpreter and the native backend's host
+//! routines all take their arithmetic from here, so a value cannot depend on which of them
 //! computed it. That covers the domain guards (the `exp` cap at
 //! [`EXP_LIMIT`], the `ln` floor at [`LN_FLOOR`], the `sqrt` clamp), the
 //! special functions, which are defined here rather than taken from a
