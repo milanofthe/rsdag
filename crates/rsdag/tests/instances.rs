@@ -58,13 +58,13 @@ fn calls_of_one_instance_are_the_calls_one_by_one() {
     assert_eq!(g.len(), n0 + N, "one node per output, the list shared");
 
     // the same calls in another graph, built in another order: the same
-    // fingerprints
+    // expressions
     let mut h: Graph<F64> = Graph::new();
     let fh = body(&mut h);
     let hargs: Vec<ExprId> = (0..2 * N).map(|k| h.sym(&format!("x{k}"))).collect();
     let back: Vec<ExprId> = outs.iter().rev().map(|&k| h.call(fh, k, &hargs)).collect();
     for (a, b) in together.iter().zip(back.iter().rev()) {
-        assert_eq!(g.fingerprint(*a), h.fingerprint(*b));
+        assert_eq!(rsdag::to_string(&g, *a), rsdag::to_string(&h, *b));
     }
 }
 

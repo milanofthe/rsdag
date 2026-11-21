@@ -28,8 +28,12 @@ use crate::semantics::{binary_f64, unary_f64};
 /// window (which is what makes `Reduce`/`Dot`/`Solve`/`Call` hash-cons structurally).
 pub struct Graph<K: Field = F64> {
     nodes: Vec<Node>,
-    /// The structural fingerprint of each node (see
-    /// [`fingerprint`](Self::fingerprint)), parallel to `nodes`.
+    /// The structural fingerprint of each node, parallel to `nodes`: a hash
+    /// of what it computes (its op, constant value or symbol name, and its
+    /// operands' fingerprints), never of when it was built, so equal
+    /// expressions have equal fingerprints in any graph, built in any order.
+    /// Commutative operand lists are ordered by it, which is what makes a
+    /// sum fold in the same order however the graph grew.
     shape: Vec<u64>,
     dedup: HashMap<Node, ExprId>,
     consts: Vec<K>,
@@ -386,17 +390,6 @@ impl<K: Field> Graph<K> {
         self.shape.push(shape);
         self.dedup.insert(node, id);
         id
-    }
-
-    /// The structural fingerprint of `e`: a hash of what it computes (its
-    /// op, constant value or symbol name, and its operands' fingerprints),
-    /// never of when it was built, so equal expressions have equal
-    /// fingerprints in any graph, built in any order. Commutative operand
-    /// lists are ordered by it, which is what makes a sum fold in the same
-    /// order however the graph grew; a consumer can key caches on it.
-    #[inline]
-    pub fn fingerprint(&self, e: ExprId) -> u64 {
-        self.shape[e.0 as usize]
     }
 
     fn shape_of(&self, node: &Node) -> u64 {

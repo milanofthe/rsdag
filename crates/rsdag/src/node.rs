@@ -653,8 +653,8 @@ impl std::ops::Deref for Operands<'_> {
     }
 }
 
-/// The arithmetic of structural fingerprints (see
-/// [`Graph::fingerprint`](crate::Graph::fingerprint)): a fixed mixing
+/// The arithmetic of structural fingerprints (see `Graph::shape`): a fixed
+/// mixing
 /// function and a fixed byte hasher, so a fingerprint is the same on every
 /// platform, in every run and under every version of the hash crates.
 pub(crate) mod shape {
