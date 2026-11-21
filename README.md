@@ -147,7 +147,9 @@ width over several instances at once, one in each lane of every vector
 register (four with AVX, two with SSE2), bit for bit the scalar code. Per
 phase, a cost estimate decides whether lanes pay and how a batch splits
 into blocks of each width and single instances; `rsdag_jit::Options::lanes`
-forces or disables them.
+forces or disables them. The interpreter runs a batch in blocks of up
+to sixteen instances: one pass over the body's ops per block, each op
+over the block's lanes, bit for bit the instances one by one.
 
 Parameters with the `Param` role are a body's pure arguments; its tape is
 split over them. A caller compiled with `compile_split` whose prolog has
