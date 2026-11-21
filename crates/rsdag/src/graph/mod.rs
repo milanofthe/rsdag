@@ -60,10 +60,6 @@ pub struct Graph<K: Field = F64> {
     /// The bindings of parameters of functions (see [`bind`](Self::bind)).
     contexts: Vec<Context>,
     context_dedup: HashMap<(FuncId, Box<[u32]>, ArgList), u32>,
-    /// Reusable per-node memos for the graph traversals (differentiation,
-    /// substitution), a stack so a traversal nested in another reuses one
-    /// too; see [`Memo`].
-    memos: Vec<Memo>,
     /// The copies of functions with globals bound (see
     /// [`rebound`](Self::rebound)), by function and binding.
     rebound: HashMap<(FuncId, Vec<(SymbolId, ExprId)>), FuncId>,
@@ -100,6 +96,18 @@ pub(crate) struct Context {
 /// Marks a bound parameter in [`Context::slot`].
 pub(crate) const BOUND: u32 = 1 << 31;
 
+impl Context {
+    /// Parameter `p` of a call in this context: its argument among `args`,
+    /// or where the context binds it its expression among `bound`.
+    #[inline]
+    pub(crate) fn pick<T: Copy>(&self, p: usize, args: &[T], bound: &[T]) -> T {
+        match self.slot[p] {
+            s if s & BOUND == 0 => args[s as usize],
+            s => bound[(s & !BOUND) as usize],
+        }
+    }
+}
+
 /// What [`Graph::partial`] does with a parameter: bind it to an
 /// expression in the function, or pass one per call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,51 +124,157 @@ pub struct Bound {
     pub(crate) ctx: u32,
 }
 
-/// A per-node memo table over the arena, cleared in O(1) by bumping an epoch:
-/// the traversal primitives (`differentiate`, `substitute*`) key their memo by
-/// `ExprId`, and on a hash-consed graph a build pass runs thousands of them
-/// (one per stamp and port, one per instance root), each visiting a few
-/// thousand nodes -- a hash map per call measured as the dominant cost. This
-/// is two dense arrays and an epoch instead: a lookup is an index compare.
-/// Keys are always nodes of the graph being traversed (ids below the arena
-/// length at `begin`), so nodes created during the traversal never alias a
-/// key.
-#[derive(Default)]
-pub(crate) struct Memo {
-    epoch: Vec<u32>,
-    val: Vec<ExprId>,
+/// Per-node data over the arena: dense and cleared in O(1) by bumping an
+/// epoch, so a lookup is an index compare where a hash map measured as the
+/// dominant cost of the traversals a build pass runs by the thousand. The
+/// storage comes from a per-thread pool and goes back there on drop: a
+/// traversal nested in another takes a table of its own, and repeated
+/// traversals allocate none (see [`Pooled`]). Keys are nodes below the arena length at
+/// [`begin`](Self::begin); a node made during the traversal is no key (`set`
+/// ignores it, `get` finds nothing).
+pub(crate) struct NodeTable<T: Slot> {
+    stamp: Vec<u32>,
+    val: Vec<u32>,
     cur: u32,
+    kind: std::marker::PhantomData<T>,
 }
 
-impl Memo {
-    /// Start a fresh traversal over an arena of `n` nodes.
+/// A value a [`NodeTable`] holds: 32 bits.
+pub(crate) trait Slot: Copy {
+    fn pack(self) -> u32;
+    fn unpack(v: u32) -> Self;
+}
+
+impl Slot for ExprId {
+    fn pack(self) -> u32 {
+        self.0
+    }
+    fn unpack(v: u32) -> Self {
+        ExprId(v)
+    }
+}
+
+impl Slot for u32 {
+    fn pack(self) -> u32 {
+        self
+    }
+    fn unpack(v: u32) -> Self {
+        v
+    }
+}
+
+/// The storage of a [`NodeTable`]: stamps, values, epoch.
+type TableStore = (Vec<u32>, Vec<u32>, u32);
+
+impl<T: Slot> NodeTable<T> {
+    /// An empty table over an arena of `n` nodes.
+    pub(crate) fn new(n: usize) -> Self {
+        let (stamp, val, cur) = Pooled::<TableStore>::take().into_inner();
+        let mut t = NodeTable {
+            stamp,
+            val,
+            cur,
+            kind: std::marker::PhantomData,
+        };
+        t.begin(n);
+        t
+    }
+
+    /// Empty the table, over an arena of `n` nodes.
     pub(crate) fn begin(&mut self, n: usize) {
         self.cur = self.cur.wrapping_add(1);
         if self.cur == 0 {
             // epoch wrapped: invalidate everything explicitly
-            self.epoch.iter_mut().for_each(|e| *e = 0);
+            self.stamp.iter_mut().for_each(|e| *e = 0);
             self.cur = 1;
         }
-        if self.epoch.len() < n {
-            self.epoch.resize(n, 0);
-            self.val.resize(n, ExprId(0));
+        if self.stamp.len() < n {
+            self.stamp.resize(n, 0);
+            self.val.resize(n, 0);
         }
     }
+
     #[inline]
-    pub(crate) fn get(&self, e: ExprId) -> Option<ExprId> {
+    pub(crate) fn get(&self, e: ExprId) -> Option<T> {
         let k = e.0 as usize;
-        if k < self.epoch.len() && self.epoch[k] == self.cur {
-            Some(self.val[k])
-        } else {
-            None
+        (k < self.stamp.len() && self.stamp[k] == self.cur).then(|| T::unpack(self.val[k]))
+    }
+
+    #[inline]
+    pub(crate) fn contains(&self, e: ExprId) -> bool {
+        let k = e.0 as usize;
+        k < self.stamp.len() && self.stamp[k] == self.cur
+    }
+
+    #[inline]
+    pub(crate) fn set(&mut self, e: ExprId, v: T) {
+        let k = e.0 as usize;
+        if k < self.stamp.len() {
+            self.stamp[k] = self.cur;
+            self.val[k] = v.pack();
         }
     }
-    #[inline]
-    pub(crate) fn set(&mut self, e: ExprId, v: ExprId) {
-        let k = e.0 as usize;
-        if k < self.epoch.len() {
-            self.epoch[k] = self.cur;
-            self.val[k] = v;
+}
+
+impl<T: Slot> Drop for NodeTable<T> {
+    fn drop(&mut self) {
+        let store = (
+            std::mem::take(&mut self.stamp),
+            std::mem::take(&mut self.val),
+            self.cur,
+        );
+        Pooled::give(store);
+    }
+}
+
+thread_local! {
+    static POOL: std::cell::RefCell<Vec<Box<dyn std::any::Any>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Buffers a traversal reuses, taken from a per-thread pool and given back
+/// on drop, with what they hold (the taker clears them): a traversal run
+/// thousands of times allocates its buffers once, and one nested in
+/// another takes buffers of its own.
+pub(crate) struct Pooled<T: Default + 'static>(Option<T>);
+
+impl<T: Default + 'static> Pooled<T> {
+    pub(crate) fn take() -> Self {
+        let found = POOL.with(|p| {
+            let mut p = p.borrow_mut();
+            let at = p.iter().rposition(|b| b.is::<T>())?;
+            p.swap_remove(at).downcast::<T>().ok()
+        });
+        Pooled(Some(found.map_or_else(T::default, |b| *b)))
+    }
+
+    /// The value, no longer given back on drop.
+    pub(crate) fn into_inner(mut self) -> T {
+        self.0.take().expect("held until drop")
+    }
+
+    /// Put `t` in the pool.
+    pub(crate) fn give(t: T) {
+        drop(Pooled(Some(t)));
+    }
+}
+
+impl<T: Default + 'static> std::ops::Deref for Pooled<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.0.as_ref().expect("held until drop")
+    }
+}
+
+impl<T: Default + 'static> std::ops::DerefMut for Pooled<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.0.as_mut().expect("held until drop")
+    }
+}
+
+impl<T: Default + 'static> Drop for Pooled<T> {
+    fn drop(&mut self) {
+        if let Some(t) = self.0.take() {
+            POOL.with(|p| p.borrow_mut().push(Box::new(t)));
         }
     }
 }
@@ -170,7 +284,7 @@ mod compose;
 mod flow;
 
 pub(crate) use calls::Deps;
-pub(crate) use flow::{Join, Set, Through};
+pub(crate) use flow::{inert, Join, Set, Through};
 
 impl<K: Field> Default for Graph<K> {
     fn default() -> Self {
@@ -200,7 +314,6 @@ impl<K: Field> Graph<K> {
             output_dedup: HashMap::default(),
             contexts: Vec::new(),
             context_dedup: HashMap::default(),
-            memos: Vec::new(),
             rebound: HashMap::default(),
             vjps: HashMap::default(),
             templates: Default::default(),
@@ -208,19 +321,6 @@ impl<K: Field> Graph<K> {
         ctx.zero = ctx.konst(K::zero());
         ctx.one = ctx.konst(K::one());
         ctx
-    }
-
-    /// Take a reusable traversal memo (a fresh one if every one is in use
-    /// by an enclosing traversal), already begun over the current arena.
-    pub(crate) fn take_memo(&mut self) -> Memo {
-        let mut m = self.memos.pop().unwrap_or_default();
-        m.begin(self.nodes.len());
-        m
-    }
-
-    /// Return a memo taken with [`take_memo`](Self::take_memo).
-    pub(crate) fn put_memo(&mut self, m: Memo) {
-        self.memos.push(m);
     }
 
     /// Number of distinct nodes currently interned (useful for sharing checks).
@@ -261,13 +361,14 @@ impl<K: Field> Graph<K> {
         self.args(l).split_at(l.len() / 2)
     }
 
-    /// The operands a node reads, without allocation (leaves have none).
+    /// The operands a node reads (leaves have none); of a call, in its
+    /// function's parameter order: an argument, or where the call's
+    /// context binds the parameter, the bound expression.
     #[inline]
     pub fn operands(&self, id: ExprId) -> Operands<'_> {
         match *self.node(id) {
             Node::Call(o, l) if self.output_ctx[o.0 as usize] != NO_CONTEXT => {
-                let c = &self.contexts[self.output_ctx[o.0 as usize] as usize];
-                Operands::Owned([self.args(l), self.args(c.exprs)].concat())
+                Operands::Owned(self.full_args(o, l).into_owned())
             }
             ref node => node.operands(&self.arg_pool),
         }
@@ -916,8 +1017,9 @@ impl<K: Field> Graph<K> {
     /// `node` over the operands `ops` (ids of this graph, in
     /// [`operands`](Self::operands) order), through the smart constructors:
     /// folding and canonical operand order run again, so identities that
-    /// only became visible after a transform collapse. A leaf or a call must
-    /// already name a constant, symbol or output of this graph.
+    /// only became visible after a transform collapse. A leaf must already
+    /// name a constant or symbol of this graph; a call is rebuilt over its
+    /// instance (see [`calls_over`](Self::calls_over)).
     pub(crate) fn build(&mut self, node: Node, ops: &[ExprId]) -> ExprId {
         match node {
             Node::Const(_) | Node::Symbol(_) => self.intern(node),
@@ -935,7 +1037,7 @@ impl<K: Field> Graph<K> {
                 self.dot(a.to_vec(), b.to_vec())
             }
             Node::Solve(_, i) => self.solve_component(ops, i),
-            Node::Call(o, _) => self.call_over_operands(o, ops),
+            Node::Call(..) => unreachable!("a call is rebuilt over its instance"),
         }
     }
 

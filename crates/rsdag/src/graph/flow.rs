@@ -9,15 +9,9 @@
 //! ones): a call that passes a value in a few arguments of hundreds asks
 //! only about those few.
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::*;
-
-thread_local! {
-    /// Position tables for the cones of this thread's analyses, reused.
-    static MEMOS: RefCell<Vec<Memo>> = const { RefCell::new(Vec::new()) };
-}
 
 /// The operands a value passes through, and how a call passes it on.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -178,7 +172,7 @@ impl Join for Set {
 
 /// Of a comparison its operands, of a selector its condition, carry no
 /// derivative: the leading operands [`Through::Carries`] skips.
-fn inert(node: &Node) -> usize {
+pub(crate) fn inert(node: &Node) -> usize {
     match node {
         Node::Cmp(..) => 2,
         Node::Select(..) => 1,
@@ -186,81 +180,110 @@ fn inert(node: &Node) -> usize {
     }
 }
 
-/// Values over a cone (see [`Graph::flow`]).
-pub(crate) struct Flow<V> {
-    at: Memo,
-    vals: Vec<V>,
-    /// The nodes of the cone, in the order of `vals`.
-    nodes: Vec<ExprId>,
+/// The nodes under some roots in a topological order, each after its
+/// operands, and each node's place in it (see [`Graph::cone`]).
+pub(crate) struct Cone {
+    pub(crate) nodes: Pooled<Vec<ExprId>>,
+    at: NodeTable<u32>,
 }
 
-impl<V> Drop for Flow<V> {
-    fn drop(&mut self) {
-        let at = std::mem::take(&mut self.at);
-        MEMOS.with(|m| m.borrow_mut().push(at));
+/// The buffers of [`Graph::cone`]'s walk.
+#[derive(Default)]
+struct Walk {
+    lists: FxHashSet<ArgList>,
+    funcs: FxHashSet<FuncId>,
+    contexts: FxHashSet<u32>,
+    stack: Vec<(ExprId, bool)>,
+    ops: Vec<ExprId>,
+}
+
+/// A node met but not finished in [`Graph::cone`]'s walk.
+const OPEN: u32 = u32::MAX;
+
+impl Cone {
+    /// The place of a node of the cone.
+    #[inline]
+    pub(crate) fn pos(&self, e: ExprId) -> usize {
+        self.at.get(e).expect("a node of the cone") as usize
     }
+}
+
+/// Values over a cone (see [`Graph::flow`]).
+pub(crate) struct Flow<V> {
+    cone: Cone,
+    vals: Vec<V>,
 }
 
 impl<V> Flow<V> {
     /// The value of a node of the cone.
     pub(crate) fn get(&self, e: ExprId) -> &V {
-        &self.vals[self.at.get(e).expect("a node of the cone").0 as usize]
+        &self.vals[self.cone.pos(e)]
     }
 
     /// Every node of the cone with its value.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (ExprId, &V)> {
-        self.nodes.iter().copied().zip(&self.vals)
+        self.cone.nodes.iter().copied().zip(&self.vals)
     }
 }
 
 impl<K: Field> Graph<K> {
-    /// The nodes under `roots`, every operand and every argument list once,
-    /// in ascending id order (a topological one: a hash-consed node is
-    /// newer than its operands), with each node's position in `at`.
-    pub(crate) fn cone(&self, roots: &[ExprId], at: &mut Memo) -> Vec<ExprId> {
-        let mut out = self.reach(roots, at, true);
-        out.sort_unstable();
-        for (k, &e) in out.iter().enumerate() {
-            at.set(e, ExprId(k as u32));
-        }
-        out
-    }
-
-    /// The nodes under `roots`, every operand and every argument list once,
-    /// in the order the walk meets them, marked in `at`; with `globals`, a
+    /// The cone of `roots`: the nodes under them, each once, in the order a
+    /// recursive walk finishes them (operands in order, every argument list
+    /// and every context once), a topological order. With `globals`, a
     /// call's globals as its operands too (what it reads, not only what it
     /// mentions).
-    fn reach(&self, roots: &[ExprId], at: &mut Memo, globals: bool) -> Vec<ExprId> {
-        at.begin(self.len());
-        let mut lists: FxHashSet<ArgList> = FxHashSet::default();
-        let mut funcs: FxHashSet<FuncId> = FxHashSet::default();
-        let mut contexts: FxHashSet<u32> = FxHashSet::default();
-        let mut stack: Vec<ExprId> = roots.to_vec();
-        let mut out = Vec::new();
-        while let Some(e) = stack.pop() {
-            if at.get(e).is_some() {
+    pub(crate) fn cone(&self, roots: &[ExprId], globals: bool) -> Cone {
+        let mut at = NodeTable::new(self.len());
+        let mut walk: Pooled<Walk> = Pooled::take();
+        let Walk {
+            lists,
+            funcs,
+            contexts,
+            stack,
+            ops,
+        } = &mut *walk;
+        lists.clear();
+        funcs.clear();
+        contexts.clear();
+        stack.clear();
+        stack.extend(roots.iter().rev().map(|&r| (r, false)));
+        let mut nodes: Pooled<Vec<ExprId>> = Pooled::take();
+        nodes.clear();
+        while let Some((e, done)) = stack.pop() {
+            if done {
+                at.set(e, nodes.len() as u32);
+                nodes.push(e);
                 continue;
             }
-            at.set(e, e);
-            out.push(e);
+            if at.contains(e) {
+                continue;
+            }
+            at.set(e, OPEN);
+            stack.push((e, true));
+            ops.clear();
             match *self.node(e) {
                 Node::Call(o, l) => {
                     if lists.insert(l) {
-                        stack.extend_from_slice(self.args(l));
-                    }
-                    let f = self.output(o).0;
-                    if globals && funcs.insert(f) {
-                        stack.extend_from_slice(&self.globals(f));
+                        ops.extend_from_slice(self.args(l));
                     }
                     let c = self.output_ctx[o.0 as usize];
                     if c != NO_CONTEXT && contexts.insert(c) {
-                        stack.extend_from_slice(self.args(self.contexts[c as usize].exprs));
+                        ops.extend_from_slice(self.args(self.contexts[c as usize].exprs));
+                    }
+                    let f = self.output(o).0;
+                    if globals && funcs.insert(f) {
+                        ops.extend_from_slice(self.globals_of(f));
                     }
                 }
-                _ => stack.extend_from_slice(&self.operands(e)),
+                ref node => ops.extend_from_slice(&node.operands(&self.arg_pool)),
             }
+            stack.extend(
+                (ops.iter().rev())
+                    .filter(|&&a| !at.contains(a))
+                    .map(|&a| (a, false)),
+            );
         }
-        out
+        Cone { nodes, at }
     }
 
     /// The symbol nodes `f`'s body reads that are not its parameters, its
@@ -297,10 +320,7 @@ impl<K: Field> Graph<K> {
             NO_CONTEXT => args[p as usize],
             c => {
                 let c = &self.contexts[c as usize];
-                match c.slot[p as usize] {
-                    s if s & BOUND == 0 => args[s as usize],
-                    s => self.args(c.exprs)[(s & !BOUND) as usize],
-                }
+                c.pick(p as usize, args, self.args(c.exprs))
             }
         }
     }
@@ -314,23 +334,6 @@ impl<K: Field> Graph<K> {
         func.globals.get().expect("just found")
     }
 
-    /// The nodes under `roots`, ascending; with `globals` the globals the
-    /// calls read (see [`cone`](Self::cone)).
-    pub(crate) fn cone_sorted(&self, roots: &[ExprId], globals: bool) -> Vec<ExprId> {
-        let mut cone = self.cone_nodes(roots, globals);
-        cone.sort_unstable();
-        cone
-    }
-
-    /// The nodes under `roots`, unordered; with `globals` the globals the
-    /// calls read (see [`cone`](Self::cone)).
-    pub(crate) fn cone_nodes(&self, roots: &[ExprId], globals: bool) -> Vec<ExprId> {
-        let mut at = MEMOS.with(|m| m.borrow_mut().pop()).unwrap_or_default();
-        let cone = self.reach(roots, &mut at, globals);
-        MEMOS.with(|m| m.borrow_mut().push(at));
-        cone
-    }
-
     /// Values over the cone of `roots`: a constant's and a symbol's from
     /// `leaf`, every other node's the join of its operands' as `through`
     /// passes them, a call's the join of the arguments its output reads
@@ -341,13 +344,12 @@ impl<K: Field> Graph<K> {
         through: Through,
         leaf: impl Fn(&Node) -> V,
     ) -> Flow<V> {
-        let mut at = MEMOS.with(|m| m.borrow_mut().pop()).unwrap_or_default();
-        let cone = self.cone(roots, &mut at);
-        let mut vals: Vec<V> = Vec::with_capacity(cone.len());
+        let cone = self.cone(roots, true);
+        let mut vals: Vec<V> = Vec::with_capacity(cone.nodes.len());
         // per instance, what each output reads among its moving arguments
         let mut sites: HashMap<(FuncId, u32, ArgList), Arc<[Arc<[u32]>]>> = HashMap::default();
-        for &e in &cone {
-            let val = |c: &ExprId| &vals[at.get(*c).expect("in the cone").0 as usize];
+        for &e in cone.nodes.iter() {
+            let val = |c: &ExprId| &vals[cone.pos(*c)];
             let node = *self.node(e);
             let v = match node {
                 Node::Const(_) | Node::Symbol(_) => leaf(&node),
@@ -385,11 +387,7 @@ impl<K: Field> Graph<K> {
             };
             vals.push(v);
         }
-        Flow {
-            at,
-            vals,
-            nodes: cone,
-        }
+        Flow { cone, vals }
     }
 
     /// Per output of `f`, the parameters among `moving` (indices, ascending)

@@ -8,15 +8,13 @@ use crate::field::Field;
 use rustc_hash::FxHashMap as HashMap;
 
 use crate::func::{FuncId, OutputId};
-use crate::graph::{Graph, Join, Memo, Set, Through};
+use crate::graph::{inert, Graph, Join, NodeTable, Set, Through};
 use crate::node::{ArgList, BinOp, CmpOp, ExprId, Node, ReduceOp, SymbolId, UnaryOp};
 
 /// Derivative of `expr` with respect to the symbol `wrt`.
 pub fn differentiate<K: Field>(ctx: &mut Graph<K>, expr: ExprId, wrt: SymbolId) -> ExprId {
-    let mut memo = ctx.take_memo();
-    let d = forward(ctx, &[expr], wrt, &mut memo, &|_| true)[0];
-    ctx.put_memo(memo);
-    d
+    let mut memo = NodeTable::new(ctx.len());
+    forward(ctx, &[expr], wrt, &mut memo, &|_| true)[0]
 }
 
 /// Local derivative `d(op(a))/da` of a unary op, shared by the forward
@@ -285,16 +283,6 @@ fn cofactors<K: Field>(
     out
 }
 
-/// How many leading operands of `node` carry no derivative: both of a
-/// comparison's (piecewise constant), a select's condition.
-fn inert(node: &Node) -> usize {
-    match node {
-        Node::Cmp(..) => 2,
-        Node::Select(..) => 1,
-        _ => 0,
-    }
-}
-
 /// Whether `test` holds for every operand of `e` that carries a derivative
 /// (see [`carrying`]), without collecting them: the per-node test of a
 /// forward sweep.
@@ -335,13 +323,13 @@ pub(crate) fn carrying<K: Field>(ctx: &Graph<K>, e: ExprId, out: &mut Vec<ExprId
 /// having a larger id than its operands. Through a call only the operands
 /// its output's support names, so a row of a wide body's single call walks
 /// that row's share of it, not the call's whole argument list.
-fn cone<K: Field>(ctx: &Graph<K>, root: ExprId, seen: &mut Memo) -> Vec<ExprId> {
+fn cone<K: Field>(ctx: &Graph<K>, root: ExprId, seen: &mut NodeTable<u32>) -> Vec<ExprId> {
     let mut out = Vec::new();
     let mut stack = vec![root];
     let mut ops = Vec::new();
     while let Some(e) = stack.pop() {
-        if seen.get(e).is_none() {
-            seen.set(e, e);
+        if !seen.contains(e) {
+            seen.set(e, 0);
             out.push(e);
             carrying(ctx, e, &mut ops);
             stack.extend_from_slice(&ops);
@@ -363,7 +351,7 @@ pub(crate) fn forward<K: Field>(
     ctx: &mut Graph<K>,
     roots: &[ExprId],
     wrt: SymbolId,
-    memo: &mut Memo,
+    memo: &mut NodeTable<ExprId>,
     moves: &dyn Fn(ExprId) -> bool,
 ) -> Vec<ExprId> {
     let zero = ctx.zero();
@@ -402,7 +390,12 @@ pub(crate) fn forward<K: Field>(
 /// The derivative of node `e` with respect to `wrt`, its operands' already
 /// in `memo`. A node none of whose operands moves is zero: an inactive
 /// subgraph builds nothing.
-fn tangent<K: Field>(ctx: &mut Graph<K>, e: ExprId, wrt: SymbolId, memo: &mut Memo) -> ExprId {
+fn tangent<K: Field>(
+    ctx: &mut Graph<K>,
+    e: ExprId,
+    wrt: SymbolId,
+    memo: &mut NodeTable<ExprId>,
+) -> ExprId {
     let zero = ctx.zero();
     let node = *ctx.node(e);
     if let Node::Symbol(s) = node {
@@ -592,7 +585,7 @@ pub fn sparse_jacobian<K: Field>(
             }
         }
     }
-    let mut memo = ctx.take_memo();
+    let mut memo = NodeTable::new(ctx.len());
     for (j, members) in by_col.iter().enumerate() {
         if members.is_empty() {
             continue;
@@ -607,7 +600,6 @@ pub fn sparse_jacobian<K: Field>(
             rows[i].push((j, d));
         }
     }
-    ctx.put_memo(memo);
     for row in rows.iter_mut() {
         row.retain(|&(_, e)| !ctx.is_zero(e));
     }
@@ -668,12 +660,12 @@ pub fn vjp<K: Field>(
 pub fn gradient<K: Field>(ctx: &mut Graph<K>, f: ExprId, wrt: &[SymbolId]) -> Vec<ExprId> {
     // The cone of f, ascending: walked backwards, every node comes after
     // all of its consumers. `pos` is a node's place in it.
-    let mut pos = ctx.take_memo();
+    let mut pos = NodeTable::new(ctx.len());
     let nodes = cone(ctx, f, &mut pos);
     for (k, &e) in nodes.iter().enumerate() {
-        pos.set(e, ExprId(k as u32));
+        pos.set(e, k as u32);
     }
-    let at = |e: ExprId| pos.get(e).expect("in the cone").0 as usize;
+    let at = |e: ExprId| pos.get(e).expect("in the cone") as usize;
     // Activity: a node is active if it depends on a symbol of `wrt`. Only
     // active operands receive an adjoint, so a subgraph over other symbols
     // (the parameters not asked for, a call's constant arguments) builds
@@ -741,7 +733,6 @@ pub fn gradient<K: Field>(ctx: &mut Graph<K>, f: ExprId, wrt: &[SymbolId]) -> Ve
             }
         }
     }
-    ctx.put_memo(pos);
     wrt.iter()
         .map(|s| sym_adj.get(s).copied().unwrap_or(zero))
         .collect()
@@ -817,7 +808,7 @@ fn carry<K: Field>(
 struct Sweep<'s> {
     act: &'s dyn Fn(ExprId) -> bool,
     at: &'s dyn Fn(ExprId) -> usize,
-    pos: &'s Memo,
+    pos: &'s NodeTable<u32>,
 }
 
 /// One node of the reverse sweep: its adjoint `a_bar` into its operands'
@@ -982,7 +973,7 @@ fn sweep_node<K: Field>(
                     } else {
                         match pos.get(xk) {
                             Some(p) => {
-                                let t = std::mem::take(&mut adj[p.0 as usize]);
+                                let t = std::mem::take(&mut adj[p as usize]);
                                 ctx.reduce(ReduceOp::Sum, t)
                             }
                             None => zero,

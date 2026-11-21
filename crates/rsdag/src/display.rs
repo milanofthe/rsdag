@@ -1,5 +1,3 @@
-use rustc_hash::FxHashMap as HashMap;
-
 use crate::field::Field;
 use crate::graph::Graph;
 use crate::node::{ExprId, Node};
@@ -13,33 +11,22 @@ use crate::constants::{INFIX_MAX, INFIX_OP_BYTES};
 /// Good enough for inspection and tests. Pretty/canonical rendering of
 /// `H(s)` as a collected rational function is a job for the rewrite layer.
 pub fn to_string<K: Field>(ctx: &Graph<K>, id: ExprId) -> String {
-    // The nodes under `id`, ascending (a dependency order), and the length
-    // of each one's infix form, capped past the limit.
-    let mut cone = Vec::new();
-    let mut seen = rustc_hash::FxHashSet::default();
-    let mut stack = vec![id];
-    while let Some(e) = stack.pop() {
-        if seen.insert(e) {
-            cone.push(e);
-            stack.extend_from_slice(&ctx.operands(e));
-        }
-    }
-    cone.sort_unstable();
-    let mut len: HashMap<ExprId, usize> = HashMap::default();
-    for &e in &cone {
-        let own = if ctx.operands(e).is_empty() {
+    // The nodes under `id`, each after its operands, and the length of each
+    // one's infix form, capped past the limit.
+    let cone = ctx.cone(&[id], false);
+    let mut len: Vec<usize> = Vec::with_capacity(cone.nodes.len());
+    for &e in cone.nodes.iter() {
+        let ops = ctx.operands(e);
+        let own = if ops.is_empty() {
             leaf(ctx, e).len()
         } else {
             INFIX_OP_BYTES
         };
-        let total = ctx
-            .operands(e)
-            .iter()
-            .fold(own, |acc, c| acc.saturating_add(len[c]));
-        len.insert(e, total.min(INFIX_MAX + 1));
+        let total = (ops.iter()).fold(own, |acc, &c| acc.saturating_add(len[cone.pos(c)]));
+        len.push(total.min(INFIX_MAX + 1));
     }
     let mut out = String::new();
-    if len[&id] <= INFIX_MAX {
+    if len[cone.pos(id)] <= INFIX_MAX {
         infix(ctx, id, &mut out);
         return out;
     }
@@ -50,7 +37,10 @@ pub fn to_string<K: Field>(ctx: &Graph<K>, id: ExprId) -> String {
             out.push_str(&format!("%{}", c.0));
         }
     };
-    for &e in cone.iter().filter(|&&e| !ctx.operands(e).is_empty()) {
+    // listed in id order
+    let mut nodes = cone.nodes;
+    nodes.sort_unstable();
+    for &e in nodes.iter().filter(|&&e| !ctx.operands(e).is_empty()) {
         out.push_str(&format!("%{} = ", e.0));
         write_node(ctx, e, &mut out, &mut operand);
         out.push('\n');
@@ -139,7 +129,11 @@ fn write_node<K: Field>(
         Node::Select(c, t, e) => list("select", &[c, t, e], out),
         Node::Call(o, l) => {
             let (f, k) = ctx.output(o);
-            list(&format!("{}#{k}", ctx.func(f).name()), ctx.args(l), out)
+            list(
+                &format!("{}#{k}", ctx.func(f).name()),
+                &ctx.full_args(o, l),
+                out,
+            )
         }
         Node::Reduce(op, l) => list(op.name(), ctx.args(l), out),
         Node::Solve(l, i) => {

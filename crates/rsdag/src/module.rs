@@ -27,7 +27,7 @@ use crate::field::Field;
 use std::sync::Arc;
 
 use crate::extern_fn::ExternBundle;
-use crate::func::{FuncId, Function, Output, OutputId};
+use crate::func::{FuncId, Output, OutputId};
 use crate::graph::Graph;
 use crate::node::{ArgList, ExprId, Node, SymbolId};
 use crate::role::{OutputRole, ParamRole};
@@ -476,11 +476,8 @@ impl<K: Field> Graph<K> {
                     .iter()
                     .map(|s| map.symbols[s.0 as usize])
                     .collect();
-                let mut func = Function::new(&data.name, params, bodies[g].clone());
-                for (k, &r) in data.param_roles.iter().enumerate() {
-                    func.set_param_role(k as u32, r);
-                }
-                self.push_function(func)
+                let body = bodies[g].clone();
+                self.define(&data.name, params, &data.param_roles, body, [])
             });
             let func = self.func(id);
             for k in func.outputs().len()..data.outputs.len() {

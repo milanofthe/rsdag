@@ -1,153 +1,237 @@
 //! Structural rewrites of the DAG: the bottom-up rewrite every transform is
 //! written in, and substituting expressions for symbols.
 
+use std::borrow::Cow;
+
 use crate::field::Field;
 use rustc_hash::FxHashMap as HashMap;
 
-use crate::graph::{Graph, NO_CONTEXT};
+use crate::func::FuncId;
+use crate::graph::{Graph, Pooled, NO_CONTEXT};
 use crate::node::{ArgList, ExprId, Node, SymbolId};
 
-/// A node's operands, rewritten: in [`Graph::operands`] order, and for a
-/// call the argument list they make, interned once however many calls of
-/// the one instance share it, and its context over its bound expressions
-/// rewritten.
-pub(crate) struct Ops<'a> {
-    pub ops: &'a [ExprId],
-    pub list: Option<ArgList>,
+/// A bottom-up rewrite (see [`rewrite`]): the graph it reads and what it
+/// makes of each node.
+pub(crate) trait Rule<K: Field> {
+    /// What a node becomes: a node of a graph, a drawn node.
+    type V: Copy + 'static;
+    /// The graph rewritten.
+    fn source(&self) -> &Graph<K>;
+    /// Node `e`, no call, over its operands rewritten, in
+    /// [`Graph::operands`] order.
+    fn node(&mut self, e: ExprId, node: Node, ops: &[Self::V]) -> Self::V;
+    /// The calls `outs` (node, output index) of one instance, in cone
+    /// order, over the instance's operands rewritten: one value per call
+    /// pushed to `vals`.
+    fn calls(&mut self, call: &Call<Self::V>, outs: &[(ExprId, u32)], vals: &mut Vec<Self::V>);
+}
+
+/// An instance a rewrite meets: function `f` called in context `ctx` of
+/// the source over one argument list, the list rewritten, and the context's
+/// bound expressions, rewritten once however many instances share them.
+pub(crate) struct Call<'a, V> {
+    pub f: FuncId,
     pub ctx: u32,
+    pub args: &'a [V],
+    pub bound: &'a [V],
 }
 
-impl<K: Field> Graph<K> {
-    /// [`build`](Graph::build) over rewritten operands: a call over its
-    /// interned list, without hashing the list again.
-    pub(crate) fn rebuild(&mut self, node: Node, ops: &Ops) -> ExprId {
-        match (node, ops.list) {
-            (Node::Call(o, _), Some(l)) => {
-                let (f, out) = self.output(o);
-                self.call_list_in(f, out, ops.ctx, l)
+impl<V: Copy> Call<'_, V> {
+    /// The operands rewritten, in the function's parameter order (see
+    /// [`Graph::full_args`]).
+    pub(crate) fn params<K: Field>(&self, g: &Graph<K>) -> Cow<'_, [V]> {
+        g.in_param_order(self.ctx, self.args, self.bound)
+    }
+}
+
+/// Rewrite the DAG under `roots` bottom-up, every node once, in the order
+/// of [`Graph::cone`] (the order a recursive walk finishes the nodes): a
+/// call's instance at its first call, with every call of the instance under
+/// `roots`, so an instance of a wide body costs its width once and its
+/// outputs share what the rule makes of it.
+pub(crate) fn rewrite<K: Field, R: Rule<K>>(r: &mut R, roots: &[ExprId]) -> Vec<R::V> {
+    let cone = r.source().cone(roots, false);
+    let mut scratch: Pooled<Scratch<R::V>> = Pooled::take();
+    let Scratch {
+        index,
+        place,
+        start,
+        found,
+        outs,
+        next,
+        at_done,
+        done,
+        vals,
+        contexts,
+        ops,
+        args,
+    } = &mut *scratch;
+    index.clear();
+    contexts.clear();
+    place.clear();
+    start.clear();
+    found.clear();
+    outs.clear();
+    done.clear();
+    vals.clear();
+    // Per call its instance and its place among the instance's calls, and
+    // the calls laid out by instance: `outs[start[s]..start[s + 1]]`.
+    let g = r.source();
+    for &e in cone.nodes.iter() {
+        place.push(match *g.node(e) {
+            Node::Call(o, l) => {
+                let (f, k) = g.output(o);
+                let fresh = index.len() as u32;
+                let s = *index.entry((f, g.context_of(o), l)).or_insert(fresh);
+                if s == fresh {
+                    start.push(0);
+                }
+                start[s as usize] += 1;
+                found.push((s, (e, k)));
+                (s, start[s as usize] - 1)
             }
-            _ => self.build(node, ops.ops),
+            _ => (u32::MAX, 0),
+        });
+    }
+    let mut sum = 0;
+    for n in start.iter_mut() {
+        (*n, sum) = (sum, sum + *n);
+    }
+    start.push(sum);
+    outs.resize(sum as usize, (ExprId(0), 0));
+    next.clone_from(start);
+    for &(s, call) in found.iter() {
+        outs[next[s as usize] as usize] = call;
+        next[s as usize] += 1;
+    }
+    // per instance, where its calls' values start in `done`
+    at_done.clear();
+    at_done.resize(index.len(), u32::MAX);
+    for (&e, &(s, k)) in cone.nodes.iter().zip(place.iter()) {
+        let g = r.source();
+        let node = *g.node(e);
+        let v = match node {
+            Node::Call(o, l) => {
+                let s = s as usize;
+                if at_done[s] == u32::MAX {
+                    let (f, c) = (g.output(o).0, g.context_of(o));
+                    let at = |a: &ExprId| vals[cone.pos(*a)];
+                    args.clear();
+                    args.extend(g.args(l).iter().map(at));
+                    let bound = match c {
+                        NO_CONTEXT => &[][..],
+                        c => contexts
+                            .entry(c)
+                            .or_insert_with(|| g.args(g.context_list(c)).iter().map(at).collect()),
+                    };
+                    let call = Call {
+                        f,
+                        ctx: c,
+                        args,
+                        bound,
+                    };
+                    at_done[s] = done.len() as u32;
+                    let calls = &outs[start[s] as usize..start[s + 1] as usize];
+                    r.calls(&call, calls, done);
+                    debug_assert_eq!(done.len() as u32 - at_done[s], calls.len() as u32);
+                }
+                done[(at_done[s] + k) as usize]
+            }
+            _ => {
+                ops.clear();
+                ops.extend(g.operands(e).iter().map(|&a| vals[cone.pos(a)]));
+                r.node(e, node, ops)
+            }
+        };
+        vals.push(v);
+    }
+    roots.iter().map(|&e| vals[cone.pos(e)]).collect()
+}
+
+/// The buffers of [`rewrite`], kept in the per-thread pool.
+struct Scratch<V> {
+    index: HashMap<(FuncId, u32, ArgList), u32>,
+    place: Vec<(u32, u32)>,
+    start: Vec<u32>,
+    found: Vec<(u32, (ExprId, u32))>,
+    outs: Vec<(ExprId, u32)>,
+    next: Vec<u32>,
+    at_done: Vec<u32>,
+    done: Vec<V>,
+    vals: Vec<V>,
+    contexts: HashMap<u32, Vec<V>>,
+    ops: Vec<V>,
+    args: Vec<V>,
+}
+
+impl<V> Default for Scratch<V> {
+    fn default() -> Self {
+        Scratch {
+            index: HashMap::default(),
+            place: Vec::new(),
+            start: Vec::new(),
+            found: Vec::new(),
+            outs: Vec::new(),
+            next: Vec::new(),
+            at_done: Vec::new(),
+            done: Vec::new(),
+            vals: Vec::new(),
+            contexts: HashMap::default(),
+            ops: Vec::new(),
+            args: Vec::new(),
         }
     }
 }
 
-/// Rewrite the DAG under `roots` bottom-up: `rule(g, e, node, ops)` is the
-/// new id of node `e`, `ops` its operands already rewritten;
-/// [`Graph::rebuild`] is the identity rule. One shared memo, so a
-/// subexpression reachable from several roots is rewritten once, and an
-/// explicit stack, so a deep chain does not overflow the call stack.
-/// Operands are visited in order, the order a recursive walk takes, so new
-/// nodes are created in the same order as by one. The calls of one instance
-/// share their argument list, and it is rewritten once: an instance of a
-/// wide body costs its width once, not once per output.
-pub(crate) fn rewrite<K: Field>(
-    g: &mut Graph<K>,
-    roots: &[ExprId],
-    mut rule: impl FnMut(&mut Graph<K>, ExprId, Node, &Ops) -> ExprId,
-) -> Vec<ExprId> {
-    let mut memo = g.take_memo();
-    let mut stack: Vec<(ExprId, bool)> = Vec::new();
-    let mut ops: Vec<ExprId> = Vec::new();
-    // per call argument list: its operands rewritten, and interned
-    let mut lists: HashMap<ArgList, (Vec<ExprId>, ArgList)> = HashMap::default();
-    // per context: its bound expressions rewritten
-    let mut contexts: HashMap<u32, u32> = HashMap::default();
-    for &root in roots {
-        stack.push((root, false));
-        while let Some((e, expanded)) = stack.pop() {
-            if memo.get(e).is_some() {
-                continue;
-            }
-            let node = *g.node(e);
-            let call_list = match node {
-                Node::Call(_, l) => Some(l),
-                _ => None,
-            };
-            if !expanded {
-                stack.push((e, true));
-                // a list rewritten before: only the binding, which another
-                // call over the list may not share
-                match (node, call_list) {
-                    (Node::Call(o, _), Some(l)) if lists.contains_key(&l) => {
-                        let c = g.context_of(o);
-                        if c != NO_CONTEXT && !contexts.contains_key(&c) {
-                            let bound = g.args(g.context_list(c));
-                            stack.extend(
-                                (bound.iter().rev())
-                                    .filter(|&&c| memo.get(c).is_none())
-                                    .map(|&c| (c, false)),
-                            );
-                        }
-                    }
-                    _ => {
-                        let pending = g.operands(e);
-                        stack.extend(
-                            (pending.iter().rev())
-                                .filter(|&&c| memo.get(c).is_none())
-                                .map(|&c| (c, false)),
-                        );
-                    }
-                }
-                continue;
-            }
-            let r = match call_list {
-                Some(l) => {
-                    let (new, nl) = &*lists.entry(l).or_insert_with(|| {
-                        let new: Vec<ExprId> = g
-                            .args(l)
-                            .iter()
-                            .map(|&c| memo.get(c).expect("operand rewritten"))
-                            .collect();
-                        let nl = g.intern_args(&new);
-                        (new, nl)
-                    });
-                    let Node::Call(o, _) = node else {
-                        unreachable!()
-                    };
-                    let ctx = match g.context_of(o) {
-                        NO_CONTEXT => NO_CONTEXT,
-                        c => *contexts.entry(c).or_insert_with(|| {
-                            let f = g.output(o).0;
-                            let new: Vec<ExprId> = g
-                                .args(g.context_list(c))
-                                .iter()
-                                .map(|&e| memo.get(e).expect("bound expression rewritten"))
-                                .collect();
-                            g.context_over(c, f, &new)
-                        }),
-                    };
-                    let nl = *nl;
-                    let ops = Ops {
-                        ops: new,
-                        list: Some(nl),
-                        ctx,
-                    };
-                    rule(g, e, node, &ops)
-                }
-                None => {
-                    ops.clear();
-                    ops.extend(
-                        g.operands(e)
-                            .iter()
-                            .map(|&c| memo.get(c).expect("operand rewritten")),
-                    );
-                    let ops = Ops {
-                        ops: &ops,
-                        list: None,
-                        ctx: NO_CONTEXT,
-                    };
-                    rule(g, e, node, &ops)
-                }
-            };
-            memo.set(e, r);
+/// The contexts the calls of a rewrite in place run in: per context of the
+/// source and function called, the context over the context's bound
+/// expressions rewritten, made once per rewrite (a model card shared by many
+/// instances costs its width once).
+#[derive(Default)]
+pub(crate) struct Contexts(HashMap<(u32, FuncId), u32>);
+
+impl Contexts {
+    /// The context `call`'s calls of `f` (its function, or a copy with its
+    /// parameters) run in.
+    pub(crate) fn of<K: Field>(&mut self, g: &mut Graph<K>, call: &Call<ExprId>, f: FuncId) -> u32 {
+        match call.ctx {
+            NO_CONTEXT => NO_CONTEXT,
+            c => *(self.0.entry((c, f))).or_insert_with(|| g.context_over(c, f, call.bound)),
         }
     }
-    let out = roots
-        .iter()
-        .map(|&r| memo.get(r).expect("root rewritten"))
-        .collect();
-    g.put_memo(memo);
-    out
+}
+
+/// [`substitute`]: a symbol `map` binds its expression, a call whose body
+/// reads one as a global the copy bound so (see [`Graph::rebound`]).
+struct Substitute<'a, K: Field> {
+    g: &'a mut Graph<K>,
+    map: &'a HashMap<SymbolId, ExprId>,
+    /// per function, the copy its calls run
+    copies: HashMap<FuncId, Option<FuncId>>,
+    contexts: Contexts,
+}
+
+impl<K: Field> Rule<K> for Substitute<'_, K> {
+    type V = ExprId;
+    fn source(&self) -> &Graph<K> {
+        self.g
+    }
+    fn node(&mut self, e: ExprId, node: Node, ops: &[ExprId]) -> ExprId {
+        match node {
+            Node::Symbol(s) => self.map.get(&s).copied().unwrap_or(e),
+            _ => self.g.build(node, ops),
+        }
+    }
+    fn calls(&mut self, call: &Call<ExprId>, outs: &[(ExprId, u32)], vals: &mut Vec<ExprId>) {
+        let (g, map) = (&mut *self.g, self.map);
+        let f = *self
+            .copies
+            .entry(call.f)
+            .or_insert_with(|| g.rebound(call.f, map));
+        let f = f.unwrap_or(call.f);
+        let ctx = self.contexts.of(g, call, f);
+        g.calls_over(f, ctx, call, outs, vals)
+    }
 }
 
 /// [`substitute`] of every free symbol of `roots` by what `f` maps it to,
@@ -191,22 +275,11 @@ pub fn substitute<K: Field>(
     roots: &[ExprId],
     map: &HashMap<SymbolId, ExprId>,
 ) -> Vec<ExprId> {
-    // per function, the copy its calls run (see `Graph::rebound`)
-    let mut copies: HashMap<crate::func::FuncId, Option<crate::func::FuncId>> = HashMap::default();
-    rewrite(ctx, roots, |g, e, node, ops| match (node, ops.list) {
-        (Node::Symbol(s), _) => map.get(&s).copied().unwrap_or(e),
-        // a call whose body reads a symbol `map` binds runs a copy bound so
-        (Node::Call(o, _), Some(l)) => {
-            let (f, k) = g.output(o);
-            let copy = *copies.entry(f).or_insert_with(|| g.rebound(f, map));
-            match copy {
-                Some(copy) => {
-                    let ctx = g.context_onto(ops.ctx, copy);
-                    g.call_list_in(copy, k, ctx, l)
-                }
-                None => g.rebuild(node, ops),
-            }
-        }
-        _ => g.rebuild(node, ops),
-    })
+    let mut rule = Substitute {
+        g: ctx,
+        map,
+        copies: HashMap::default(),
+        contexts: Contexts::default(),
+    };
+    rewrite(&mut rule, roots)
 }

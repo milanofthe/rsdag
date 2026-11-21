@@ -92,13 +92,13 @@ pub struct Function {
     /// Derivative output `d outputs[out] / d params[param]`, by index: the
     /// outputs whose role is [`OutputRole::Derivative`].
     deriv_index: HashMap<(u32, u32), u32>,
+    /// What each node of the outputs' cone depends on among the parameters
+    /// that are no model parameters, once asked for (see `Graph::derive`).
+    pub(crate) deps: std::sync::Mutex<Option<Arc<crate::graph::Deps>>>,
     /// Per output, its support once asked for (see
     /// [`Graph::output_support`](crate::Graph::output_support)). An output
     /// never changes once pushed, so neither does its support.
     support: std::sync::Mutex<Vec<Option<Arc<[u32]>>>>,
-    /// What each node of the outputs' cone depends on among the parameters
-    /// that are no model parameters, once asked for (see `Graph::derive`).
-    pub(crate) deps: std::sync::Mutex<Option<Arc<crate::graph::Deps>>>,
     /// What each output reads, per way through and set of moving
     /// parameters (see `Graph::reads`).
     reads: std::sync::Mutex<HashMap<ReadsKey, Arc<[Arc<[u32]>]>>>,
@@ -222,8 +222,8 @@ impl Function {
             interpreted: Default::default(),
             lowered: Default::default(),
             deriv_index: HashMap::default(),
-            support: Default::default(),
             deps: Default::default(),
+            support: Default::default(),
             reads: Default::default(),
             globals: Default::default(),
             composite: Default::default(),
@@ -266,15 +266,6 @@ impl Function {
         self.deriv_index.get(&(out, param)).copied()
     }
 
-    pub(crate) fn cached_support(&self, out: u32) -> Option<Arc<[u32]>> {
-        self.support
-            .lock()
-            .unwrap()
-            .get(out as usize)
-            .cloned()
-            .flatten()
-    }
-
     /// The symbol nodes the body reads that are not its parameters, its
     /// calls' included, ascending (see `Graph::globals`).
     pub(crate) fn globals_in<K: crate::field::Field>(
@@ -284,18 +275,13 @@ impl Function {
         if let Some(g) = self.globals.get() {
             return g.clone();
         }
-        let exprs: Vec<ExprId> = self
-            .outputs
-            .iter()
-            .filter_map(|o| match *o {
-                Output::Expr(e) => Some(e),
-                _ => None,
-            })
-            .collect();
+        let exprs = self.exprs();
         let params: rustc_hash::FxHashSet<SymbolId> = self.params.iter().copied().collect();
         let mut globals: Vec<ExprId> = ctx
-            .cone_nodes(&exprs, true)
-            .into_iter()
+            .cone(&exprs, true)
+            .nodes
+            .iter()
+            .copied()
             .filter(
                 |&e| matches!(*ctx.node(e), crate::node::Node::Symbol(s) if !params.contains(&s)),
             )
@@ -330,8 +316,13 @@ impl Function {
         self.reads.lock().unwrap().get(key).cloned()
     }
 
-    pub(crate) fn cache_reads(&self, key: ReadsKey, reads: Arc<[Arc<[u32]>]>) {
-        self.reads.lock().unwrap().insert(key, reads);
+    pub(crate) fn cached_support(&self, out: u32) -> Option<Arc<[u32]>> {
+        self.support
+            .lock()
+            .unwrap()
+            .get(out as usize)
+            .cloned()
+            .flatten()
     }
 
     pub(crate) fn cache_support(&self, out: u32, support: Arc<[u32]>) {
@@ -340,6 +331,31 @@ impl Function {
             cache.resize(out as usize + 1, None);
         }
         cache[out as usize] = Some(support);
+    }
+
+    pub(crate) fn cache_reads(&self, key: ReadsKey, reads: Arc<[Arc<[u32]>]>) {
+        self.reads.lock().unwrap().insert(key, reads);
+    }
+
+    /// The outputs that are expressions, in output order.
+    pub(crate) fn exprs(&self) -> Vec<ExprId> {
+        (self.outputs.iter())
+            .filter_map(|o| match *o {
+                Output::Expr(e) => Some(e),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The outputs with their expressions replaced, in order, by `exprs`.
+    pub(crate) fn outputs_over(&self, exprs: Vec<ExprId>) -> Vec<Output> {
+        let mut exprs = exprs.into_iter();
+        (self.outputs.iter())
+            .map(|o| match o {
+                Output::Expr(_) => Output::Expr(exprs.next().expect("one per expression")),
+                &other => other,
+            })
+            .collect()
     }
 
     pub fn name(&self) -> &str {
