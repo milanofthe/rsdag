@@ -2,7 +2,7 @@
 //! keeping guard outputs that detect a region flip. See [`Tape::specialize`]
 //! and [`Tape::specialize_main`].
 
-use rustc_hash::FxHashMap;
+use rustc_hash::FxHashSet;
 
 use super::compile::{Inst, Kind, Program, Ref};
 use super::{input_index, Op, Tape};
@@ -130,27 +130,20 @@ impl Tape {
         }
         // Hash-consing makes shared conditions common; two selects sharing
         // one traced the same truth, and one guard checks both.
-        let mut guard: FxHashMap<Ref, u32> = FxHashMap::default();
+        let mut guarded: FxHashSet<Ref> = FxHashSet::default();
         let mut guards: Vec<Ref> = Vec::new();
         let mut expected: Vec<u8> = Vec::new();
-        let mut guard_of: Vec<u32> = Vec::new();
         let first = if main_only { self.prolog_ops } else { 0 };
         for i in first..m {
-            if !matches!(p.insts[i].kind, Kind::Select) {
-                continue;
-            }
-            let g = match (live[i], pinned[i]) {
-                (true, Some((cond, _, choice))) => {
-                    let cond = decided(&p, &arm, cond, false);
-                    *guard.entry(cond).or_insert_with(|| {
-                        guards.push(cond);
-                        expected.push(choice);
-                        guards.len() as u32 - 1
-                    })
+            if let (Kind::Select, true, Some((cond, _, choice))) =
+                (&p.insts[i].kind, live[i], pinned[i])
+            {
+                let cond = decided(&p, &arm, cond, false);
+                if guarded.insert(cond) {
+                    guards.push(cond);
+                    expected.push(choice);
                 }
-                _ => u32::MAX,
-            };
-            guard_of.push(g);
+            }
         }
         let n_real = p.roots.len();
         match form {
@@ -158,7 +151,6 @@ impl Tape {
             Guards::Count => {
                 let count = mismatches(&mut p, &guards, &expected);
                 p.roots.push(count);
-                guard_of.fill(u32::MAX);
                 // the count is the main phase's, in no kept state
                 if let Some((at, _)) = &mut p.state {
                     at.resize(p.insts.len(), u32::MAX);
@@ -189,7 +181,6 @@ impl Tape {
             n_real,
             expected,
             prolog_guards,
-            guard_of,
             count: form == Guards::Count,
         }
     }
@@ -272,9 +263,6 @@ pub struct SpecializedTape {
     /// Guards whose condition lives in the inherited prolog (or is an
     /// input), as `(operand, expected)`, checked right after a prolog pass.
     prolog_guards: Vec<(u32, u8)>,
-    /// Per select of the trace, the guard that checks it (`u32::MAX`: none,
-    /// unpinned or out of the outputs' reach, or the guards counted).
-    guard_of: Vec<u32>,
     /// The guards as one count ([`Guards::Count`]).
     count: bool,
 }
@@ -301,15 +289,6 @@ impl SpecializedTape {
         self.n_real
     }
 
-    /// The guard outputs, after the real ones.
-    pub fn n_guards(&self) -> usize {
-        if self.count {
-            1
-        } else {
-            self.expected.len()
-        }
-    }
-
     /// Whether the guard outputs `guards` (the shortened tape's outputs
     /// after the real ones) hold: the real outputs are then the full
     /// tape's, bit for bit.
@@ -321,15 +300,6 @@ impl SpecializedTape {
             .iter()
             .zip(&self.expected)
             .all(|(&v, &e)| (v != 0.0) == (e != 0))
-    }
-
-    /// The selects of the trace whose guard fails in `guards`: the ones
-    /// that flipped (none named when the guards are counted).
-    pub fn flipped<'a>(&'a self, guards: &'a [f64]) -> impl Iterator<Item = usize> + 'a {
-        self.guard_of.iter().enumerate().filter_map(move |(k, &g)| {
-            let g = g as usize;
-            (g < guards.len() && (guards[g] != 0.0) != (self.expected[g] != 0)).then_some(k)
-        })
     }
 
     /// Evaluate the shortened tape. Returns `true` if every pinned choice still
