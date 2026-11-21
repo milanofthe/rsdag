@@ -114,7 +114,7 @@ pub fn eval<T: Scalar, K: Field>(
 
 /// Per-sweep function evaluation: a body per function and the outputs of
 /// every distinct `(function, argument list)` already evaluated.
-pub struct FuncEval<T: Scalar> {
+struct FuncEval<T: Scalar> {
     bodies: rustc_hash::FxHashMap<FuncId, Body>,
     /// Per instance (function, context, argument list), its outputs.
     vals: rustc_hash::FxHashMap<(FuncId, u32, ArgList), Vec<T>>,
@@ -124,7 +124,7 @@ pub struct FuncEval<T: Scalar> {
 }
 
 impl<T: Scalar> FuncEval<T> {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             bodies: Default::default(),
             vals: Default::default(),
@@ -134,7 +134,7 @@ impl<T: Scalar> FuncEval<T> {
 
     /// Declare that the sweep calls output `out` of `f`, before the first
     /// call; a body is chosen for the declared set.
-    pub fn need(&mut self, f: FuncId, out: u32) {
+    fn need(&mut self, f: FuncId, out: u32) {
         let v = self.needed.entry(f).or_default();
         if !v.contains(&out) {
             v.push(out);
@@ -144,7 +144,7 @@ impl<T: Scalar> FuncEval<T> {
     /// The value of a call of output `o` over the list `l` at the values
     /// `args` of its operands (in its function's parameter order, then its
     /// globals); the instance keys the memo.
-    pub fn output<K: Field>(&mut self, ctx: &Graph<K>, o: OutputId, l: ArgList, args: &[T]) -> T {
+    fn output<K: Field>(&mut self, ctx: &Graph<K>, o: OutputId, l: ArgList, args: &[T]) -> T {
         let (f, out) = ctx.output(o);
         let site = (f, ctx.context_of(o), l);
         let func = ctx.func(f);
@@ -179,11 +179,5 @@ impl<T: Scalar> FuncEval<T> {
             out
         });
         vals[slot as usize]
-    }
-}
-
-impl<T: Scalar> Default for FuncEval<T> {
-    fn default() -> Self {
-        Self::new()
     }
 }
