@@ -5,6 +5,7 @@
 //! code multiplies the powers out inline up to a bound and calls the host
 //! beyond it; both agree with the reference.
 
+use rsdag::Program;
 use rsdag::{Graph, Node, Tape, F64};
 use rsdag_jit::NativeTape;
 

@@ -6,6 +6,7 @@
 //! logger is off.
 
 use rsdag::hooks::{self, Clock, Level, Log};
+use rsdag::Program;
 use rsdag::{Graph, Node, Tape, F64};
 
 struct Trap;

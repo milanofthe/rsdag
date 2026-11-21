@@ -10,7 +10,7 @@
 //! that the benchmark measures the same population the parity suite checks.
 //!
 //! ```
-//! use rsdag::{synth::{Spec, build, inputs}, Graph, Tape, F64};
+//! use rsdag::{synth::{Spec, build, inputs}, Graph, Program, Tape, F64};
 //! let mut g: Graph<F64> = Graph::new();
 //! let mut spec = Spec::new(7);          // seed
 //! spec.steps = 200;

@@ -4,6 +4,7 @@
 //! branches.
 
 use rsdag::variant::VariantPolicy;
+use rsdag::Program;
 use rsdag::{
     BodyBackend, CmpOp, ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape,
     F64,

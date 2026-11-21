@@ -4,6 +4,7 @@
 //! the state the same.
 
 use rsdag::node::CmpOp;
+use rsdag::Program;
 use rsdag::{ExprId, Graph, Guards, Node, SymbolId, Tape, F64};
 
 fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {

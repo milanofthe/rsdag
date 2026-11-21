@@ -4,6 +4,7 @@
 //! an episode already running, and a state one backend's prolog left read
 //! alike by the other's main phase.
 
+use rsdag::Program;
 #[path = "../../rsdag/tests/param_variants.rs"]
 mod variants;
 

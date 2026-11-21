@@ -1,6 +1,7 @@
 //! Product kernels fold their consumers' subtraction or addition in: the
 //! program shrinks and stays bit-identical to the arena.
 
+use rsdag::Program;
 use rsdag::{Graph, Node, SymbolId, Tape, F64};
 
 fn syms(g: &mut Graph<F64>, names: &[String]) -> (Vec<rsdag::ExprId>, Vec<SymbolId>) {

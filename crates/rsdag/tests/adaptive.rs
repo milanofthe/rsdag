@@ -2,6 +2,7 @@
 //! interpreter and its choice specialization, bit for bit the interpreter.
 
 use rsdag::synth::{build, inputs, Rng, Spec, Vocabulary};
+use rsdag::Program;
 use rsdag::{Adaptive, Graph, Policy, Tape, F64};
 
 fn same(a: &[f64], b: &[f64]) -> bool {

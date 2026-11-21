@@ -2,6 +2,7 @@
 //! bigger tape serves a smaller one's prolog and main passes unchanged, and
 //! nothing an evaluation reads depends on what the buffer held before.
 
+use rsdag::Program;
 use rsdag::{ExprId, Graph, Node, SymbolId, Tape, F64};
 
 fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {

@@ -3,8 +3,8 @@
 Expression graph backend for hybrid event and continuous ODE and DAE
 simulators: a hash-consed expression graph with functions and calls,
 forward and reverse differentiation, a flat instruction tape split into a
-per-parameter prolog and a per-iteration main phase, an interpreter over
-any scalar type, and a native code backend for AArch64 and x86-64.
+per-parameter prolog and a per-iteration main phase, an interpreter, and
+a native code backend for AArch64 and x86-64.
 
 ![Pipeline](docs/diagrams/pipeline.svg)
 
@@ -98,7 +98,7 @@ folded by the kernel (`Fold`): the consumer vanishes and the kernel writes
 output of the same kernel.
 `Tape::compile_split` marks parameter-pure inputs; the tape then has a
 prolog evaluated once per parameter binding and a main part evaluated per
-iteration. The prolog's results are `work[..Tape::state_len()]`, the same
+iteration. The prolog's results are `work[..Program::state_len()]`, the same
 layout in every backend.
 
 ![Prolog and main split](docs/diagrams/split.svg)
@@ -118,8 +118,10 @@ point or many.
 
 ![Adaptive](docs/diagrams/adaptive.svg)
 
-Evaluation is allocation-free once the buffers exist. `Tape::work_len` and
-`out_len` size them, `eval_into` writes into slices the caller owns.
+Evaluation is allocation-free once the buffers exist. `Program`, which the
+tape and the native code implement, sizes them (`work_len`, `out_len`) and
+writes into slices the caller owns (`eval_into`, `eval_prolog_into`,
+`eval_main_into`); `eval`, `eval_prolog` and `eval_main` grow `Vec`s.
 Function bodies: `ExternBundle::work_len`
 and `call_into` take a caller-owned buffer; a calling tape lends its own.
 `NativeTape::compile` emits the same instruction sequence as machine code
@@ -229,6 +231,7 @@ or a step decision apart, reach awake workers. Any `parallel::Pool` serves.
 ```rust
 use std::sync::Arc;
 use rsdag::parallel::{self, Parallel, Workers};
+use rsdag::Program;
 
 let p = Parallel::new(Arc::new(Workers::new(4)));
 parallel::install(p, || {
@@ -334,7 +337,7 @@ neither the PSP103 nor the BSIM4 Jacobians within a minute.
 ## Rust
 
 ```rust
-use rsdag::{Graph, Tape, SymbolId};
+use rsdag::{Graph, Program, Tape, SymbolId};
 
 let mut g: Graph = Graph::new();          // f64 constants; Graph<BigRational> with `exact`
 let (x, y) = (g.sym("x"), g.sym("y"));

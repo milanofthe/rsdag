@@ -20,7 +20,7 @@
 //! The prolog/main split runs in episodes: [`Adaptive::eval_prolog`] once
 //! per parameter binding, [`Adaptive::eval_main`] per iteration over the
 //! same buffer. The interpreter and the native code share the state layout
-//! ([`Tape::state_len`]), so an episode moves from one to the other at any
+//! ([`Program::state_len`]), so an episode moves from one to the other at any
 //! time; only a specialized episode is tied to its specialization, and
 //! falls back to the full tape when a region flips.
 
@@ -254,7 +254,7 @@ impl Adaptive {
     /// The full tape, natively once compiled.
     fn eval_full(&self, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
         match self.native() {
-            Some(native) => run(native, inputs, work, out),
+            Some(native) => native.eval(inputs, work, out),
             None => self.tape.eval(inputs, work, out),
         }
     }
@@ -279,7 +279,7 @@ impl Adaptive {
         };
         let held = match native {
             Some(native) => {
-                run(&*native, inputs, work, out);
+                native.eval(inputs, work, out);
                 sp.check_outputs(out)
             }
             None if !self.interpreted_serves(&sp) => {
@@ -345,7 +345,7 @@ impl Adaptive {
         }
         let (ver, sp, native) = st.current()?;
         if let Some(native) = native {
-            prolog(&*native, inputs, work);
+            native.eval_prolog(inputs, work);
             if sp.check_prolog_guards(inputs, work) {
                 return Some(Kind::SpecNative(native, sp, ver));
             }
@@ -363,7 +363,7 @@ impl Adaptive {
     /// same either way.
     fn full_prolog(&self, inputs: &[f64], work: &mut Vec<f64>) {
         match self.native() {
-            Some(native) => prolog(native, inputs, work),
+            Some(native) => native.eval_prolog(inputs, work),
             None => self.tape.eval_prolog(inputs, work),
         }
     }
@@ -399,7 +399,7 @@ impl Adaptive {
         }
         match &ep.0 {
             Kind::SpecNative(native, sp, ver) => {
-                main(&**native, inputs, work, out);
+                native.eval_main(inputs, work, out);
                 if sp.check_outputs(out) {
                     return;
                 }
@@ -423,7 +423,7 @@ impl Adaptive {
             // Mid-episode, the interpreter's state serves the native code
             // as it is (`main` only lengthens the buffer).
             Kind::Full => match self.native() {
-                Some(native) => main(native, inputs, work, out),
+                Some(native) => native.eval_main(inputs, work, out),
                 None => self.tape.eval_main(inputs, work, out),
             },
         }
@@ -677,29 +677,4 @@ fn expected(tape: &Tape) -> (Duration, Duration) {
         ns(pass, f64::from(crate::constants::INTERPRETED_NS_PER_OP)),
         ns(tape.n_ops() + bodies, crate::constants::COMPILE_NS_PER_OP),
     )
-}
-
-/// The Vec-buffer forms over a [`Program`]: the buffers grow to its
-/// lengths (never shrink, so a state a prolog left stays in place).
-fn fit(p: &dyn Program, work: &mut Vec<f64>) {
-    if work.len() < p.work_len() {
-        work.resize(p.work_len(), 0.0);
-    }
-}
-
-fn run(p: &dyn Program, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
-    fit(p, work);
-    out.resize(p.out_len(), 0.0);
-    p.eval_into(inputs, work, out);
-}
-
-fn prolog(p: &dyn Program, inputs: &[f64], work: &mut Vec<f64>) {
-    fit(p, work);
-    p.eval_prolog_into(inputs, work);
-}
-
-fn main(p: &dyn Program, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
-    fit(p, work);
-    out.resize(p.out_len(), 0.0);
-    p.eval_main_into(inputs, work, out);
 }

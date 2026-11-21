@@ -2,6 +2,7 @@
 //! per set of outputs a program calls, shared by the programs over one
 //! graph, and specialized to the constants a call passes.
 
+use rsdag::Program;
 use rsdag::{ExprId, Graph, Node, OutputRole, ParamRole, Scope, Tape, F64};
 
 #[test]

@@ -24,8 +24,7 @@ use std::hash::Hasher;
 
 use rustc_hash::{FxHashMap as HashMap, FxHasher};
 
-use crate::extern_fn::ExternBundle;
-use crate::scalar::Scalar;
+use crate::extern_fn::{ExternBundle, Instances, Rows};
 
 use super::input_index;
 
@@ -79,48 +78,48 @@ pub struct Call<'a> {
 
 /// A region of the work buffer the pieces of work of a stage share.
 #[derive(Clone, Copy)]
-pub struct Shared<T>(*mut T, usize);
+pub struct Shared(*mut f64, usize);
 
 // SAFETY: the pieces of work of a stage access disjoint parts of a region,
 // or read the same ones; see `plan_stages`.
-unsafe impl<T: Send> Send for Shared<T> {}
-unsafe impl<T: Sync> Sync for Shared<T> {}
+unsafe impl Send for Shared {}
+unsafe impl Sync for Shared {}
 
-impl<T: Copy> Shared<T> {
-    pub fn new(region: &mut [T]) -> Self {
+impl Shared {
+    pub fn new(region: &mut [f64]) -> Self {
         Shared(region.as_mut_ptr(), region.len())
     }
 
     /// # Safety
     /// `ptr` holds `len` values, and nothing else accesses them in a way
     /// the calls run over it do not allow (see [`run_call`]).
-    pub unsafe fn from_raw(ptr: *mut T, len: usize) -> Self {
+    pub unsafe fn from_raw(ptr: *mut f64, len: usize) -> Self {
         Shared(ptr, len)
     }
 
     /// The region's first value, for a piece of work that accesses it
     /// as [`get`](Self::get) and [`set`](Self::set) would.
-    pub(super) fn ptr(self) -> *mut T {
+    pub(super) fn ptr(self) -> *mut f64 {
         self.0
     }
 
     /// # Safety
     /// No piece of work writes slot `k` while this runs.
-    pub(super) unsafe fn get(self, k: usize) -> T {
+    pub(super) unsafe fn get(self, k: usize) -> f64 {
         assert!(k < self.1);
         unsafe { *self.0.add(k) }
     }
 
     /// # Safety
     /// No piece of work writes `k` while another reads it.
-    pub(super) unsafe fn set(self, k: usize, v: T) {
+    pub(super) unsafe fn set(self, k: usize, v: f64) {
         assert!(k < self.1);
         unsafe { *self.0.add(k) = v }
     }
 
     /// # Safety
     /// No piece of work writes `at..at + n` while the slice lives.
-    unsafe fn slice<'a>(self, at: usize, n: usize) -> &'a [T] {
+    unsafe fn slice<'a>(self, at: usize, n: usize) -> &'a [f64] {
         assert!(at + n <= self.1);
         unsafe { std::slice::from_raw_parts(self.0.add(at), n) }
     }
@@ -129,7 +128,7 @@ impl<T: Copy> Shared<T> {
     /// No other piece of work reads or writes `at..at + n` while the slice
     /// lives.
     #[allow(clippy::mut_from_ref)]
-    unsafe fn slice_mut<'a>(self, at: usize, n: usize) -> &'a mut [T] {
+    pub(super) unsafe fn slice_mut<'a>(self, at: usize, n: usize) -> &'a mut [f64] {
         assert!(at + n <= self.1);
         unsafe { std::slice::from_raw_parts_mut(self.0.add(at), n) }
     }
@@ -145,13 +144,13 @@ impl<T: Copy> Shared<T> {
 /// `slots` and `gather` are the program's regions; nothing else accesses
 /// the instances' arguments, outputs and states while this runs, and
 /// nothing writes what they read.
-pub unsafe fn run_call<T: Scalar>(
+pub unsafe fn run_call(
     c: &Call,
-    slots: Shared<T>,
-    gather: Shared<T>,
-    inputs: &[T],
+    slots: Shared,
+    gather: Shared,
+    inputs: &[f64],
     groups: std::ops::Range<usize>,
-    scratch: &mut [T],
+    scratch: &mut [f64],
 ) {
     if c.phase == Phase::Prolog && groups == (0..c.n_groups) {
         unsafe { share_rows(c, slots, gather, inputs) };
@@ -162,13 +161,12 @@ pub unsafe fn run_call<T: Scalar>(
 /// The row of every instance of the prolog `c`, after its rows: the first
 /// instance with its pure arguments, bit for bit (see the module docs),
 /// told apart by the arguments it owns; with none, every instance reads
-/// the first row. A scalar without a value's bits ([`Scalar::bits`])
-/// keeps every instance on its own row.
+/// the first row.
 ///
 /// # Safety
 /// As [`run_call`]; the pure arguments are the operands, or gathered
 /// already where the call has none.
-pub unsafe fn share_rows<T: Scalar>(c: &Call, slots: Shared<T>, gather: Shared<T>, inputs: &[T]) {
+pub unsafe fn share_rows(c: &Call, slots: Shared, gather: Shared, inputs: &[f64]) {
     let (n, na) = (c.n_groups, c.n_args);
     let at = c.out + n * c.n_out;
     let own = c
@@ -176,28 +174,27 @@ pub unsafe fn share_rows<T: Scalar>(c: &Call, slots: Shared<T>, gather: Shared<T
         .expect("a prolog names the arguments its instances own");
     let arg = |g: usize, j: usize| match c.operands {
         Some(ops) => match input_index(ops[g * na + j]) {
-            Some(i) => inputs.get(i as usize).copied().unwrap_or(T::nan()),
+            Some(i) => inputs.get(i as usize).copied().unwrap_or(f64::NAN),
             None => unsafe { slots.get(ops[g * na + j] as usize) },
         },
         None => unsafe { gather.get(c.args + g * na + j) },
     };
-    let set = |g: usize, row: usize| unsafe { slots.set(at + g, T::from_f64(row as f64)) };
+    let set = |g: usize, row: usize| unsafe { slots.set(at + g, row as f64) };
     // The arguments every instance shares are the first one's.
-    let identified = n > 0 && (0..na).all(|j| arg(0, j).bits().is_some());
-    if !identified || own.is_empty() {
-        (0..n).for_each(|g| set(g, if identified { 0 } else { g }));
+    if own.is_empty() {
+        (0..n).for_each(|g| set(g, 0));
         return;
     }
     let hash = |g: usize| {
         let mut h = FxHasher::default();
         for &j in own {
-            h.write_u64(arg(g, j as usize).bits()?);
+            h.write_u64(arg(g, j as usize).to_bits());
         }
         Some(h.finish())
     };
     let same = |a: usize, b: usize| {
         own.iter()
-            .all(|&j| arg(a, j as usize).bits() == arg(b, j as usize).bits())
+            .all(|&j| arg(a, j as usize).to_bits() == arg(b, j as usize).to_bits())
     };
     find_rows(n, hash, same, set);
 }
@@ -232,13 +229,13 @@ pub(crate) fn find_rows(
 ///
 /// # Safety
 /// As [`run_call`].
-unsafe fn run_part<T: Scalar>(
+unsafe fn run_part(
     c: &Call,
-    slots: Shared<T>,
-    gather: Shared<T>,
-    inputs: &[T],
+    slots: Shared,
+    gather: Shared,
+    inputs: &[f64],
     groups: std::ops::Range<usize>,
-    scratch: &mut [T],
+    scratch: &mut [f64],
 ) {
     let (na, no, b) = (c.n_args, c.n_out, c.bundle);
     let (g0, ng) = (groups.start, groups.len());
@@ -250,14 +247,13 @@ unsafe fn run_part<T: Scalar>(
     if let Some(ops) = c.operands {
         let ni = ops.len() / c.n_groups.max(1);
         let value = |k: u32| match input_index(k) {
-            Some(i) => inputs.get(i as usize).copied().unwrap_or(T::nan()),
+            Some(i) => inputs.get(i as usize).copied().unwrap_or(f64::NAN),
             None => unsafe { slots.get(k as usize) },
         };
         // a prolog's instance that reads another's row computes nothing
         let rows = c.out + c.n_groups * no;
-        let computes = |g: &usize| {
-            c.phase != Phase::Prolog || unsafe { slots.get(rows + g) }.to_f64() as usize == *g
-        };
+        let computes =
+            |g: &usize| c.phase != Phase::Prolog || unsafe { slots.get(rows + g) } as usize == *g;
         for g in groups.clone().filter(computes) {
             let (from, to) = (&ops[g * ni..(g + 1) * ni], c.args + g * na);
             match c.places {
@@ -275,13 +271,19 @@ unsafe fn run_part<T: Scalar>(
     let args = unsafe { gather.slice(c.args + g0 * na, ng * na) };
     let out = unsafe { slots.slice_mut(c.out + g0 * no, ng * no) };
     match c.phase {
-        Phase::Whole if ng >= 2 => T::call_bundle_batch(b, args, ng, na, out),
-        Phase::Whole => T::call_bundle_whole(b, args, scratch, out),
+        Phase::Whole if ng >= 2 => b.call_batch(args, ng, na, out),
+        Phase::Whole => b.call_into(args, scratch, out),
         Phase::Main => {
             let (n, sl) = (c.n_groups, b.state_len());
             let states = unsafe { slots.slice(c.state, n * sl) };
             let rows = unsafe { slots.slice(c.state + n * sl + g0, ng) };
-            T::call_bundle_main_batch(b, args, states, rows, ng, na, scratch, out);
+            if ng >= 2 {
+                let at = Instances::first(ng, na, sl).with_rows(Rows::At(rows));
+                b.main_batch(args, states, out, &at);
+            } else if ng == 1 {
+                let r = rows[0] as usize;
+                b.main_into(args, &states[r * sl..(r + 1) * sl], scratch, out);
+            }
         }
         Phase::Prolog => {
             // the instances whose row is their own: the others read theirs
@@ -290,10 +292,18 @@ unsafe fn run_part<T: Scalar>(
                 own.clear();
                 own.extend(
                     (0..ng)
-                        .filter(|&k| rows[k].to_f64() as usize == g0 + k)
+                        .filter(|&k| rows[k] as usize == g0 + k)
                         .map(|k| k as u32),
                 );
-                T::call_bundle_prolog_batch(b, args, ng, na, own, scratch, out)
+                if ng >= 2 {
+                    let at = Instances::first(ng, na, b.state_len());
+                    match own.len() == ng {
+                        true => b.prolog_batch(args, out, &at),
+                        false => b.prolog_batch(args, out, &at.listed(own)),
+                    }
+                } else if ng == 1 && !own.is_empty() {
+                    b.prolog_into(args, scratch, out);
+                }
             })
         }
     }
@@ -309,12 +319,12 @@ unsafe fn run_part<T: Scalar>(
 /// # Safety
 /// As [`run_call`], for every call; and the calls of the stage read nothing
 /// another one writes, their arguments apart in the gather area.
-pub unsafe fn run_stage<'a, T: Scalar>(
+pub unsafe fn run_stage<'a>(
     n: usize,
     call: impl Fn(usize) -> Call<'a> + Sync,
-    slots: Shared<T>,
-    gather: Shared<T>,
-    inputs: &[T],
+    slots: Shared,
+    gather: Shared,
+    inputs: &[f64],
 ) {
     let work_of = |c: &Call| c.ops as f64 * c.bundle.rate().ns_per_op();
     let work: f64 = (0..n).map(|k| work_of(&call(k))).sum();
@@ -327,7 +337,7 @@ pub unsafe fn run_stage<'a, T: Scalar>(
         }
     }
     let run_groups = |c: &Call, groups: std::ops::Range<usize>| {
-        crate::scratch::with_len(c.bundle.work_len(), T::zero(), |s| unsafe {
+        crate::scratch::with_len(c.bundle.work_len(), 0.0, |s| unsafe {
             run_part(c, slots, gather, inputs, groups, s)
         })
     };

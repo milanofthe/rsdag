@@ -23,7 +23,7 @@ pub(crate) const GATHER_TABLE: usize = 64;
 
 /// Integer powers up to this exponent are emitted as their products,
 /// larger ones call the host. The same products either way
-/// (`rsdag::semantics::powi_t`); independent of rsdag's
+/// (`rsdag::semantics::powi_f64`); independent of rsdag's
 /// `POWF_AS_POWI_MAX`, which decides what is an integer power at all.
 pub(crate) const POWI_INLINE: u32 = 64;
 

@@ -3,6 +3,7 @@
 //! as that prefix and the main phase run on any other buffer holding it.
 
 use rsdag::synth::{build, inputs, Spec, Vocabulary};
+use rsdag::Program;
 use rsdag::{Graph, Tape, F64};
 
 fn same(a: &[f64], b: &[f64]) -> bool {

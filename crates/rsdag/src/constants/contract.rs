@@ -42,7 +42,7 @@ pub const FOLD_LANES: usize = 4;
 
 /// A `Powf` whose exponent is a constant integer of at most this magnitude
 /// is an integer power ([`Graph::pow_i`](crate::Graph::pow_i)): it
-/// evaluates by multiplication ([`powi_t`](crate::semantics::powi_t)), not
+/// evaluates by multiplication ([`powi_f64`](crate::semantics::powi_f64)), not
 /// by `pow`. The native backend's own bound on the powers it multiplies
 /// out inline (`POWI_INLINE`) is a matter of code size, not this.
 pub const POWF_AS_POWI_MAX: f64 = 64.0;

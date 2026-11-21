@@ -3,6 +3,7 @@
 //! accumulator is the previous result, read in place) evaluates to the same
 //! bits as the interpreter, whole and split into prolog and main.
 
+use rsdag::Program;
 use rsdag::{ExprId, Graph, Node, SymbolId, Tape, F64};
 use rsdag_jit::NativeTape;
 

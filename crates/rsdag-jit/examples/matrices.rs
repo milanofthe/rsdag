@@ -8,6 +8,7 @@
 //!
 //!     cargo run --release -p rsdag-jit --example matrices > docs/bench/data/matrices.csv
 
+use rsdag::Program;
 mod common;
 use common::per_call;
 
@@ -74,16 +75,18 @@ fn main() {
                 let (g, roots, syms, vals) = build(kind, n, count);
                 let tape = Tape::compile(&g, &roots, &syms);
                 let native = NativeTape::compile(&tape).expect("native code");
-                let (mut w, mut o) = (Vec::new(), Vec::new());
-                tape.eval(&vals, &mut w, &mut o);
-                let t_interp = per_call(|| tape.eval(&vals, &mut w, &mut o));
-                let (mut wn, mut on) = (Vec::new(), Vec::new());
-                native.eval(&vals, &mut wn, &mut on);
+                // the slice forms, over buffers sized once, as a solver
+                // calls them in its loop
+                let (mut w, mut o) = (vec![0.0; tape.work_len()], vec![0.0; tape.out_len()]);
+                tape.eval_into(&vals, &mut w, &mut o);
+                let t_interp = per_call(|| tape.eval_into(&vals, &mut w, &mut o));
+                let (mut wn, mut on) = (vec![0.0; native.work_len()], vec![0.0; native.out_len()]);
+                native.eval_into(&vals, &mut wn, &mut on);
                 assert!(
                     o.iter().zip(&on).all(|(a, b)| a.to_bits() == b.to_bits()),
                     "{kind} {n} x{count}: native differs from the interpreter"
                 );
-                let t_native = per_call(|| native.eval(&vals, &mut wn, &mut on));
+                let t_native = per_call(|| native.eval_into(&vals, &mut wn, &mut on));
                 let per = 1e9 / count as f64;
                 println!(
                     "{kind},{n},{count},{:.1},{:.1}",

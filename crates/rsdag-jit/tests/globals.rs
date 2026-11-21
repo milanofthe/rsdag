@@ -2,6 +2,7 @@
 //! interpreter's values bit for bit, plain and split over the card, on a
 //! batch wide enough for lanes.
 
+use rsdag::Program;
 use rsdag::{ExprId, Graph, Node, OutputRole, ParamRole, ReduceOp, Scope, SymbolId, Tape, F64};
 use rsdag_jit::NativeTape;
 

@@ -1,6 +1,7 @@
 //! The dense solve as a node: one pivoting kernel for all components,
 //! exact against the reference routine and differentiable in both modes.
 
+use rsdag::Program;
 use std::collections::HashMap;
 
 use rsdag::synth::Spec;

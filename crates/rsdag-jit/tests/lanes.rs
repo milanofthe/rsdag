@@ -5,6 +5,7 @@
 //! not fill its last block of lanes; the prolog's states included.
 
 use rsdag::node::{BinOp, CmpOp, ReduceOp, UnaryOp};
+use rsdag::Program;
 use rsdag::{ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
 use rsdag_jit::{Lanes, NativeTape, Options};
 

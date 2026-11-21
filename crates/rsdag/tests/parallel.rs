@@ -2,6 +2,7 @@
 //! compute exactly what the serial loop computes: prologs, main phases over
 //! the instances' states, and calls without state.
 
+use rsdag::Program;
 use std::sync::Arc;
 
 use rsdag::parallel::{self, Lent};

@@ -3,6 +3,7 @@
 //! shape, nested when a body calls another, and the result is the
 //! interpreter's to the bit.
 
+use rsdag::Program;
 use rsdag::{ExprId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
 use rsdag_jit::{Batch, NativeTape, Options};
 

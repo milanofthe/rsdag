@@ -58,7 +58,7 @@ fn split_state(o: &[u32], stateful: bool) -> (&[u32], u32) {
 
 impl Tape {
     /// Compile a tape computing `roots`, where `inputs[k]` (passed to
-    /// [`eval`](Self::eval)) is the value of symbol `input_syms[k]`. Symbols not
+    /// [`eval`](super::Program::eval)) is the value of symbol `input_syms[k]`. Symbols not
     /// listed evaluate to `NaN`.
     ///
     /// A hierarchy is compiled as it stands: a composite function (one
@@ -77,10 +77,10 @@ impl Tape {
     /// input `k` as solve-constant (a parameter), and every op depending only
     /// on such inputs is scheduled into a *prolog prefix* of the instruction
     /// stream. A Newton loop evaluates the prolog once per parameter binding
-    /// ([`eval_prolog`](Self::eval_prolog)) and then only the remainder per
-    /// iteration ([`eval_main`](Self::eval_main)); values crossing the boundary
+    /// ([`eval_prolog`](super::Program::eval_prolog)) and then only the remainder per
+    /// iteration ([`eval_main`](super::Program::eval_main)); values crossing the boundary
     /// are pinned so iteration-loop slot reuse cannot clobber them. Plain
-    /// [`eval`](Self::eval) still runs the whole stream, so the split is
+    /// [`eval`](super::Program::eval) still runs the whole stream, so the split is
     /// invisible to callers that ignore it.
     pub fn compile_split<K: Field>(
         ctx: &Graph<K>,

@@ -3,6 +3,7 @@
 //! and since both backends lay out the state the same way, a prolog run by
 //! one serves the main phase of the other.
 
+use rsdag::Program;
 use rsdag::{ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
 use rsdag_jit::NativeTape;
 

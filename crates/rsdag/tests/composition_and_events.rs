@@ -7,6 +7,7 @@
 //! whose state derivative is a single graph, and drives an event through a
 //! guard output, its time derivative and a state-write effect.
 
+use rsdag::Program;
 use rustc_hash::FxHashMap as HashMap;
 
 use rsdag::synth::{build, inputs, Spec};

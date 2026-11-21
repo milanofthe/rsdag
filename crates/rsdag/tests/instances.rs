@@ -2,6 +2,7 @@
 //! walks calls (rewriting, specializing, differentiating, compiling) works
 //! on the list once per instance. The results are the inlined graph's.
 
+use rsdag::Program;
 use rsdag::{
     sparse_jacobian, ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64,
 };

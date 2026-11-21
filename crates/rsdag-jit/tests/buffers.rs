@@ -1,6 +1,7 @@
 //! The native backend over a reused, larger or poisoned work buffer: the
 //! same result as over a fresh one.
 
+use rsdag::Program;
 use rsdag::{ExprId, Graph, Node, SymbolId, Tape, F64};
 use rsdag_jit::NativeTape;
 

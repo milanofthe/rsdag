@@ -3,6 +3,7 @@
 //! split over those parameters runs that prolog in its own prolog, once
 //! per binding, and only the rest per evaluation.
 
+use rsdag::Program;
 use rsdag::{ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
 
 fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {

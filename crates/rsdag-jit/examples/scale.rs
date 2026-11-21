@@ -24,6 +24,7 @@
 //!     cargo run --release -p rsdag-jit --example scale -- [--gates <n>] [--card <n>] [--placed once|flat|both]
 //!         [--bind] [--inline] [--trace]
 
+use rsdag::Program;
 mod common;
 use common::per_call;
 use std::time::Instant;

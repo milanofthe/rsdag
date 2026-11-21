@@ -2,6 +2,7 @@
 //! imported into another with what it calls, called there, and compiled as
 //! one program whose only calls are its leaves.
 
+use rsdag::Program;
 use rsdag::{
     differentiate, ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64,
 };

@@ -97,7 +97,7 @@ unsafe fn regions<'a>(
     layout: &Layout,
     work: *mut f64,
     inputs: *const f64,
-) -> (Shared<f64>, Shared<f64>, &'a [f64]) {
+) -> (Shared, Shared, &'a [f64]) {
     let (g, s) = (layout.gather, layout.scratch);
     unsafe {
         (

@@ -2,6 +2,7 @@
 //! installed pool, bit for bit as serially and as the interpreter: prologs,
 //! main phases over the instances' states, and calls without state.
 
+use rsdag::Program;
 use std::sync::Arc;
 
 use rsdag::parallel::{self, Lent};

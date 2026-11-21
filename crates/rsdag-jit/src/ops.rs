@@ -9,7 +9,7 @@ use rsdag::Tape;
 use crate::constants::{INLINE_MINMAX_MAX, INLINE_ROWS, POWI_INLINE};
 use crate::isa::Isa;
 
-/// Whether `x^n` is emitted inline (as `semantics::powi_t` multiplies,
+/// Whether `x^n` is emitted inline (as `semantics::powi_f64` multiplies,
 /// product for product) rather than through the host.
 pub(crate) fn powi_inline(n: i32) -> bool {
     n != 0 && n.unsigned_abs() <= POWI_INLINE

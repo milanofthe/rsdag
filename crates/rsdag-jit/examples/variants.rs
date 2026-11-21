@@ -6,6 +6,7 @@
 //!
 //!     cargo run --release -p rsdag-jit --example variants -- [--n <instances>]
 
+use rsdag::Program;
 mod common;
 use common::per_call;
 

@@ -4,6 +4,7 @@
 //! once per card) evaluates, differentiates, specializes, inlines, compiles
 //! and serializes to the same bits.
 
+use rsdag::Program;
 use std::collections::HashMap;
 
 use rsdag::{

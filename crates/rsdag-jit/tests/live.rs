@@ -2,6 +2,7 @@
 //! prolog pass: the native backend keeps the guard slots written when asked
 //! to, and the check then agrees with the interpreter's.
 
+use rsdag::Program;
 use rsdag::{CmpOp, Graph, Node, SymbolId, Tape, F64};
 use rsdag_jit::{NativeTape, Options};
 
