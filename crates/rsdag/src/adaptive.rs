@@ -417,35 +417,6 @@ impl Adaptive {
         }
     }
 
-    /// Evaluate `L` input sets, lane-interleaved (`inputs[k][lane]` is
-    /// input `k` of lane `lane`), one evaluation per lane on the current
-    /// backend; `out[o][lane]` is output `o` of lane `lane`. `flat`,
-    /// `work` and `row` are the caller's scratch.
-    #[deprecated(
-        since = "4.5.0",
-        note = "Session::eval_points evaluates many points, the prolog once per binding"
-    )]
-    pub fn eval_lanes<const L: usize>(
-        &self,
-        inputs: &[[f64; L]],
-        flat: &mut Vec<f64>,
-        work: &mut Vec<f64>,
-        row: &mut Vec<f64>,
-        out: &mut Vec<[f64; L]>,
-    ) {
-        let n_out = self.tape.n_outputs();
-        out.clear();
-        out.resize(n_out, [0.0; L]);
-        for lane in 0..L {
-            flat.clear();
-            flat.extend(inputs.iter().map(|k| k[lane]));
-            self.eval(flat, work, row);
-            for (j, v) in row.iter().enumerate() {
-                out[j][lane] = *v;
-            }
-        }
-    }
-
     // --- bookkeeping --------------------------------------------------------
 
     /// A full traced evaluation, the correct result of this call, and what
