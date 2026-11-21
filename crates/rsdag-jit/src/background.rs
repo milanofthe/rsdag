@@ -10,6 +10,7 @@
 //! burst never owns every core either.
 
 use std::collections::BTreeSet;
+use std::sync::mpsc::{channel, Sender};
 use std::sync::{Condvar, Mutex, OnceLock};
 
 /// The compile pool: half the cores (at least one).
@@ -31,8 +32,8 @@ static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
 /// the pool's threads take them as they come, so the compiles of
 /// independent bodies land together rather than one after another. A job
 /// that needs another's result is submitted by it, or does that work
-/// itself. The submission costs the caller nothing measurable; a panic in
-/// the job is caught and ends only the job.
+/// itself. The submission is one channel send, so it costs the caller
+/// nothing measurable; a panic in the job is caught and ends only the job.
 pub fn submit(job: impl FnOnce() + Send + 'static) {
     let (lock, _) = &JOBS;
     let mut jobs = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -40,7 +41,7 @@ pub fn submit(job: impl FnOnce() + Send + 'static) {
     jobs.next += 1;
     jobs.running.insert(seq);
     drop(jobs);
-    pool().spawn(move || {
+    let _ = queue().send(Box::new(move || {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
         let (lock, done) = &JOBS;
         lock.lock()
@@ -48,8 +49,29 @@ pub fn submit(job: impl FnOnce() + Send + 'static) {
             .running
             .remove(&seq);
         done.notify_all();
-    });
+    }));
 }
+
+/// The thread that hands the jobs to the pool, so a submission is a
+/// channel send and the pool's threads start off the caller's path.
+fn queue() -> &'static Sender<Job> {
+    static Q: OnceLock<Sender<Job>> = OnceLock::new();
+    Q.get_or_init(|| {
+        let (tx, rx) = channel::<Job>();
+        // A detached thread parked on `recv` keeps the process free to exit.
+        std::thread::Builder::new()
+            .name("rsdag-jit-queue".into())
+            .spawn(move || {
+                while let Ok(job) = rx.recv() {
+                    pool().spawn(job);
+                }
+            })
+            .expect("spawn the compile queue");
+        tx
+    })
+}
+
+type Job = Box<dyn FnOnce() + Send>;
 
 /// Wait until every job submitted before this call has run.
 pub fn drain() {
