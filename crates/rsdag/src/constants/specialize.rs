@@ -4,8 +4,6 @@
 //! specialized program computes the full one's bits wherever its guards
 //! hold, and the full program serves where one fails.
 
-use std::time::Duration;
-
 use crate::adaptive::Policy;
 use crate::choices::ChoicePolicy;
 use crate::variant::VariantPolicy;
@@ -54,7 +52,7 @@ impl Policy {
     pub const DEFAULT: Policy = Policy {
         jit: true,
         kick_after: 3,
-        eager_pass: Some(Duration::from_millis(10)),
+        wait: true,
         choices: ChoicePolicy::DEFAULT,
         variants: VariantPolicy::DEFAULT,
     };

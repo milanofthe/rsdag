@@ -127,7 +127,7 @@ impl Specializer {
         self.current = false;
         self.version += 1;
         self.stable = 0;
-        self.cooldown_until = self.evals + policy.flip_cooldown;
+        self.cool(policy);
         self.flips += n;
         if self.flips >= policy.thrash_flips && self.evals < self.flips * policy.thrash_evals {
             self.turn_off("choices thrash");
@@ -141,6 +141,11 @@ impl Specializer {
     /// is on its way.
     pub(crate) fn due(&mut self, policy: &ChoicePolicy) -> bool {
         self.eligible(policy) && self.current().is_none() && self.ready() && self.trace()
+    }
+
+    /// No specialization is built for the policy's cooldown from here.
+    pub(crate) fn cool(&mut self, policy: &ChoicePolicy) {
+        self.cooldown_until = self.evals + policy.flip_cooldown;
     }
 
     fn ready(&self) -> bool {

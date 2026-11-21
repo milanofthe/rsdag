@@ -52,7 +52,7 @@ pub type BodyCompiler = dyn Fn(&crate::tape::Tape, &[bool], usize) -> Option<std
     + Sync;
 
 /// Where work runs that its caller does not wait for: a function taking a
-/// job, which it runs later, in order with the jobs before it.
+/// job, which it runs later.
 pub type Submit = std::sync::Arc<dyn Fn(Box<dyn FnOnce() + Send>) + Send + Sync>;
 
 /// How a program runs the tapes its bundles carry of their own (see
