@@ -143,15 +143,6 @@ impl Nonlinearity {
     }
 }
 
-/// Classify one expression's dependence on `vars`.
-pub fn nonlinearity<K: Field>(
-    g: &Graph<K>,
-    expr: ExprId,
-    vars: &BTreeSet<SymbolId>,
-) -> Nonlinearity {
-    nonlinearity_of(g, &[expr], vars)
-}
-
 /// Classify a residual system: the worst degree over the residuals and the
 /// union of their flags. What the solver has to plan for.
 ///

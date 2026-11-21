@@ -52,7 +52,7 @@ pub use module::{IdMap, Module, ModuleError, MODULE_VERSION};
 pub use node::{
     ArgList, BinOp, CmpOp, ConstId, Elementary, ExprId, Node, Operands, ReduceOp, SymbolId, UnaryOp,
 };
-pub use nonlinearity::{nonlinearity, nonlinearity_of, Degree, Nonlinearity, UnarySet};
+pub use nonlinearity::{nonlinearity_of, Degree, Nonlinearity, UnarySet};
 /// The exact constant field (feature `exact`).
 #[cfg(feature = "exact")]
 pub use num_rational::BigRational;
