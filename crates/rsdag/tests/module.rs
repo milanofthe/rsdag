@@ -241,8 +241,8 @@ fn derivatives_demanded_after_a_call_round_trip() {
     let (mut loaded, map) = Graph::from_module(&module).unwrap();
     assert_eq!(loaded.to_module(), module);
     let f2 = map.funcs[f.0 as usize];
-    let d0 = g.derivative_output(f, 0, 0);
-    assert_eq!(loaded.derivative_output(f2, 0, 0), d0);
+    let a2 = map.symbols[syms[0].0 as usize];
+    differentiate(&mut loaded, map.exprs[c.0 as usize], a2);
     assert_eq!(
         loaded.func(f2).outputs().len(),
         n_out,
@@ -278,7 +278,8 @@ fn a_declared_extern_derivative_survives_a_reload() {
         })
         .unwrap();
     let f2 = map.funcs[f.0 as usize];
-    assert_eq!(loaded.derivative_output(f2, 0, 0), k);
+    let role = loaded.func(f2).output_roles()[k as usize];
+    assert_eq!(role, OutputRole::Derivative { of: 0, wrt: 0 });
     let syms = [SymbolId(0), SymbolId(1)];
     let d = differentiate(&mut loaded, map.exprs[sum.0 as usize], syms[0]);
     let (mut w, mut o) = (Vec::new(), Vec::new());

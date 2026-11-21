@@ -205,7 +205,7 @@ pub enum OutputRole {
     /// A quantity read off the system without entering it (an operating
     /// point variable).
     Observer { id: u32 },
-    /// A derivative output `d outputs[of] / d params[wrt]` (memoised by
-    /// [`Graph::derivative_output`](crate::graph::Graph::derivative_output)).
+    /// A derivative output `d outputs[of] / d params[wrt]`, derived from the
+    /// body on first demand and kept.
     Derivative { of: u32, wrt: u32 },
 }

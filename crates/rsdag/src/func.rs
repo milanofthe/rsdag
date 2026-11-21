@@ -262,7 +262,7 @@ impl Function {
     }
 
     /// The derivative output `d outputs[out] / d params[param]`, if there is one.
-    pub fn derivative(&self, out: u32, param: u32) -> Option<u32> {
+    pub(crate) fn derivative(&self, out: u32, param: u32) -> Option<u32> {
         self.deriv_index.get(&(out, param)).copied()
     }
 

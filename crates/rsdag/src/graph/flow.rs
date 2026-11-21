@@ -289,15 +289,14 @@ impl<K: Field> Graph<K> {
     /// The symbol nodes `f`'s body reads that are not its parameters, its
     /// calls' included, ascending: the globals every call of `f` reads
     /// besides its arguments. A call's operand `p` is its argument `p`, and
-    /// past the arguments global `p - arity` (see
-    /// [`operand_symbol`](Self::operand_symbol)).
+    /// past the arguments global `p - arity`.
     pub fn globals(&self, f: FuncId) -> Arc<[ExprId]> {
         self.funcs[f.0 as usize].globals_in(self)
     }
 
     /// The symbol a call of `f` binds by its operand `p`: parameter `p`, or
     /// past the parameters a global (see [`globals`](Self::globals)).
-    pub fn operand_symbol(&self, f: FuncId, p: u32) -> SymbolId {
+    pub(crate) fn operand_symbol(&self, f: FuncId, p: u32) -> SymbolId {
         let params = self.funcs[f.0 as usize].params();
         match params.get(p as usize) {
             Some(&s) => s,
@@ -309,7 +308,7 @@ impl<K: Field> Graph<K> {
     /// Operand `p` of a call of output `o` over the list `l`: in its
     /// function's parameter order its argument or, where its context binds
     /// the parameter, the bound expression; past the parameters a global.
-    pub fn call_operand(&self, o: OutputId, l: ArgList, p: u32) -> ExprId {
+    pub(crate) fn call_operand(&self, o: OutputId, l: ArgList, p: u32) -> ExprId {
         let f = self.output(o).0;
         let n = self.funcs[f.0 as usize].params().len();
         if p as usize >= n {

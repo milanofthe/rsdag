@@ -222,7 +222,7 @@ impl<K: Field> Graph<K> {
     /// share their body, so the ones not known yet are found in one pass
     /// over it, and each is kept. An extern output is taken to read every
     /// parameter, a zero one none.
-    pub fn output_support(&self, f: FuncId, out: u32) -> Arc<[u32]> {
+    pub(crate) fn output_support(&self, f: FuncId, out: u32) -> Arc<[u32]> {
         let func = &self.funcs[f.0 as usize];
         if let Some(s) = func.cached_support(out) {
             return s;
@@ -530,7 +530,7 @@ impl<K: Field> Graph<K> {
     /// The index of the derivative output `d outputs[out] / d params[param]`,
     /// differentiating the body on first demand (symbolic functions) or
     /// looking up the declared slot (extern functions; zero if undeclared).
-    pub fn derivative_output(&mut self, f: FuncId, out: u32, param: u32) -> u32 {
+    pub(crate) fn derivative_output(&mut self, f: FuncId, out: u32, param: u32) -> u32 {
         if let Some(k) = self.funcs[f.0 as usize].derivative(out, param) {
             return k;
         }
@@ -561,7 +561,7 @@ impl<K: Field> Graph<K> {
     /// of one output. Model parameters asked for together (a sensitivity to
     /// many) are derived in one reverse sweep over the body when they are
     /// [`REVERSE_MIN_TOUCHED`](crate::autodiff::REVERSE_MIN_TOUCHED) or more.
-    pub fn derivative_outputs(&mut self, f: FuncId, out: u32, params: &[u32]) -> Vec<u32> {
+    pub(crate) fn derivative_outputs(&mut self, f: FuncId, out: u32, params: &[u32]) -> Vec<u32> {
         let func = &self.funcs[f.0 as usize];
         if let Output::Expr(e) = func.outputs()[out as usize] {
             let missing: Vec<u32> = (params.iter().copied())
