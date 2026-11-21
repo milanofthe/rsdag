@@ -116,7 +116,7 @@ impl<'a> Instances<'a> {
     }
 
     /// These, their state rows `rows`.
-    pub fn with_rows(self, rows: Rows<'a>) -> Self {
+    pub(crate) fn with_rows(self, rows: Rows<'a>) -> Self {
         Instances { rows, ..self }
     }
 
@@ -130,7 +130,7 @@ impl<'a> Instances<'a> {
     }
 
     /// The instances `index` lists, in the arrays of these.
-    pub fn listed(self, index: &'a [u32]) -> Self {
+    pub(crate) fn listed(self, index: &'a [u32]) -> Self {
         Instances {
             n: index.len(),
             index: Some(index),
