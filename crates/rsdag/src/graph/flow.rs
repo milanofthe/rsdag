@@ -1,8 +1,8 @@
 //! The one structural analysis: a value per node of a cone, a leaf's from
 //! the caller, every other node's the join of its operands', through a call
-//! the join of the arguments its output reads. Support, dependence,
-//! feedthrough and the sparsity of a Jacobian are this with a different
-//! leaf and a different way through calls.
+//! the join of the arguments its output reads. Support, dependence and the
+//! sparsity of a Jacobian are this with a different leaf and a different way
+//! through calls.
 //!
 //! What an output of a function reads is found once per function, per way
 //! through and per set of its parameters that carry a value (the moving

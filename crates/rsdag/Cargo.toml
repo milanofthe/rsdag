@@ -9,7 +9,7 @@ description = "Rust symbolic graph backend: hash-consed expression graph, differ
 
 [features]
 # The core (graph, differentiation, tape, roles, modules) depends on
-# `rustc-hash` and `libm` alone and computes in `f64`. Everything else is
+# `rustc-hash`, `libm` and `rspool` alone and computes in `f64`. Everything else is
 # opt-in, so a consumer that builds and evaluates pays for nothing more.
 default = []
 

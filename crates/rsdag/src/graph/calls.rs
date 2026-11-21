@@ -1,5 +1,6 @@
 //! Functions, calls and the system layer over them: defining a function,
-//! calling it, roles, role-selected Jacobians, feedthrough, inlining.
+//! calling it, binding its parameters, roles, derivative outputs,
+//! specialization, inlining.
 //!
 //! A child module of `graph` so it reaches the arena's private fields; a
 //! second `impl Graph` block rather than a second type, because a call is a

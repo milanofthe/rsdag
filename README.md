@@ -43,7 +43,7 @@ NOTICE); for a commercial license contact info@milanrother.com.
 - `rsdag-py`: Python package `rsdag` (`trace`, `jit`, `jacobian`, `grad`,
   `where`, `matmul`, `solve`; traced programs compose), built with maturin.
 
-Dependencies of the core: `rustc-hash`, `libm`. `Graph` is `Graph<F64>`.
+Dependencies of the core: `rustc-hash`, `libm`, `rspool`. `Graph` is `Graph<F64>`.
 Features:
 
 | feature | adds | dependencies |
@@ -184,7 +184,7 @@ with `Graph::import`, the functions it calls along (a structurally equal
 function already there is reused), and calls into it build the
 composition. A hierarchy (blocks of blocks, subcircuits of devices) stays
 functions for the symbolic work: a derivative through a call follows only
-what the called output reads (`Graph::output_support`), and specialization
+what the called output reads, and specialization (`Graph::specialize_calls`)
 makes one copy per pattern of constant arguments. A model card is a
 binding: `Graph::bind` binds parameters of a function once, a call through
 it (`Graph::calls_bound`) carries only the instance's own arguments, and
