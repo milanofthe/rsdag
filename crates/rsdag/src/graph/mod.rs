@@ -71,6 +71,9 @@ pub struct Graph<K: Field = F64> {
     /// [`vjp_function`](Self::vjp_function)), by function, outputs and
     /// operands.
     vjps: HashMap<(FuncId, Box<[u32]>, Box<[u32]>), FuncId>,
+    /// The functions defined so far, by what defines them (see
+    /// [`define`](Self::define)).
+    defined: HashMap<FuncKey, FuncId>,
     /// The templates the tape compiler made of composite functions, by
     /// function, output set and operand purity: shared by every program
     /// compiled over this graph (see [`Tape::compile`](crate::Tape::compile)).
@@ -81,6 +84,16 @@ pub struct Graph<K: Field = F64> {
 /// its type its own.
 pub(crate) type TemplateCache =
     HashMap<(u32, Vec<u32>, Option<Vec<bool>>), Arc<dyn std::any::Any + Send + Sync>>;
+
+/// What defines a function: its parameters, their roles, its outputs with
+/// theirs at definition, and its extern body by address.
+#[derive(PartialEq, Eq, Hash)]
+pub(crate) struct FuncKey {
+    pub(crate) params: Box<[SymbolId]>,
+    pub(crate) roles: Box<[ParamRole]>,
+    pub(crate) outputs: Box<[(Output, OutputRole)]>,
+    pub(crate) body: Option<usize>,
+}
 
 /// No context: a call passes every parameter.
 pub(crate) const NO_CONTEXT: u32 = u32::MAX;
@@ -320,6 +333,7 @@ impl<K: Field> Graph<K> {
             context_dedup: HashMap::default(),
             rebound: HashMap::default(),
             vjps: HashMap::default(),
+            defined: HashMap::default(),
             templates: Default::default(),
         };
         ctx.zero = ctx.konst(K::zero());

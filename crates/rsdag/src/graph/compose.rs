@@ -14,9 +14,10 @@ impl<K: Field> Graph<K> {
     /// imported to theirs here, so a function called from several imports
     /// comes over once; pass the same map to import more from `other`.
     ///
-    /// A symbolic function this graph already holds with the same
-    /// parameters, roles and outputs is taken for it rather than a copy made.
-    /// An extern function shares its body. A body a consumer registered for
+    /// A function this graph already holds with the same parameters, roles
+    /// and outputs is taken for it rather than a copy made (see
+    /// [`Scope`](crate::Scope)), so its instances imported along different
+    /// paths batch together. An extern function shares its body. A body a consumer registered for
     /// a symbolic function stays with `other`; here the function compiles
     /// its own.
     pub fn import(
@@ -36,22 +37,6 @@ impl<K: Field> Graph<K> {
             .collect();
         let built = self.import_exprs(other, &func.exprs(), imported);
         let outputs = func.outputs_over(built);
-        // A symbolic function this graph already holds, the same over the
-        // same parameters, is the one to call: its instances, imported along
-        // different paths, then batch together.
-        let same = (0..self.funcs.len()).map(|k| FuncId(k as u32)).find(|&g| {
-            let h = &self.funcs[g.0 as usize];
-            func.extern_body().is_none()
-                && h.extern_body().is_none()
-                && h.params() == &params[..]
-                && h.param_roles() == func.param_roles()
-                && h.outputs() == &outputs[..]
-                && h.output_roles() == func.output_roles()
-        });
-        if let Some(g) = same {
-            imported.insert(f, g);
-            return g;
-        }
         let outputs = outputs.into_iter().zip(func.output_roles().iter().copied());
         let body = func.extern_body().cloned();
         let new = self.define(func.name(), params, func.param_roles(), body, outputs);
