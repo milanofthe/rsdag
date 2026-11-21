@@ -718,7 +718,8 @@ impl VariantBody {
                 }
                 // Instances on the full body for want of their variant
                 // move to it soon: nothing to specialize the body for.
-                if (v != 0 || !self.form.advancing()) && learned.due(&policy) {
+                let full_moves = v == 0 && learned.current().is_none() && self.form.advancing();
+                if !full_moves && learned.due(&policy) {
                     spread(at.len(), |k| at.at(k) as u32)
                 } else {
                     let compile = (!compiled).then(|| self.form.compile_due(v, &mut learned));
