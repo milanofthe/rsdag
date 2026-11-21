@@ -9,6 +9,14 @@
 pub const INTERPRETED_NS_PER_OP: f32 = 5.0;
 /// See [`INTERPRETED_NS_PER_OP`].
 pub const NATIVE_NS_PER_OP: f32 = 0.5;
+/// The ns per op of a variant body's form whose backend compiles, before
+/// any is measured: its ops are the full body's, its code the variants'
+/// compiled main phases, shortened over their choices. Measured on
+/// milan-pc (Ryzen 9900X), serial stages of a circuit simulator's transient
+/// programs: chain1000 0.032 (residual) and 0.016 (Jacobian), chain10000
+/// 0.034 and 0.017, c1908 0.029 and 0.013, c6288 0.032 and 0.015. Machine:
+/// a prior, replaced by what the runs measure.
+pub const COMPILED_VARIANT_NS_PER_OP: f32 = 0.03;
 /// The ns a background native compile takes per op of a program and of the
 /// bodies it calls ([`Policy::wait`](crate::Policy::wait)), a prior that
 /// is never replaced. Measured on milan-pc (Ryzen 9900X, compile pool of

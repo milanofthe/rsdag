@@ -513,6 +513,13 @@ impl VariantBody {
             conds: OnceLock::new(),
             pending: Mutex::default(),
         });
+        // what an op costs before it is measured: the compiled variants', or
+        // the interpreter's
+        let prior = if backend.compile.is_some() {
+            crate::constants::COMPILED_VARIANT_NS_PER_OP
+        } else {
+            crate::constants::INTERPRETED_NS_PER_OP
+        };
         let v = VariantBody {
             reads: reads.into(),
             interp: (0..n).map(|_| OnceLock::new()).collect(),
@@ -522,7 +529,7 @@ impl VariantBody {
             backend,
             policy,
             backends: BackendCache::default(),
-            rate: crate::parallel::Rate::new(crate::constants::INTERPRETED_NS_PER_OP),
+            rate: crate::parallel::Rate::new(prior),
         };
         // An instance runs the full body until its variant is ready: this
         // form of it from the start.
