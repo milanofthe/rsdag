@@ -31,13 +31,10 @@ fn domain_guards() {
 fn exp_and_ln_bit_fields() {
     assert_eq!(F64_EXP_BIAS, 1023);
     assert_eq!(F64_FRAC_BITS, 52);
-    assert_eq!(F64_HIGH_WORD, 32);
-    assert_eq!(F64_HIGH_FRAC_BITS, 20);
-    assert_eq!(F64_LOW_WORD_MASK, 0xffff_ffff);
-    assert_eq!(LN_HIGH_FRAC_MASK, 0x000f_ffff);
-    assert_eq!(LN_SQRT2_CARRY, 0x9_5f64);
-    assert_eq!(LN_HIGH_UNIT, 0x10_0000);
-    assert_eq!(LN_HIGH_ONE, 0x3ff0_0000);
+    assert_eq!(EXP_TABLE_BITS, 7);
+    assert_eq!(EXP_SCALE_BIAS, 64);
+    assert_eq!(LN_TABLE_BITS, 7);
+    assert_eq!(LN_OFF, 0x3fe6_0000_0000_0000);
 }
 
 #[test]
@@ -54,24 +51,41 @@ fn fold_order_and_integer_powers() {
 fn exp_and_ln_coefficients() {
     for (name, v, want) in [
         ("MAGIC", MAGIC, 0x4338_0000_0000_0000),
-        ("INV_LN2", INV_LN2, 0x3ff7_1547_652b_82fe),
-        ("LN2_HI", LN2_HI, 0x3fe6_2e42_fee0_0000),
-        ("LN2_LO", LN2_LO, 0x3dea_39ef_3579_3c76),
-        ("EP1", EP1, 0x3fc5_5555_5555_553e),
-        ("EP2", EP2, 0xbf66_c16c_16be_bd93),
-        ("EP3", EP3, 0x3f11_566a_af25_de2c),
-        ("EP4", EP4, 0xbebb_bd41_c5d2_6bf1),
-        ("EP5", EP5, 0x3e66_3769_72be_a4d0),
-        ("LG1", LG1, 0x3fe5_5555_5555_5593),
-        ("LG2", LG2, 0x3fd9_9999_9997_fa04),
-        ("LG3", LG3, 0x3fd2_4924_9422_9359),
-        ("LG4", LG4, 0x3fcc_71c5_1d8e_78af),
-        ("LG5", LG5, 0x3fc7_4664_96cb_03de),
-        ("LG6", LG6, 0x3fc3_9a09_d078_c69f),
-        ("LG7", LG7, 0x3fc2_f112_df3e_5244),
+        ("EXP_INV_LN2_N", EXP_INV_LN2_N, 0x4067_1547_652b_82fe),
+        ("EXP_LN2_HI_N", EXP_LN2_HI_N, 0x3f76_2e42_fefc_0000),
+        ("EXP_LN2_LO_N", EXP_LN2_LO_N, 0xbd3c_610c_a86c_3899),
+        ("EXP_POLY[0]", EXP_POLY[0], 0x3fdf_ffff_ffff_ff57),
+        ("EXP_POLY[1]", EXP_POLY[1], 0x3fc5_5555_5555_5525),
+        ("EXP_POLY[2]", EXP_POLY[2], 0x3fa5_5555_acf7_d28e),
+        ("EXP_POLY[3]", EXP_POLY[3], 0x3f81_1111_4324_c640),
+        ("LN_LN2_HI", LN_LN2_HI, 0x3fe6_2e42_fefa_3800),
+        ("LN_LN2_LO", LN_LN2_LO, 0x3d2e_f357_93c7_6730),
+        ("LN_POLY[0]", LN_POLY[0], 0x3fd5_5555_5555_5555),
+        ("LN_POLY[1]", LN_POLY[1], 0xbfd0_0000_0000_0b45),
+        ("LN_POLY[2]", LN_POLY[2], 0x3fc9_9999_9999_ae17),
+        ("LN_POLY[3]", LN_POLY[3], 0xbfc5_5555_4a15_f694),
+        ("LN_POLY[4]", LN_POLY[4], 0x3fc2_4924_880f_8532),
+        ("LN_POLY[5]", LN_POLY[5], 0xbfc0_0167_311e_1591),
+        ("LN_POLY[6]", LN_POLY[6], 0x3fbc_7454_3096_1a00),
     ] {
         bits(name, v, want);
     }
+}
+
+/// FNV-1a over a table's bits.
+fn fnv(bits: impl IntoIterator<Item = u64>) -> u64 {
+    bits.into_iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ b).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+#[test]
+fn exp_and_ln_tables() {
+    assert_eq!(fnv(EXP_TABLE), 0xa1af_296a_f08c_1db8);
+    assert_eq!(
+        fnv(LN_TABLE.iter().flatten().map(|v| v.to_bits())),
+        0xaead_42a1_6854_2e23
+    );
 }
 
 #[test]

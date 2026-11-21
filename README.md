@@ -268,10 +268,13 @@ instance, in nested frames. The operators are labelled in the notation
 
 ## Bit-exactness
 
-All backends compute the same IEEE operation sequence: no fast-math, no
-fused multiply-add, one reference routine per elementary function, one
-four-accumulator order for reductions and dot products, the same domain
-guards. `rsdag::synth` generates random programs over the whole op
+All backends compute the same IEEE operation sequence: no fast-math, one
+reference routine per elementary function, one four-accumulator order for
+reductions and dot products, the same domain guards. The multiply-adds
+of the exponential and the logarithm round once where the CPU fuses them
+(x86-64 with FMA, AArch64) and twice elsewhere, in every backend alike, so
+the backends of one machine agree to the bit and machines may differ in
+the last bits. `rsdag::synth` generates random programs over the whole op
 vocabulary; the test suites compare the arena sweep, the tape and the
 native code on them bit for bit.
 

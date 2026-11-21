@@ -666,7 +666,7 @@ impl NativeTape {
 
     /// The tape as code over several instances at once, each in its lane
     /// of every register and every slot that many values side by side (see
-    /// [`NativeBody`]'s batches), widest first: four lanes with AVX, and
+    /// [`NativeBody`]'s batches), widest first: four lanes with AVX2, and
     /// two. None for bodies that call bodies or run dense kernels, nor off
     /// x86-64.
     fn compile_lanes(tape: &Tape) -> Vec<NativeTape> {
@@ -675,7 +675,7 @@ impl NativeTape {
             use crate::x86_64::X64;
             let opts = Options::default();
             let wide = crate::x86_64::features()
-                .avx
+                .avx2
                 .then(|| Self::compile_isa::<X64<MAX_LANES>>(tape, &opts, &[]));
             let two = Some(Self::compile_isa::<X64<2>>(tape, &opts, &[]));
             wide.into_iter().chain(two).filter_map(Result::ok).collect()
@@ -761,8 +761,7 @@ impl NativeTape {
         for (k, op) in ops.iter().enumerate() {
             let p = &mut phase_ops[usize::from(k >= split)];
             // Lane code computes an exponential or a logarithm for every
-            // lane at once, inline or in one host call: about a host call's
-            // cost per block.
+            // lane at once: about a host call's cost per block.
             let all_lanes = lanes > 1 && matches!(op, Op::Unary(UnaryOp::Exp | UnaryOp::Ln, _));
             p.0 += if all_lanes { 1 + LANE_CALL } else { 1 };
             p.1 += usize::from(routine::<A>(op).is_some() && !all_lanes);
@@ -1828,9 +1827,9 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 self.isa.abs(r, x);
                 Some(r)
             }
-            UnaryOp::Exp | UnaryOp::Ln if I::exp_ln_inline() => {
+            UnaryOp::Exp | UnaryOp::Ln => {
                 let r = self.fresh_for(dst);
-                let t = [self.fresh(), self.fresh(), self.fresh(), self.fresh()];
+                let t = std::array::from_fn(|_| self.fresh());
                 self.isa.exp_ln(uop == UnaryOp::Ln, r, x, t);
                 Some(r)
             }
@@ -1848,21 +1847,6 @@ impl<'a, I: Isa> Emitter<'a, I> {
         };
         match inline {
             Some(r) => self.put(dst, r),
-            // Lanes: one call computes every lane of the exponential or the
-            // logarithm.
-            None if I::LANES > 1 && matches!(uop, UnaryOp::Exp | UnaryOp::Ln) => {
-                let base = self.layout.gather * F64_BYTES;
-                self.isa.store(x, Base::Work, base);
-                let addr = match uop {
-                    UnaryOp::Exp => host::h_exp_lanes as *const (),
-                    _ => host::h_ln_lanes as *const (),
-                };
-                let n = Arg::I(IArg::Imm(I::LANES as u64));
-                self.call(addr, &[Arg::I(IArg::WorkAddr(base)), n]);
-                let r = self.fresh_for(dst);
-                self.isa.load(r, Base::Work, base);
-                self.put(dst, r);
-            }
             None => {
                 let (addr, code) = host::unary_addr(uop);
                 // The coded routine takes the op first: `h_unary_ext(op, x)`.
@@ -2144,9 +2128,10 @@ impl rsdag::Program for NativeTape {
     }
 }
 
-#[cfg(all(test, target_arch = "x86_64"))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_arch = "x86_64")]
     use crate::x86_64::X64;
     use rsdag::semantics::{exp_guarded, ln_guarded, EXP_LIMIT, LN_FLOOR};
     use rsdag::{Graph, Node, F64};
@@ -2239,6 +2224,7 @@ mod tests {
     /// Lane code writes nothing past its work array: a rounding that calls
     /// the host (without SSE4.1, as under `RSDAG_SSE2`) passes its lanes
     /// through the gather area, which the layout holds.
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn lane_code_stays_in_its_work_array() {
         let mut g: Graph<F64> = Graph::new();
@@ -2261,12 +2247,19 @@ mod tests {
         );
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn exp_and_ln_inline_are_the_reference_bit_for_bit() {
         check::<X64<1>>();
         check::<X64<2>>();
-        if crate::x86_64::features().avx {
+        if crate::x86_64::features().avx2 {
             check::<X64<4>>();
         }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn exp_and_ln_inline_are_the_reference_bit_for_bit() {
+        check::<crate::aarch64::A64>();
     }
 }

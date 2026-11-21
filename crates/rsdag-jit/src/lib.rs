@@ -12,9 +12,10 @@
 //! Bit-exactness is a hard invariant: the same IEEE operation sequence as
 //! the interpreter (`MulAdd` is a multiply and an add, two roundings, on
 //! every backend), reductions folded in the reference
-//! order, and every transcendental through the same
-//! [`unary_f64`](rsdag::semantics::unary_f64) host routine, so the domain
-//! guards hold identically. `tests/parity.rs` fuzzes arena == tape ==
+//! order, the exponential and the logarithm inline by the reference's steps
+//! ([`exp_with`](rsdag::semantics::exp_with)), and every other
+//! transcendental through the same [`unary_f64`](rsdag::semantics::unary_f64)
+//! host routine, so the domain guards hold identically. `tests/parity.rs` fuzzes arena == tape ==
 //! native to the bit.
 
 pub use rsdag::constants::CHUNK_OPS;

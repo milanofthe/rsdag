@@ -21,10 +21,12 @@
 //! under Windows, so no value survives a host call there, and `vzeroupper`
 //! precedes every call and the return.
 //!
-//! Where there is AVX (and AVX2 for four lanes) the exponential and the
-//! logarithm are instructions too, rsdag's own algorithm with its integer
-//! steps in the packed integer forms: no call, so the cache keeps its
-//! values across them.
+//! The exponential and the logarithm are instructions too, rsdag's own
+//! algorithm with its integer steps in the packed integer forms and its
+//! table rows loaded lane by lane: no call, so the cache keeps its values
+//! across them. Its multiply-adds are `vfmadd` where
+//! `rsdag::semantics::fused` says the machine fuses, else a product and a
+//! sum. Four lanes need AVX2.
 
 use crate::isa::*;
 use rsdag::node::{CmpOp, ReduceOp};
@@ -52,6 +54,8 @@ pub(crate) struct X64<const L: usize> {
     code: Vec<u8>,
     /// Three-operand VEX forms and `vblendvpd`.
     avx: bool,
+    /// Fused multiply-adds (`rsdag::semantics::fused`).
+    fma: bool,
     /// Host routines held in `r12` and `r15`.
     hot: Vec<*const ()>,
     /// The chunk's constants, and where their displacements go: the byte
@@ -69,7 +73,7 @@ pub(crate) struct Features {
     pub sse41: bool,
     /// Three-operand VEX forms, `vblendvpd` and the 256-bit forms.
     pub avx: bool,
-    /// 256-bit integer forms (the host's four-lane exponential and logarithm).
+    /// 256-bit integer forms, which four lanes need.
     pub avx2: bool,
 }
 
@@ -329,159 +333,486 @@ impl<const L: usize> X64<L> {
         }
     }
 
-    // The inline exponential and logarithm, VEX throughout (AVX, and AVX2
-    // for the integer forms on four lanes).
+    // The inline exponential and logarithm: VEX where there is AVX (and
+    // AVX2 for the integer forms on four lanes), else the legacy SSE2
+    // forms; a fused multiply-add where `rsdag::semantics::fused` says.
 
     /// `d = a op b`.
     fn f(&mut self, op: Arith, d: u8, a: u8, b: u8) {
-        self.vex_rr(Self::PP, Self::arith_op(op), d, a, b);
+        self.arith(op, d, a, b);
     }
     /// `d = a op c`, `c` from the pool.
     fn fc(&mut self, op: Arith, d: u8, a: u8, c: f64) {
         self.op_const(Self::PFX, Self::PP, Self::arith_op(op), d, a, c.to_bits());
     }
-    /// `d = a op b` over 64-bit integer lanes, `vpaddq` and the like.
+    /// The three-operand VEX prefix with every field: `w` its W bit, `map`
+    /// (1 `0F`, 2 `0F38`, 3 `0F3A`), `l` the vector length, `reg` the ModRM
+    /// reg field, `v` the extra source, `x` a SIB index and `rm` the ModRM
+    /// rm field (or SIB base).
+    fn vex3(&mut self, w: bool, pp: u8, map: u8, l: u8, reg: u8, v: u8, x: u8, rm: u8) {
+        let r = (!reg >> 3) & 1;
+        let xb = (!x >> 3) & 1;
+        let b = (!rm >> 3) & 1;
+        let v = !v & 0xF;
+        self.bytes(&[
+            0xC4,
+            (r << 7) | (xb << 6) | (b << 5) | map,
+            ((w as u8) << 7) | (v << 3) | (l << 2) | pp,
+        ]);
+    }
+    /// `d = a b + c` as `vfmadd{form}` (`0x98` 132, `0xA8` 213, `0xB8`
+    /// 231) on `d`, the register `v` and `m`, a register or a constant.
+    fn fma3(&mut self, form: u8, d: u8, v: u8, m: Operand) {
+        let op = form + (L == 1) as u8; // the `sd` form is the next opcode
+        let rm = match m {
+            Operand::R(r) => r,
+            Operand::C(_) => 0,
+        };
+        self.vex3(true, 1, 2, Self::VL, d, v, 0, rm);
+        self.b(op);
+        match m {
+            Operand::R(r) => self.modrm_reg(d, r),
+            Operand::C(c) => self.modrm_const(d, c.to_bits()),
+        }
+    }
+    /// `d = a b + c`, rounded once where the machine fuses, else the product
+    /// and the sum each rounded (`rsdag::semantics::MulAdd`). `a` is a
+    /// register; `d` is `a` or `c` or none of the operands; `xmm0` is the
+    /// product's scratch.
+    fn madd(&mut self, d: u8, a: u8, b: Operand, c: Operand) {
+        use Arith::*;
+        if !self.fma {
+            // the product into `d`, or into `xmm0` where `d` holds `c`
+            let p = match c {
+                Operand::R(c) if c == d => 0,
+                _ => d,
+            };
+            match b {
+                Operand::R(b) => self.f(Mul, p, a, b),
+                Operand::C(b) => self.fc(Mul, p, a, b),
+            }
+            match c {
+                Operand::R(_) if p == 0 => self.f(Add, d, d, 0),
+                Operand::R(c) => self.f(Add, d, d, c),
+                Operand::C(c) => self.fc(Add, d, d, c),
+            }
+            return;
+        }
+        match (b, c) {
+            // d = d b + c, b a register or the constant
+            (_, Operand::R(c)) if d == c => match b {
+                Operand::R(b) => self.fma3(FMA231, d, a, Operand::R(b)),
+                Operand::C(_) => self.fma3(FMA231, d, a, b),
+            },
+            (Operand::C(_), Operand::R(c)) => {
+                // d = a [b] + c: d = d [b] + c with d = a
+                self.mov(d, a);
+                self.fma3(FMA132, d, c, b);
+            }
+            (Operand::R(b), Operand::R(c)) => {
+                let (d_in, other) = if d == b { (b, a) } else { (a, b) };
+                self.mov(d, d_in);
+                self.fma3(FMA213, d, other, Operand::R(c));
+            }
+            (Operand::R(b), Operand::C(_)) => {
+                let (d_in, other) = if d == b { (b, a) } else { (a, b) };
+                self.mov(d, d_in);
+                self.fma3(FMA213, d, other, c);
+            }
+            (Operand::C(b), Operand::C(_)) => {
+                debug_assert_ne!(d, a);
+                self.fconst(d, b);
+                self.fma3(FMA213, d, a, c);
+            }
+        }
+    }
+    /// `d = a op b` over 64-bit integer lanes (`paddq` and the like).
     fn int(&mut self, op: Int, d: u8, a: u8, b: u8) {
-        self.vex_rr(1, op as u8, d, a, b);
+        if self.avx {
+            self.vex_rr(1, op as u8, d, a, b);
+        } else if d == b && d != a {
+            debug_assert!(!matches!(op, Int::Sub), "a difference into its subtrahend");
+            self.sse(0x66, op as u8, d, a);
+        } else {
+            self.mov(d, a);
+            self.sse(0x66, op as u8, d, b);
+        }
     }
     /// `d = a op c` over 64-bit integer lanes, `c` from the pool.
     fn int_c(&mut self, op: Int, d: u8, a: u8, c: u64) {
-        self.vex(1, 1, d, a, 0);
+        if self.avx {
+            self.vex(1, 1, d, a, 0);
+        } else {
+            self.mov(d, a);
+            self.b(0x66);
+            self.rex(false, d, 0);
+            self.b(0x0F);
+        }
         self.b(op as u8);
         self.modrm_const(d, c);
     }
-    /// `d = a << n`, or logical `a >> n`, over 64-bit lanes: `vpsllq`
-    /// (`66 0F 73 /6 ib`), `vpsrlq` (`/2`), the result in VEX.vvvv.
-    fn shift(&mut self, left: bool, d: u8, a: u8, n: u8) {
+    /// `d = a << n`, or logical `a >> n`, over 64-bit lanes: `psllq`
+    /// (`66 0F 73 /6 ib`), `psrlq` (`/2`).
+    fn shift(&mut self, left: bool, d: u8, a: u8, n: u32) {
         let ext = if left { 6 } else { 2 };
-        self.vex(1, 1, ext, d, a);
+        if self.avx {
+            self.vex(1, 1, ext, d, a);
+        } else {
+            self.mov(d, a);
+            self.b(0x66);
+            self.rex(false, 0, d);
+            self.b(0x0F);
+        }
         self.b(0x73);
-        self.modrm_reg(ext, a);
-        self.b(n);
+        self.modrm_reg(ext, if self.avx { a } else { d });
+        self.b(n as u8);
     }
     /// `xmm0 = (x pred c) ? all ones : 0`, `c` from the pool, `pred` one
-    /// of VEX's 32.
+    /// of VEX's 32 (of them `LT_OQ`, `LE_OQ`, `NLT_UQ`, `GT_OQ` without AVX).
     fn cmp_c(&mut self, x: u8, c: f64, pred: u8) {
-        self.vex(Self::PP, 1, 0, x, 0);
+        if self.avx {
+            self.vex(Self::PP, 1, 0, x, 0);
+        } else if pred == GT_OQ {
+            // c < x
+            self.fconst(0, c);
+            self.sse(Self::PFX, 0xC2, 0, x);
+            self.b(LT_OQ & 7);
+            return;
+        } else {
+            self.mov(0, x);
+            self.b(Self::PFX);
+            self.b(0x0F);
+        }
         self.b(0xC2);
         self.modrm_const_imm(0, c.to_bits(), 1);
-        self.b(pred);
+        self.b(if self.avx { pred } else { pred & 7 });
+    }
+    /// `d = xmm0 ? t : d`; clobbers `xmm0`, and `t` without AVX.
+    fn keep(&mut self, d: u8, t: u8) {
+        if self.avx {
+            self.vex(1, 3, d, d, t); // vblendvpd d, d, t, xmm0
+            self.b(0x4B);
+            self.modrm_reg(d, t);
+            self.b(0x00);
+        } else {
+            self.sse(0x66, 0x54, t, 0); // andpd t, xmm0
+            self.sse(0x66, 0x55, 0, d); // andnpd xmm0, d
+            self.sse(0x66, 0x56, 0, t); // orpd xmm0, t
+            self.mov(d, 0);
+        }
+    }
+    /// `d = xmm0 ? x : d`, `x` kept (through `xmm1` without AVX).
+    fn keep_x(&mut self, d: u8, x: u8) {
+        if self.avx {
+            self.keep(d, x);
+        } else {
+            self.mov(1, x);
+            self.keep(d, 1);
+        }
+    }
+    /// A ModRM and SIB byte for `[base + index + disp8]`.
+    fn modrm_sib(&mut self, reg: u8, base: u8, index: u8, disp: u8) {
+        self.bytes(&[
+            0x44 | ((reg & 7) << 3),
+            ((index & 7) << 3) | (base & 7),
+            disp,
+        ]);
+    }
+    /// `r` from `[TABLE + index + disp]`: `movsd`, or `movupd` (two values)
+    /// with `pair`; VEX.128 where there is AVX.
+    fn load_at(&mut self, pair: bool, r: u8, index: u8, disp: u8) {
+        let pp = if pair { 1 } else { 3 };
+        if self.avx {
+            self.vex3(false, pp, 1, 0, r, 0, index, TABLE);
+        } else {
+            self.b(if pair { 0x66 } else { 0xF2 });
+            let rex = 0x40 | ((r >> 3) << 2) | ((index >> 3) << 1) | (TABLE >> 3);
+            if rex != 0x40 {
+                self.b(rex);
+            }
+            self.b(0x0F);
+        }
+        self.b(0x10);
+        self.modrm_sib(r, TABLE, index, disp);
+    }
+    /// The upper half of `ymm r` from `[TABLE + index + disp]`
+    /// (`vinsertf128 r, r, m128, 1`).
+    fn insert_at(&mut self, r: u8, index: u8, disp: u8) {
+        self.vex3(false, 1, 3, 1, r, r, index, TABLE);
+        self.b(0x18);
+        self.modrm_sib(r, TABLE, index, disp);
+        self.b(1);
+    }
+    /// `d = unpcklpd(a, b)` (the lanes' first values), or `unpckhpd` with
+    /// `high`.
+    fn unpack(&mut self, high: bool, d: u8, a: u8, b: u8) {
+        let op = if high { 0x15 } else { 0x14 };
+        if self.avx {
+            self.vex_rr(1, op, d, a, b);
+        } else {
+            debug_assert!(d == a || d != b);
+            self.mov(d, a);
+            self.sse(0x66, op, d, b);
+        }
+    }
+    /// `movq g, x`: a register's first lane into the general register `g`.
+    fn lane_to_gpr(&mut self, g: u8, x: u8) {
+        if self.avx {
+            self.vex3(true, 1, 1, 0, x, 0, 0, g);
+        } else {
+            self.b(0x66);
+            self.b(0x48 | ((x >> 3) << 2) | (g >> 3));
+            self.b(0x0F);
+        }
+        self.b(0x7E);
+        self.modrm_reg(x, g);
+    }
+    /// `movq x, g`: the general register `g` into a register's first lane.
+    fn gpr_to_lane(&mut self, x: u8, g: u8) {
+        if self.avx {
+            self.vex3(true, 1, 1, 0, x, 0, 0, g);
+        } else {
+            self.b(0x66);
+            self.b(0x48 | ((x >> 3) << 2) | (g >> 3));
+            self.b(0x0F);
+        }
+        self.b(0x6E);
+        self.modrm_reg(x, g);
+    }
+    /// `cvtsi2sd x, g`: the signed integer `g` as a double into `x`'s first
+    /// lane (exact for the exponents here).
+    fn int_to_float(&mut self, x: u8, g: u8) {
+        if self.avx {
+            self.vex3(true, 3, 1, 0, x, x, 0, g);
+        } else {
+            self.b(0xF2);
+            self.b(0x48 | ((x >> 3) << 2) | (g >> 3));
+            self.b(0x0F);
+        }
+        self.b(0x2A);
+        self.modrm_reg(x, g);
+    }
+    /// `op d, s` on 64-bit general registers (`op r/m64, r64`).
+    fn gpr_rr(&mut self, op: u8, d: u8, s: u8) {
+        self.rex(true, s, d);
+        self.b(op);
+        self.modrm_reg(s, d);
+    }
+    /// A shift of a 64-bit general register by `n` (`C1 /ext ib`).
+    fn gpr_shift(&mut self, ext: u8, d: u8, n: u32) {
+        self.rex(true, 0, d);
+        self.b(0xC1);
+        self.modrm_reg(ext, d);
+        self.b(n as u8);
+    }
+    /// `and d, imm32` on a 64-bit general register.
+    fn gpr_and(&mut self, d: u8, v: u64) {
+        let v = u32::try_from(v).expect("a mask of 32 bits");
+        self.rex(true, 0, d);
+        self.b(0x81);
+        self.modrm_reg(4, d);
+        self.bytes(&v.to_le_bytes());
+    }
+    /// `g` = the second lane of `x` (`vpextrq g, x, 1`; without AVX through
+    /// `xmm0`).
+    fn lane1_to_gpr(&mut self, g: u8, x: u8) {
+        if self.avx {
+            self.vex3(true, 1, 3, 0, x, 0, 0, g);
+            self.b(0x16);
+            self.modrm_reg(x, g);
+            self.b(1);
+        } else {
+            self.sse(0x66, 0x70, 0, x); // pshufd xmm0, x, the high half twice
+            self.b(0xEE);
+            self.lane_to_gpr(g, 0);
+        }
+    }
+    /// The rows of a table at `table`, one per lane at the byte offsets in
+    /// `idx`'s lanes, into `cols` by column (`tmp` the scratch of the
+    /// transposition; `idx` is free afterwards and may be `tmp`).
+    fn rows(&mut self, table: *const u8, idx: u8, cols: &[u8], tmp: u8) {
+        let g = &INDEX_GPRS[..L];
+        self.lane_to_gpr(g[0], idx);
+        if L > 1 {
+            self.lane1_to_gpr(g[1], idx);
+        }
+        if L == 4 {
+            // vextracti128 idx, idx, 1
+            self.vex3(false, 1, 3, 1, idx, 0, 0, idx);
+            self.b(0x39);
+            self.modrm_reg(idx, idx);
+            self.b(1);
+            self.lane_to_gpr(g[2], idx);
+            self.lane1_to_gpr(g[3], idx);
+        }
+        self.rows_from(table, cols, tmp);
+    }
+    /// [`rows`](Self::rows) with the offsets already in [`INDEX_GPRS`].
+    fn rows_from(&mut self, table: *const u8, cols: &[u8], tmp: u8) {
+        let g = &INDEX_GPRS[..L];
+        self.mov_imm(TABLE, table as u64);
+        for (p, pair) in cols.chunks(2).enumerate() {
+            let at = (p * PAIR_BYTES) as u8;
+            let [c0, c1] = [pair[0], pair[1]];
+            match L {
+                1 => {
+                    self.load_at(false, c0, g[0], at);
+                    self.load_at(false, c1, g[0], at + F64_BYTES as u8);
+                }
+                _ => {
+                    self.load_at(true, c0, g[0], at);
+                    self.load_at(true, tmp, g[1], at);
+                    if L == 4 {
+                        self.insert_at(c0, g[2], at);
+                        self.insert_at(tmp, g[3], at);
+                    }
+                    self.unpack(true, c1, c0, tmp);
+                    self.unpack(false, c0, c0, tmp);
+                }
+            }
+        }
     }
 
-    /// [`rsdag::semantics::exp_guarded`] step for step, `xmm1` the fifth
-    /// scratch register.
-    fn exp_inline(&mut self, d: u8, x: u8, [a, b, c, e]: [u8; 4]) {
+    /// [`rsdag::semantics::exp_guarded`] step for step.
+    fn exp_inline(&mut self, d: u8, x: u8, [a, b, c, e, f]: [u8; 5]) {
         use Arith::*;
+        use Operand::{C, R};
         let s = 1;
-        // k = round(x / ln 2) in the low bits of t = x / ln 2 + MAGIC
-        self.fc(Mul, a, x, INV_LN2);
-        self.fc(Add, a, a, MAGIC);
-        self.fc(Sub, b, a, MAGIC); // kf
-        self.int_c(Int::Sub, a, a, MAGIC.to_bits()); // k
-        self.fc(Mul, c, b, LN2_HI);
-        self.f(Sub, c, x, c); // hi
-        self.fc(Mul, b, b, LN2_LO); // lo
-        self.f(Sub, e, c, b); // r
-        self.f(Mul, s, e, e); // t2
-        self.fc(Mul, d, s, EP5);
-        for p in [EP4, EP3, EP2, EP1] {
-            self.fc(Add, d, d, p);
-            self.f(Mul, d, s, d);
-        }
-        self.f(Sub, d, e, d); // c
-        self.f(Mul, s, e, d); // r c
-        self.fconst(e, 2.0);
-        self.f(Sub, e, e, d);
-        self.f(Div, s, s, e);
-        self.f(Sub, s, b, s);
-        self.f(Sub, s, s, c);
-        self.fconst(d, 1.0);
-        self.f(Sub, d, d, s); // y
-                              // y 2^k1 2^(k - k1) with k1 = k >> 1, the shift arithmetic through
-                              // a bias (64-bit lanes have no arithmetic shift below AVX-512)
-        let frac = F64_FRAC_BITS as u8;
-        self.int_c(Int::Add, b, a, (2 * (F64_EXP_BIAS + 1)) as u64);
-        self.shift(false, b, b, 1); // k1 + 1024
-        self.int(Int::Sub, a, a, b); // k - k1 - 1024
-        self.int_c(Int::Sub, b, b, 1);
-        self.shift(true, b, b, frac); // 2^k1
-        self.int_c(Int::Add, a, a, (2 * F64_EXP_BIAS + 1) as u64);
-        self.shift(true, a, a, frac); // 2^(k - k1)
-        self.f(Mul, d, d, b);
-        self.f(Mul, d, d, a);
+        // t = x N / ln 2 + MAGIC, k = round(x N / ln 2) in its low bits
+        self.madd(a, x, C(EXP_INV_LN2_N), C(MAGIC));
+        self.fc(Sub, b, a, MAGIC); // kd
+        self.madd(c, b, C(-EXP_LN2_HI_N), R(x));
+        self.madd(c, b, C(-EXP_LN2_LO_N), R(c)); // r
+                                                 // the row of k mod N, and k / N into the exponent
+        self.int_c(Int::And, e, a, EXP_INDEX_MASK);
+        self.shift(true, e, e, EXP_ROW_SHIFT);
+        self.shift(true, b, a, EXP_SHIFT);
+        self.rows(EXP_TABLE.as_ptr().cast(), e, &[f, d], e); // tail, scale bits
+        self.int(Int::Add, d, d, b); // scale
+        let [c2, c3, c4, c5] = EXP_POLY;
+        self.f(Mul, a, c, c); // r^2
+        self.madd(b, c, C(c3), C(c2));
+        self.madd(e, c, C(c5), C(c4));
+        self.f(Add, f, f, c);
+        self.madd(f, a, R(b), R(f));
+        self.f(Mul, a, a, a);
+        self.madd(f, a, R(e), R(f)); // p
+        self.madd(d, d, R(f), R(d));
+        self.fc(Mul, d, d, EXP_UNBIAS);
         // underflow to zero, a NaN kept, the linear tail above the limit
         self.zero(s);
         self.cmp_c(x, EXP_UNDERFLOW, LT_OQ);
-        self.blend(s, d, d);
+        self.keep(d, s);
         self.cmp_mask(x, x, UNORD_Q);
-        self.blend(x, d, d);
+        self.keep_x(d, x);
         self.fc(Sub, s, x, EXP_LIMIT);
         self.fc(Add, s, s, 1.0);
         self.fc(Mul, s, s, EXP_AT_LIMIT);
         self.cmp_c(x, EXP_LIMIT, GT_OQ);
-        self.blend(s, d, d);
+        self.keep(d, s);
     }
 
-    /// [`rsdag::semantics::ln_guarded`] step for step, `xmm1` the fifth
-    /// scratch register.
-    fn ln_inline(&mut self, d: u8, x: u8, [a, b, c, e]: [u8; 4]) {
+    /// [`rsdag::semantics::ln_guarded`] step for step.
+    fn ln_inline(&mut self, d: u8, x: u8, [a, b, c, e, f]: [u8; 5]) {
         use Arith::*;
+        use Operand::{C, R};
         let s = 1;
-        // x = 2^k m, m in [sqrt(2)/2, sqrt(2)), from the bits
-        let (high, high_frac) = (F64_HIGH_WORD as u8, F64_HIGH_FRAC_BITS as u8);
-        self.shift(false, a, x, high); // high
-        self.int_c(Int::And, b, a, LN_HIGH_FRAC_MASK as u64); // hm
-        self.int_c(Int::Add, c, b, LN_SQRT2_CARRY as u64);
-        self.int_c(Int::And, c, c, LN_HIGH_UNIT as u64); // i
-        self.shift(false, a, a, high_frac);
-        self.int_c(Int::Sub, a, a, F64_EXP_BIAS as u64);
-        self.shift(false, e, c, high_frac);
-        self.int(Int::Add, a, a, e); // k
-        self.int_c(Int::Xor, c, c, LN_HIGH_ONE as u64);
-        self.int(Int::Or, c, c, b);
-        self.shift(true, c, c, high);
-        self.int_c(Int::And, b, x, F64_LOW_WORD_MASK);
-        self.int(Int::Or, c, c, b); // m
-        self.fc(Sub, c, c, 1.0); // f
-        self.fc(Add, b, c, 2.0);
-        self.f(Div, b, c, b); // s
-        self.int_c(Int::Add, a, a, MAGIC.to_bits());
-        self.fc(Sub, a, a, MAGIC); // dk
-        self.f(Mul, e, b, b); // z
-        self.f(Mul, s, e, e); // w
-        self.fc(Mul, d, s, LG7);
-        for p in [LG5, LG3] {
-            self.fc(Add, d, d, p);
-            self.f(Mul, d, s, d);
+        // x = 2^k z, and the row's offset
+        let table = LN_TABLE.as_ptr().cast();
+        if L == 1 {
+            // one lane: the integer steps in general registers
+            let [t, k, ix] = [INDEX_GPRS[0], INDEX_GPRS[1], INDEX_GPRS[2]];
+            self.lane_to_gpr(ix, x);
+            self.mov_imm(k, LN_OFF);
+            self.gpr_rr(GPR_MOV, t, ix);
+            self.gpr_rr(GPR_SUB, t, k); // tmp
+            self.gpr_rr(GPR_MOV, k, t);
+            self.gpr_shift(GPR_SAR, k, F64_FRAC_BITS); // k
+            self.zero(b);
+            self.int_to_float(b, k); // kd
+            self.gpr_shift(GPR_SHL, k, F64_FRAC_BITS);
+            self.gpr_rr(GPR_SUB, ix, k);
+            self.gpr_to_lane(e, ix); // z
+            self.gpr_shift(GPR_SHR, t, LN_SHIFT - LN_ROW_SHIFT);
+            self.gpr_and(t, LN_INDEX_MASK << LN_ROW_SHIFT);
+            self.rows_from(table, &[a, c, f, d], s); // invc, c, logc
+        } else {
+            self.int_c(Int::Sub, a, x, LN_OFF); // tmp
+            self.shift(false, b, a, F64_FRAC_BITS);
+            self.int_c(Int::Xor, b, b, LN_K_OFFSET);
+            self.int_c(Int::Add, b, b, MAGIC.to_bits());
+            self.fc(Sub, b, b, LN_K_MAGIC); // kd
+            self.int_c(Int::And, c, a, LN_EXP_MASK);
+            self.int(Int::Sub, e, x, c); // z
+            self.shift(false, c, a, LN_SHIFT - LN_ROW_SHIFT);
+            self.int_c(Int::And, c, c, LN_INDEX_MASK << LN_ROW_SHIFT);
+            self.rows(table, c, &[a, c, f, d], s); // invc, c, logc
         }
-        self.fc(Add, d, d, LG1);
-        self.f(Mul, d, e, d); // t2
-        self.fc(Mul, e, s, LG6);
-        for p in [LG4, LG2] {
-            self.fc(Add, e, e, p);
-            self.f(Mul, e, s, e);
-        }
-        self.f(Add, d, d, e); // r = t2 + t1
-        self.fc(Mul, s, c, 0.5);
-        self.f(Mul, s, s, c); // hfsq
-        self.f(Add, e, s, d);
-        self.f(Mul, e, b, e);
-        self.fc(Mul, d, a, LN2_LO);
-        self.f(Add, e, e, d);
-        self.f(Sub, e, s, e);
         self.f(Sub, e, e, c);
-        self.fc(Mul, d, a, LN2_HI);
-        self.f(Sub, d, d, e);
-        // infinity and NaN kept, the floor
-        self.cmp_c(x, f64::INFINITY, EQ_OQ);
-        self.blend(x, d, d);
-        self.cmp_mask(x, x, UNORD_Q);
-        self.blend(x, d, d);
+        self.f(Mul, e, e, a); // r
+        self.madd(a, b, C(LN_LN2_HI), R(f)); // w
+        self.f(Add, c, a, e); // hi
+        self.f(Sub, a, a, c);
+        self.f(Add, a, a, e);
+        self.madd(f, b, C(LN_LN2_LO), R(d));
+        self.f(Add, a, a, f); // lo
+        let p = LN_POLY;
+        self.f(Mul, s, e, e); // r^2
+        self.madd(b, e, C(p[1]), C(p[0]));
+        self.madd(d, e, C(p[3]), C(p[2]));
+        self.madd(b, s, R(d), R(b));
+        self.madd(d, e, C(p[5]), C(p[4]));
+        self.madd(d, s, C(p[6]), R(d));
+        self.f(Mul, f, s, s);
+        self.madd(b, f, R(d), R(b));
+        self.madd(a, s, C(-0.5), R(a));
+        self.f(Mul, s, s, e);
+        self.madd(a, s, R(b), R(a));
+        self.f(Add, d, a, c);
+        // infinity and NaN kept (not below infinity), the floor
+        self.cmp_c(x, f64::INFINITY, NLT_UQ);
+        self.keep_x(d, x);
         self.fconst(s, LN_AT_FLOOR);
         self.cmp_c(x, LN_FLOOR, LE_OQ);
-        self.blend(s, d, d);
+        self.keep(d, s);
     }
 }
+
+/// A multiply-add's operand: a register or a constant from the pool.
+#[derive(Clone, Copy)]
+enum Operand {
+    R(u8),
+    C(f64),
+}
+
+// General-register opcodes: `mov` and `sub` (`op r/m64, r64`), and the
+// shifts' ModRM extensions under `C1`.
+const GPR_MOV: u8 = 0x89;
+const GPR_SUB: u8 = 0x29;
+const GPR_SHL: u8 = 4;
+const GPR_SHR: u8 = 5;
+const GPR_SAR: u8 = 7;
+
+const FMA132: u8 = 0x98;
+const FMA213: u8 = 0xA8;
+const FMA231: u8 = 0xB8;
+
+/// The general registers the inline exponential and logarithm use: the
+/// table's address, and each lane's row offset; all volatile under both
+/// conventions and holding nothing between ops.
+const TABLE: u8 = 11; // r11
+const INDEX_GPRS: [u8; 4] = [0, 1, 2, 10]; // rax rcx rdx r10
+const F64_BYTES: usize = std::mem::size_of::<f64>();
+const PAIR_BYTES: usize = 2 * F64_BYTES;
+/// `exp`'s rows hold two values, `ln`'s four.
+const EXP_ROW_SHIFT: u32 = PAIR_BYTES.trailing_zeros();
+const LN_ROW_SHIFT: u32 = (2 * PAIR_BYTES).trailing_zeros();
+/// `k`, the top 12 bits of `ln`'s `tmp` as a signed number, is `(tmp >>
+/// 52) ^ LN_K_OFFSET` less `LN_K_OFFSET`, and as a float that through the
+/// rounding constant: no 64-bit arithmetic shift nor integer conversion
+/// below AVX-512.
+const LN_K_OFFSET: u64 = 1 << (u64::BITS - 1 - F64_FRAC_BITS);
+const LN_K_MAGIC: f64 = MAGIC + LN_K_OFFSET as f64;
 
 /// The packed 64-bit integer ops, as their `66 0F` opcodes.
 #[derive(Clone, Copy)]
@@ -489,12 +820,12 @@ enum Int {
     Add = 0xD4,
     Sub = 0xFB,
     And = 0xDB,
-    Or = 0xEB,
     Xor = 0xEF,
 }
 
-// VEX comparison predicates, ordered (false on a NaN) but `UNORD_Q`.
-const EQ_OQ: u8 = 0x00;
+// VEX comparison predicates, ordered (false on a NaN) but `UNORD_Q` and
+// `NLT_UQ`; the legacy `cmpsd` has their low three bits, but for `GT_OQ`.
+const NLT_UQ: u8 = 0x15;
 const LT_OQ: u8 = 0x11;
 const LE_OQ: u8 = 0x12;
 const UNORD_Q: u8 = 0x03;
@@ -512,11 +843,12 @@ impl<const L: usize> Isa for X64<L> {
 
     fn new(hot: &[*const ()]) -> X64<L> {
         assert!(matches!(L, 1 | 2 | 4), "one, two or four lanes");
-        let Features { avx, .. } = features();
-        assert!(L < 4 || avx, "four lanes need AVX");
+        let Features { avx, avx2, .. } = features();
+        assert!(L < 4 || avx2, "four lanes need AVX2");
         X64 {
             code: Vec::with_capacity(8192),
             avx,
+            fma: avx && rsdag::semantics::fused(),
             hot: hot.iter().copied().take(HOT_REGS.len()).collect(),
             pool: Vec::new(),
             fixups: Vec::new(),
@@ -727,11 +1059,7 @@ impl<const L: usize> Isa for X64<L> {
         self.cmp_mask(c, 1, 4); // cmpneqsd: true when c != 0 or c is NaN
         self.blend(t, e, d);
     }
-    fn exp_ln_inline() -> bool {
-        let f = features();
-        f.avx && (L < 4 || f.avx2)
-    }
-    fn exp_ln(&mut self, ln: bool, d: u8, x: u8, t: [u8; 4]) {
+    fn exp_ln(&mut self, ln: bool, d: u8, x: u8, t: [u8; 5]) {
         if ln {
             self.ln_inline(d, x, t);
         } else {

@@ -12,6 +12,7 @@
 
 pub mod contract;
 mod display;
+mod exp_ln;
 mod graph;
 mod parallel;
 mod specialize;
@@ -19,6 +20,7 @@ mod tape;
 
 pub use contract::*;
 pub(crate) use display::*;
+pub use exp_ln::*;
 pub use graph::*;
 pub use parallel::*;
 pub(crate) use specialize::*;
