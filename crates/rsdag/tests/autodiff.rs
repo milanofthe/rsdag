@@ -497,12 +497,15 @@ fn the_support_reads_through_nested_calls() {
     assert_eq!(&*g.output_support(gf, 1), &[2, 3]);
     let args: Vec<ExprId> = ["p", "q", "r", "t"].iter().map(|n| g.sym(n)).collect();
     let call = g.call(gf, 1, &args);
-    let names: Vec<String> = g
-        .support_in(&[call])
-        .into_iter()
-        .map(|s| g.symbol_name(s).to_string())
+    let wrt: Vec<SymbolId> = ["p", "q", "r", "t"]
+        .iter()
+        .map(|n| g.symbol_id(n))
         .collect();
-    assert_eq!(names, ["r", "t"]);
+    let cols: Vec<usize> = sparse_jacobian(&mut g, &[call], &wrt)[0]
+        .iter()
+        .map(|&(k, _)| k)
+        .collect();
+    assert_eq!(cols, [2, 3]);
     // the value reads the selector's condition too
     let (p, q) = (g.symbol_id("p"), g.symbol_id("q"));
     let g0 = g.call(gf, 0, &args);

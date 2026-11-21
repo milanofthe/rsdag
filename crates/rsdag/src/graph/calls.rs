@@ -218,8 +218,7 @@ impl<K: Field> Graph<K> {
 
     /// The operands of a call (its parameters, then its globals, see
     /// [`globals`](Self::globals)) output `out` of `f` can have a nonzero
-    /// derivative in, by index, ascending: its [`support_in`](Self::support_in)
-    /// among them. Structural, read off the graph. The outputs of a function
+    /// derivative in, by index, ascending. Structural, read off the graph. The outputs of a function
     /// share their body, so the ones not known yet are found in one pass
     /// over it, and each is kept. An extern output is taken to read every
     /// parameter, a zero one none.
@@ -250,24 +249,6 @@ impl<K: Field> Graph<K> {
             _ => false,
         });
         roots.iter().map(|&r| *flow.get(r)).collect()
-    }
-
-    /// The symbols `exprs` can have a nonzero derivative in: their
-    /// [`free_symbols_in`](Self::free_symbols_in) through the operands that
-    /// carry a derivative (not a comparison's, not a selector's condition),
-    /// and through a call only the arguments its output's
-    /// [`output_support`](Self::output_support) names. The sparsity of every
-    /// derivative of `exprs`, nested calls included.
-    pub fn support_in(&self, exprs: &[ExprId]) -> std::collections::BTreeSet<SymbolId> {
-        let flow = self.flow(exprs, Through::Carries, |n| match *n {
-            Node::Symbol(s) => Set::one(s.0, self.n_symbols()),
-            _ => Set::bottom(),
-        });
-        let mut all = Set::bottom();
-        for &e in exprs {
-            all.join(flow.get(e));
-        }
-        all.iter().map(SymbolId).collect()
     }
 
     /// Define an extern function over `arity` arguments whose outputs are the

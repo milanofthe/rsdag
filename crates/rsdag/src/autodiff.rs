@@ -535,8 +535,9 @@ pub use crate::constants::REVERSE_MIN_TOUCHED;
 /// Sparse Jacobian of `residuals` with respect to `wrt`: row `i` lists the
 /// nonzero `(column, d residuals[i] / d wrt[column])`, by column.
 ///
-/// Only the symbols in a row's support can have a nonzero derivative (see
-/// [`Graph::support_in`]): through a call, the ones the called output reads.
+/// Only the symbols a row reads through operands that carry a derivative
+/// can have a nonzero one: through a call, the ones the called output reads
+/// (its output support).
 /// A row that touches few unknowns is differentiated forward, one sweep
 /// per unknown, and a sweep is shared by every such row that touches that
 /// unknown, so a subexpression common to several rows (a device current

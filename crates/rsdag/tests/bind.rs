@@ -154,7 +154,8 @@ fn a_bound_call_evaluates_and_differentiates_as_the_full_one() {
     );
     let rs = bound.roots.clone();
     let card0 = bound.params[9];
-    assert!(bound.g.support_in(&rs).contains(&card0));
+    let d_card0 = sparse_jacobian(&mut bound.g, &rs, &[card0]);
+    assert!(d_card0.iter().any(|row| !row.is_empty()));
     assert!(
         bound.g.free_symbols_in(&rs).contains(&card0),
         "the binding is the caller's"

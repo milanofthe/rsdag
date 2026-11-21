@@ -115,7 +115,7 @@ fn close(a: &[f64], b: &[f64]) {
 
 #[test]
 fn a_call_reads_the_globals_of_its_body() {
-    let c = circuit(4);
+    let mut c = circuit(4);
     let d = FuncId(0);
     let gt = FuncId(1);
     let card: Vec<SymbolId> =
@@ -129,8 +129,10 @@ fn a_call_reads_the_globals_of_its_body() {
     assert_eq!(card, c.card);
     assert_eq!(c.g.globals(gt).len(), 2, "the gate reads its devices' card");
     let roots = c.roots.clone();
-    let support = c.g.support_in(&roots);
-    assert!(support.contains(&c.card[0]) && support.contains(&c.card[1]));
+    let d_card = sparse_jacobian(&mut c.g, &roots, &c.card);
+    let cols: std::collections::BTreeSet<usize> =
+        d_card.iter().flatten().map(|&(k, _)| k).collect();
+    assert!(cols.contains(&0) && cols.contains(&1));
     assert!(c.g.depends_on(&roots[..1], &[c.card[1]])[0]);
     // what the roots read, not only what they mention
     assert!(c.g.free_symbols_in(&roots).contains(&c.card[0]));
@@ -196,7 +198,9 @@ fn substituting_a_global_binds_the_bodies_reading_it() {
     let want = eval(&c.g, &roots, &env);
     env.remove(&t1);
     close(&eval(&c.g, &bound, &env), &want);
-    assert!(!c.g.support_in(&bound).contains(&t1));
+    assert!(sparse_jacobian(&mut c.g, &bound, &[t1])
+        .iter()
+        .all(|row| row.is_empty()));
 }
 
 #[test]
