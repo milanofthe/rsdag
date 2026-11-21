@@ -65,3 +65,21 @@ pub(crate) const LU_TRAILING_ROWS: usize = 4;
 pub const SOLVE_BATCH_MAX_N: usize = 16;
 /// See [`SOLVE_BATCH_MAX_N`].
 pub const SOLVE_BATCH_MAX_K: usize = 4;
+
+/// Instances a batched call of an interpreted body runs side by side in
+/// the lanes of one pass over its ops (`Tape::main_batch`): blocks of
+/// sixteen while more than eight are left, the spare lanes of the last one
+/// idle; fewer in a block of eight, four or two; one alone. A pass costs
+/// the dispatch of each op once for the block, and the narrower blocks
+/// keep the lanes' slots in the near caches. Measured on a Ryzen 9 9900X
+/// (main phases, time per instance against one by one): a PSP103 body of
+/// nine instances 0.15 in one block of sixteen, a BSIM4 body of four
+/// instances 0.17 in a block of four, of two 0.31 in a block of two; a
+/// block of sixty-four is slower than sixteen.
+pub(crate) const LANES_WIDE: usize = 16;
+/// See [`LANES_WIDE`].
+pub(crate) const LANES_MID: usize = 8;
+/// See [`LANES_WIDE`].
+pub(crate) const LANES_NARROW: usize = 4;
+/// See [`LANES_WIDE`].
+pub(crate) const LANES_PAIR: usize = 2;
