@@ -263,10 +263,9 @@ specialized tape.
 
 `dot::GraphView` gives a graph under some roots as data for a viewer that
 lays it out itself: one node per expression with its kind, a shared
-subexpression once, a focus set at full strength and the rest faded,
-clusters, extra links, and the bodies of the calls in nested frames
-(`bodies`, or `inline` for every instance). The operators are labelled in
-the notation `Ascii` or `Math`.
+subexpression once, and with `inline` every call as its body, once per
+instance, in nested frames. The operators are labelled in the notation
+`Ascii` or `Math`.
 
 ## Bit-exactness
 
