@@ -16,7 +16,7 @@
 //! let mut g: Graph<F64> = Graph::new();
 //! let x = g.sym("x");
 //! let e = g.sin(x);
-//! let f = g.close("f", vec![e]);
+//! let f = rsdag::Scope::new(&mut g, "f").close(vec![e]);
 //! let module = g.to_module();          // plain data, `serde`-serializable
 //! let (mut back, map) = Graph::from_module(&module).unwrap();
 //! assert_eq!(map.funcs[f.0 as usize], f);
@@ -131,7 +131,7 @@ impl<K> Module<K> {
     /// and, for a node's operands, precedes it; and that every operand list
     /// has a length its node can have. A module that passes loads without
     /// a panic.
-    pub fn validate(&self) -> Result<(), ModuleError> {
+    pub(crate) fn validate(&self) -> Result<(), ModuleError> {
         if self.version != MODULE_VERSION {
             return Err(ModuleError::Version {
                 found: self.version,
@@ -361,8 +361,9 @@ impl<K: Field> Graph<K> {
     /// As [`Graph::load_module`], with `externs(name)` supplying the body of
     /// each extern function the module declares (`None` when there is none).
     ///
-    /// The module is [validated](Module::validate) first; nothing is added
-    /// to the graph when it fails.
+    /// The module is validated first (every id it holds names something
+    /// that is there and, for a node's operands, precedes it); nothing is
+    /// added to the graph when it fails.
     ///
     /// Nodes are re-interned in id order, which is a dependency order, so a
     /// node's operands are already mapped when it is built. A symbol is
@@ -434,7 +435,7 @@ impl<K: Field> Graph<K> {
                                 .map(|(&p, x)| (p, map.exprs[x.0 as usize]))
                                 .collect();
                             let b = self.bind(id, &pairs);
-                            self.call_bound(b, k, &ops)
+                            self.calls_bound(b, &[k], &ops)[0]
                         }
                     }
                 }

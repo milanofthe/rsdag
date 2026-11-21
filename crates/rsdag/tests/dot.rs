@@ -1,15 +1,8 @@
 //! The graph view as data: one node per expression, a shared subexpression
-//! once, faded nodes outside the focus, the bodies of the calls in frames.
+//! once, the bodies of the calls in frames.
 
-use rsdag::dot::{number, reachable, GraphView, Kind};
-use rsdag::{differentiate, ExprId, Graph, Node, SymbolId, F64};
-
-fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
-    match g.node(e) {
-        Node::Symbol(s) => *s,
-        _ => unreachable!(),
-    }
-}
+use rsdag::dot::{GraphView, Kind};
+use rsdag::{Graph, ParamRole, F64};
 
 #[test]
 fn a_shared_subexpression_is_one_node() {
@@ -36,75 +29,20 @@ fn a_shared_subexpression_is_one_node() {
 }
 
 #[test]
-fn nodes_outside_the_focus_are_faded() {
-    let mut g: Graph<F64> = Graph::new();
-    let (x, y) = (g.sym("x"), g.sym("y"));
-    let xy = g.mul(x, y);
-    let s = g.sin(xy);
-    let f = g.add(s, xy);
-    let wrt = sym(&g, x);
-    let df = differentiate(&mut g, f, wrt);
-    let keep = reachable(&g, &[df]);
-    let d = GraphView::new(&g)
-        .root(f, "f")
-        .root(df, "df/dx")
-        .focus(keep.clone())
-        .data();
-    let faded = d.nodes.iter().filter(|n| n.faded).count();
-    let all = reachable(&g, &[f, df]);
-    // Every node only f reaches is faded, and f's result with them.
-    assert_eq!(faded, all.len() - keep.len() + 1, "{d:?}");
-}
-
-#[test]
 fn numbers_are_short() {
-    assert_eq!(number(0.0), "0");
-    assert_eq!(number(-3.0), "-3");
-    assert_eq!(number(0.5), "0.5");
-    assert_eq!(number(0.001), "0.001");
-    assert_eq!(number(5.5406e34), "5.541e34");
-    assert_eq!(number(1.0 / 3.0), "0.3333");
-}
-
-#[test]
-fn bodies_draw_each_called_function_once() {
-    // leaf(a) = sin(a); mid(x, y) = leaf(x) * y; two calls of mid at the top
-    let mut g: Graph<F64> = Graph::new();
-    let mut s = rsdag::Scope::new(&mut g, "leaf");
-    let a = s.param("a");
-    let sa = s.sin(a);
-    let leaf = s.close(vec![sa]);
-    let mut s = rsdag::Scope::new(&mut g, "mid");
-    let (x, y) = (s.param("x"), s.param("y"));
-    let l = s.call(leaf, 0, &[x]);
-    let m = s.mul(l, y);
-    let mid = s.close(vec![m]);
-    let (p, q) = (g.sym("p"), g.sym("q"));
-    let one = g.call(mid, 0, &[p, q]);
-    let two = g.call(mid, 0, &[q, p]);
-    let r = g.add(one, two);
-
-    let flat = GraphView::new(&g).root(r, "r").data();
-    assert!(flat.clusters.is_empty());
-
-    // each body once in its frame, the sine of leaf's body once however many
-    // calls reach it, a link per call (two of mid, one of leaf in mid's
-    // body), and a call relabelled by its instance
-    let data = GraphView::new(&g)
-        .root(r, "r")
-        .bodies()
-        .label(one, "X1")
-        .data();
-    assert_eq!(data.clusters, ["mid", "leaf"]);
-    assert_eq!(data.nodes.iter().filter(|n| n.label == "sin").count(), 1);
-    assert_eq!(data.links.len(), 3);
-    let sine = data.nodes.iter().find(|n| n.label == "sin").expect("sin");
-    assert_eq!(sine.cluster, Some(1));
-    assert!(data.nodes.iter().any(|n| n.label == "X1"));
-    assert!(data
-        .nodes
-        .iter()
-        .any(|n| n.label == "mid" && n.cluster.is_none()));
+    for (x, want) in [
+        (0.0, "0"),
+        (-3.0, "-3"),
+        (0.5, "0.5"),
+        (0.001, "0.001"),
+        (5.5406e34, "5.541e34"),
+        (1.0 / 3.0, "0.3333"),
+    ] {
+        let mut g: Graph<F64> = Graph::new();
+        let c = g.konst_f64(x);
+        let d = GraphView::new(&g).root(c, "").data();
+        assert_eq!(d.nodes[0].label, want);
+    }
 }
 
 #[test]
@@ -112,11 +50,14 @@ fn inline_draws_every_instance_as_its_body() {
     // leaf(a) = sin(a); mid(x, y) = leaf(x) * y; two calls of mid at the top
     let mut g: Graph<F64> = Graph::new();
     let mut s = rsdag::Scope::new(&mut g, "leaf");
-    let a = s.param("a");
+    let a = s.param_with_role("a", ParamRole::Free);
     let sa = s.sin(a);
     let leaf = s.close(vec![sa]);
     let mut s = rsdag::Scope::new(&mut g, "mid");
-    let (x, y) = (s.param("x"), s.param("y"));
+    let (x, y) = (
+        s.param_with_role("x", ParamRole::Free),
+        s.param_with_role("y", ParamRole::Free),
+    );
     let l = s.call(leaf, 0, &[x]);
     let m = s.mul(l, y);
     let mid = s.close(vec![m]);
@@ -169,8 +110,6 @@ fn inline_draws_every_instance_as_its_body() {
         readers.contains(&leaf_of(x1)) && readers.contains(&Some(x2)),
         "{readers:?}"
     );
-    // no call left to link to its body
-    assert!(data.links.is_empty());
 }
 
 #[test]
@@ -179,15 +118,18 @@ fn inline_binds_the_bound_parameters_of_a_call() {
     // bindings of k
     let mut g: Graph<F64> = Graph::new();
     let mut s = rsdag::Scope::new(&mut g, "leaf");
-    let (a, k) = (s.param("a"), s.param("k"));
+    let (a, k) = (
+        s.param_with_role("a", ParamRole::Free),
+        s.param_with_role("k", ParamRole::Free),
+    );
     let sa = s.sin(a);
     let m = s.mul(k, sa);
     let leaf = s.close(vec![m]);
     let (p, c1, c2) = (g.sym("p"), g.sym("c1"), g.sym("c2"));
     let b1 = g.bind(leaf, &[(1, c1)]);
     let b2 = g.bind(leaf, &[(1, c2)]);
-    let one = g.call_bound(b1, 0, &[p]);
-    let two = g.call_bound(b2, 0, &[p]);
+    let one = g.calls_bound(b1, &[0], &[p])[0];
+    let two = g.calls_bound(b2, &[0], &[p])[0];
     let r = g.add(one, two);
 
     let data = GraphView::new(&g).root(r, "r").inline().data();

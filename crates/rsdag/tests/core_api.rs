@@ -8,7 +8,7 @@ fn charge_form_rows_select_by_role() {
     let (x, r, c) = (g.sym("x"), g.sym("r"), g.sym("c"));
     let i = g.div(x, r);
     let q = g.mul(c, x);
-    let f = g.close("rc", vec![i, q]);
+    let f = Scope::new(&mut g, "rc").close(vec![i, q]);
     for (k, s) in g.func(f).params().to_vec().into_iter().enumerate() {
         let role = match g.symbol_name(s) {
             "x" => ParamRole::State { id: 0 },
@@ -20,8 +20,8 @@ fn charge_form_rows_select_by_role() {
     g.set_output_role(f, 1, OutputRole::Charge { id: 0 });
     assert_eq!(
         g.func(f)
-            .outputs_with_role(|o| matches!(o, OutputRole::Charge { .. })),
-        vec![1]
+            .exprs_with_role(|o| matches!(o, OutputRole::Charge { .. })),
+        vec![(q, OutputRole::Charge { id: 0 })]
     );
     let x = match g.node(x) {
         Node::Symbol(s) => *s,
@@ -80,7 +80,7 @@ fn folds_constants_and_identities() {
     let three = ctx.konst_int(3);
     let six = ctx.mul(two, three);
     let q = ctx.div(six, six);
-    assert!(ctx.is_one(q));
+    assert_eq!(q, ctx.one());
 }
 
 #[test]
@@ -91,7 +91,7 @@ fn unary_folding_and_eval() {
     let o = ctx.one();
     let e0 = ctx.exp(z);
     let l1 = ctx.ln(o);
-    assert!(ctx.is_one(e0));
+    assert_eq!(e0, ctx.one());
     assert!(ctx.is_zero(l1));
 
     // exp(ln(x)) evaluates to x; diode-like exp(v/Vt) evaluates correctly.

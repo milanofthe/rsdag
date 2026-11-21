@@ -54,7 +54,7 @@ pub enum CmpOp {
 
 impl CmpOp {
     /// The operator as written, `>`, `>=`, ...
-    pub fn symbol(self) -> &'static str {
+    pub(crate) fn symbol(self) -> &'static str {
         match self {
             CmpOp::Gt => ">",
             CmpOp::Ge => ">=",
@@ -90,7 +90,7 @@ impl ReduceOp {
     }
 
     /// Combine an accumulator with the next element (left fold).
-    pub fn combine(self, acc: f64, x: f64) -> f64 {
+    pub(crate) fn combine(self, acc: f64, x: f64) -> f64 {
         match self {
             ReduceOp::Sum => acc + x,
             ReduceOp::Product => acc * x,
@@ -492,7 +492,7 @@ impl Elementary {
     }
 
     /// The reduction an extremum is, `None` for an op.
-    pub fn reduction(self) -> Option<ReduceOp> {
+    pub(crate) fn reduction(self) -> Option<ReduceOp> {
         match self {
             Elementary::Min => Some(ReduceOp::Min),
             Elementary::Max => Some(ReduceOp::Max),
@@ -525,7 +525,7 @@ impl Elementary {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Node {
     /// Exact rational constant, by id into the context's constant table (kept
-    /// reduced, sign in the numerator). Resolve with [`crate::Graph::const_val`].
+    /// reduced, sign in the numerator). Read with [`crate::Graph::const_f64`].
     Const(ConstId),
     /// Free symbol, referenced by id into the context symbol table.
     Symbol(SymbolId),
@@ -550,8 +550,8 @@ pub enum Node {
     /// One fused node instead of a balanced/again-binary tree.
     Reduce(ReduceOp, ArgList),
     /// Inner product `Σ_i a[i]*b[i]` over two equal-length operand lists,
-    /// stored as ONE list `[a_0..a_n, b_0..b_n]` (resolve the halves with
-    /// [`crate::Graph::dot_args`]). The fused form of a sum of pairwise
+    /// stored as ONE list `[a_0..a_n, b_0..b_n]` (the halves of
+    /// [`crate::Graph::args`]). The fused form of a sum of pairwise
     /// products (matrix-vector rows).
     Dot(ArgList),
     /// Component `i` of `x` solving the dense system `A x = b`, the list
@@ -653,8 +653,8 @@ impl std::ops::Deref for Operands<'_> {
     }
 }
 
-/// The arithmetic of structural fingerprints (see
-/// [`Graph::fingerprint`](crate::Graph::fingerprint)): a fixed mixing
+/// The arithmetic of structural fingerprints (see `Graph::shape`): a fixed
+/// mixing
 /// function and a fixed byte hasher, so a fingerprint is the same on every
 /// platform, in every run and under every version of the hash crates.
 pub(crate) mod shape {

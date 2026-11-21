@@ -28,8 +28,12 @@ use crate::semantics::{binary_f64, unary_f64};
 /// window (which is what makes `Reduce`/`Dot`/`Solve`/`Call` hash-cons structurally).
 pub struct Graph<K: Field = F64> {
     nodes: Vec<Node>,
-    /// The structural fingerprint of each node (see
-    /// [`fingerprint`](Self::fingerprint)), parallel to `nodes`.
+    /// The structural fingerprint of each node, parallel to `nodes`: a hash
+    /// of what it computes (its op, constant value or symbol name, and its
+    /// operands' fingerprints), never of when it was built, so equal
+    /// expressions have equal fingerprints in any graph, built in any order.
+    /// Commutative operand lists are ordered by it, which is what makes a
+    /// sum fold in the same order however the graph grew.
     shape: Vec<u64>,
     dedup: HashMap<Node, ExprId>,
     consts: Vec<K>,
@@ -345,7 +349,7 @@ impl<K: Field> Graph<K> {
 
     /// The exact rational behind a constant id.
     #[inline]
-    pub fn const_val(&self, c: ConstId) -> &K {
+    pub(crate) fn const_val(&self, c: ConstId) -> &K {
         &self.consts[c.0 as usize]
     }
 
@@ -357,7 +361,7 @@ impl<K: Field> Graph<K> {
 
     /// The two equal-length halves `(a, b)` of a `Dot` node's operand list.
     #[inline]
-    pub fn dot_args(&self, l: ArgList) -> (&[ExprId], &[ExprId]) {
+    pub(crate) fn dot_args(&self, l: ArgList) -> (&[ExprId], &[ExprId]) {
         self.args(l).split_at(l.len() / 2)
     }
 
@@ -386,17 +390,6 @@ impl<K: Field> Graph<K> {
         self.shape.push(shape);
         self.dedup.insert(node, id);
         id
-    }
-
-    /// The structural fingerprint of `e`: a hash of what it computes (its
-    /// op, constant value or symbol name, and its operands' fingerprints),
-    /// never of when it was built, so equal expressions have equal
-    /// fingerprints in any graph, built in any order. Commutative operand
-    /// lists are ordered by it, which is what makes a sum fold in the same
-    /// order however the graph grew; a consumer can key caches on it.
-    #[inline]
-    pub fn fingerprint(&self, e: ExprId) -> u64 {
-        self.shape[e.0 as usize]
     }
 
     fn shape_of(&self, node: &Node) -> u64 {
@@ -463,7 +456,7 @@ impl<K: Field> Graph<K> {
 
     /// Borrow the rational value if `id` is a constant.
     #[inline]
-    pub fn const_of(&self, id: ExprId) -> Option<&K> {
+    pub(crate) fn const_of(&self, id: ExprId) -> Option<&K> {
         match *self.node(id) {
             Node::Const(c) => Some(self.const_val(c)),
             _ => None,
@@ -483,13 +476,13 @@ impl<K: Field> Graph<K> {
 
     /// True if `id` is the constant one.
     #[inline]
-    pub fn is_one(&self, id: ExprId) -> bool {
+    pub(crate) fn is_one(&self, id: ExprId) -> bool {
         id == self.one
     }
 
     // --- leaf constructors -------------------------------------------------
 
-    pub fn konst(&mut self, r: K) -> ExprId {
+    pub(crate) fn konst(&mut self, r: K) -> ExprId {
         let c = match self.const_dedup.get(&r) {
             Some(&c) => c,
             None => {
@@ -510,7 +503,7 @@ impl<K: Field> Graph<K> {
         }
     }
 
-    pub fn ratio(&mut self, num: i64, den: i64) -> ExprId {
+    pub(crate) fn ratio(&mut self, num: i64, den: i64) -> ExprId {
         self.konst(K::from_ratio(num, den))
     }
 
@@ -556,7 +549,7 @@ impl<K: Field> Graph<K> {
 
     /// A symbol of its own: named `prefix` and a number, a name no symbol of
     /// the graph has.
-    pub fn fresh_symbol(&mut self, prefix: &str) -> SymbolId {
+    pub(crate) fn fresh_symbol(&mut self, prefix: &str) -> SymbolId {
         let mut k = self.symbol_names.len();
         loop {
             let name = format!("{prefix}{k}");
@@ -804,17 +797,14 @@ impl<K: Field> Graph<K> {
     pub fn floor(&mut self, a: ExprId) -> ExprId {
         self.unary(UnaryOp::Floor, a)
     }
-    pub fn sinh(&mut self, a: ExprId) -> ExprId {
+    pub(crate) fn sinh(&mut self, a: ExprId) -> ExprId {
         self.unary(UnaryOp::Sinh, a)
     }
-    pub fn cosh(&mut self, a: ExprId) -> ExprId {
+    pub(crate) fn cosh(&mut self, a: ExprId) -> ExprId {
         self.unary(UnaryOp::Cosh, a)
     }
     pub fn tanh(&mut self, a: ExprId) -> ExprId {
         self.unary(UnaryOp::Tanh, a)
-    }
-    pub fn atan(&mut self, a: ExprId) -> ExprId {
-        self.unary(UnaryOp::Atan, a)
     }
 
     // --- conditions and selection ----------------------------------------
@@ -976,14 +966,14 @@ impl<K: Field> Graph<K> {
     }
 
     /// The matrix and the right-hand side of a [`Node::Solve`] list, and `n`.
-    pub fn solve_args(&self, l: ArgList) -> (usize, &[ExprId], &[ExprId]) {
+    pub(crate) fn solve_args(&self, l: ArgList) -> (usize, &[ExprId], &[ExprId]) {
         let n = Self::solve_n(l.len());
         let all = self.args(l);
         (n, &all[..n * n], &all[n * n..])
     }
 
     /// `n` from the length `n * n + n` of a solve list.
-    pub fn solve_n(len: usize) -> usize {
+    pub(crate) fn solve_n(len: usize) -> usize {
         let n = ((len as f64).sqrt()) as usize;
         debug_assert_eq!(n * n + n, len, "a solve list is n*n + n long");
         n

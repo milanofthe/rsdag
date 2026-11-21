@@ -18,7 +18,7 @@
 //! like arithmetic.
 //!
 //! ```
-//! use rsdag::{Builder, Graph, Numeric, Scope, Tape, F64};
+//! use rsdag::{Builder, Graph, Numeric, ParamRole, Scope, Tape, F64};
 //!
 //! /// A diode current, written once.
 //! fn diode<B: Builder>(b: &mut B, v: B::N, is: B::N) -> B::N {
@@ -34,7 +34,7 @@
 //! // Recorded, then differentiated and compiled:
 //! let mut g: Graph<F64> = Graph::new();
 //! let mut s = Scope::new(&mut g, "diode");
-//! let (v, is) = (s.param("v"), s.param("is"));
+//! let (v, is) = (s.param_with_role("v", ParamRole::Free), s.param_with_role("is", ParamRole::Free));
 //! let expr = diode(&mut *s, v, is);
 //! let f = s.close(vec![expr]);
 //! # let _ = (i, f, Tape::compile(&g, &[expr], &[]));

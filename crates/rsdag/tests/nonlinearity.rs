@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use rsdag::BigRational;
-use rsdag::{nonlinearity, nonlinearity_of, CmpOp, Degree, ExprId, Graph, SymbolId, UnaryOp};
+use rsdag::{nonlinearity_of, CmpOp, Degree, ExprId, Graph, ParamRole, SymbolId, UnaryOp};
 
 fn vars(g: &Graph<BigRational>, of: &[ExprId]) -> BTreeSet<SymbolId> {
     g.free_symbols_in(of)
@@ -19,7 +19,7 @@ fn polynomial_degree_is_exact() {
     let bx = g.mul(b, x);
     let s = g.add(ax2, bx);
     let expr = g.add(s, c);
-    let nl = nonlinearity(&g, expr, &vars(&g, &[x]));
+    let nl = nonlinearity_of(&g, &[expr], &vars(&g, &[x]));
     assert_eq!(nl.degree, Degree::Finite(2));
     assert!(nl.is_polynomial());
     assert!(nl.transcendental.is_empty());
@@ -32,7 +32,7 @@ fn parameters_do_not_raise_the_degree() {
     let (x, a) = (g.sym("x"), g.sym("a"));
     let ea = g.exp(a);
     let expr = g.mul(ea, x); // exp(a) * x is linear in x
-    let nl = nonlinearity(&g, expr, &vars(&g, &[x]));
+    let nl = nonlinearity_of(&g, &[expr], &vars(&g, &[x]));
     assert_eq!(nl.degree, Degree::Finite(1));
     assert!(nl.transcendental.is_empty());
 }
@@ -43,7 +43,7 @@ fn a_diode_is_transcendental() {
     let (x, vt) = (g.sym("x"), g.sym("vt"));
     let q = g.div(x, vt);
     let expr = g.exp(q);
-    let nl = nonlinearity(&g, expr, &vars(&g, &[x]));
+    let nl = nonlinearity_of(&g, &[expr], &vars(&g, &[x]));
     assert_eq!(nl.degree, Degree::Unbounded);
     assert!(!nl.is_polynomial());
     assert!(nl.transcendental.contains(&UnaryOp::Exp));
@@ -55,7 +55,7 @@ fn a_reciprocal_of_an_unknown_is_rational() {
     let mut g: Graph<BigRational> = Graph::new();
     let x = g.sym("x");
     let expr = g.pow_i(x, -1);
-    let nl = nonlinearity(&g, expr, &vars(&g, &[x]));
+    let nl = nonlinearity_of(&g, &[expr], &vars(&g, &[x]));
     assert!(nl.rational);
     assert_eq!(nl.degree, Degree::Unbounded);
 }
@@ -68,7 +68,7 @@ fn a_variable_branch_is_piecewise_and_a_fixed_one_is_not() {
     let on_x = g.cmp(CmpOp::Gt, x, zero);
     let nx = g.neg(x);
     let abs_like = g.select(on_x, x, nx);
-    let nl = nonlinearity(&g, abs_like, &vars(&g, &[x]));
+    let nl = nonlinearity_of(&g, &[abs_like], &vars(&g, &[x]));
     assert!(nl.piecewise);
     assert_eq!(nl.degree, Degree::Unbounded);
 
@@ -77,7 +77,7 @@ fn a_variable_branch_is_piecewise_and_a_fixed_one_is_not() {
     let on_p = g.cmp(CmpOp::Gt, p, zero);
     let x2 = g.pow_i(x, 2);
     let fixed = g.select(on_p, x2, x);
-    let nl = nonlinearity(&g, fixed, &vars(&g, &[x]));
+    let nl = nonlinearity_of(&g, &[fixed], &vars(&g, &[x]));
     assert!(!nl.piecewise);
     assert_eq!(nl.degree, Degree::Finite(2));
 }
@@ -88,14 +88,14 @@ fn reductions_and_dots_follow_sum_and_product_rules() {
     let (x, y, a) = (g.sym("x"), g.sym("y"), g.sym("a"));
     let v = vars(&g, &[x, y]);
     let prod = g.reduce(rsdag::ReduceOp::Product, vec![x, y, a]);
-    assert_eq!(nonlinearity(&g, prod, &v).degree, Degree::Finite(2));
+    assert_eq!(nonlinearity_of(&g, &[prod], &v).degree, Degree::Finite(2));
     let sum = g.reduce(rsdag::ReduceOp::Sum, vec![x, prod]);
-    assert_eq!(nonlinearity(&g, sum, &v).degree, Degree::Finite(2));
+    assert_eq!(nonlinearity_of(&g, &[sum], &v).degree, Degree::Finite(2));
     // x*x + y*a: degree 2 from the first term.
     let dot = g.dot(vec![x, y], vec![x, a]);
-    assert_eq!(nonlinearity(&g, dot, &v).degree, Degree::Finite(2));
+    assert_eq!(nonlinearity_of(&g, &[dot], &v).degree, Degree::Finite(2));
     let m = g.reduce(rsdag::ReduceOp::Max, vec![x, a]);
-    let nl = nonlinearity(&g, m, &v);
+    let nl = nonlinearity_of(&g, &[m], &v);
     assert!(nl.piecewise && nl.degree == Degree::Unbounded);
 }
 
@@ -111,7 +111,7 @@ fn a_call_is_classified_through_its_body() {
     let f = g.define_func("sq", vec![ps], vec![body]);
     let x = g.sym("x");
     let call = g.call(f, 0, &[x]);
-    let nl = nonlinearity(&g, call, &vars(&g, &[x]));
+    let nl = nonlinearity_of(&g, &[call], &vars(&g, &[x]));
     assert!(!nl.opaque);
     assert_eq!(nl.degree, Degree::Finite(2));
 }
@@ -138,15 +138,15 @@ fn a_system_takes_the_worst_case() {
 fn calls_classify_like_their_inlined_bodies() {
     let mut g: Graph<BigRational> = Graph::new();
     let mut s = rsdag::Scope::new(&mut g, "cube");
-    let v = s.param("v");
-    let k = s.param("k");
+    let v = s.param_with_role("v", ParamRole::Free);
+    let k = s.param_with_role("k", ParamRole::Free);
     let v3 = s.pow_i(v, 3);
     let i = s.mul(k, v3);
     let cube = s.close(vec![i]);
     let mut s = rsdag::Scope::new(&mut g, "pair");
-    let a = s.param("a");
-    let b = s.param("b");
-    let k = s.param("k");
+    let a = s.param_with_role("a", ParamRole::Free);
+    let b = s.param_with_role("b", ParamRole::Free);
+    let k = s.param_with_role("k", ParamRole::Free);
     let ia = s.call(cube, 0, &[a, k]);
     let ib = s.call(cube, 0, &[b, k]);
     let sum = s.add(ia, ib);
@@ -157,8 +157,8 @@ fn calls_classify_like_their_inlined_bodies() {
     let call = g.call(pair, 0, &[xy, y, p]);
     let flat = g.inline_all(&[call])[0];
     let vs = vars(&g, &[x, y]);
-    let through = nonlinearity(&g, call, &vs);
-    assert_eq!(through, nonlinearity(&g, flat, &vs));
+    let through = nonlinearity_of(&g, &[call], &vs);
+    assert_eq!(through, nonlinearity_of(&g, &[flat], &vs));
     assert_eq!(
         through.degree,
         Degree::Finite(6),
@@ -167,7 +167,10 @@ fn calls_classify_like_their_inlined_bodies() {
     assert!(!through.opaque);
 
     let only_p = vars(&g, &[p]);
-    assert_eq!(nonlinearity(&g, call, &only_p).degree, Degree::Finite(1));
+    assert_eq!(
+        nonlinearity_of(&g, &[call], &only_p).degree,
+        Degree::Finite(1)
+    );
 
     let ext = g.define_extern_func(
         "ext",
@@ -176,7 +179,7 @@ fn calls_classify_like_their_inlined_bodies() {
         vec![rsdag::Output::Slot(0)],
     );
     let opaque = g.call(ext, 0, &[x]);
-    assert!(nonlinearity(&g, opaque, &vs).opaque);
+    assert!(nonlinearity_of(&g, &[opaque], &vs).opaque);
 }
 
 struct Square;

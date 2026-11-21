@@ -535,8 +535,9 @@ pub use crate::constants::REVERSE_MIN_TOUCHED;
 /// Sparse Jacobian of `residuals` with respect to `wrt`: row `i` lists the
 /// nonzero `(column, d residuals[i] / d wrt[column])`, by column.
 ///
-/// Only the symbols in a row's support can have a nonzero derivative (see
-/// [`Graph::support_in`]): through a call, the ones the called output reads.
+/// Only the symbols a row reads through operands that carry a derivative
+/// can have a nonzero one: through a call, the ones the called output reads
+/// (its output support).
 /// A row that touches few unknowns is differentiated forward, one sweep
 /// per unknown, and a sweep is shared by every such row that touches that
 /// unknown, so a subexpression common to several rows (a device current
@@ -630,8 +631,8 @@ pub fn affine_in<K: Field>(
 
 /// The vector-Jacobian product of `outputs` by `wrt`, over weights of its
 /// own: the gradient of `sum_k w_k outputs[k]` by `wrt` (one reverse sweep),
-/// and the weights `w_k`, fresh symbols (see [`Graph::fresh_symbol`]) an
-/// evaluation binds. Every entry is linear in the weights.
+/// and the weights `w_k`, symbols of their own (a name no symbol of the
+/// graph has) an evaluation binds. Every entry is linear in the weights.
 pub fn vjp<K: Field>(
     ctx: &mut Graph<K>,
     outputs: &[ExprId],

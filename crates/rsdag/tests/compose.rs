@@ -2,7 +2,9 @@
 //! imported into another with what it calls, called there, and compiled as
 //! one program whose only calls are its leaves.
 
-use rsdag::{ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
+use rsdag::{
+    differentiate, ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64,
+};
 use rustc_hash::FxHashMap;
 
 fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
@@ -25,13 +27,21 @@ fn library() -> (Graph<F64>, FuncId, FuncId) {
     let sa = s.sin(a);
     let dev = s.close(vec![ab, sa]);
     let mut s = Scope::new(&mut g, "blk");
-    let (x, y, z) = (s.param("x"), s.param("y"), s.param("z"));
+    let (x, y, z) = (
+        s.param_with_role("x", ParamRole::Free),
+        s.param_with_role("y", ParamRole::Free),
+        s.param_with_role("z", ParamRole::Free),
+    );
     let first = s.calls(dev, &[0, 1], &[x, y]);
     let second = s.calls(dev, &[0, 1], &[y, z]);
     let o0 = s.add(first[0], second[1]);
     let blk = s.close(vec![o0, second[0]]);
     // a derivative output comes along with the function
-    g.derivative_output(blk, 0, 1);
+    let (p, q) = (g.sym("p"), g.sym("q"));
+    let r = g.sym("r");
+    let call = g.call(blk, 0, &[p, q, r]);
+    let q = g.symbol_id("q");
+    differentiate(&mut g, call, q);
     (g, dev, blk)
 }
 
@@ -46,11 +56,8 @@ fn an_imported_function_brings_what_it_calls_once() {
     assert_eq!(g.n_funcs(), 2, "blk and the dev it calls");
     let d = imported[&dev];
     assert_eq!(g.func(d).param_roles(), lib.func(dev).param_roles());
-    let k = g.func(b).derivative(0, 1).expect("the derivative output");
-    assert!(matches!(
-        g.func(b).output_roles()[k as usize],
-        OutputRole::Derivative { of: 0, wrt: 1 }
-    ));
+    let roles = g.func(b).output_roles();
+    assert!(roles.contains(&OutputRole::Derivative { of: 0, wrt: 1 }));
 }
 
 #[test]

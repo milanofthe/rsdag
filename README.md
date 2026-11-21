@@ -43,7 +43,7 @@ NOTICE); for a commercial license contact info@milanrother.com.
 - `rsdag-py`: Python package `rsdag` (`trace`, `jit`, `jacobian`, `grad`,
   `where`, `matmul`, `solve`; traced programs compose), built with maturin.
 
-Dependencies of the core: `rustc-hash`, `libm`. `Graph` is `Graph<F64>`.
+Dependencies of the core: `rustc-hash`, `libm`, `rspool`. `Graph` is `Graph<F64>`.
 Features:
 
 | feature | adds | dependencies |
@@ -71,11 +71,10 @@ schedules and emits it again.
 ## Graph
 
 Nodes are hash-consed; ascending ids are a topological order. Constructors
-fold constants in `K` and apply the algebraic identities.
-`Graph::fingerprint` is a structural hash of a node, the same in any graph,
-on any platform and in any build order; the terms of a sum or product are
-ordered by it. A function is a
-graph over positional parameters with named outputs; `Call` applies it;
+fold constants in `K` and apply the algebraic identities. Each node
+carries a structural hash, the same in any graph, on any platform and in
+any build order; the terms of a sum or product are ordered by it. A
+function is a graph over positional parameters with named outputs; `Call` applies it;
 derivative outputs are derived from the body on first demand. Parameters
 and outputs carry roles (state, input, parameter, time, delay history,
 noise generator; residual, charge, derivative, guard with its crossing
@@ -185,7 +184,7 @@ with `Graph::import`, the functions it calls along (a structurally equal
 function already there is reused), and calls into it build the
 composition. A hierarchy (blocks of blocks, subcircuits of devices) stays
 functions for the symbolic work: a derivative through a call follows only
-what the called output reads (`Graph::output_support`), and specialization
+what the called output reads, and specialization (`Graph::specialize_calls`)
 makes one copy per pattern of constant arguments. A model card is a
 binding: `Graph::bind` binds parameters of a function once, a call through
 it (`Graph::calls_bound`) carries only the instance's own arguments, and
@@ -263,10 +262,9 @@ specialized tape.
 
 `dot::GraphView` gives a graph under some roots as data for a viewer that
 lays it out itself: one node per expression with its kind, a shared
-subexpression once, a focus set at full strength and the rest faded,
-clusters, extra links, and the bodies of the calls in nested frames
-(`bodies`, or `inline` for every instance). The operators are labelled in
-the notation `Ascii` or `Math`.
+subexpression once, and with `inline` every call as its body, once per
+instance, in nested frames. The operators are labelled in the notation
+`Ascii` or `Math`.
 
 ## Bit-exactness
 

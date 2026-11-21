@@ -24,10 +24,9 @@ fn lag(name: &str) -> (Graph<F64>, rsdag::Module<F64>) {
     let tau = s.param_with_role("tau", ParamRole::Param);
     let d = s.sub(u, x);
     let dx = s.div(d, tau);
-    s.close_with_roles(vec![
-        (OutputRole::StateDeriv { id: 0 }, dx),
-        (OutputRole::Output { port: 0, elem: 0 }, x),
-    ]);
+    let f = s.close(vec![dx, x]);
+    g.set_output_role(f, 0, OutputRole::StateDeriv { id: 0 });
+    g.set_output_role(f, 1, OutputRole::Output { port: 0, elem: 0 });
     let module = g.to_module();
     (g, module)
 }
@@ -46,7 +45,8 @@ fn saturation(name: &str) -> (Graph<F64>, rsdag::Module<F64>) {
     let capped = s.select(over, hi, v);
     let under = s.cmp(rsdag::CmpOp::Lt, capped, lo);
     let y = s.select(under, lo, capped);
-    s.close_with_roles(vec![(OutputRole::Output { port: 0, elem: 0 }, y)]);
+    let f = s.close(vec![y]);
+    g.set_output_role(f, 0, OutputRole::Output { port: 0, elem: 0 });
     let module = g.to_module();
     (g, module)
 }
@@ -130,23 +130,20 @@ fn an_event_is_a_guard_output_and_a_state_write() {
     let guard = h;
     let dh = v;
     let gravity = s.konst_f64(-9.81);
-    let f = s.close_with_roles(vec![
-        (
-            OutputRole::Guard {
-                id: 0,
-                dir: rsdag::Crossing::Falling,
-            },
-            guard,
-        ),
-        (OutputRole::StateDeriv { id: 0 }, dh),
-        (OutputRole::StateDeriv { id: 1 }, gravity),
-    ]);
+    let f = s.close(vec![guard, dh, gravity]);
+    let guard_role = OutputRole::Guard {
+        id: 0,
+        dir: rsdag::Crossing::Falling,
+    };
+    g.set_output_role(f, 0, guard_role);
+    g.set_output_role(f, 1, OutputRole::StateDeriv { id: 0 });
+    g.set_output_role(f, 2, OutputRole::StateDeriv { id: 1 });
     let params = g.func(f).params().to_vec();
 
     // The roles select the event's parts without any lookup by name.
     let guards = g
         .func(f)
-        .outputs_with_role(|r| matches!(r, OutputRole::Guard { .. }));
+        .exprs_with_role(|r| matches!(r, OutputRole::Guard { .. }));
     assert_eq!(guards.len(), 1);
 
     // A derivative-based locator wants dg/dt along the flow: (dg/dh) dh/dt
@@ -162,10 +159,11 @@ fn an_event_is_a_guard_output_and_a_state_write() {
     let ve = e.param_with_role("v", ParamRole::State { id: 1 });
     let restitution = e.konst_f64(-0.8);
     let v_new = e.mul(restitution, ve);
-    let eff = e.close_with_roles(vec![(OutputRole::StateWrite { id: 1 }, v_new)]);
+    let eff = e.close(vec![v_new]);
+    g.set_output_role(eff, 0, OutputRole::StateWrite { id: 1 });
     assert_eq!(
         g.func(eff)
-            .outputs_with_role(|r| matches!(r, OutputRole::StateWrite { .. }))
+            .exprs_with_role(|r| matches!(r, OutputRole::StateWrite { .. }))
             .len(),
         1
     );

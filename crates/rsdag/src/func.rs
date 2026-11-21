@@ -61,11 +61,11 @@ pub enum Output {
 /// symbolic expressions. An extern function is its bundle; a symbolic one
 /// is its interpreted body.
 #[derive(Clone)]
-pub struct Body {
-    pub bundle: Arc<dyn ExternBundle>,
+pub(crate) struct Body {
+    pub(crate) bundle: Arc<dyn ExternBundle>,
     /// `slot_of[out]` is the bundle slot holding output `out`, `None` when
     /// the body was compiled without it.
-    pub slot_of: Vec<Option<u32>>,
+    pub(crate) slot_of: Vec<Option<u32>>,
 }
 
 /// A function of a [`Graph`](crate::graph::Graph), read through its
@@ -122,7 +122,7 @@ pub(crate) type ReadsKey = (crate::graph::Through, Box<[u32]>);
 /// tape is split over them, and a caller that has them in its own prolog
 /// keeps the body's prolog result per instance (see
 /// [`ExternBundle::state_len`]).
-pub struct InterpretedBody {
+pub(crate) struct InterpretedBody {
     tape: crate::tape::Tape,
     n_out: usize,
     /// One flag per parameter; empty when no parameter is pure.
@@ -262,7 +262,7 @@ impl Function {
     }
 
     /// The derivative output `d outputs[out] / d params[param]`, if there is one.
-    pub fn derivative(&self, out: u32, param: u32) -> Option<u32> {
+    pub(crate) fn derivative(&self, out: u32, param: u32) -> Option<u32> {
         self.deriv_index.get(&(out, param)).copied()
     }
 
@@ -378,7 +378,7 @@ impl Function {
         &self.output_roles
     }
     /// The numeric bundle of an extern function; `None` for a symbolic one.
-    pub fn extern_body(&self) -> Option<&Arc<dyn ExternBundle>> {
+    pub(crate) fn extern_body(&self) -> Option<&Arc<dyn ExternBundle>> {
         self.extern_body.as_ref()
     }
 
@@ -386,7 +386,7 @@ impl Function {
     /// with the slot of each output, a symbolic one is its body compiled to
     /// a tape and interpreted (see [`InterpretedBody`]), every expression
     /// output a slot.
-    pub fn body<K: crate::field::Field>(&self, ctx: &crate::graph::Graph<K>) -> Body {
+    pub(crate) fn body<K: crate::field::Field>(&self, ctx: &crate::graph::Graph<K>) -> Body {
         let all: Vec<u32> = (0..self.outputs.len() as u32).collect();
         self.body_for(ctx, &all)
     }
@@ -395,7 +395,7 @@ impl Function {
     /// among the bodies built so far that carry each of them that is an
     /// expression, the one computing the fewest outputs; else the body of
     /// exactly those outputs, interpreted.
-    pub fn body_for<K: crate::field::Field>(
+    pub(crate) fn body_for<K: crate::field::Field>(
         &self,
         ctx: &crate::graph::Graph<K>,
         needed: &[u32],
@@ -514,7 +514,7 @@ impl Function {
     /// A program that reads fewer outputs than a body it was given computes
     /// (a view of a program lowered for more, see [`crate::tape::Lowered`])
     /// takes this one.
-    pub fn body_exact<K: crate::field::Field>(
+    pub(crate) fn body_exact<K: crate::field::Field>(
         &self,
         ctx: &crate::graph::Graph<K>,
         needed: &[u32],
@@ -557,13 +557,6 @@ impl Function {
         })
     }
 
-    /// Indices of the outputs carrying `role`, in output order.
-    pub fn outputs_with_role(&self, role: impl Fn(&OutputRole) -> bool) -> Vec<u32> {
-        (0..self.outputs.len() as u32)
-            .filter(|&i| role(&self.output_roles[i as usize]))
-            .collect()
-    }
-
     /// The expression outputs carrying `role`, and their roles, in output
     /// order.
     pub fn exprs_with_role(&self, role: impl Fn(&OutputRole) -> bool) -> Vec<(ExprId, OutputRole)> {
@@ -576,7 +569,7 @@ impl Function {
             .collect()
     }
 
-    pub fn is_extern(&self) -> bool {
+    pub(crate) fn is_extern(&self) -> bool {
         self.extern_body.is_some()
     }
 }

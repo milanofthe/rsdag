@@ -18,7 +18,10 @@ fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
 /// + 3 v_{k+2}, every output reading four of the 2 N parameters.
 fn body(g: &mut Graph<F64>) -> FuncId {
     let mut s = Scope::new(g, "dev");
-    let (a, b) = (s.param("a"), s.param("b"));
+    let (a, b) = (
+        s.param_with_role("a", ParamRole::Free),
+        s.param_with_role("b", ParamRole::Free),
+    );
     let sb = s.sin(b);
     let dev = s.close(vec![sb, a]);
     let mut s = Scope::new(g, "body");
@@ -55,13 +58,13 @@ fn calls_of_one_instance_are_the_calls_one_by_one() {
     assert_eq!(g.len(), n0 + N, "one node per output, the list shared");
 
     // the same calls in another graph, built in another order: the same
-    // fingerprints
+    // expressions
     let mut h: Graph<F64> = Graph::new();
     let fh = body(&mut h);
     let hargs: Vec<ExprId> = (0..2 * N).map(|k| h.sym(&format!("x{k}"))).collect();
     let back: Vec<ExprId> = outs.iter().rev().map(|&k| h.call(fh, k, &hargs)).collect();
     for (a, b) in together.iter().zip(back.iter().rev()) {
-        assert_eq!(g.fingerprint(*a), h.fingerprint(*b));
+        assert_eq!(rsdag::to_string(&g, *a), rsdag::to_string(&h, *b));
     }
 }
 
@@ -156,8 +159,12 @@ fn composite_functions_inline_and_leaves_stay_calls() {
     let f = body(&mut g);
     // top(u, p) = body(u, p) + body(u shifted, p), one instance each
     let mut s = Scope::new(&mut g, "top");
-    let u: Vec<ExprId> = (0..N).map(|k| s.param(&format!("u{k}"))).collect();
-    let p: Vec<ExprId> = (0..N).map(|k| s.param(&format!("q{k}"))).collect();
+    let u: Vec<ExprId> = (0..N)
+        .map(|k| s.param_with_role(&format!("u{k}"), ParamRole::Free))
+        .collect();
+    let p: Vec<ExprId> = (0..N)
+        .map(|k| s.param_with_role(&format!("q{k}"), ParamRole::Free))
+        .collect();
     let a: Vec<ExprId> = u.iter().chain(&p).copied().collect();
     let b: Vec<ExprId> = (0..N)
         .map(|k| u[(k + 1) % N])

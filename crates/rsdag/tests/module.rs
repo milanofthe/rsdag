@@ -17,7 +17,7 @@ fn a_module_round_trips_bit_exactly() {
         };
         let mut g: Graph<F64> = Graph::new();
         let (roots, syms) = build(&mut g, &mut spec);
-        let f = g.close("f", roots.clone());
+        let f = Scope::new(&mut g, "f").close(roots.clone());
 
         let module = g.to_module();
         let (loaded, map) = Graph::from_module(&module).unwrap();
@@ -92,7 +92,7 @@ fn a_module_survives_json() {
         let k = g.konst_f64(v);
         roots.push(k);
     }
-    g.close("f", roots.clone());
+    Scope::new(&mut g, "f").close(roots.clone());
     let module = g.to_module();
     let text = serde_json::to_string(&module).expect("serialize");
     let back: Module<F64> = serde_json::from_str(&text).expect("deserialize");
@@ -116,13 +116,13 @@ fn a_module_survives_json() {
 fn calls_and_nested_functions_round_trip() {
     let mut g: Graph<F64> = Graph::new();
     let mut s = rsdag::Scope::new(&mut g, "gain");
-    let u = s.param("u");
-    let k = s.param("k");
+    let u = s.param_with_role("u", ParamRole::Free);
+    let k = s.param_with_role("k", ParamRole::Free);
     let y = s.mul(k, u);
     let gain = s.close(vec![y]);
 
     let mut s = rsdag::Scope::new(&mut g, "chain");
-    let x = s.param("x");
+    let x = s.param_with_role("x", ParamRole::Free);
     let a = s.konst_f64(2.0);
     let b = s.konst_f64(3.0);
     let mid = s.call(gain, 0, &[x, a]);
@@ -228,7 +228,7 @@ fn derivatives_demanded_after_a_call_round_trip() {
         let s = g.sin(x);
         g.mul(s, y)
     };
-    let f = g.close("f", vec![body]);
+    let f = Scope::new(&mut g, "f").close(vec![body]);
     let (a, b) = (g.sym("a"), g.sym("b"));
     let c = g.call(f, 0, &[a, b]);
     let syms = [SymbolId(2), SymbolId(3)];
@@ -241,8 +241,8 @@ fn derivatives_demanded_after_a_call_round_trip() {
     let (mut loaded, map) = Graph::from_module(&module).unwrap();
     assert_eq!(loaded.to_module(), module);
     let f2 = map.funcs[f.0 as usize];
-    let d0 = g.derivative_output(f, 0, 0);
-    assert_eq!(loaded.derivative_output(f2, 0, 0), d0);
+    let a2 = map.symbols[syms[0].0 as usize];
+    differentiate(&mut loaded, map.exprs[c.0 as usize], a2);
     assert_eq!(
         loaded.func(f2).outputs().len(),
         n_out,
@@ -278,7 +278,8 @@ fn a_declared_extern_derivative_survives_a_reload() {
         })
         .unwrap();
     let f2 = map.funcs[f.0 as usize];
-    assert_eq!(loaded.derivative_output(f2, 0, 0), k);
+    let role = loaded.func(f2).output_roles()[k as usize];
+    assert_eq!(role, OutputRole::Derivative { of: 0, wrt: 0 });
     let syms = [SymbolId(0), SymbolId(1)];
     let d = differentiate(&mut loaded, map.exprs[sum.0 as usize], syms[0]);
     let (mut w, mut o) = (Vec::new(), Vec::new());
@@ -309,9 +310,9 @@ fn a_broken_module_is_refused_not_panicked_on() {
     let s = g.add(x, y);
     let t = g.sin(s);
     let d = g.dot(vec![x, y], vec![y, t]);
-    let _ = g.close("f", vec![d]);
+    let _ = Scope::new(&mut g, "f").close(vec![d]);
     let good = g.to_module();
-    assert!(good.validate().is_ok());
+    assert!(Graph::from_module(&good).is_ok());
 
     let mut breaks: Vec<(&str, rsdag::Module<F64>)> = Vec::new();
     let mut m = good.clone();

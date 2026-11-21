@@ -1,7 +1,6 @@
-//! A graph's numbers depend on its expressions, not on its history: equal
-//! expressions have equal fingerprints in any graph, and a sum folds in the
-//! same order however its terms were built, so it evaluates to the same
-//! bits after any unrelated construction and in any build order.
+//! A graph's numbers depend on its expressions, not on its history: a sum
+//! folds in the same order however its terms were built, so it evaluates to
+//! the same bits after any unrelated construction and in any build order.
 
 use rsdag::synth::{build, inputs, Spec, Vocabulary};
 use rsdag::{differentiate, sparse_jacobian, ExprId, Graph, Node, ReduceOp, SymbolId, Tape, F64};
@@ -68,7 +67,6 @@ fn a_sum_evaluates_the_same_whatever_was_built_before() {
     let tb = terms(&mut b, &xb, &backward);
     let rb = b.reduce(ReduceOp::Sum, tb);
 
-    assert_eq!(a.fingerprint(ra), b.fingerprint(rb));
     assert_eq!(value(&a, ra, &sa, &ins), value(&b, rb, &sb, &ins));
 }
 
@@ -108,9 +106,6 @@ fn jacobian_bits_do_not_depend_on_how_it_was_taken() {
                 x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()),
                 "seed {seed} entry {k}: {x} vs {y}"
             );
-        }
-        for (&e, &f) in fast.iter().zip(&slow) {
-            assert_eq!(g.fingerprint(e), h.fingerprint(f), "seed {seed}");
         }
     }
 }

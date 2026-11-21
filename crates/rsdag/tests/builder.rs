@@ -3,7 +3,7 @@
 //! bit on the whole vocabulary.
 
 use rsdag::synth::{inputs, Spec};
-use rsdag::{Builder, Graph, Numeric, Scope, Tape, F64};
+use rsdag::{Builder, Graph, Numeric, ParamRole, Scope, Tape, F64};
 
 /// A model with a bit of everything: ring, elementary functions, a clamp,
 /// a comparison, a reduction and a dot.
@@ -41,8 +41,13 @@ fn model<B: Builder>(b: &mut B, x: [B::N; 4], k: B::N) -> [B::N; 3] {
 fn record(x: [f64; 4], k: f64) -> Vec<f64> {
     let mut g: Graph<F64> = Graph::new();
     let mut s = Scope::new(&mut g, "model");
-    let xs = [s.param("x0"), s.param("x1"), s.param("x2"), s.param("x3")];
-    let kk = s.param("k");
+    let xs = [
+        s.param_with_role("x0", ParamRole::Free),
+        s.param_with_role("x1", ParamRole::Free),
+        s.param_with_role("x2", ParamRole::Free),
+        s.param_with_role("x3", ParamRole::Free),
+    ];
+    let kk = s.param_with_role("k", ParamRole::Free);
     let outs = model(&mut *s, xs, kk);
     let f = s.close(outs.to_vec());
     let params = g.func(f).params().to_vec();
@@ -75,8 +80,13 @@ fn computing_and_recording_agree_to_the_bit() {
 fn the_recorded_model_differentiates() {
     let mut g: Graph<F64> = Graph::new();
     let mut s = Scope::new(&mut g, "m");
-    let xs = [s.param("x0"), s.param("x1"), s.param("x2"), s.param("x3")];
-    let kk = s.param("k");
+    let xs = [
+        s.param_with_role("x0", ParamRole::Free),
+        s.param_with_role("x1", ParamRole::Free),
+        s.param_with_role("x2", ParamRole::Free),
+        s.param_with_role("x3", ParamRole::Free),
+    ];
+    let kk = s.param_with_role("k", ParamRole::Free);
     let outs = model(&mut *s, xs, kk);
     let f = s.close(outs.to_vec());
     let params = g.func(f).params().to_vec();
@@ -114,7 +124,10 @@ fn an_implicit_update_records_and_computes_the_same() {
     }
     let mut g: Graph<F64> = Graph::new();
     let mut s = Scope::new(&mut g, "implicit");
-    let (u, k) = (s.param("u"), s.param("k"));
+    let (u, k) = (
+        s.param_with_role("u", ParamRole::Free),
+        s.param_with_role("k", ParamRole::Free),
+    );
     let out = implicit(&mut *s, u, k);
     let f = s.close(out.clone());
     let params = g.func(f).params().to_vec();

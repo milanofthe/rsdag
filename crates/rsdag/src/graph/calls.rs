@@ -1,5 +1,6 @@
 //! Functions, calls and the system layer over them: defining a function,
-//! calling it, roles, role-selected Jacobians, feedthrough, inlining.
+//! calling it, binding its parameters, roles, derivative outputs,
+//! specialization, inlining.
 //!
 //! A child module of `graph` so it reaches the arena's private fields; a
 //! second `impl Graph` block rather than a second type, because a call is a
@@ -58,21 +59,11 @@ impl<K: Field> Graph<K> {
         f
     }
 
-    /// Close an open graph over `outputs` into a function: every symbol the
-    /// outputs mention becomes a parameter, in symbol order; a called
-    /// function's globals stay globals. The `Scope` idiom: build with named
-    /// symbols, then close.
-    pub fn close(&mut self, name: &str, outputs: Vec<ExprId>) -> FuncId {
-        let params = self.params_for(&outputs, &[], |_| true);
-        self.define_func(name, params, outputs)
-    }
-
     /// The parameters a function of `outputs` takes: the `leading` symbols
     /// the outputs mention, in order, then every other symbol they mention
-    /// that `more` admits, by symbol (see [`close`](Self::close)). A
-    /// symbol they mention that is neither the function closes over; one a
-    /// called function reads is that function's (its parameter, or what it
-    /// closes over).
+    /// that `more` admits, by symbol. A symbol they mention that is neither
+    /// the function closes over; one a called function reads is that
+    /// function's (its parameter, or what it closes over).
     pub fn params_for(
         &self,
         outputs: &[ExprId],
@@ -228,12 +219,11 @@ impl<K: Field> Graph<K> {
 
     /// The operands of a call (its parameters, then its globals, see
     /// [`globals`](Self::globals)) output `out` of `f` can have a nonzero
-    /// derivative in, by index, ascending: its [`support_in`](Self::support_in)
-    /// among them. Structural, read off the graph. The outputs of a function
+    /// derivative in, by index, ascending. Structural, read off the graph. The outputs of a function
     /// share their body, so the ones not known yet are found in one pass
     /// over it, and each is kept. An extern output is taken to read every
     /// parameter, a zero one none.
-    pub fn output_support(&self, f: FuncId, out: u32) -> Arc<[u32]> {
+    pub(crate) fn output_support(&self, f: FuncId, out: u32) -> Arc<[u32]> {
         let func = &self.funcs[f.0 as usize];
         if let Some(s) = func.cached_support(out) {
             return s;
@@ -262,24 +252,6 @@ impl<K: Field> Graph<K> {
         roots.iter().map(|&r| *flow.get(r)).collect()
     }
 
-    /// The symbols `exprs` can have a nonzero derivative in: their
-    /// [`free_symbols_in`](Self::free_symbols_in) through the operands that
-    /// carry a derivative (not a comparison's, not a selector's condition),
-    /// and through a call only the arguments its output's
-    /// [`output_support`](Self::output_support) names. The sparsity of every
-    /// derivative of `exprs`, nested calls included.
-    pub fn support_in(&self, exprs: &[ExprId]) -> std::collections::BTreeSet<SymbolId> {
-        let flow = self.flow(exprs, Through::Carries, |n| match *n {
-            Node::Symbol(s) => Set::one(s.0, self.n_symbols()),
-            _ => Set::bottom(),
-        });
-        let mut all = Set::bottom();
-        for &e in exprs {
-            all.join(flow.get(e));
-        }
-        all.iter().map(SymbolId).collect()
-    }
-
     /// Define an extern function over `arity` arguments whose outputs are the
     /// given slots of `body` (or [`Output::Zero`]). Derivative outputs the body
     /// carries are declared with [`declare_derivative`](Self::declare_derivative).
@@ -293,18 +265,6 @@ impl<K: Field> Graph<K> {
         let params: Vec<SymbolId> = (0..arity)
             .map(|i| self.symbol_id(&format!("{name}.${i}")))
             .collect();
-        self.define_extern_func_with_params(name, params, body, outputs)
-    }
-
-    /// Define an extern function over the given formal parameters (the
-    /// symbols already exist), see [`define_extern_func`](Self::define_extern_func).
-    pub fn define_extern_func_with_params(
-        &mut self,
-        name: &str,
-        params: Vec<SymbolId>,
-        body: Arc<dyn ExternBundle>,
-        outputs: Vec<Output>,
-    ) -> FuncId {
         let outputs = outputs.into_iter().map(|o| (o, OutputRole::Plain));
         self.define(name, params, &[], Some(body), outputs)
     }
@@ -327,7 +287,7 @@ impl<K: Field> Graph<K> {
     }
 
     /// Number of symbols.
-    pub fn n_symbols(&self) -> usize {
+    pub(crate) fn n_symbols(&self) -> usize {
         self.symbol_names.len()
     }
 
@@ -339,11 +299,6 @@ impl<K: Field> Graph<K> {
     #[inline]
     pub fn output(&self, o: OutputId) -> (FuncId, u32) {
         self.outputs[o.0 as usize]
-    }
-
-    /// The interned id of output `out` of `f`.
-    pub fn output_id(&mut self, f: FuncId, out: u32) -> OutputId {
-        self.output_in(f, out, NO_CONTEXT)
     }
 
     /// The interned id of output `out` of `f` called in context `ctx`.
@@ -461,7 +416,7 @@ impl<K: Field> Graph<K> {
     }
 
     /// The parameters a call through `b` passes, in order.
-    pub fn bound_arity(&self, b: Bound) -> usize {
+    fn bound_arity(&self, b: Bound) -> usize {
         let n = self.funcs[b.func.0 as usize].params().len();
         match b.ctx {
             NO_CONTEXT => n,
@@ -469,14 +424,8 @@ impl<K: Field> Graph<K> {
         }
     }
 
-    /// A call of output `out` through `b`, over the parameters it leaves.
-    pub fn call_bound(&mut self, b: Bound, out: u32, args: &[ExprId]) -> ExprId {
-        debug_assert_eq!(args.len(), self.bound_arity(b), "call arity");
-        let l = self.intern_args(args);
-        self.call_list_in(b.func, out, b.ctx, l)
-    }
-
-    /// [`call_bound`](Self::call_bound) for several outputs over one list.
+    /// Calls of the outputs `outs` through `b`, over one list of the
+    /// parameters it leaves.
     pub fn calls_bound(&mut self, b: Bound, outs: &[u32], args: &[ExprId]) -> Vec<ExprId> {
         debug_assert_eq!(args.len(), self.bound_arity(b), "call arity");
         let l = self.intern_args(args);
@@ -582,7 +531,7 @@ impl<K: Field> Graph<K> {
     /// The index of the derivative output `d outputs[out] / d params[param]`,
     /// differentiating the body on first demand (symbolic functions) or
     /// looking up the declared slot (extern functions; zero if undeclared).
-    pub fn derivative_output(&mut self, f: FuncId, out: u32, param: u32) -> u32 {
+    pub(crate) fn derivative_output(&mut self, f: FuncId, out: u32, param: u32) -> u32 {
         if let Some(k) = self.funcs[f.0 as usize].derivative(out, param) {
             return k;
         }
@@ -613,7 +562,7 @@ impl<K: Field> Graph<K> {
     /// of one output. Model parameters asked for together (a sensitivity to
     /// many) are derived in one reverse sweep over the body when they are
     /// [`REVERSE_MIN_TOUCHED`](crate::autodiff::REVERSE_MIN_TOUCHED) or more.
-    pub fn derivative_outputs(&mut self, f: FuncId, out: u32, params: &[u32]) -> Vec<u32> {
+    pub(crate) fn derivative_outputs(&mut self, f: FuncId, out: u32, params: &[u32]) -> Vec<u32> {
         let func = &self.funcs[f.0 as usize];
         if let Output::Expr(e) = func.outputs()[out as usize] {
             let missing: Vec<u32> = (params.iter().copied())
@@ -818,7 +767,7 @@ impl<K: Field> Graph<K> {
 
     /// The symbols `exprs` mention, the bodies they call not looked into: the
     /// parameters a function closed over them takes (see
-    /// [`close`](Self::close)).
+    /// [`params_for`](Self::params_for)).
     pub fn mentioned_symbols_in(&self, exprs: &[ExprId]) -> std::collections::BTreeSet<SymbolId> {
         self.symbols_of(&self.cone(exprs, false).nodes)
     }

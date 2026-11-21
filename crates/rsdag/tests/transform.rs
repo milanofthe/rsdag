@@ -31,7 +31,7 @@ fn deep_chains_substitute_and_inline_on_a_small_stack() {
             for _ in 0..100_000 {
                 acc = g.sin(acc);
             }
-            let f = g.close("f", vec![acc]);
+            let f = Scope::new(&mut g, "f").close(vec![acc]);
             let y = g.sym("y");
             let xs = g.symbol_id("x");
             let map: HashMap<SymbolId, ExprId> = [(xs, y)].into_iter().collect();

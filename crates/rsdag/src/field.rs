@@ -48,7 +48,7 @@ pub trait Field: Clone + PartialEq + Eq + Hash + std::fmt::Debug + Send + Sync +
     /// Exact textual form for the printer (`3/2`, `-7`, `0.1`).
     fn render(&self) -> String;
     /// A hash of the value that is the same on every platform and in every
-    /// run (the constants' part of [`Graph::fingerprint`](crate::Graph::fingerprint)).
+    /// run (the constants' part of a node's structural fingerprint).
     fn stable_hash(&self) -> u64;
 }
 

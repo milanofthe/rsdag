@@ -40,7 +40,7 @@ fn tape() -> Tape {
     let s2 = g.select(c2, sq1, ns1);
     let c3 = g.cmp(CmpOp::Gt, b, p);
     let eb = g.exp(b);
-    let half = g.ratio(1, 2);
+    let half = g.konst_f64(0.5);
     let a2 = g.mul(a, a);
     let a2 = g.add(a2, half);
     let la = g.ln(a2);

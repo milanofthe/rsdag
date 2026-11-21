@@ -467,7 +467,11 @@ fn the_support_reads_through_nested_calls() {
     let mut g: Graph<F64> = Graph::new();
     // f(a, b, c) = [a b, a > 0 ? sin(c) : c]
     let mut s = Scope::new(&mut g, "f");
-    let (a, b, c) = (s.param("a"), s.param("b"), s.param("c"));
+    let (a, b, c) = (
+        s.param_with_role("a", ParamRole::Free),
+        s.param_with_role("b", ParamRole::Free),
+        s.param_with_role("c", ParamRole::Free),
+    );
     let ab = s.mul(a, b);
     let zero = s.zero();
     let pos = s.cmp(CmpOp::Gt, a, zero);
@@ -476,24 +480,31 @@ fn the_support_reads_through_nested_calls() {
     let f = s.close(vec![ab, pick]);
     // g(x, y, z, w) = [f0(x, y, z) + w, f1(x, y, z w)]
     let mut s = Scope::new(&mut g, "g");
-    let (x, y, z, w) = (s.param("x"), s.param("y"), s.param("z"), s.param("w"));
+    let (x, y, z, w) = (
+        s.param_with_role("x", ParamRole::Free),
+        s.param_with_role("y", ParamRole::Free),
+        s.param_with_role("z", ParamRole::Free),
+        s.param_with_role("w", ParamRole::Free),
+    );
     let f0 = s.call(f, 0, &[x, y, z]);
     let g0 = s.add(f0, w);
     let zw = s.mul(z, w);
     let g1 = s.call(f, 1, &[x, y, zw]);
     let gf = s.close(vec![g0, g1]);
-    assert_eq!(&*g.output_support(f, 0), &[0, 1]);
-    assert_eq!(&*g.output_support(f, 1), &[2]);
-    assert_eq!(&*g.output_support(gf, 0), &[0, 1, 3]);
-    assert_eq!(&*g.output_support(gf, 1), &[2, 3]);
-    let args: Vec<ExprId> = ["p", "q", "r", "t"].iter().map(|n| g.sym(n)).collect();
+    // the columns of a call's Jacobian: the arguments its output reads
+    let names = ["p", "q", "r", "t"];
+    let args: Vec<ExprId> = names.iter().map(|n| g.sym(n)).collect();
+    let wrt: Vec<SymbolId> = names.iter().map(|n| g.symbol_id(n)).collect();
+    let cols = |g: &mut Graph<F64>, func, out, n: usize| -> Vec<usize> {
+        let call = g.call(func, out, &args[..n]);
+        let rows = sparse_jacobian(g, &[call], &wrt[..n]);
+        rows[0].iter().map(|&(k, _)| k).collect()
+    };
+    assert_eq!(cols(&mut g, f, 0, 3), [0, 1]);
+    assert_eq!(cols(&mut g, f, 1, 3), [2]);
+    assert_eq!(cols(&mut g, gf, 0, 4), [0, 1, 3]);
+    assert_eq!(cols(&mut g, gf, 1, 4), [2, 3]);
     let call = g.call(gf, 1, &args);
-    let names: Vec<String> = g
-        .support_in(&[call])
-        .into_iter()
-        .map(|s| g.symbol_name(s).to_string())
-        .collect();
-    assert_eq!(names, ["r", "t"]);
     // the value reads the selector's condition too
     let (p, q) = (g.symbol_id("p"), g.symbol_id("q"));
     let g0 = g.call(gf, 0, &args);
@@ -511,7 +522,9 @@ fn a_jacobian_through_wide_calls_makes_only_its_entries() {
     let mut g: Graph<F64> = Graph::new();
     // f(x)_k = x_k exp(x_{k+1}), cyclic: each output reads two of N parameters
     let mut s = Scope::new(&mut g, "f");
-    let xs: Vec<ExprId> = (0..N).map(|k| s.param(&format!("x{k}"))).collect();
+    let xs: Vec<ExprId> = (0..N)
+        .map(|k| s.param_with_role(&format!("x{k}"), ParamRole::Free))
+        .collect();
     let outs: Vec<ExprId> = (0..N)
         .map(|k| {
             let e = s.exp(xs[(k + 1) % N]);
@@ -521,7 +534,9 @@ fn a_jacobian_through_wide_calls_makes_only_its_entries() {
     let f = s.close(outs);
     // h(y)_k = f(y)_k + y_k: a body that is all calls into f
     let mut s = Scope::new(&mut g, "h");
-    let ys: Vec<ExprId> = (0..N).map(|k| s.param(&format!("y{k}"))).collect();
+    let ys: Vec<ExprId> = (0..N)
+        .map(|k| s.param_with_role(&format!("y{k}"), ParamRole::Free))
+        .collect();
     let outs: Vec<ExprId> = (0..N)
         .map(|k| {
             let c = s.call(f, k as u32, &ys);
@@ -605,9 +620,10 @@ fn a_call_site_with_several_outputs_and_their_derivatives_takes_one_vjp() {
             })
             .collect();
         let aids: Vec<SymbolId> = (0..n).map(|k| g.symbol_id(&format!("a{k}"))).collect();
-        // the outputs and a derivative output of one call site, weighted
-        let d0 = g.derivative_output(f, 0, 3);
-        let outs = g.calls(f, &[0, 1, d0], &args);
+        // the outputs and a derivative of one call site, weighted
+        let mut outs = g.calls(f, &[0, 1], &args);
+        let a3 = g.symbol_id("a3");
+        outs.push(differentiate(g, outs[0], a3));
         let w = [1.3, -0.7, 2.1];
         let terms: Vec<ExprId> = (outs.iter().zip(w))
             .map(|(&o, w)| {
@@ -659,11 +675,6 @@ fn vjp_is_the_weighted_gradient() {
     let got = eval(&ctx, &g, &env);
     let want = [1.5 * 2.0 - 0.5 * 0.3f64.cos(), 1.5 * 0.3];
     assert!((got[0] - want[0]).abs() < 1e-15 && (got[1] - want[1]).abs() < 1e-15);
-    // a fresh symbol never takes a name the graph has
-    let taken = format!("vjp$w{}", ctx.symbol_name(w[1]).len());
-    ctx.sym(&taken);
-    let f = ctx.fresh_symbol("vjp$w");
-    assert!(!w.contains(&f) && ctx.symbol_name(f) != taken);
 }
 
 /// An affine split: the rest at the symbols zero and their coefficients;

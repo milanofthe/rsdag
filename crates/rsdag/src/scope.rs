@@ -2,10 +2,8 @@
 //!
 //! A [`Scope`] is an open function: it hands out parameters by name as the
 //! caller needs them, records their order and their roles, and closes into a
-//! [`FuncId`]. It is the seam every frontend builds through -- a netlist
-//! lowering, a Verilog-A lowering, the Python tracer -- so that the order of
-//! a function's parameters is the order they were asked for rather than an
-//! accident of symbol ids.
+//! [`FuncId`], so that the order of a function's parameters is the order
+//! they were asked for rather than an accident of symbol ids.
 //!
 //! A scope derefs to the graph it builds in, so the ordinary constructors
 //! work on it directly:
@@ -16,7 +14,7 @@
 //! let mut g: Graph<F64> = Graph::new();
 //! let mut s = Scope::new(&mut g, "rc");
 //! let v = s.param_with_role("v", ParamRole::State { id: 0 });
-//! let r = s.param("r");
+//! let r = s.param_with_role("r", ParamRole::Free);
 //! let i = s.div(v, r);                 // a graph constructor, on the scope
 //! let f = s.close(vec![i]);
 //! # let _ = f;
@@ -25,7 +23,7 @@
 use std::ops::{Deref, DerefMut};
 
 use crate::field::{Field, F64};
-use crate::func::FuncId;
+use crate::func::{FuncId, Output};
 use crate::graph::Graph;
 use crate::node::{ExprId, Node, SymbolId};
 use crate::role::{OutputRole, ParamRole};
@@ -51,14 +49,11 @@ impl<'g, K: Field> Scope<'g, K> {
         }
     }
 
-    /// A parameter of this function, in call order. Asking twice for the
-    /// same name returns the same parameter rather than a second one.
-    pub fn param(&mut self, name: &str) -> ExprId {
-        self.param_with_role(name, ParamRole::Free)
-    }
-
-    /// As [`Scope::param`], with the role the consumer's system layer needs
-    /// (a state, an input port element, a mutable parameter).
+    /// A parameter of this function, in call order, with the role the
+    /// consumer's system layer needs (a state, an input port element, a
+    /// mutable parameter, or [`ParamRole::Free`]). Asking twice for the same
+    /// name returns the same parameter rather than a second one, with the
+    /// role asked for last.
     pub fn param_with_role(&mut self, name: &str, role: ParamRole) -> ExprId {
         let s = self.graph.symbol_id(name);
         let e = self.graph.symbol_expr(s);
@@ -84,11 +79,6 @@ impl<'g, K: Field> Scope<'g, K> {
         e
     }
 
-    /// The parameters asked for so far, in order.
-    pub fn params(&self) -> &[SymbolId] {
-        &self.params
-    }
-
     /// Close the scope over `outputs`.
     ///
     /// Free symbols the outputs mention that were never asked for as
@@ -96,34 +86,17 @@ impl<'g, K: Field> Scope<'g, K> {
     /// parameters, so closing over an expression built outside the scope is
     /// total rather than silently wrong. A called function's globals stay
     /// globals.
-    pub fn close(self, outputs: Vec<ExprId>) -> FuncId {
-        self.close_with_roles(
-            outputs
-                .into_iter()
-                .map(|e| (OutputRole::Plain, e))
-                .collect(),
-        )
-    }
-
-    /// As [`Scope::close`], giving each output its role.
-    pub fn close_with_roles(mut self, outputs: Vec<(OutputRole, ExprId)>) -> FuncId {
-        let exprs: Vec<ExprId> = outputs.iter().map(|&(_, e)| e).collect();
-        for s in self.graph.mentioned_symbols_in(&exprs) {
+    pub fn close(mut self, outputs: Vec<ExprId>) -> FuncId {
+        for s in self.graph.mentioned_symbols_in(&outputs) {
             if !self.params.contains(&s) && !self.globals.contains(&s) {
                 self.params.push(s);
                 self.roles.push(ParamRole::Free);
             }
         }
-        let f = self
-            .graph
-            .define_func(&self.name, self.params.clone(), exprs);
-        for (k, role) in self.roles.iter().enumerate() {
-            self.graph.set_param_role(f, k as u32, *role);
-        }
-        for (k, (role, _)) in outputs.iter().enumerate() {
-            self.graph.set_output_role(f, k as u32, *role);
-        }
-        f
+        let outputs = outputs
+            .into_iter()
+            .map(|e| (Output::Expr(e), OutputRole::Plain));
+        (self.graph).define(&self.name, self.params, &self.roles, None, outputs)
     }
 }
 

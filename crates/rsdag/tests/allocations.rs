@@ -76,20 +76,16 @@ fn the_evaluation_paths_do_not_allocate() {
         "eval_into allocated"
     );
 
-    let f = g.define_func("body", syms, roots);
-    let body = g.func(f).body(&g);
-    let bundle = &*body.bundle;
-    let mut bwork = vec![0.0; bundle.work_len()];
-    let mut bout = vec![0.0; bundle.n_outputs()];
+    // The same as a function body, called from a program.
+    let f = g.define_func("body", syms.clone(), roots);
+    let calls = g.calls(f, &[0, 1, 2, 3], &xs);
+    let tape = Tape::compile(&g, &calls, &syms);
+    let mut work = vec![0.0; tape.work_len()];
+    let mut out = vec![0.0; tape.out_len()];
     assert_eq!(
-        allocs(50, || bundle.call_into(&inputs, &mut bwork, &mut bout)),
+        allocs(50, || tape.eval_into(&inputs, &mut work, &mut out)),
         0,
-        "call_into allocated"
-    );
-    assert_eq!(
-        allocs(50, || bundle.call(&inputs, &mut bout)),
-        0,
-        "call allocated beyond its thread-local buffer"
+        "a call of a body allocated"
     );
 
     // A dense solve works in the scratch the work buffer lends, on both
