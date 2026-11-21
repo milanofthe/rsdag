@@ -3,7 +3,7 @@
 //! shape, nested when a body calls another, and the result is the
 //! interpreter's to the bit.
 
-use rsdag::{ExprId, Graph, Node, SymbolId, Tape, F64};
+use rsdag::{ExprId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
 use rsdag_jit::{Batch, NativeTape, Options};
 
 fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
@@ -15,19 +15,19 @@ fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
 
 /// `cell(l, c, r) = exp(c - l) - exp(r - c) + 2c - 1`, as a function.
 fn cell(g: &mut Graph<F64>) -> rsdag::FuncId {
-    let (l, c, r) = (g.sym("l"), g.sym("c"), g.sym("r"));
-    let d1 = g.sub(c, l);
-    let d2 = g.sub(r, c);
-    let e1 = g.exp(d1);
-    let e2 = g.exp(d2);
-    let s = g.sub(e1, e2);
-    let two = g.konst_f64(2.0);
-    let t = g.mul(two, c);
-    let one = g.one();
-    let u = g.sub(t, one);
-    let out = g.add(s, u);
-    let params = vec![sym(g, l), sym(g, c), sym(g, r)];
-    g.define_func("cell", params, vec![out])
+    let mut s = Scope::new(g, "cell");
+    let [l, c, r] = ["l", "c", "r"].map(|n| s.param(n, ParamRole::Free));
+    let d1 = s.sub(c, l);
+    let d2 = s.sub(r, c);
+    let e1 = s.exp(d1);
+    let e2 = s.exp(d2);
+    let e = s.sub(e1, e2);
+    let two = s.konst_f64(2.0);
+    let t = s.mul(two, c);
+    let one = s.one();
+    let u = s.sub(t, one);
+    let out = s.add(e, u);
+    s.close([(out, OutputRole::Plain)])
 }
 
 fn same(a: &[f64], b: &[f64]) -> bool {
@@ -92,7 +92,11 @@ fn a_body_called_on_expressions_and_a_body_calling_a_body() {
     let ab = g.mul(a, b);
     let c1 = g.call(f, 0, &[a, ab, b]);
     let c2 = g.call(f, 0, &[b, c1, a]);
-    let outer = g.define_func("outer", vec![sym(&g, a), sym(&g, b)], vec![c2]);
+    let (sa, sb) = (sym(&g, a), sym(&g, b));
+    let mut s = Scope::new(&mut g, "outer");
+    s.param(sa, ParamRole::Free);
+    s.param(sb, ParamRole::Free);
+    let outer = s.close([(c2, OutputRole::Plain)]);
     let (x, y, z) = (g.sym("x"), g.sym("y"), g.sym("z"));
     let syms = vec![sym(&g, x), sym(&g, y), sym(&g, z)];
     let xy = g.add(x, y);

@@ -11,7 +11,9 @@
 
 use std::time::Instant;
 
-use rsdag::{sparse_jacobian, ExprId, Graph, Node, ParamRole, Scope, SymbolId, Tape, F64};
+use rsdag::{
+    sparse_jacobian, ExprId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64,
+};
 
 fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
     let e = g.sym(name);
@@ -27,27 +29,27 @@ fn main() {
         let mut g: Graph<F64> = Graph::new();
         // d(va, vb, p) = p tanh(va - vb): the current from a to b
         let mut s = Scope::new(&mut g, "d");
-        let va = s.param_with_role("va", ParamRole::State { id: 0 });
-        let vb = s.param_with_role("vb", ParamRole::State { id: 1 });
-        let p = s.param_with_role("p", ParamRole::Param);
+        let va = s.param("va", ParamRole::State { id: 0 });
+        let vb = s.param("vb", ParamRole::State { id: 1 });
+        let p = s.param("p", ParamRole::Param);
         let dv = s.sub(va, vb);
         let th = s.tanh(dv);
         let i = s.mul(p, th);
-        let d = s.close(vec![i]);
+        let d = s.close([(i, OutputRole::Plain)]);
         // body(v, vdot, p, c): node k takes c_k vdot_k, the device from k to
         // k + 1 and the one from k - 1 to k
         let mut s = Scope::new(&mut g, "body");
         let v: Vec<ExprId> = (0..n)
-            .map(|k| s.param_with_role(&format!("v{k}"), ParamRole::State { id: k as u32 }))
+            .map(|k| s.param(&format!("v{k}"), ParamRole::State { id: k as u32 }))
             .collect();
         let vd: Vec<ExprId> = (0..n)
-            .map(|k| s.param_with_role(&format!("vd{k}"), ParamRole::StateDot { id: k as u32 }))
+            .map(|k| s.param(&format!("vd{k}"), ParamRole::StateDot { id: k as u32 }))
             .collect();
         let p: Vec<ExprId> = (0..n)
-            .map(|k| s.param_with_role(&format!("p{k}"), ParamRole::Param))
+            .map(|k| s.param(&format!("p{k}"), ParamRole::Param))
             .collect();
         let c: Vec<ExprId> = (0..n)
-            .map(|k| s.param_with_role(&format!("c{k}"), ParamRole::Param))
+            .map(|k| s.param(&format!("c{k}"), ParamRole::Param))
             .collect();
         let currents: Vec<ExprId> = (0..n)
             .map(|k| s.call(d, 0, &[v[k], v[(k + 1) % n], p[k]]))
@@ -59,7 +61,7 @@ fn main() {
                 s.sub(out, currents[(k + n - 1) % n])
             })
             .collect();
-        let body = s.close(outs);
+        let body = s.close(outs.into_iter().map(|e| (e, OutputRole::Plain)));
 
         let names = ["x", "xd", "p", "c"];
         let mut args = Vec::with_capacity(4 * n);

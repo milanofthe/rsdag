@@ -5,7 +5,7 @@
 //! not fill its last block of lanes; the prolog's states included.
 
 use rsdag::node::{BinOp, CmpOp, ReduceOp, UnaryOp};
-use rsdag::{ExprId, FuncId, Graph, Node, ParamRole, Scope, SymbolId, Tape, F64};
+use rsdag::{ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
 use rsdag_jit::{Lanes, NativeTape, Options};
 
 fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
@@ -64,10 +64,10 @@ const CMP: [CmpOp; 6] = [
 /// parameters' work (a prolog) feeding the states' (the main phase).
 fn body(g: &mut Graph<F64>) -> FuncId {
     let mut s = Scope::new(g, "every");
-    let a = s.param_with_role("a", ParamRole::State { id: 0 });
-    let b = s.param_with_role("b", ParamRole::State { id: 1 });
-    let p = s.param_with_role("p", ParamRole::Param);
-    let q = s.param_with_role("q", ParamRole::Param);
+    let a = s.param("a", ParamRole::State { id: 0 });
+    let b = s.param("b", ParamRole::State { id: 1 });
+    let p = s.param("p", ParamRole::Param);
+    let q = s.param("q", ParamRole::Param);
     let mut outs = Vec::new();
     // parameter-only work: lands in the prolog, read through the state
     let pq = s.mul(p, q);
@@ -99,7 +99,7 @@ fn body(g: &mut Graph<F64>) -> FuncId {
     outs.push(s.dot(vec![a, b, p], vec![q, a, b]));
     let neg = s.neg(a);
     outs.push(neg);
-    s.close(outs)
+    s.close(outs.into_iter().map(|e| (e, OutputRole::Plain)))
 }
 
 /// Values of every kind, so every lane meets them in turn.

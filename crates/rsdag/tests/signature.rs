@@ -1,7 +1,7 @@
 //! A function's roles as the signature of the programs over it: one input
 //! order, groups contiguous, parameters pure.
 
-use rsdag::{Graph, Node, ParamRole, Signature, SymbolId, F64};
+use rsdag::{Graph, Node, OutputRole, ParamRole, Scope, Signature, SymbolId, F64};
 
 fn sym(g: &mut Graph<F64>, name: &str) -> SymbolId {
     let e = g.sym(name);
@@ -31,11 +31,12 @@ fn the_signature_orders_by_role_and_index() {
         ParamRole::Input { port: 0, elem: 0 },
         ParamRole::Free,
     ];
-    let x = g.sym("x0");
-    let f = g.define_func("sys", s.clone(), vec![x]);
-    for (i, r) in roles.iter().enumerate() {
-        g.set_param_role(f, i as u32, *r);
+    let mut sc = Scope::new(&mut g, "sys");
+    for (&p, &r) in s.iter().zip(&roles) {
+        sc.param(p, r);
     }
+    let x = sc.sym("x0");
+    let f = sc.close([(x, OutputRole::Plain)]);
     let sig = Signature::of(g.func(f));
     let order: Vec<&str> = sig.syms.iter().map(|&s| g.symbol_name(s)).collect();
     // States by id, derivatives, inputs, parameters in declaration order,

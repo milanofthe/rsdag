@@ -5,19 +5,16 @@ fn charge_form_rows_select_by_role() {
     // One row in charge form: i(x) = x/r, q(x) = c x (an RC node), so
     // dF/dx' = dq/dx is the derivative of the charge output.
     let mut g: Graph<F64> = Graph::new();
-    let (x, r, c) = (g.sym("x"), g.sym("r"), g.sym("c"));
-    let i = g.div(x, r);
-    let q = g.mul(c, x);
-    let f = Scope::new(&mut g, "rc").close(vec![i, q]);
-    for (k, s) in g.func(f).params().to_vec().into_iter().enumerate() {
-        let role = match g.symbol_name(s) {
-            "x" => ParamRole::State { id: 0 },
-            _ => ParamRole::Param,
-        };
-        g.set_param_role(f, k as u32, role);
-    }
-    g.set_output_role(f, 0, OutputRole::Residual { id: 0 });
-    g.set_output_role(f, 1, OutputRole::Charge { id: 0 });
+    let mut s = Scope::new(&mut g, "rc");
+    let x = s.param("x", ParamRole::State { id: 0 });
+    let r = s.param("r", ParamRole::Param);
+    let c = s.param("c", ParamRole::Param);
+    let i = s.div(x, r);
+    let q = s.mul(c, x);
+    let f = s.close([
+        (i, OutputRole::Residual { id: 0 }),
+        (q, OutputRole::Charge { id: 0 }),
+    ]);
     assert_eq!(
         g.func(f)
             .exprs_with_role(|o| matches!(o, OutputRole::Charge { .. })),
@@ -153,10 +150,11 @@ fn substitute_with_a_rule_and_pin_to_constants() {
     let xa = g.sym("X.a");
     assert_eq!(out[0], g.mul(xa, b));
     // a function of (p, q) called with q pinned to 2
-    let (p, q) = (g.symbol_id("p"), g.symbol_id("q"));
-    let (pe, qe) = (g.symbol_expr(p), g.symbol_expr(q));
-    let body = g.mul(pe, qe);
-    let func = g.define_func("f", vec![p, q], vec![body]);
+    let mut s = Scope::new(&mut g, "f");
+    let pe = s.param("p", ParamRole::Free);
+    let qe = s.param("q", ParamRole::Free);
+    let body = s.mul(pe, qe);
+    let func = s.close([(body, OutputRole::Plain)]);
     let call = g.call(func, 0, &[a, b]);
     let two = g.konst_f64(2.0);
     let sb = g.as_symbol(b).unwrap();
@@ -173,13 +171,12 @@ fn substitute_with_a_rule_and_pin_to_constants() {
 #[test]
 fn signature_without_and_outputs_of_a_role() {
     let mut g: Graph<F64> = Graph::new();
-    let (x, n) = (g.symbol_id("x"), g.symbol_id("n"));
-    let (xe, ne) = (g.symbol_expr(x), g.symbol_expr(n));
-    let i = g.add(xe, ne);
-    let f = g.define_func("rows", vec![x, n], vec![i, xe]);
-    g.set_param_role(f, 0, ParamRole::State { id: 0 });
-    g.set_param_role(f, 1, ParamRole::Noise { id: 0 });
-    g.set_output_role(f, 0, OutputRole::Residual { id: 0 });
+    let x = g.symbol_id("x");
+    let mut s = Scope::new(&mut g, "rows");
+    let xe = s.param(x, ParamRole::State { id: 0 });
+    let ne = s.param("n", ParamRole::Noise { id: 0 });
+    let i = s.add(xe, ne);
+    let f = s.close([(i, OutputRole::Residual { id: 0 }), (xe, OutputRole::Plain)]);
     let sig = Signature::of(g.func(f)).without(|r| matches!(r, ParamRole::Noise { .. }));
     assert_eq!(sig.syms, vec![x]);
     let rows = g
@@ -189,23 +186,23 @@ fn signature_without_and_outputs_of_a_role() {
     assert_eq!(rows[0].0, i);
 }
 
-/// A function's parameters: the leading ones its outputs read, in order,
-/// then the admitted others by symbol; roles by rule.
+/// A function's parameters: the ones asked for, in order, with their roles,
+/// then the other symbols its outputs read by symbol, `Free`; a global is
+/// none of them.
 #[test]
-fn params_in_order_and_roles_by_rule() {
+fn params_in_order_then_the_rest_and_no_globals() {
     let mut g: Graph<F64> = Graph::new();
     let (a, b, c, d) = (g.sym("a"), g.sym("b"), g.sym("ns.c"), g.sym("glob"));
     let ab = g.mul(a, b);
     let cd = g.add(c, d);
     let out = g.add(ab, cd);
-    let [sa, sb, sc, unread] = ["a", "b", "ns.c", "unread"].map(|n| g.symbol_id(n));
-    let params = g.params_for(&[out], &[sb, unread, sa], |s| {
-        g.symbol_name(s).starts_with("ns.")
-    });
-    assert_eq!(params, vec![sb, sa, sc]);
-    let f = g.define_func_with("f", params, vec![out], |g, s| {
-        (g.symbol_name(s) == "a").then_some(ParamRole::Param)
-    });
+    let [sa, sb, sc, sd] = ["a", "b", "ns.c", "glob"].map(|n| g.symbol_id(n));
+    let mut s = Scope::new(&mut g, "f");
+    s.param(sb, ParamRole::Free);
+    s.param(sa, ParamRole::Param);
+    s.global(sd);
+    let f = s.close([(out, OutputRole::Plain)]);
+    assert_eq!(g.func(f).params(), &[sb, sa, sc]);
     assert_eq!(
         g.func(f).param_roles(),
         &[ParamRole::Free, ParamRole::Param, ParamRole::Free]
@@ -218,10 +215,11 @@ fn params_in_order_and_roles_by_rule() {
 fn partial_binds_and_passes_in_order() {
     let mut g: Graph<F64> = Graph::new();
     let [p, q, r] = ["p", "q", "r"].map(|n| g.symbol_id(n));
-    let [pe, qe, re] = [p, q, r].map(|s| g.symbol_expr(s));
-    let pq = g.mul(pe, qe);
-    let body = g.sub(pq, re);
-    let f = g.define_func("f", vec![p, q, r], vec![body]);
+    let mut s = Scope::new(&mut g, "f");
+    let [pe, qe, re] = [p, q, r].map(|p| s.param(p, ParamRole::Free));
+    let pq = s.mul(pe, qe);
+    let body = s.sub(pq, re);
+    let f = s.close([(body, OutputRole::Plain)]);
     let (two, x, y) = (g.konst_f64(2.0), g.sym("x"), g.sym("y"));
     let (b, args) = g.partial(f, |_, s| {
         if s == q {
@@ -247,10 +245,10 @@ fn partial_binds_and_passes_in_order() {
 #[test]
 fn a_constant_output_calls_as_its_value() {
     let mut g: Graph<F64> = Graph::new();
-    let p = g.symbol_id("p");
-    let pe = g.symbol_expr(p);
-    let three = g.konst_f64(3.0);
-    let f = g.define_func("f", vec![p], vec![pe, three]);
+    let mut s = Scope::new(&mut g, "f");
+    let pe = s.param("p", ParamRole::Free);
+    let three = s.konst_f64(3.0);
+    let f = s.close([(pe, OutputRole::Plain), (three, OutputRole::Plain)]);
     let x = g.sym("x");
     let calls = g.calls(f, &[0, 1], &[x]);
     assert!(matches!(g.node(calls[0]), Node::Call(..)));
@@ -260,16 +258,18 @@ fn a_constant_output_calls_as_its_value() {
 /// A symbol only a called function reads is that function's: no parameter
 /// of a function over the call.
 #[test]
-fn params_for_leave_a_called_bodys_symbols_to_it() {
+fn a_called_bodys_symbols_are_not_the_callers_params() {
     let mut g: Graph<F64> = Graph::new();
-    let (p, glob) = (g.symbol_id("p"), g.sym("glob"));
-    let pe = g.symbol_expr(p);
-    let body = g.mul(pe, glob);
-    let inner = g.define_func("inner", vec![p], vec![body]);
+    let mut s = Scope::new(&mut g, "inner");
+    let pe = s.param("p", ParamRole::Free);
+    let glob = s.global("glob");
+    let body = s.mul(pe, glob);
+    let inner = s.close([(body, OutputRole::Plain)]);
     let x = g.sym("x");
     let call = g.call(inner, 0, &[x]);
     let sx = g.as_symbol(x).unwrap();
-    assert_eq!(g.params_for(&[call], &[], |_| true), vec![sx]);
+    let outer = Scope::new(&mut g, "outer").close([(call, OutputRole::Plain)]);
+    assert_eq!(g.func(outer).params(), &[sx]);
 }
 
 /// Symbols by name and by node, and the terms of a sum.

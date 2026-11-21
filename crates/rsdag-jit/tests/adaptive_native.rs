@@ -3,7 +3,7 @@
 //! episodes, and the native code landing in the middle of an episode.
 
 use rsdag::synth::{build, inputs, Rng, Spec, Vocabulary};
-use rsdag::{Adaptive, Policy};
+use rsdag::{Adaptive, OutputRole, ParamRole, Policy, Scope};
 use rsdag::{Graph, Tape, F64};
 
 fn same(a: &[f64], b: &[f64]) -> bool {
@@ -131,7 +131,9 @@ fn a_pass_dearer_than_the_compile_waits_for_it() {
         let t = g.tanh(y);
         y = g.mul(w, t);
     }
-    let f = g.define_func("f", vec![xs], vec![y]);
+    let mut s = Scope::new(&mut g, "f");
+    s.param(xs, ParamRole::Free);
+    let f = s.close([(y, OutputRole::Plain)]);
     let n = 20000;
     let mut syms: Vec<SymbolId> = Vec::new();
     let mut calls = Vec::new();

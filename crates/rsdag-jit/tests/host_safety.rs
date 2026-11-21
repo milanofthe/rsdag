@@ -7,7 +7,9 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use rsdag::{ExprId, ExternBundle, Graph, Node, Output, SymbolId, Tape, F64};
+use rsdag::{
+    ExprId, ExternBundle, Graph, Node, Output, OutputRole, ParamRole, SymbolId, Tape, F64,
+};
 use rsdag_jit::NativeTape;
 
 /// `[a + b]`, panicking when `a` is negative; reports `n_out` outputs.
@@ -41,11 +43,11 @@ fn program(calls: usize) -> (NativeTape, Arc<AtomicUsize>, usize) {
     let (x, xs) = sym(&mut g, "x");
     let f = g.define_extern_func(
         "touchy",
-        2,
+        &[ParamRole::Free; 2],
         Arc::new(Touchy {
             n_out: n_out.clone(),
         }),
-        vec![Output::Slot(0)],
+        [(Output::Slot(0), OutputRole::Plain)],
     );
     let mut terms = Vec::new();
     for k in 0..calls {

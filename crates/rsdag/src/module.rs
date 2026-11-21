@@ -16,7 +16,7 @@
 //! let mut g: Graph<F64> = Graph::new();
 //! let x = g.sym("x");
 //! let e = g.sin(x);
-//! let f = rsdag::Scope::new(&mut g, "f").close(vec![e]);
+//! let f = rsdag::Scope::new(&mut g, "f").close([(e, rsdag::OutputRole::Plain)]);
 //! let module = g.to_module();          // plain data, `serde`-serializable
 //! let (mut back, map) = Graph::from_module(&module).unwrap();
 //! assert_eq!(map.funcs[f.0 as usize], f);
@@ -477,8 +477,10 @@ impl<K: Field> Graph<K> {
                     .iter()
                     .map(|s| map.symbols[s.0 as usize])
                     .collect();
-                let body = bodies[g].clone();
-                self.define(&data.name, params, &data.param_roles, body, [])
+                // not interned: its outputs come as the sweep meets them
+                let roles = data.param_roles.clone();
+                let func = crate::func::Function::new(&data.name, params, roles, bodies[g].clone());
+                self.push_function(func)
             });
             let func = self.func(id);
             for k in func.outputs().len()..data.outputs.len() {

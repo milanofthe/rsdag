@@ -2,7 +2,7 @@
 //! once, the bodies of the calls in frames.
 
 use rsdag::dot::{GraphView, Kind};
-use rsdag::{Graph, ParamRole, F64};
+use rsdag::{Graph, OutputRole, ParamRole, F64};
 
 #[test]
 fn a_shared_subexpression_is_one_node() {
@@ -50,17 +50,14 @@ fn inline_draws_every_instance_as_its_body() {
     // leaf(a) = sin(a); mid(x, y) = leaf(x) * y; two calls of mid at the top
     let mut g: Graph<F64> = Graph::new();
     let mut s = rsdag::Scope::new(&mut g, "leaf");
-    let a = s.param_with_role("a", ParamRole::Free);
+    let a = s.param("a", ParamRole::Free);
     let sa = s.sin(a);
-    let leaf = s.close(vec![sa]);
+    let leaf = s.close([(sa, OutputRole::Plain)]);
     let mut s = rsdag::Scope::new(&mut g, "mid");
-    let (x, y) = (
-        s.param_with_role("x", ParamRole::Free),
-        s.param_with_role("y", ParamRole::Free),
-    );
+    let (x, y) = (s.param("x", ParamRole::Free), s.param("y", ParamRole::Free));
     let l = s.call(leaf, 0, &[x]);
     let m = s.mul(l, y);
-    let mid = s.close(vec![m]);
+    let mid = s.close([(m, OutputRole::Plain)]);
     let (p, q) = (g.sym("p"), g.sym("q"));
     let one = g.call(mid, 0, &[p, q]);
     let two = g.call(mid, 0, &[q, p]);
@@ -118,13 +115,10 @@ fn inline_binds_the_bound_parameters_of_a_call() {
     // bindings of k
     let mut g: Graph<F64> = Graph::new();
     let mut s = rsdag::Scope::new(&mut g, "leaf");
-    let (a, k) = (
-        s.param_with_role("a", ParamRole::Free),
-        s.param_with_role("k", ParamRole::Free),
-    );
+    let (a, k) = (s.param("a", ParamRole::Free), s.param("k", ParamRole::Free));
     let sa = s.sin(a);
     let m = s.mul(k, sa);
-    let leaf = s.close(vec![m]);
+    let leaf = s.close([(m, OutputRole::Plain)]);
     let (p, c1, c2) = (g.sym("p"), g.sym("c1"), g.sym("c2"));
     let b1 = g.bind(leaf, &[(1, c1)]);
     let b2 = g.bind(leaf, &[(1, c2)]);

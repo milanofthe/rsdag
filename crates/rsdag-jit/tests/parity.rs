@@ -6,7 +6,7 @@
 //! hard rather than incidentally.
 
 use rsdag::synth::{cases, Spec, Vocabulary};
-use rsdag::{Graph, Tape};
+use rsdag::{Graph, OutputRole, ParamRole, Scope, Tape};
 use rsdag_jit::{NativeTape, Options};
 
 /// The corpus both fuzz tests draw from: sizes and vocabularies varying with
@@ -116,7 +116,9 @@ fn function_call_and_short_input_parity() {
     let pp = ctx.mul(p, p);
     let one = ctx.one();
     let body = ctx.add(pp, one);
-    let f = ctx.define_func("sq1", vec![ps], vec![body]);
+    let mut s = Scope::new(&mut ctx, "sq1");
+    s.param(ps, ParamRole::Free);
+    let f = s.close([(body, OutputRole::Plain)]);
     let o = ctx.call(f, 0, &[x]);
     let s = ctx.add(o, y);
     let e = ctx.exp(s);

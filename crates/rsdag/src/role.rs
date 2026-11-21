@@ -10,8 +10,11 @@
 //! `StateWrite` outputs. A transport delay is a `History` parameter beside
 //! a `DelaySource` and a `DelayTime` output, a noise generator a `Noise`
 //! parameter (zero in every evaluation, the system's response to it its
-//! transfer) beside its `NoiseLevel` outputs, and a quantity read off the
-//! system without entering it an `Observer` output. Consumers keep their own
+//! transfer) beside its `NoiseLevel` outputs (or, where the residuals are
+//! at rest, its `NoiseGain` outputs, where it enters), a quantity read off
+//! the system without entering it an `Observer` output, and the Newton step
+//! limiting of a quantity the residuals read with an offset its `Limit`
+//! outputs. Consumers keep their own
 //! integrators and schedulers; the backend guarantees that a function with
 //! roles can be evaluated, differentiated with respect to any role subset,
 //! specialized and lowered.
@@ -202,9 +205,19 @@ pub enum OutputRole {
     /// frequency dependence (`level / f^exponent`), then, for a tabulated
     /// one, `(frequency, density)` pairs from `elem` 2 on.
     NoiseLevel { id: u32, elem: u32 },
+    /// How noise generator `id` enters residual `row`, for a system whose
+    /// residuals are at rest (no call carries the generator): the row with
+    /// the generator live is its [`Residual`](Self::Residual) output plus
+    /// this output times the generator.
+    NoiseGain { id: u32, row: u32 },
     /// A quantity read off the system without entering it (an operating
     /// point variable).
     Observer { id: u32 },
+    /// Newton step limiting of quantity `id`, which the residuals read with
+    /// an offset the solver drives: `elem` 0 the limited value (over the
+    /// iterate and the value limited to before), 1 the quantity itself, so
+    /// the offset is their difference.
+    Limit { id: u32, elem: u32 },
     /// A derivative output `d outputs[of] / d params[wrt]`, derived from the
     /// body on first demand and kept.
     Derivative { of: u32, wrt: u32 },

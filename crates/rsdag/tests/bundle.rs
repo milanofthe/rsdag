@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use rsdag::BigRational;
-use rsdag::{ExternBundle, Graph, Output, Tape};
+use rsdag::{ExternBundle, Graph, Output, OutputRole, ParamRole, Tape};
 
 /// Outputs `[a+b, a*b, a-b]` from `[a, b]`, counting how often it runs.
 struct TriBundle {
@@ -43,11 +43,11 @@ fn bundle_scatters_and_runs_once() {
 
     let f = ctx.define_extern_func(
         "tri",
-        2,
+        &[ParamRole::Free; 2],
         Arc::new(TriBundle {
             calls: calls.clone(),
         }),
-        vec![Output::Slot(0), Output::Slot(1), Output::Slot(2)],
+        [Output::Slot(0), Output::Slot(1), Output::Slot(2)].map(|o| (o, OutputRole::Plain)),
     );
     // Three outputs of the same function over the same arguments.
     let o_sum = ctx.call(f, 0, &[x, y]);

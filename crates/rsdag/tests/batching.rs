@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use rsdag::{ExprId, Graph, Node, SymbolId, Tape, F64};
+use rsdag::{ExprId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
 
 fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
     match g.node(e) {
@@ -15,13 +15,14 @@ fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
 
 /// `cell(a, b) = exp(a) - b*b + a`.
 fn cell(g: &mut Graph<F64>) -> rsdag::FuncId {
-    let (a, b) = (g.sym("a"), g.sym("b"));
-    let e = g.exp(a);
-    let bb = g.mul(b, b);
-    let d = g.sub(e, bb);
-    let out = g.add(d, a);
-    let params = vec![sym(g, a), sym(g, b)];
-    g.define_func("cell", params, vec![out])
+    let mut s = Scope::new(g, "cell");
+    let a = s.param("a", ParamRole::Free);
+    let b = s.param("b", ParamRole::Free);
+    let e = s.exp(a);
+    let bb = s.mul(b, b);
+    let d = s.sub(e, bb);
+    let out = s.add(d, a);
+    s.close([(out, OutputRole::Plain)])
 }
 
 fn batches_in(tape: &Tape) -> usize {

@@ -46,7 +46,7 @@ pub struct OutputId(pub u32);
 
 /// One output of a function.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Output {
     /// A symbolic expression over the function's parameters.
     Expr(ExprId),
@@ -190,15 +190,16 @@ impl ExternBundle for InterpretedBody {
 }
 
 impl Function {
-    /// A function without outputs over `params`, every role `Free`.
+    /// A function without outputs over `params` with their `param_roles`.
     pub(crate) fn new(
         name: &str,
         params: Vec<SymbolId>,
+        param_roles: Vec<ParamRole>,
         extern_body: Option<Arc<dyn ExternBundle>>,
     ) -> Function {
         Function {
             name: name.to_string(),
-            param_roles: vec![ParamRole::Free; params.len()],
+            param_roles,
             params,
             outputs: Vec::new(),
             output_roles: Vec::new(),
@@ -224,25 +225,12 @@ impl Function {
             self.deps = Default::default();
         }
         let k = self.outputs.len() as u32;
-        self.outputs.push(output);
-        self.output_roles.push(OutputRole::Plain);
-        self.set_output_role(k, role);
-        k
-    }
-
-    /// Set the role of output `out`, keeping the derivative index.
-    pub(crate) fn set_output_role(&mut self, out: u32, role: OutputRole) {
-        if let OutputRole::Derivative { of, wrt } = self.output_roles[out as usize] {
-            self.deriv_index.remove(&(of, wrt));
-        }
         if let OutputRole::Derivative { of, wrt } = role {
-            self.deriv_index.insert((of, wrt), out);
+            self.deriv_index.insert((of, wrt), k);
         }
-        self.output_roles[out as usize] = role;
-    }
-
-    pub(crate) fn set_param_role(&mut self, param: u32, role: ParamRole) {
-        self.param_roles[param as usize] = role;
+        self.outputs.push(output);
+        self.output_roles.push(role);
+        k
     }
 
     /// The derivative output `d outputs[out] / d params[param]`, if there is one.
@@ -349,15 +337,14 @@ impl Function {
     pub fn params(&self) -> &[SymbolId] {
         &self.params
     }
-    /// One role per parameter (`Free` unless set).
+    /// One role per parameter.
     pub fn param_roles(&self) -> &[ParamRole] {
         &self.param_roles
     }
     pub fn outputs(&self) -> &[Output] {
         &self.outputs
     }
-    /// One role per output (`Plain` unless set; derivative outputs are
-    /// tagged `Derivative`).
+    /// One role per output (derivative outputs are tagged `Derivative`).
     pub fn output_roles(&self) -> &[OutputRole] {
         &self.output_roles
     }

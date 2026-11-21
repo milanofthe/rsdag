@@ -4,7 +4,9 @@
 use std::collections::BTreeSet;
 
 use rsdag::BigRational;
-use rsdag::{nonlinearity_of, CmpOp, Degree, ExprId, Graph, ParamRole, SymbolId, UnaryOp};
+use rsdag::{
+    nonlinearity_of, CmpOp, Degree, ExprId, Graph, OutputRole, ParamRole, Scope, SymbolId, UnaryOp,
+};
 
 fn vars(g: &Graph<BigRational>, of: &[ExprId]) -> BTreeSet<SymbolId> {
     g.free_symbols_in(of)
@@ -108,7 +110,9 @@ fn a_call_is_classified_through_its_body() {
         _ => unreachable!(),
     };
     let body = g.mul(p, p);
-    let f = g.define_func("sq", vec![ps], vec![body]);
+    let mut s = Scope::new(&mut g, "sq");
+    s.param(ps, ParamRole::Free);
+    let f = s.close([(body, OutputRole::Plain)]);
     let x = g.sym("x");
     let call = g.call(f, 0, &[x]);
     let nl = nonlinearity_of(&g, &[call], &vars(&g, &[x]));
@@ -138,19 +142,19 @@ fn a_system_takes_the_worst_case() {
 fn calls_classify_like_their_inlined_bodies() {
     let mut g: Graph<BigRational> = Graph::new();
     let mut s = rsdag::Scope::new(&mut g, "cube");
-    let v = s.param_with_role("v", ParamRole::Free);
-    let k = s.param_with_role("k", ParamRole::Free);
+    let v = s.param("v", ParamRole::Free);
+    let k = s.param("k", ParamRole::Free);
     let v3 = s.pow_i(v, 3);
     let i = s.mul(k, v3);
-    let cube = s.close(vec![i]);
+    let cube = s.close([(i, OutputRole::Plain)]);
     let mut s = rsdag::Scope::new(&mut g, "pair");
-    let a = s.param_with_role("a", ParamRole::Free);
-    let b = s.param_with_role("b", ParamRole::Free);
-    let k = s.param_with_role("k", ParamRole::Free);
+    let a = s.param("a", ParamRole::Free);
+    let b = s.param("b", ParamRole::Free);
+    let k = s.param("k", ParamRole::Free);
     let ia = s.call(cube, 0, &[a, k]);
     let ib = s.call(cube, 0, &[b, k]);
     let sum = s.add(ia, ib);
-    let pair = s.close(vec![sum]);
+    let pair = s.close([(sum, OutputRole::Plain)]);
 
     let (x, y, p) = (g.sym("x"), g.sym("y"), g.sym("p"));
     let xy = g.mul(x, y);
@@ -174,9 +178,9 @@ fn calls_classify_like_their_inlined_bodies() {
 
     let ext = g.define_extern_func(
         "ext",
-        1,
+        &[ParamRole::Free; 1],
         std::sync::Arc::new(Square),
-        vec![rsdag::Output::Slot(0)],
+        [(rsdag::Output::Slot(0), OutputRole::Plain)],
     );
     let opaque = g.call(ext, 0, &[x]);
     assert!(nonlinearity_of(&g, &[opaque], &vs).opaque);

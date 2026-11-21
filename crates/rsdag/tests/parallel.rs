@@ -5,7 +5,9 @@
 use std::sync::Arc;
 
 use rsdag::parallel::{self, Lent};
-use rsdag::{ExprId, FuncId, Graph, Node, ParamRole, ReduceOp, Scope, SymbolId, Tape, F64};
+use rsdag::{
+    ExprId, FuncId, Graph, Node, OutputRole, ParamRole, ReduceOp, Scope, SymbolId, Tape, F64,
+};
 
 const N: usize = 64;
 
@@ -21,10 +23,10 @@ fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
 /// `p0 exp(-a b)`, its parameters with the `Param` role.
 fn device(g: &mut Graph<F64>, name: &str, k: f64) -> FuncId {
     let mut s = Scope::new(g, name);
-    let a = s.param_with_role("a", ParamRole::State { id: 0 });
-    let b = s.param_with_role("b", ParamRole::State { id: 1 });
-    let p0 = s.param_with_role("p0", ParamRole::Param);
-    let p1 = s.param_with_role("p1", ParamRole::Param);
+    let a = s.param("a", ParamRole::State { id: 0 });
+    let b = s.param("b", ParamRole::State { id: 1 });
+    let p0 = s.param("p0", ParamRole::Param);
+    let p1 = s.param("p1", ParamRole::Param);
     let kk = s.konst_f64(k);
     let p1k = s.mul(p1, kk);
     let e = s.exp(p1k);
@@ -37,7 +39,7 @@ fn device(g: &mut Graph<F64>, name: &str, k: f64) -> FuncId {
     let nab = s.neg(ab);
     let q = s.exp(nab);
     let q = s.mul(pe, q);
-    s.close(vec![i, q])
+    s.close([(i, OutputRole::Plain), (q, OutputRole::Plain)])
 }
 
 /// A ring of `N` nodes with two kinds of device between neighbours: the

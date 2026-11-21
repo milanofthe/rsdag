@@ -2,7 +2,7 @@
 //! per set of outputs a program calls, shared by the programs over one
 //! graph, and specialized to the constants a call passes.
 
-use rsdag::{ExprId, Graph, Node, ParamRole, Tape, F64};
+use rsdag::{ExprId, Graph, Node, OutputRole, ParamRole, Scope, Tape, F64};
 
 #[test]
 fn an_interpreted_body_computes_only_the_outputs_called() {
@@ -21,7 +21,9 @@ fn an_interpreted_body_computes_only_the_outputs_called() {
         Node::Symbol(s) => s,
         _ => unreachable!(),
     };
-    let f = g.define_func("f", vec![xs], outs);
+    let mut s = Scope::new(&mut g, "f");
+    s.param(xs, ParamRole::Free);
+    let f = s.close(outs.into_iter().map(|e| (e, OutputRole::Plain)));
     let y = g.sym("y");
     let (c1, c3) = (g.call(f, 1, &[y]), g.call(f, 3, &[y]));
     let r = g.add(c1, c3);
@@ -56,7 +58,10 @@ fn calls_with_constant_arguments_run_a_specialized_copy() {
     let sc = g.sin(c);
     let o0 = g.add(cex, sc);
     let o1 = g.mul(c, x);
-    let f = g.define_func("f", vec![xs, cs], vec![o0, o1]);
+    let mut s = Scope::new(&mut g, "f");
+    s.param(xs, ParamRole::Free);
+    s.param(cs, ParamRole::Free);
+    let f = s.close([(o0, OutputRole::Plain), (o1, OutputRole::Plain)]);
     let ((y, ys), (z, zs)) = (sym(&mut g, "y"), sym(&mut g, "z"));
     let (zero, two) = (g.zero(), g.konst_f64(2.0));
     let a = g.call(f, 0, &[y, zero]);
@@ -92,11 +97,11 @@ fn constant_parameters_stay_arguments() {
     // still specialized away.
     let mut g: Graph<F64> = Graph::new();
     let mut s = rsdag::Scope::new(&mut g, "f");
-    let x = s.param_with_role("x", rsdag::ParamRole::State { id: 0 });
-    let c = s.param_with_role("c", rsdag::ParamRole::Param);
+    let x = s.param("x", rsdag::ParamRole::State { id: 0 });
+    let c = s.param("c", rsdag::ParamRole::Param);
     let ex = s.exp(x);
     let o = s.mul(c, ex);
-    let f = s.close(vec![o]);
+    let f = s.close([(o, OutputRole::Plain)]);
     let y = g.sym("y");
     let (one, two, zero) = (g.one(), g.konst_f64(2.0), g.zero());
     let a = g.call(f, 0, &[y, one]);
@@ -128,9 +133,9 @@ fn programs_over_one_graph_share_a_body() {
     // body: it is built once per function and output set, not per tape.
     let mut g: Graph<F64> = Graph::new();
     let mut s = rsdag::Scope::new(&mut g, "f");
-    let x = s.param_with_role("x", ParamRole::Free);
+    let x = s.param("x", ParamRole::Free);
     let ex = s.exp(x);
-    let f = s.close(vec![ex]);
+    let f = s.close([(ex, OutputRole::Plain)]);
     let y = g.sym("y");
     let ys = match *g.node(y) {
         Node::Symbol(s) => s,

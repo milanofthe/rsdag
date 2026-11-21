@@ -21,21 +21,21 @@ fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
 fn library() -> (Graph<F64>, FuncId, FuncId) {
     let mut g: Graph<F64> = Graph::new();
     let mut s = Scope::new(&mut g, "dev");
-    let a = s.param_with_role("a", ParamRole::State { id: 0 });
-    let b = s.param_with_role("b", ParamRole::Param);
+    let a = s.param("a", ParamRole::State { id: 0 });
+    let b = s.param("b", ParamRole::Param);
     let ab = s.mul(a, b);
     let sa = s.sin(a);
-    let dev = s.close(vec![ab, sa]);
+    let dev = s.close([(ab, OutputRole::Plain), (sa, OutputRole::Plain)]);
     let mut s = Scope::new(&mut g, "blk");
     let (x, y, z) = (
-        s.param_with_role("x", ParamRole::Free),
-        s.param_with_role("y", ParamRole::Free),
-        s.param_with_role("z", ParamRole::Free),
+        s.param("x", ParamRole::Free),
+        s.param("y", ParamRole::Free),
+        s.param("z", ParamRole::Free),
     );
     let first = s.calls(dev, &[0, 1], &[x, y]);
     let second = s.calls(dev, &[0, 1], &[y, z]);
     let o0 = s.add(first[0], second[1]);
-    let blk = s.close(vec![o0, second[0]]);
+    let blk = s.close([(o0, OutputRole::Plain), (second[0], OutputRole::Plain)]);
     // a derivative output comes along with the function
     let (p, q) = (g.sym("p"), g.sym("q"));
     let r = g.sym("r");

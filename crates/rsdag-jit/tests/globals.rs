@@ -2,7 +2,7 @@
 //! interpreter's values bit for bit, plain and split over the card, on a
 //! batch wide enough for lanes.
 
-use rsdag::{ExprId, Graph, Node, ParamRole, ReduceOp, Scope, SymbolId, Tape, F64};
+use rsdag::{ExprId, Graph, Node, OutputRole, ParamRole, ReduceOp, Scope, SymbolId, Tape, F64};
 use rsdag_jit::NativeTape;
 
 fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
@@ -20,9 +20,9 @@ fn native_calls_read_their_globals() {
         let mut s = Scope::new(&mut g, "d");
         let t1 = s.global("t1");
         let t2 = s.global("t2");
-        let va = s.param_with_role("va", ParamRole::State { id: 0 });
-        let vb = s.param_with_role("vb", ParamRole::State { id: 1 });
-        let w = s.param_with_role("w", ParamRole::Param);
+        let va = s.param("va", ParamRole::State { id: 0 });
+        let vb = s.param("vb", ParamRole::State { id: 1 });
+        let w = s.param("w", ParamRole::Param);
         let k = s.mul(t1, w);
         let dv = s.sub(va, vb);
         let th = s.tanh(dv);
@@ -30,7 +30,7 @@ fn native_calls_read_their_globals() {
         let x = s.mul(t2, va);
         let e = s.exp(x);
         let i = s.add(i, e);
-        s.close(vec![i])
+        s.close([(i, OutputRole::Plain)])
     };
     let n = 37;
     let v: Vec<(ExprId, SymbolId)> = (0..=n).map(|k| sym(&mut g, &format!("v{k}"))).collect();
@@ -83,17 +83,17 @@ fn native_bound_calls_are_the_full_ones() {
         let mut g: Graph<F64> = Graph::new();
         let d = {
             let mut s = Scope::new(&mut g, "d");
-            let va = s.param_with_role("va", ParamRole::State { id: 0 });
-            let vb = s.param_with_role("vb", ParamRole::State { id: 1 });
-            let c0 = s.param_with_role("c0", ParamRole::Param);
-            let c1 = s.param_with_role("c1", ParamRole::Param);
+            let va = s.param("va", ParamRole::State { id: 0 });
+            let vb = s.param("vb", ParamRole::State { id: 1 });
+            let c0 = s.param("c0", ParamRole::Param);
+            let c1 = s.param("c1", ParamRole::Param);
             let dv = s.sub(va, vb);
             let th = s.tanh(dv);
             let i = s.mul(c0, th);
             let x = s.mul(c1, va);
             let e = s.exp(x);
             let i = s.add(i, e);
-            s.close(vec![i])
+            s.close([(i, OutputRole::Plain)])
         };
         let n = 29;
         let v: Vec<(ExprId, SymbolId)> = (0..n).map(|k| sym(&mut g, &format!("v{k}"))).collect();

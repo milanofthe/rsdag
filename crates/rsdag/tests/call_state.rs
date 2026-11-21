@@ -3,7 +3,7 @@
 //! split over those parameters runs that prolog in its own prolog, once
 //! per binding, and only the rest per evaluation.
 
-use rsdag::{ExprId, FuncId, Graph, Node, ParamRole, SymbolId, Tape, F64};
+use rsdag::{ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
 
 fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
     let e = g.sym(name);
@@ -29,10 +29,10 @@ fn device(g: &mut Graph<F64>) -> FuncId {
     let o0 = g.mul(tv, k);
     let v2 = g.mul(v, v);
     let o1 = g.add(v2, k);
-    let f = g.define_func("dev", vec![vs, ps], vec![o0, o1]);
-    g.set_param_role(f, 0, ParamRole::State { id: 0 });
-    g.set_param_role(f, 1, ParamRole::Param);
-    f
+    let mut s = Scope::new(g, "dev");
+    s.param(vs, ParamRole::State { id: 0 });
+    s.param(ps, ParamRole::Param);
+    s.close([(o0, OutputRole::Plain), (o1, OutputRole::Plain)])
 }
 
 fn same(a: &[f64], b: &[f64]) -> bool {
@@ -155,11 +155,11 @@ fn carded(g: &mut Graph<F64>) -> FuncId {
     }
     let tv = g.tanh(v);
     let o = g.mul(tv, k);
-    let f = g.define_func("dev", vec![vs, cs, qs], vec![o]);
-    g.set_param_role(f, 0, ParamRole::State { id: 0 });
-    g.set_param_role(f, 1, ParamRole::Param);
-    g.set_param_role(f, 2, ParamRole::Param);
-    f
+    let mut s = Scope::new(g, "dev");
+    s.param(vs, ParamRole::State { id: 0 });
+    s.param(cs, ParamRole::Param);
+    s.param(qs, ParamRole::Param);
+    s.close([(o, OutputRole::Plain)])
 }
 
 #[test]

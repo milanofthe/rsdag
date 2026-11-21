@@ -23,23 +23,12 @@ impl<K: Field> Graph<K> {
         self.funcs[f.0 as usize].push_output(output, role)
     }
 
-    /// Define a symbolic function: `outputs` are expressions over the formal
-    /// `params` (free symbols of the outputs not listed in `params` are shared
-    /// globals every call sees unchanged).
-    pub fn define_func(
-        &mut self,
-        name: &str,
-        params: Vec<SymbolId>,
-        outputs: Vec<ExprId>,
-    ) -> FuncId {
-        let outputs = outputs
-            .into_iter()
-            .map(|e| (Output::Expr(e), OutputRole::Plain));
-        self.define(name, params, &[], None, outputs)
-    }
-
-    /// Define a function: `params` with the roles `roles` (`Free` past
-    /// them), an extern `body` or none, the outputs with their roles.
+    /// Define a function: `params` with their `roles`, an extern `body` or
+    /// none, the outputs with their roles. Interned: the same parameters,
+    /// roles, outputs and body give the function defined first (whatever its
+    /// name), so instances built apart that lower to the same body share one
+    /// function and run as one batch. Derivative outputs appended later are
+    /// not part of what is compared.
     pub(crate) fn define(
         &mut self,
         name: &str,
@@ -48,62 +37,23 @@ impl<K: Field> Graph<K> {
         body: Option<Arc<dyn ExternBundle>>,
         outputs: impl IntoIterator<Item = (Output, OutputRole)>,
     ) -> FuncId {
-        let mut func = Function::new(name, params, body);
-        for (k, &r) in roles.iter().enumerate() {
-            func.set_param_role(k as u32, r);
+        debug_assert_eq!(params.len(), roles.len(), "one role per parameter");
+        let key = FuncKey {
+            params: params.into(),
+            roles: roles.into(),
+            outputs: outputs.into_iter().collect(),
+            body: body.as_ref().map(|b| Arc::as_ptr(b) as *const () as usize),
+        };
+        if let Some(&f) = self.defined.get(&key) {
+            return f;
         }
+        let func = Function::new(name, key.params.to_vec(), key.roles.to_vec(), body);
         let f = self.push_function(func);
-        for (o, r) in outputs {
+        for &(o, r) in key.outputs.iter() {
             self.push_output(f, o, r);
         }
+        self.defined.insert(key, f);
         f
-    }
-
-    /// The parameters a function of `outputs` takes: the `leading` symbols
-    /// the outputs mention, in order, then every other symbol they mention
-    /// that `more` admits, by symbol. A symbol they mention that is neither
-    /// the function closes over; one a called function reads is that
-    /// function's (its parameter, or what it closes over).
-    pub fn params_for(
-        &self,
-        outputs: &[ExprId],
-        leading: &[SymbolId],
-        more: impl Fn(SymbolId) -> bool,
-    ) -> Vec<SymbolId> {
-        let free = self.mentioned_symbols_in(outputs);
-        let mut seen: FxHashSet<SymbolId> = FxHashSet::default();
-        (leading.iter().copied())
-            .chain(free.iter().copied().filter(|&s| more(s)))
-            .filter(|s| free.contains(s) && seen.insert(*s))
-            .collect()
-    }
-
-    /// [`define_func`](Self::define_func), each parameter taking the role
-    /// `role` gives it (none keeps [`ParamRole::Free`]).
-    pub fn define_func_with(
-        &mut self,
-        name: &str,
-        params: Vec<SymbolId>,
-        outputs: Vec<ExprId>,
-        role: impl Fn(&Self, SymbolId) -> Option<ParamRole>,
-    ) -> FuncId {
-        let roles: Vec<ParamRole> = (params.iter())
-            .map(|&s| role(self, s).unwrap_or(ParamRole::Free))
-            .collect();
-        let outputs = outputs
-            .into_iter()
-            .map(|e| (Output::Expr(e), OutputRole::Plain));
-        self.define(name, params, &roles, None, outputs)
-    }
-
-    /// Set the role of parameter `param` of function `f`.
-    pub fn set_param_role(&mut self, f: FuncId, param: u32, role: ParamRole) {
-        self.funcs[f.0 as usize].set_param_role(param, role);
-    }
-
-    /// Set the role of output `out` of function `f`.
-    pub fn set_output_role(&mut self, f: FuncId, out: u32, role: OutputRole) {
-        self.funcs[f.0 as usize].set_output_role(out, role);
     }
 
     /// Inline every call reachable from `roots`, to the bottom.
@@ -252,21 +202,21 @@ impl<K: Field> Graph<K> {
         roots.iter().map(|&r| *flow.get(r)).collect()
     }
 
-    /// Define an extern function over `arity` arguments whose outputs are the
-    /// given slots of `body` (or [`Output::Zero`]). Derivative outputs the body
-    /// carries are declared with [`declare_derivative`](Self::declare_derivative).
+    /// Define an extern function over one argument per role of `roles`, its
+    /// outputs the given slots of `body` (or [`Output::Zero`]) with their
+    /// roles. Derivative outputs the body carries are declared with
+    /// [`declare_derivative`](Self::declare_derivative).
     pub fn define_extern_func(
         &mut self,
         name: &str,
-        arity: usize,
+        roles: &[ParamRole],
         body: Arc<dyn ExternBundle>,
-        outputs: Vec<Output>,
+        outputs: impl IntoIterator<Item = (Output, OutputRole)>,
     ) -> FuncId {
-        let params: Vec<SymbolId> = (0..arity)
+        let params: Vec<SymbolId> = (0..roles.len())
             .map(|i| self.symbol_id(&format!("{name}.${i}")))
             .collect();
-        let outputs = outputs.into_iter().map(|o| (o, OutputRole::Plain));
-        self.define(name, params, &[], Some(body), outputs)
+        self.define(name, params, roles, Some(body), outputs)
     }
 
     /// Declare `d outputs[out] / d params[param]` of an extern function as
@@ -601,7 +551,7 @@ impl<K: Field> Graph<K> {
         let func = &self.funcs[f.0 as usize];
         let name = format!("{}#vjp{}", func.name(), self.vjps.len());
         let mut formal = func.params().to_vec();
-        let roles = func.param_roles().to_vec();
+        let mut roles = func.param_roles().to_vec();
         let exprs: Vec<Option<ExprId>> = (outs.iter())
             .map(|&o| match func.outputs()[o as usize] {
                 Output::Expr(e) => Some(e),
@@ -621,6 +571,7 @@ impl<K: Field> Graph<K> {
         let psi = self.reduce(ReduceOp::Sum, terms);
         let wrt: Vec<SymbolId> = params.iter().map(|&p| self.operand_symbol(f, p)).collect();
         let grads = crate::autodiff::gradient(self, psi, &wrt);
+        roles.resize(formal.len() + cotangents.len(), ParamRole::Free);
         formal.extend(cotangents);
         let outputs = grads
             .into_iter()
@@ -767,7 +718,7 @@ impl<K: Field> Graph<K> {
 
     /// The symbols `exprs` mention, the bodies they call not looked into: the
     /// parameters a function closed over them takes (see
-    /// [`params_for`](Self::params_for)).
+    /// [`Scope::close`](crate::Scope::close)).
     pub fn mentioned_symbols_in(&self, exprs: &[ExprId]) -> std::collections::BTreeSet<SymbolId> {
         self.symbols_of(&self.cone(exprs, false).nodes)
     }

@@ -3,7 +3,7 @@
 //! and since both backends lay out the state the same way, a prolog run by
 //! one serves the main phase of the other.
 
-use rsdag::{ExprId, FuncId, Graph, Node, ParamRole, SymbolId, Tape, F64};
+use rsdag::{ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
 use rsdag_jit::NativeTape;
 
 fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
@@ -28,10 +28,10 @@ fn device(g: &mut Graph<F64>) -> FuncId {
     let o0 = g.mul(tv, k);
     let v2 = g.mul(v, v);
     let o1 = g.add(v2, k);
-    let f = g.define_func("dev", vec![vs, ps], vec![o0, o1]);
-    g.set_param_role(f, 0, ParamRole::State { id: 0 });
-    g.set_param_role(f, 1, ParamRole::Param);
-    f
+    let mut s = Scope::new(g, "dev");
+    s.param(vs, ParamRole::State { id: 0 });
+    s.param(ps, ParamRole::Param);
+    s.close([(o0, OutputRole::Plain), (o1, OutputRole::Plain)])
 }
 
 fn same(a: &[f64], b: &[f64]) -> bool {
