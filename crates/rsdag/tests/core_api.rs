@@ -8,7 +8,7 @@ fn charge_form_rows_select_by_role() {
     let (x, r, c) = (g.sym("x"), g.sym("r"), g.sym("c"));
     let i = g.div(x, r);
     let q = g.mul(c, x);
-    let f = g.close("rc", vec![i, q]);
+    let f = Scope::new(&mut g, "rc").close(vec![i, q]);
     for (k, s) in g.func(f).params().to_vec().into_iter().enumerate() {
         let role = match g.symbol_name(s) {
             "x" => ParamRole::State { id: 0 },

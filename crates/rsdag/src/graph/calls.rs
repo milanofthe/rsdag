@@ -58,21 +58,11 @@ impl<K: Field> Graph<K> {
         f
     }
 
-    /// Close an open graph over `outputs` into a function: every symbol the
-    /// outputs mention becomes a parameter, in symbol order; a called
-    /// function's globals stay globals. The `Scope` idiom: build with named
-    /// symbols, then close.
-    pub fn close(&mut self, name: &str, outputs: Vec<ExprId>) -> FuncId {
-        let params = self.params_for(&outputs, &[], |_| true);
-        self.define_func(name, params, outputs)
-    }
-
     /// The parameters a function of `outputs` takes: the `leading` symbols
     /// the outputs mention, in order, then every other symbol they mention
-    /// that `more` admits, by symbol (see [`close`](Self::close)). A
-    /// symbol they mention that is neither the function closes over; one a
-    /// called function reads is that function's (its parameter, or what it
-    /// closes over).
+    /// that `more` admits, by symbol. A symbol they mention that is neither
+    /// the function closes over; one a called function reads is that
+    /// function's (its parameter, or what it closes over).
     pub fn params_for(
         &self,
         outputs: &[ExprId],
@@ -293,18 +283,6 @@ impl<K: Field> Graph<K> {
         let params: Vec<SymbolId> = (0..arity)
             .map(|i| self.symbol_id(&format!("{name}.${i}")))
             .collect();
-        self.define_extern_func_with_params(name, params, body, outputs)
-    }
-
-    /// Define an extern function over the given formal parameters (the
-    /// symbols already exist), see [`define_extern_func`](Self::define_extern_func).
-    pub fn define_extern_func_with_params(
-        &mut self,
-        name: &str,
-        params: Vec<SymbolId>,
-        body: Arc<dyn ExternBundle>,
-        outputs: Vec<Output>,
-    ) -> FuncId {
         let outputs = outputs.into_iter().map(|o| (o, OutputRole::Plain));
         self.define(name, params, &[], Some(body), outputs)
     }
@@ -807,7 +785,7 @@ impl<K: Field> Graph<K> {
 
     /// The symbols `exprs` mention, the bodies they call not looked into: the
     /// parameters a function closed over them takes (see
-    /// [`close`](Self::close)).
+    /// [`params_for`](Self::params_for)).
     pub fn mentioned_symbols_in(&self, exprs: &[ExprId]) -> std::collections::BTreeSet<SymbolId> {
         self.symbols_of(&self.cone(exprs, false).nodes)
     }

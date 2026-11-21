@@ -4,7 +4,9 @@
 use std::collections::BTreeSet;
 
 use rsdag::BigRational;
-use rsdag::{nonlinearity, nonlinearity_of, CmpOp, Degree, ExprId, Graph, SymbolId, UnaryOp};
+use rsdag::{
+    nonlinearity, nonlinearity_of, CmpOp, Degree, ExprId, Graph, ParamRole, SymbolId, UnaryOp,
+};
 
 fn vars(g: &Graph<BigRational>, of: &[ExprId]) -> BTreeSet<SymbolId> {
     g.free_symbols_in(of)
@@ -138,15 +140,15 @@ fn a_system_takes_the_worst_case() {
 fn calls_classify_like_their_inlined_bodies() {
     let mut g: Graph<BigRational> = Graph::new();
     let mut s = rsdag::Scope::new(&mut g, "cube");
-    let v = s.param("v");
-    let k = s.param("k");
+    let v = s.param_with_role("v", ParamRole::Free);
+    let k = s.param_with_role("k", ParamRole::Free);
     let v3 = s.pow_i(v, 3);
     let i = s.mul(k, v3);
     let cube = s.close(vec![i]);
     let mut s = rsdag::Scope::new(&mut g, "pair");
-    let a = s.param("a");
-    let b = s.param("b");
-    let k = s.param("k");
+    let a = s.param_with_role("a", ParamRole::Free);
+    let b = s.param_with_role("b", ParamRole::Free);
+    let k = s.param_with_role("k", ParamRole::Free);
     let ia = s.call(cube, 0, &[a, k]);
     let ib = s.call(cube, 0, &[b, k]);
     let sum = s.add(ia, ib);

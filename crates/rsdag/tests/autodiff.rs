@@ -467,7 +467,11 @@ fn the_support_reads_through_nested_calls() {
     let mut g: Graph<F64> = Graph::new();
     // f(a, b, c) = [a b, a > 0 ? sin(c) : c]
     let mut s = Scope::new(&mut g, "f");
-    let (a, b, c) = (s.param("a"), s.param("b"), s.param("c"));
+    let (a, b, c) = (
+        s.param_with_role("a", ParamRole::Free),
+        s.param_with_role("b", ParamRole::Free),
+        s.param_with_role("c", ParamRole::Free),
+    );
     let ab = s.mul(a, b);
     let zero = s.zero();
     let pos = s.cmp(CmpOp::Gt, a, zero);
@@ -476,7 +480,12 @@ fn the_support_reads_through_nested_calls() {
     let f = s.close(vec![ab, pick]);
     // g(x, y, z, w) = [f0(x, y, z) + w, f1(x, y, z w)]
     let mut s = Scope::new(&mut g, "g");
-    let (x, y, z, w) = (s.param("x"), s.param("y"), s.param("z"), s.param("w"));
+    let (x, y, z, w) = (
+        s.param_with_role("x", ParamRole::Free),
+        s.param_with_role("y", ParamRole::Free),
+        s.param_with_role("z", ParamRole::Free),
+        s.param_with_role("w", ParamRole::Free),
+    );
     let f0 = s.call(f, 0, &[x, y, z]);
     let g0 = s.add(f0, w);
     let zw = s.mul(z, w);
@@ -511,7 +520,9 @@ fn a_jacobian_through_wide_calls_makes_only_its_entries() {
     let mut g: Graph<F64> = Graph::new();
     // f(x)_k = x_k exp(x_{k+1}), cyclic: each output reads two of N parameters
     let mut s = Scope::new(&mut g, "f");
-    let xs: Vec<ExprId> = (0..N).map(|k| s.param(&format!("x{k}"))).collect();
+    let xs: Vec<ExprId> = (0..N)
+        .map(|k| s.param_with_role(&format!("x{k}"), ParamRole::Free))
+        .collect();
     let outs: Vec<ExprId> = (0..N)
         .map(|k| {
             let e = s.exp(xs[(k + 1) % N]);
@@ -521,7 +532,9 @@ fn a_jacobian_through_wide_calls_makes_only_its_entries() {
     let f = s.close(outs);
     // h(y)_k = f(y)_k + y_k: a body that is all calls into f
     let mut s = Scope::new(&mut g, "h");
-    let ys: Vec<ExprId> = (0..N).map(|k| s.param(&format!("y{k}"))).collect();
+    let ys: Vec<ExprId> = (0..N)
+        .map(|k| s.param_with_role(&format!("y{k}"), ParamRole::Free))
+        .collect();
     let outs: Vec<ExprId> = (0..N)
         .map(|k| {
             let c = s.call(f, k as u32, &ys);

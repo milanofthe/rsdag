@@ -16,7 +16,7 @@
 //! let mut g: Graph<F64> = Graph::new();
 //! let x = g.sym("x");
 //! let e = g.sin(x);
-//! let f = g.close("f", vec![e]);
+//! let f = rsdag::Scope::new(&mut g, "f").close(vec![e]);
 //! let module = g.to_module();          // plain data, `serde`-serializable
 //! let (mut back, map) = Graph::from_module(&module).unwrap();
 //! assert_eq!(map.funcs[f.0 as usize], f);

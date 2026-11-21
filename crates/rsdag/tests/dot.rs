@@ -2,7 +2,7 @@
 //! once, faded nodes outside the focus, the bodies of the calls in frames.
 
 use rsdag::dot::{number, reachable, GraphView, Kind};
-use rsdag::{differentiate, ExprId, Graph, Node, SymbolId, F64};
+use rsdag::{differentiate, ExprId, Graph, Node, ParamRole, SymbolId, F64};
 
 fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
     match g.node(e) {
@@ -71,11 +71,14 @@ fn bodies_draw_each_called_function_once() {
     // leaf(a) = sin(a); mid(x, y) = leaf(x) * y; two calls of mid at the top
     let mut g: Graph<F64> = Graph::new();
     let mut s = rsdag::Scope::new(&mut g, "leaf");
-    let a = s.param("a");
+    let a = s.param_with_role("a", ParamRole::Free);
     let sa = s.sin(a);
     let leaf = s.close(vec![sa]);
     let mut s = rsdag::Scope::new(&mut g, "mid");
-    let (x, y) = (s.param("x"), s.param("y"));
+    let (x, y) = (
+        s.param_with_role("x", ParamRole::Free),
+        s.param_with_role("y", ParamRole::Free),
+    );
     let l = s.call(leaf, 0, &[x]);
     let m = s.mul(l, y);
     let mid = s.close(vec![m]);
@@ -112,11 +115,14 @@ fn inline_draws_every_instance_as_its_body() {
     // leaf(a) = sin(a); mid(x, y) = leaf(x) * y; two calls of mid at the top
     let mut g: Graph<F64> = Graph::new();
     let mut s = rsdag::Scope::new(&mut g, "leaf");
-    let a = s.param("a");
+    let a = s.param_with_role("a", ParamRole::Free);
     let sa = s.sin(a);
     let leaf = s.close(vec![sa]);
     let mut s = rsdag::Scope::new(&mut g, "mid");
-    let (x, y) = (s.param("x"), s.param("y"));
+    let (x, y) = (
+        s.param_with_role("x", ParamRole::Free),
+        s.param_with_role("y", ParamRole::Free),
+    );
     let l = s.call(leaf, 0, &[x]);
     let m = s.mul(l, y);
     let mid = s.close(vec![m]);
@@ -179,7 +185,10 @@ fn inline_binds_the_bound_parameters_of_a_call() {
     // bindings of k
     let mut g: Graph<F64> = Graph::new();
     let mut s = rsdag::Scope::new(&mut g, "leaf");
-    let (a, k) = (s.param("a"), s.param("k"));
+    let (a, k) = (
+        s.param_with_role("a", ParamRole::Free),
+        s.param_with_role("k", ParamRole::Free),
+    );
     let sa = s.sin(a);
     let m = s.mul(k, sa);
     let leaf = s.close(vec![m]);

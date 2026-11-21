@@ -2,7 +2,7 @@
 //! per set of outputs a program calls, shared by the programs over one
 //! graph, and specialized to the constants a call passes.
 
-use rsdag::{ExprId, Graph, Node, Tape, F64};
+use rsdag::{ExprId, Graph, Node, ParamRole, Tape, F64};
 
 #[test]
 fn an_interpreted_body_computes_only_the_outputs_called() {
@@ -128,7 +128,7 @@ fn programs_over_one_graph_share_a_body() {
     // body: it is built once per function and output set, not per tape.
     let mut g: Graph<F64> = Graph::new();
     let mut s = rsdag::Scope::new(&mut g, "f");
-    let x = s.param("x");
+    let x = s.param_with_role("x", ParamRole::Free);
     let ex = s.exp(x);
     let f = s.close(vec![ex]);
     let y = g.sym("y");

@@ -25,7 +25,11 @@ fn library() -> (Graph<F64>, FuncId, FuncId) {
     let sa = s.sin(a);
     let dev = s.close(vec![ab, sa]);
     let mut s = Scope::new(&mut g, "blk");
-    let (x, y, z) = (s.param("x"), s.param("y"), s.param("z"));
+    let (x, y, z) = (
+        s.param_with_role("x", ParamRole::Free),
+        s.param_with_role("y", ParamRole::Free),
+        s.param_with_role("z", ParamRole::Free),
+    );
     let first = s.calls(dev, &[0, 1], &[x, y]);
     let second = s.calls(dev, &[0, 1], &[y, z]);
     let o0 = s.add(first[0], second[1]);

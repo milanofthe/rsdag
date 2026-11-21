@@ -1,13 +1,13 @@
 use rsdag::*;
-use rsdag::{OutputRole, Tape, F64};
+use rsdag::{Tape, F64};
 
 #[test]
 fn parameters_keep_the_order_they_were_asked_for() {
     let mut g: Graph<F64> = Graph::new();
     let mut s = Scope::new(&mut g, "f");
     // Asked for in the opposite order to their symbol ids.
-    let z = s.param("z");
-    let a = s.param("a");
+    let z = s.param_with_role("z", ParamRole::Free);
+    let a = s.param_with_role("a", ParamRole::Free);
     let e = s.sub(z, a);
     let f = s.close(vec![e]);
     let names: Vec<&str> = g
@@ -24,15 +24,13 @@ fn roles_survive_closing() {
     let mut g: Graph<F64> = Graph::new();
     let mut s = Scope::new(&mut g, "sys");
     let x = s.param_with_role("x", ParamRole::State { id: 0 });
-    let k = s.param("k");
+    let k = s.param_with_role("k", ParamRole::Free);
     let kx = s.mul(k, x);
-    let f = s.close_with_roles(vec![(OutputRole::Residual { id: 0 }, kx)]);
-    let func = g.func(f);
-    assert_eq!(
-        func.outputs_with_role(|o| matches!(o, OutputRole::Residual { .. })),
-        vec![0]
-    );
-    assert!(func.param_roles().contains(&ParamRole::State { id: 0 }));
+    let f = s.close(vec![kx]);
+    assert!(g
+        .func(f)
+        .param_roles()
+        .contains(&ParamRole::State { id: 0 }));
 }
 
 #[test]
@@ -40,7 +38,7 @@ fn a_symbol_used_but_not_asked_for_still_becomes_a_parameter() {
     let mut g: Graph<F64> = Graph::new();
     let outside = g.sym("t");
     let mut s = Scope::new(&mut g, "f");
-    let x = s.param("x");
+    let x = s.param_with_role("x", ParamRole::Free);
     let e = s.add(x, outside);
     let f = s.close(vec![e]);
     let names: Vec<&str> = g
@@ -60,10 +58,10 @@ fn a_symbol_used_but_not_asked_for_still_becomes_a_parameter() {
 fn asking_twice_for_a_name_gives_one_parameter() {
     let mut g: Graph<F64> = Graph::new();
     let mut s = Scope::new(&mut g, "f");
-    let a = s.param("v");
+    let a = s.param_with_role("v", ParamRole::Free);
     let b = s.param_with_role("v", ParamRole::State { id: 3 });
     assert_eq!(a, b);
-    assert_eq!(s.params().len(), 1);
     let f = s.close(vec![a]);
+    assert_eq!(g.func(f).params().len(), 1);
     assert_eq!(g.func(f).param_roles()[0], ParamRole::State { id: 3 });
 }
