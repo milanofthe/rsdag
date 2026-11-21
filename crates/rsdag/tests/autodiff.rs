@@ -675,11 +675,6 @@ fn vjp_is_the_weighted_gradient() {
     let got = eval(&ctx, &g, &env);
     let want = [1.5 * 2.0 - 0.5 * 0.3f64.cos(), 1.5 * 0.3];
     assert!((got[0] - want[0]).abs() < 1e-15 && (got[1] - want[1]).abs() < 1e-15);
-    // a fresh symbol never takes a name the graph has
-    let taken = format!("vjp$w{}", ctx.symbol_name(w[1]).len());
-    ctx.sym(&taken);
-    let f = ctx.fresh_symbol("vjp$w");
-    assert!(!w.contains(&f) && ctx.symbol_name(f) != taken);
 }
 
 /// An affine split: the rest at the symbols zero and their coefficients;

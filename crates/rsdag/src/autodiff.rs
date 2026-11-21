@@ -631,8 +631,8 @@ pub fn affine_in<K: Field>(
 
 /// The vector-Jacobian product of `outputs` by `wrt`, over weights of its
 /// own: the gradient of `sum_k w_k outputs[k]` by `wrt` (one reverse sweep),
-/// and the weights `w_k`, fresh symbols (see [`Graph::fresh_symbol`]) an
-/// evaluation binds. Every entry is linear in the weights.
+/// and the weights `w_k`, symbols of their own (a name no symbol of the
+/// graph has) an evaluation binds. Every entry is linear in the weights.
 pub fn vjp<K: Field>(
     ctx: &mut Graph<K>,
     outputs: &[ExprId],

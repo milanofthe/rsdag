@@ -80,7 +80,7 @@ fn folds_constants_and_identities() {
     let three = ctx.konst_int(3);
     let six = ctx.mul(two, three);
     let q = ctx.div(six, six);
-    assert!(ctx.is_one(q));
+    assert_eq!(q, ctx.one());
 }
 
 #[test]
@@ -91,7 +91,7 @@ fn unary_folding_and_eval() {
     let o = ctx.one();
     let e0 = ctx.exp(z);
     let l1 = ctx.ln(o);
-    assert!(ctx.is_one(e0));
+    assert_eq!(e0, ctx.one());
     assert!(ctx.is_zero(l1));
 
     // exp(ln(x)) evaluates to x; diode-like exp(v/Vt) evaluates correctly.

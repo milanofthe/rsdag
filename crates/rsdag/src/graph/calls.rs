@@ -286,7 +286,7 @@ impl<K: Field> Graph<K> {
     }
 
     /// Number of symbols.
-    pub fn n_symbols(&self) -> usize {
+    pub(crate) fn n_symbols(&self) -> usize {
         self.symbol_names.len()
     }
 

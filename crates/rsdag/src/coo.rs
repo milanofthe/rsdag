@@ -17,7 +17,7 @@ pub struct Coo {
 
 impl Coo {
     /// The entries of `rows`, row by row, each row's in its order.
-    pub fn from_rows(rows: SparseRows) -> Self {
+    fn from_rows(rows: SparseRows) -> Self {
         let mut out = Coo::default();
         for (i, row) in rows.into_iter().enumerate() {
             for (j, e) in row {

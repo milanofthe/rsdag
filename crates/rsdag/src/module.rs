@@ -131,7 +131,7 @@ impl<K> Module<K> {
     /// and, for a node's operands, precedes it; and that every operand list
     /// has a length its node can have. A module that passes loads without
     /// a panic.
-    pub fn validate(&self) -> Result<(), ModuleError> {
+    pub(crate) fn validate(&self) -> Result<(), ModuleError> {
         if self.version != MODULE_VERSION {
             return Err(ModuleError::Version {
                 found: self.version,
@@ -361,8 +361,9 @@ impl<K: Field> Graph<K> {
     /// As [`Graph::load_module`], with `externs(name)` supplying the body of
     /// each extern function the module declares (`None` when there is none).
     ///
-    /// The module is [validated](Module::validate) first; nothing is added
-    /// to the graph when it fails.
+    /// The module is validated first (every id it holds names something
+    /// that is there and, for a node's operands, precedes it); nothing is
+    /// added to the graph when it fails.
     ///
     /// Nodes are re-interned in id order, which is a dependency order, so a
     /// node's operands are already mapped when it is built. A symbol is

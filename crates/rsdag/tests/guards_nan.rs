@@ -80,5 +80,5 @@ fn integer_powers_stay_in_range() {
     assert!(matches!(q.node(e), Node::Pow(..)));
     let one = q.konst_int(-1);
     let e = q.pow_i(one, 1_000_001);
-    assert!(q.const_of(e).is_some());
+    assert!(q.const_f64(e).is_some());
 }

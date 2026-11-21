@@ -312,7 +312,7 @@ fn a_broken_module_is_refused_not_panicked_on() {
     let d = g.dot(vec![x, y], vec![y, t]);
     let _ = Scope::new(&mut g, "f").close(vec![d]);
     let good = g.to_module();
-    assert!(good.validate().is_ok());
+    assert!(Graph::from_module(&good).is_ok());
 
     let mut breaks: Vec<(&str, rsdag::Module<F64>)> = Vec::new();
     let mut m = good.clone();
