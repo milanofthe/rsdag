@@ -1,5 +1,5 @@
-//! The background compiler: one thread that takes compile jobs in order,
-//! and the thread pool the jobs (and a consumer's own compiles) run on.
+//! The background compiler: the thread pool compile jobs (and a
+//! consumer's own compiles) run on.
 //!
 //! Compiling is long work (a large program takes tens to hundreds of
 //! milliseconds).
@@ -9,10 +9,8 @@
 //! run on a pool of their own, half the machine by default, so a compile
 //! burst never owns every core either.
 
-use std::sync::mpsc::{channel, Sender};
-use std::sync::OnceLock;
-
-type Job = Box<dyn FnOnce() + Send>;
+use std::collections::BTreeSet;
+use std::sync::{Condvar, Mutex, OnceLock};
 
 /// The compile pool: half the cores (at least one).
 pub fn pool() -> &'static rayon::ThreadPool {
@@ -29,37 +27,49 @@ pub fn pool() -> &'static rayon::ThreadPool {
 
 static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
 
-/// Run `job` on the compile pool, after every job submitted before it.
-/// The submission is one channel send, so it costs the caller nothing
-/// measurable; a panic in the job is caught and ends only the job.
+/// Run `job` on the compile pool, alongside the jobs submitted before it:
+/// the pool's threads take them as they come, so the compiles of
+/// independent bodies land together rather than one after another. A job
+/// that needs another's result is submitted by it, or does that work
+/// itself. The submission costs the caller nothing measurable; a panic in
+/// the job is caught and ends only the job.
 pub fn submit(job: impl FnOnce() + Send + 'static) {
-    let _ = queue().send(Box::new(job));
+    let (lock, _) = &JOBS;
+    let mut jobs = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let seq = jobs.next;
+    jobs.next += 1;
+    jobs.running.insert(seq);
+    drop(jobs);
+    pool().spawn(move || {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+        let (lock, done) = &JOBS;
+        lock.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .running
+            .remove(&seq);
+        done.notify_all();
+    });
 }
 
 /// Wait until every job submitted before this call has run.
 pub fn drain() {
-    let (tx, rx) = channel::<()>();
-    submit(move || {
-        let _ = tx.send(());
-    });
-    let _ = rx.recv();
+    let (lock, done) = &JOBS;
+    let jobs = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let before = jobs.next;
+    let waiting = |j: &mut Jobs| j.running.first().is_some_and(|&s| s < before);
+    drop(done.wait_while(jobs, waiting));
 }
 
-fn queue() -> &'static Sender<Job> {
-    static Q: OnceLock<Sender<Job>> = OnceLock::new();
-    Q.get_or_init(|| {
-        let (tx, rx) = channel::<Job>();
-        // A detached worker parked on `recv` keeps the process free to exit.
-        std::thread::Builder::new()
-            .name("rsdag-jit-queue".into())
-            .spawn(move || {
-                while let Ok(job) = rx.recv() {
-                    pool().install(|| {
-                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
-                    });
-                }
-            })
-            .expect("spawn the compile queue");
-        tx
-    })
+/// The jobs submitted, by number, and those not finished.
+struct Jobs {
+    next: u64,
+    running: BTreeSet<u64>,
 }
+
+static JOBS: (Mutex<Jobs>, Condvar) = (
+    Mutex::new(Jobs {
+        next: 0,
+        running: BTreeSet::new(),
+    }),
+    Condvar::new(),
+);

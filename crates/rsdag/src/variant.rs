@@ -330,8 +330,8 @@ impl Form {
     }
 
     /// Everything the variants of the pure argument lists `rows` need, in
-    /// order: the selects found, the conditions' tape made, each pattern's
-    /// variant built and made.
+    /// order: the selects found, each pattern's variant built and made, and
+    /// then the conditions' tape made (a prolog interprets it meanwhile).
     fn advance(&self, rows: &[Box<[f64]>]) {
         let shared = &self.shared;
         let Some(found) = shared.found.get_or_init(|| shared.find()) else {
@@ -340,7 +340,6 @@ impl Form {
         if found.shrink_pct < self.policy.min_shrink_pct {
             return;
         }
-        self.make_conds();
         for pure in rows {
             let mask = self.full.pure_args();
             let pattern = shared.pattern(&found.selects, mask, pure, self.conds.get());
@@ -349,6 +348,7 @@ impl Form {
                 self.make(v as usize);
             }
         }
+        self.make_conds();
     }
 
     /// `pure` waits for its variant, taken by a job of `submit` (one at a
@@ -374,6 +374,14 @@ impl Form {
                 std::mem::take(&mut p.rows)
             };
             form.advance(&rows);
+            // Instances move to the variants landed: what the full body
+            // saw of its choices is learned again once they have.
+            form.shared
+                .choice(0)
+                .learned
+                .lock()
+                .unwrap()
+                .cool(&form.policy.choices);
             form.shared.epoch.fetch_add(1, Ordering::Release);
         }));
     }

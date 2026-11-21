@@ -39,7 +39,7 @@ pub trait Compiler: Send + Sync {
     /// after a run (the prolog guards of a specialization are read there);
     /// `None` when it cannot be compiled.
     fn compile(&self, tape: &Tape, live: &[u32]) -> Option<Box<dyn Program>>;
-    /// Run `job` in the background, after the jobs submitted before it.
+    /// Run `job` in the background.
     fn submit(&self, job: Box<dyn FnOnce() + Send>);
 }
 
