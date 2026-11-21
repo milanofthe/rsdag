@@ -1273,7 +1273,7 @@ impl Tape {
     /// The whole tape for the instances `at`, their arguments in `args`,
     /// their first `n_out` outputs into `out`: each instance's as
     /// [`eval_into`](Self::eval_into) computes them, bit for bit, in blocks
-    /// of instances side by side (see [`instances`](Self::instances)).
+    /// of instances side by side.
     pub fn eval_batch(&self, args: &[f64], out: &mut [f64], n_out: usize, at: &Instances) {
         self.outputs_batch(0..self.ops.len(), args, None, out, n_out, at);
     }
