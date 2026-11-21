@@ -557,13 +557,6 @@ impl Function {
         })
     }
 
-    /// Indices of the outputs carrying `role`, in output order.
-    pub fn outputs_with_role(&self, role: impl Fn(&OutputRole) -> bool) -> Vec<u32> {
-        (0..self.outputs.len() as u32)
-            .filter(|&i| role(&self.output_roles[i as usize]))
-            .collect()
-    }
-
     /// The expression outputs carrying `role`, and their roles, in output
     /// order.
     pub fn exprs_with_role(&self, role: impl Fn(&OutputRole) -> bool) -> Vec<(ExprId, OutputRole)> {

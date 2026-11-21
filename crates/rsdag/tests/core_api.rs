@@ -20,8 +20,8 @@ fn charge_form_rows_select_by_role() {
     g.set_output_role(f, 1, OutputRole::Charge { id: 0 });
     assert_eq!(
         g.func(f)
-            .outputs_with_role(|o| matches!(o, OutputRole::Charge { .. })),
-        vec![1]
+            .exprs_with_role(|o| matches!(o, OutputRole::Charge { .. })),
+        vec![(q, OutputRole::Charge { id: 0 })]
     );
     let x = match g.node(x) {
         Node::Symbol(s) => *s,
