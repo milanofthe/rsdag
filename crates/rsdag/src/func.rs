@@ -144,14 +144,6 @@ impl InterpretedBody {
             rate: crate::parallel::Rate::new(crate::constants::INTERPRETED_NS_PER_OP),
         }
     }
-
-    /// The work layout: the tape's buffer, its outputs, then the arguments
-    /// a prolog is run on.
-    fn parts<'w>(&self, work: &'w mut [f64]) -> (&'w mut [f64], &'w mut [f64], &'w mut [f64]) {
-        let (w, rest) = work.split_at_mut(self.tape.work_len());
-        let (o, a) = rest.split_at_mut(self.tape.out_len());
-        (w, o, &mut a[..self.pure.len()])
-    }
 }
 
 impl ExternBundle for InterpretedBody {
@@ -161,13 +153,13 @@ impl ExternBundle for InterpretedBody {
     fn rate(&self) -> &crate::parallel::Rate {
         &self.rate
     }
-    fn work_len(&self) -> usize {
-        self.tape.work_len() + self.tape.out_len() + self.pure.len()
+    fn call_into(&self, args: &[f64], _work: &mut [f64], out: &mut [f64]) {
+        let at = crate::Instances::first(1, args.len(), 0);
+        self.tape.eval_batch(args, out, self.n_out, &at);
     }
-    fn call_into(&self, args: &[f64], work: &mut [f64], out: &mut [f64]) {
-        let (w, o, _) = self.parts(work);
-        self.tape.eval_into(args, w, o);
-        out.copy_from_slice(&o[..self.n_out]);
+    fn call_batch(&self, args: &[f64], n_groups: usize, n_args: usize, out: &mut [f64]) {
+        let at = crate::Instances::first(n_groups, n_args, 0);
+        self.tape.eval_batch(args, out, self.n_out, &at);
     }
     fn state_len(&self) -> usize {
         self.tape.state_len()
@@ -175,27 +167,19 @@ impl ExternBundle for InterpretedBody {
     fn pure_args(&self) -> &[bool] {
         &self.pure
     }
-    fn prolog_into(&self, pure: &[f64], work: &mut [f64], state: &mut [f64]) {
-        let (w, _, args) = self.parts(work);
-        // The prolog reads the pure arguments only; the others are NaN.
-        let mut p = pure.iter();
-        for (a, &is_pure) in args.iter_mut().zip(&self.pure) {
-            *a = if is_pure {
-                *p.next().expect("one value per pure argument")
-            } else {
-                f64::NAN
-            };
-        }
-        self.tape.eval_prolog_into(args, w);
-        let sl = self.tape.state_len();
-        state[..sl].copy_from_slice(&w[..sl]);
+    fn prolog_into(&self, pure: &[f64], _work: &mut [f64], state: &mut [f64]) {
+        let at = crate::Instances::first(1, pure.len(), self.tape.state_len());
+        self.prolog_batch(pure, state, &at);
     }
-    fn main_into(&self, args: &[f64], state: &[f64], work: &mut [f64], out: &mut [f64]) {
-        let (w, o, _) = self.parts(work);
-        let sl = self.tape.state_len();
-        w[..sl].copy_from_slice(&state[..sl]);
-        self.tape.eval_main_into(args, w, o);
-        out.copy_from_slice(&o[..self.n_out]);
+    fn prolog_batch(&self, pure: &[f64], states: &mut [f64], at: &crate::Instances) {
+        self.tape.prolog_batch(&self.pure, pure, states, at);
+    }
+    fn main_into(&self, args: &[f64], state: &[f64], _work: &mut [f64], out: &mut [f64]) {
+        let at = crate::Instances::first(1, args.len(), self.tape.state_len());
+        self.main_batch(args, state, out, &at);
+    }
+    fn main_batch(&self, args: &[f64], states: &[f64], out: &mut [f64], at: &crate::Instances) {
+        self.tape.main_batch(args, states, out, self.n_out, at);
     }
     fn body(&self) -> Option<&crate::tape::Tape> {
         Some(&self.tape)

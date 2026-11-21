@@ -3121,6 +3121,7 @@ impl Program {
             max_args = max_args.max(at as usize);
         }
         Tape {
+            interp: super::Interp::new(&ops, &dst, &arg_pool, &outputs, next as usize, prolog_ops),
             stages,
             regions,
             lent,

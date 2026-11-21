@@ -98,6 +98,12 @@ impl<T: Copy> Shared<T> {
         Shared(ptr, len)
     }
 
+    /// The region's first value, for a piece of work that accesses it
+    /// as [`get`](Self::get) and [`set`](Self::set) would.
+    pub(super) fn ptr(self) -> *mut T {
+        self.0
+    }
+
     /// # Safety
     /// No piece of work writes slot `k` while this runs.
     pub(super) unsafe fn get(self, k: usize) -> T {
