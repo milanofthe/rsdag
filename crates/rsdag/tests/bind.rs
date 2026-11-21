@@ -263,7 +263,7 @@ fn substitution_reaches_every_binding_of_one_argument_list() {
             .map(|(k, &e)| ((2 + k) as u32, e))
             .collect();
         let b = g.bind(d, &pairs);
-        bound.push(g.call_bound(b, 0, &[v0, v1, w]));
+        bound.push(g.calls_bound(b, &[0], &[v0, v1, w])[0]);
         let args: Vec<ExprId> = [v2, v1]
             .into_iter()
             .chain(card.iter().copied())
@@ -294,7 +294,7 @@ fn inlining_reaches_every_binding_of_one_argument_list() {
                 .map(|k| ((2 + k) as u32, sym(&mut g, &format!("card{c}.{k}")).0))
                 .collect();
             let bound = g.bind(d, &pairs);
-            g.call_bound(bound, 0, &[a, b, w])
+            g.calls_bound(bound, &[0], &[a, b, w])[0]
         })
         .collect();
     let body = g.reduce(ReduceOp::Sum, terms);

@@ -108,7 +108,7 @@ fn native_bound_calls_are_the_full_ones() {
             let (a, b) = (v[k].0, v[(k + 1) % n].0);
             let c = 2 * (k % 2);
             let i = if bound {
-                g.call_bound(binds[k % 2], 0, &[a, b])
+                g.calls_bound(binds[k % 2], &[0], &[a, b])[0]
             } else {
                 g.call(d, 0, &[a, b, card[c].0, card[c + 1].0])
             };

@@ -186,8 +186,8 @@ fn inline_binds_the_bound_parameters_of_a_call() {
     let (p, c1, c2) = (g.sym("p"), g.sym("c1"), g.sym("c2"));
     let b1 = g.bind(leaf, &[(1, c1)]);
     let b2 = g.bind(leaf, &[(1, c2)]);
-    let one = g.call_bound(b1, 0, &[p]);
-    let two = g.call_bound(b2, 0, &[p]);
+    let one = g.calls_bound(b1, &[0], &[p])[0];
+    let two = g.calls_bound(b2, &[0], &[p])[0];
     let r = g.add(one, two);
 
     let data = GraphView::new(&g).root(r, "r").inline().data();

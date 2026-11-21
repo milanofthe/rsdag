@@ -434,7 +434,7 @@ impl<K: Field> Graph<K> {
                                 .map(|(&p, x)| (p, map.exprs[x.0 as usize]))
                                 .collect();
                             let b = self.bind(id, &pairs);
-                            self.call_bound(b, k, &ops)
+                            self.calls_bound(b, &[k], &ops)[0]
                         }
                     }
                 }

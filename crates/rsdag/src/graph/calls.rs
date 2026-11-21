@@ -341,11 +341,6 @@ impl<K: Field> Graph<K> {
         self.outputs[o.0 as usize]
     }
 
-    /// The interned id of output `out` of `f`.
-    pub fn output_id(&mut self, f: FuncId, out: u32) -> OutputId {
-        self.output_in(f, out, NO_CONTEXT)
-    }
-
     /// The interned id of output `out` of `f` called in context `ctx`.
     pub(crate) fn output_in(&mut self, f: FuncId, out: u32, ctx: u32) -> OutputId {
         if let Some(&o) = self.output_dedup.get(&(f, out, ctx)) {
@@ -461,7 +456,7 @@ impl<K: Field> Graph<K> {
     }
 
     /// The parameters a call through `b` passes, in order.
-    pub fn bound_arity(&self, b: Bound) -> usize {
+    fn bound_arity(&self, b: Bound) -> usize {
         let n = self.funcs[b.func.0 as usize].params().len();
         match b.ctx {
             NO_CONTEXT => n,
@@ -469,14 +464,8 @@ impl<K: Field> Graph<K> {
         }
     }
 
-    /// A call of output `out` through `b`, over the parameters it leaves.
-    pub fn call_bound(&mut self, b: Bound, out: u32, args: &[ExprId]) -> ExprId {
-        debug_assert_eq!(args.len(), self.bound_arity(b), "call arity");
-        let l = self.intern_args(args);
-        self.call_list_in(b.func, out, b.ctx, l)
-    }
-
-    /// [`call_bound`](Self::call_bound) for several outputs over one list.
+    /// Calls of the outputs `outs` through `b`, over one list of the
+    /// parameters it leaves.
     pub fn calls_bound(&mut self, b: Bound, outs: &[u32], args: &[ExprId]) -> Vec<ExprId> {
         debug_assert_eq!(args.len(), self.bound_arity(b), "call arity");
         let l = self.intern_args(args);
