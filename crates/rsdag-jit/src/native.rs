@@ -1276,23 +1276,36 @@ impl<'a, I: Isa> Emitter<'a, I> {
             }
         }
         let res = base + nf * l * F64_BYTES;
-        for lane in 0..l {
-            self.release_except(&[]);
+        self.call_lanes(dst, addr, res, |e, lane| {
             let mut j = 0;
-            let lane_args: Vec<Arg> = args
-                .iter()
+            args.iter()
                 .map(|a| match *a {
                     Arg::F(_) => {
-                        let r = self.fresh();
-                        self.isa
+                        let r = e.fresh();
+                        e.isa
                             .load_lane(r, Base::Work, base + (j * l + lane) * F64_BYTES);
                         j += 1;
                         Arg::F(r)
                     }
                     Arg::I(i) => Arg::I(i),
                 })
-                .collect();
-            self.call(addr, &lane_args);
+                .collect()
+        });
+    }
+    /// Lane code's host call: one call per lane, `lane_args(self, lane)`
+    /// setting up lane `lane`'s and returning its arguments, the results
+    /// collected at byte `res` of the work array, then the value of `dst`.
+    fn call_lanes(
+        &mut self,
+        dst: u32,
+        addr: *const (),
+        res: usize,
+        mut lane_args: impl FnMut(&mut Self, usize) -> Vec<Arg>,
+    ) {
+        for lane in 0..I::LANES {
+            self.release_except(&[]);
+            let args = lane_args(self, lane);
+            self.call(addr, &args);
             self.isa
                 .store_lane(I::RESULT, Base::Work, res + lane * F64_BYTES);
         }
@@ -1545,26 +1558,20 @@ impl<'a, I: Isa> Emitter<'a, I> {
                     self.release_except(&[]);
                 }
                 let (row, res) = (base + m * l * F64_BYTES, base + (m * l + m) * F64_BYTES);
-                for lane in 0..l {
+                self.call_lanes(dst, host::h_reduce as *const (), res, |e, lane| {
                     for j in 0..m {
-                        let t = self.fresh();
-                        self.isa
+                        let t = e.fresh();
+                        e.isa
                             .load_lane(t, Base::Work, base + (j * l + lane) * F64_BYTES);
-                        self.isa.store_lane(t, Base::Work, row + j * F64_BYTES);
-                        self.release_except(&[]);
+                        e.isa.store_lane(t, Base::Work, row + j * F64_BYTES);
+                        e.release_except(&[]);
                     }
-                    let call = [
+                    vec![
                         Arg::I(IArg::Imm(host::reduce_code(rop))),
                         Arg::I(IArg::WorkAddr(row)),
                         Arg::I(IArg::Imm(m as u64)),
-                    ];
-                    self.call(host::h_reduce as *const (), &call);
-                    self.isa
-                        .store_lane(I::RESULT, Base::Work, res + lane * F64_BYTES);
-                }
-                let r = self.fresh_for(dst);
-                self.isa.load(r, Base::Work, res);
-                self.put(dst, r);
+                    ]
+                });
             }
             ReduceOp::Min | ReduceOp::Max => {
                 let at = self.gather(args);
