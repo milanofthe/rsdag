@@ -551,7 +551,7 @@ impl<K: Field> Graph<K> {
         let func = &self.funcs[f.0 as usize];
         let name = format!("{}#vjp{}", func.name(), self.vjps.len());
         let mut formal = func.params().to_vec();
-        let roles = func.param_roles().to_vec();
+        let mut roles = func.param_roles().to_vec();
         let exprs: Vec<Option<ExprId>> = (outs.iter())
             .map(|&o| match func.outputs()[o as usize] {
                 Output::Expr(e) => Some(e),
@@ -571,6 +571,7 @@ impl<K: Field> Graph<K> {
         let psi = self.reduce(ReduceOp::Sum, terms);
         let wrt: Vec<SymbolId> = params.iter().map(|&p| self.operand_symbol(f, p)).collect();
         let grads = crate::autodiff::gradient(self, psi, &wrt);
+        roles.resize(formal.len() + cotangents.len(), ParamRole::Free);
         formal.extend(cotangents);
         let outputs = grads
             .into_iter()
