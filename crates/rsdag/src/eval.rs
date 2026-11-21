@@ -3,7 +3,7 @@
 //! One forward sweep over the nodes reachable from the roots (ascending
 //! `ExprId` is topological, so every shared subexpression is computed once),
 //! with the same per-node semantics the tape uses: arithmetic from
-//! [`Scalar`], fold orders from [`reduce_slice_t`] and [`crate::semantics::dot_slice_t`], so a
+//! [`Scalar`], fold orders from [`reduce_slice_t`] and [`Scalar::dot_slice`], so a
 //! value cannot depend on which evaluator computed it. An unbound symbol is
 //! `NaN`, as a missing input is for a tape. Calls evaluate their function
 //! once per distinct argument list through the function's body, a bundle
@@ -102,7 +102,8 @@ pub fn eval<T: Scalar, K: Field>(
             solved.entry(l).or_insert_with(|| {
                 let n = Graph::<K>::solve_n(vals.len());
                 let mut out = vec![T::zero(); n];
-                crate::semantics::solve_t(&vals[..n * n], &vals[n * n..], n, &mut out);
+                let mut scratch = vec![T::zero(); crate::semantics::solve_scratch_len(n, 1)];
+                T::solve_many(&vals[..n * n], &vals[n * n..], n, 1, &mut out, &mut scratch);
                 out
             })[i as usize]
         };

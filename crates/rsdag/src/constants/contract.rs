@@ -58,7 +58,7 @@ pub const F64_EXP_BIAS: i64 = 1023;
 pub const F64_FRAC_BITS: u32 = 52;
 
 /// The column-panel widths of the blocked elimination in
-/// [`solve_t`](crate::semantics::solve_t): the panel's own updates run one
+/// [`solve`](crate::semantics::solve): the panel's own updates run one
 /// element at a time, the trailing update as a product, and the balance
 /// moves with the size (measured: 16 wins below about five hundred
 /// unknowns, 32 above). A width is a constant of its instantiation so the

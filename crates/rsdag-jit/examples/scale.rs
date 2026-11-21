@@ -24,6 +24,8 @@
 //!     cargo run --release -p rsdag-jit --example scale -- [--gates <n>] [--card <n>] [--placed once|flat|both]
 //!         [--bind] [--inline] [--trace]
 
+mod common;
+use common::per_call;
 use std::time::Instant;
 
 use rsdag::{
@@ -42,30 +44,6 @@ fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
 
 fn ms(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1e3
-}
-
-/// Seconds per call: the best of five batches of at least 50 ms.
-fn per_call(mut f: impl FnMut()) -> f64 {
-    let mut reps = 1usize;
-    loop {
-        let t = Instant::now();
-        for _ in 0..reps {
-            f();
-        }
-        if t.elapsed().as_secs_f64() >= 0.05 {
-            break;
-        }
-        reps *= 2;
-    }
-    (0..5)
-        .map(|_| {
-            let t = Instant::now();
-            for _ in 0..reps {
-                f();
-            }
-            t.elapsed().as_secs_f64() / reps as f64
-        })
-        .fold(f64::INFINITY, f64::min)
 }
 
 /// The device: `(d, g, s)` states, `w`, `l`, then the card. The card's

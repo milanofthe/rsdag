@@ -5,7 +5,6 @@
 
 pub mod adaptive;
 pub mod autodiff;
-pub mod builder;
 pub mod choices;
 pub mod constants;
 pub mod coo;
@@ -37,7 +36,6 @@ pub(crate) mod transform;
 
 pub use adaptive::{Adaptive, Compiler, Episode, Policy, Session, Stats};
 pub use autodiff::{affine_in, differentiate, gradient, sparse_jacobian, vjp, SparseRows};
-pub use builder::{Builder, Numeric};
 pub use choices::ChoicePolicy;
 pub use coo::{transpose_rows, Coo};
 pub use display::to_string;
@@ -59,9 +57,6 @@ pub use num_rational::BigRational;
 pub use role::{Crossing, OutputRole, ParamRole, Signature};
 pub use scalar::Scalar;
 pub use scope::Scope;
-pub use semantics::{
-    binary_f64, cmp_bool, dot_slice, reduce_slice, unary_f64, EXP_LIMIT, LN_FLOOR,
-};
 pub use tape::{
     Guards, Lowered, NoTrace, ParamSelects, Program, Region, SpecializedTape, Tape, TraceSink,
 };

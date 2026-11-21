@@ -1,8 +1,7 @@
 //! The reference semantics: what every op computes, in one place.
 //!
-//! The arena sweep, the tape interpreter, the native backend's host
-//! routines and the numeric twin of [`Builder`](crate::Builder) all take
-//! their arithmetic from here, so a value cannot depend on which of them
+//! The arena sweep, the tape interpreter and the native backend's host
+//! routines all take their arithmetic from here, so a value cannot depend on which of them
 //! computed it. That covers the domain guards (the `exp` cap at
 //! [`EXP_LIMIT`], the `ln` floor at [`LN_FLOOR`], the `sqrt` clamp), the
 //! special functions, which are defined here rather than taken from a
@@ -11,8 +10,9 @@
 
 use crate::constants::{
     EXP_INV_LN2_N, EXP_LN2_HI_N, EXP_LN2_LO_N, EXP_POLY, EXP_SCALE_BIAS, EXP_TABLE, EXP_TABLE_BITS,
-    EXP_UNDERFLOW, F64_EXP_BIAS, F64_FRAC_BITS, GEMM_COL_BLOCK, GEMM_ROW_BLOCK, GEMV_ROW_BLOCK,
-    LN_LN2_HI, LN_LN2_LO, LN_OFF, LN_POLY, LN_TABLE, LN_TABLE_BITS, LU_TRAILING_ROWS, MAGIC,
+    EXP_UNDERFLOW, F64_EXP_BIAS, F64_FRAC_BITS, LN_LN2_HI, LN_LN2_LO, LN_OFF, LN_POLY, LN_TABLE,
+    LN_TABLE_BITS, LU_PANEL_LARGE, LU_PANEL_SMALL, LU_PANEL_SWITCH, LU_TRAILING_ROWS,
+    LU_UNBLOCKED_MAX, MAGIC,
 };
 use crate::node::{BinOp, CmpOp, Elementary, ReduceOp, UnaryOp};
 use crate::scalar::Scalar;
@@ -72,30 +72,9 @@ pub fn reduce_slice_t<T: Scalar>(op: ReduceOp, xs: &[T]) -> T {
     }
 }
 
-/// The inner product in `T`, the same order over the products.
-pub fn dot_slice_t<T: Scalar>(a: &[T], b: &[T]) -> T {
-    let mut acc = [T::zero(); FOLD_LANES];
-    let ch = a.len() / FOLD_LANES;
-    for c in 0..ch {
-        for l in 0..FOLD_LANES {
-            acc[l] = acc[l].add(a[FOLD_LANES * c + l].mul(b[FOLD_LANES * c + l]));
-        }
-    }
-    let mut s = (acc[0].add(acc[1])).add(acc[2].add(acc[3]));
-    for k in ch * FOLD_LANES..a.len() {
-        s = s.add(a[k].mul(b[k]));
-    }
-    s
-}
-
 /// [`reduce_slice_t`] in `f64`.
 pub fn reduce_slice(op: ReduceOp, xs: &[f64]) -> f64 {
     reduce_slice_t(op, xs)
-}
-
-/// [`dot_slice_t`] in `f64`: the vector twin (AVX or two-lane), bit-identical.
-pub fn dot_slice(a: &[f64], b: &[f64]) -> f64 {
-    <f64 as Scalar>::dot_slice(a, b)
 }
 
 /// Canonical evaluation of an [`Elementary`] at `args` (as many as its
@@ -524,20 +503,6 @@ pub fn unary_f64(op: UnaryOp, x: f64) -> f64 {
     }
 }
 
-/// What a unary op *is*, as data rather than code: how it prints, what it is
-/// called in generated C, and whether it is differentiable everywhere it is
-/// defined.
-///
-/// The semantics live in [`unary_f64`] (and in [`crate::Scalar`] for the
-/// other execution types), because a guard like the `exp` cap is code. What
-/// is data lives here, so a new op is one row plus its semantics and its
-/// lowerings, instead of an edit in the printer, the C backend, the JIT's
-/// code mapping and the generator.
-///
-/// The aggregate ops (`Reduce`, `Dot`) are deliberately not in this table:
-/// they carry an operand list rather than a fixed arity, they are how arrays
-/// and matrices lower natively into the graph, and every backend emits them
-/// as a loop rather than a call.
 /// Evaluate a [`CmpOp`] on two ordered arguments. Single source of truth shared
 /// by the arena evaluator, the complex evaluator, the compiled tape (all `f64`)
 /// and the constant-folding interner (exact `BigRational`), so a `Cmp` node's
@@ -553,151 +518,63 @@ pub fn cmp_bool<T: PartialOrd>(op: CmpOp, x: T, y: T) -> bool {
     }
 }
 
-/// A dense matrix-vector product: `out[i] = dot(a[i*n..(i+1)*n], x)` for
-/// `m` rows, each row the same fold as [`dot_slice_t`], so a fused product
-/// is bit-identical to its rows as separate dots.
-pub fn gemv_t<T: Scalar>(a: &[T], x: &[T], m: usize, n: usize, out: &mut [T]) {
-    // Four rows at a time, each with its own four accumulators: sixteen
-    // independent chains for the core, and every row's fold is exactly
-    // `dot_slice_t`'s.
-    let ch = n / FOLD_LANES;
-    let mut i = 0;
-    while i + GEMV_ROW_BLOCK <= m {
-        let rows: [&[T]; GEMV_ROW_BLOCK] =
-            std::array::from_fn(|r| &a[(i + r) * n..(i + r + 1) * n]);
-        let mut acc = [[T::zero(); FOLD_LANES]; GEMV_ROW_BLOCK];
-        for c in 0..ch {
-            for (r, row) in rows.iter().enumerate() {
-                for l in 0..FOLD_LANES {
-                    acc[r][l] = acc[r][l].add(row[FOLD_LANES * c + l].mul(x[FOLD_LANES * c + l]));
-                }
-            }
-        }
-        for (r, row) in rows.iter().enumerate() {
-            let a4 = acc[r];
-            let mut s = (a4[0].add(a4[1])).add(a4[2].add(a4[3]));
-            for k in ch * FOLD_LANES..n {
-                s = s.add(row[k].mul(x[k]));
-            }
-            out[i + r] = s;
-        }
-        i += GEMV_ROW_BLOCK;
-    }
-    for r in i..m {
-        out[r] = dot_slice_t(&a[r * n..(r + 1) * n], x);
-    }
+/// The inner product in the fold of [`reduce_slice_t`] over the products.
+pub fn dot_slice(a: &[f64], b: &[f64]) -> f64 {
+    crate::simd::dot(a, b)
 }
 
-/// [`gemv_t`] with its rows folded per `codes` against `c` (see
-/// [`gemm_fold_t`]).
-pub fn gemv_fold_t<T: Scalar>(
-    a: &[T],
-    x: &[T],
+/// A dense matrix-vector product: `out[i] = dot(a[i*n..(i+1)*n], x)` for
+/// `m` rows, each row the fold of [`dot_slice`], so a fused product is
+/// bit-identical to its rows as separate dots.
+pub fn gemv(a: &[f64], x: &[f64], m: usize, n: usize, out: &mut [f64]) {
+    crate::simd::gemv(a, x, m, n, out)
+}
+
+/// [`gemv`] with its rows folded per `codes` against `c` (see
+/// [`gemm_fold`]).
+pub fn gemv_fold(
+    a: &[f64],
+    x: &[f64],
     m: usize,
     n: usize,
-    c: Option<&[T]>,
+    c: Option<&[f64]>,
     codes: &[u32],
-    out: &mut [T],
+    out: &mut [f64],
 ) {
-    gemv_t(a, x, m, n, out);
+    crate::simd::gemv(a, x, m, n, out);
     fold_in_place(codes, c, out);
 }
 
 /// A dense matrix-matrix product against rows: `out[i*n + j] =
 /// dot(a[i*k..], b[j*k..])` for `m` rows of `a` and `n` rows of `b`, each
 /// of `k` (the right factor by columns, each contiguous). Every entry is
-/// the fold of [`dot_slice_t`], so a fused product is bit-identical to
-/// its entries as separate dots.
-pub fn gemm_t<T: Scalar>(a: &[T], b: &[T], m: usize, k: usize, n: usize, out: &mut [T]) {
-    gemm_with(a, b, m, k, n, |i, v| out[i] = v);
+/// the fold of [`dot_slice`], so a fused product is bit-identical to its
+/// entries as separate dots.
+pub fn gemm(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, out: &mut [f64]) {
+    crate::simd::gemm(a, b, m, k, n, out)
 }
 
-/// [`gemm_t`] with every entry stored through `st(index, value)`.
-pub fn gemm_with<T: Scalar>(
-    a: &[T],
-    b: &[T],
+/// [`gemm`] with its entries folded per `codes` (see [`crate::tape::Fold`])
+/// against the accumulator `c`: an entry folded with an operand is folded
+/// as it is stored; a self fold (against another entry's product) is
+/// folded after every product is stored, the products it reads being those
+/// of entries that stay plain.
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_fold(
+    a: &[f64],
+    b: &[f64],
     m: usize,
     k: usize,
     n: usize,
-    mut st: impl FnMut(usize, T),
-) {
-    // Four rows of `a` against two rows of `b` at a time: thirty-two
-    // independent accumulators, six operand rows in the near cache.
-    let ch = k / FOLD_LANES;
-    let tail = |i: usize, j: usize, acc: [T; FOLD_LANES]| -> T {
-        let mut s = (acc[0].add(acc[1])).add(acc[2].add(acc[3]));
-        for l in ch * FOLD_LANES..k {
-            s = s.add(a[i * k + l].mul(b[j * k + l]));
-        }
-        s
-    };
-    let mut i = 0;
-    while i + GEMM_ROW_BLOCK <= m {
-        let mut j = 0;
-        while j + GEMM_COL_BLOCK <= n {
-            let mut acc = [[[T::zero(); FOLD_LANES]; GEMM_COL_BLOCK]; GEMM_ROW_BLOCK];
-            for c in 0..ch {
-                for (r, ar) in acc.iter_mut().enumerate() {
-                    let ra = &a[(i + r) * k + FOLD_LANES * c..][..FOLD_LANES];
-                    for (q, aq) in ar.iter_mut().enumerate() {
-                        let rb = &b[(j + q) * k + FOLD_LANES * c..][..FOLD_LANES];
-                        for l in 0..FOLD_LANES {
-                            aq[l] = aq[l].add(ra[l].mul(rb[l]));
-                        }
-                    }
-                }
-            }
-            for (r, ar) in acc.iter().enumerate() {
-                for (q, &aq) in ar.iter().enumerate() {
-                    st((i + r) * n + j + q, tail(i + r, j + q, aq));
-                }
-            }
-            j += GEMM_COL_BLOCK;
-        }
-        for r in 0..GEMM_ROW_BLOCK {
-            for jj in j..n {
-                st(
-                    (i + r) * n + jj,
-                    dot_slice_t(&a[(i + r) * k..][..k], &b[jj * k..][..k]),
-                );
-            }
-        }
-        i += GEMM_ROW_BLOCK;
-    }
-    for r in i..m {
-        for j in 0..n {
-            st(r * n + j, dot_slice_t(&a[r * k..][..k], &b[j * k..][..k]));
-        }
-    }
-}
-
-/// [`gemm_t`] with its entries folded per `codes` (see
-/// [`crate::tape::Fold`]) against the accumulator `c`: an entry folded
-/// with an operand is folded as it is stored; a self fold (against another
-/// entry's product) is folded after every product is stored, the products
-/// it reads being those of entries that stay plain.
-pub fn gemm_fold_t<T: Scalar>(
-    a: &[T],
-    b: &[T],
-    m: usize,
-    k: usize,
-    n: usize,
-    c: Option<&[T]>,
+    c: Option<&[f64]>,
     codes: &[u32],
-    out: &mut [T],
+    out: &mut [f64],
 ) {
-    if codes.iter().any(|&code| Fold(code).is_self()) {
-        gemm_t(a, b, m, k, n, out);
-        fold_in_place(codes, c, out);
-    } else {
-        gemm_with(a, b, m, k, n, |i, v| {
-            out[i] = Fold(codes[i]).fold(c.map_or(v, |c| c[i]), v)
-        });
-    }
+    crate::simd::gemm_fold(a, b, m, k, n, c, codes, out)
 }
 
 /// The self folds of `out` (products stored plain), in place.
-pub fn fold_in_place<T: Scalar>(codes: &[u32], c: Option<&[T]>, out: &mut [T]) {
+pub(crate) fn fold_in_place(codes: &[u32], c: Option<&[f64]>, out: &mut [f64]) {
     for i in 0..out.len() {
         let f = Fold(codes[i]);
         if f.is_plain() {
@@ -712,79 +589,41 @@ pub fn fold_in_place<T: Scalar>(codes: &[u32], c: Option<&[T]>, out: &mut [T]) {
     }
 }
 
-/// [`gemm_t`] in `f64`: the vector twin (AVX or two-lane), bit-identical.
-pub fn gemm(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, out: &mut [f64]) {
-    <f64 as Scalar>::gemm(a, b, m, k, n, out)
+/// `x` with `A x = b` for the `n` by `n` matrix `a` (row-major): Gaussian
+/// elimination with partial pivoting (the first row of the largest
+/// magnitude), panel-blocked past [`crate::constants::LU_UNBLOCKED_MAX`]
+/// unknowns. The order of its operations is part of the contract.
+pub fn solve(a: &[f64], b: &[f64], n: usize, out: &mut [f64]) {
+    solve_many(a, b, n, 1, out)
 }
 
-/// [`gemm_fold_t`] in `f64`.
-#[allow(clippy::too_many_arguments)]
-pub fn gemm_fold(
-    a: &[f64],
-    b: &[f64],
-    m: usize,
-    k: usize,
-    n: usize,
-    c: Option<&[f64]>,
-    codes: &[u32],
-    out: &mut [f64],
-) {
-    <f64 as Scalar>::gemm_fold(a, b, m, k, n, c, codes, out)
-}
-
-/// [`gemv_fold_t`] in `f64`.
-pub fn gemv_fold(
-    a: &[f64],
-    x: &[f64],
-    m: usize,
-    n: usize,
-    c: Option<&[f64]>,
-    codes: &[u32],
-    out: &mut [f64],
-) {
-    <f64 as Scalar>::gemv_fold(a, x, m, n, c, codes, out)
-}
-
-/// [`gemv_t`] in `f64`: the vector twin (AVX or two-lane), bit-identical.
-pub fn gemv(a: &[f64], x: &[f64], m: usize, n: usize, out: &mut [f64]) {
-    <f64 as Scalar>::gemv(a, x, m, n, out)
-}
-
-pub use crate::constants::{LU_PANEL_LARGE, LU_PANEL_SMALL, LU_PANEL_SWITCH, LU_UNBLOCKED_MAX};
-
-pub fn solve_t<T: Scalar>(a: &[T], b: &[T], n: usize, out: &mut [T]) {
-    solve_many_t(a, b, n, 1, out)
-}
-
-/// [`solve_t`] for `k` right-hand sides at once: `b` holds `k` vectors of
+/// [`solve`] for `k` right-hand sides at once: `b` holds `k` vectors of
 /// `n` back to back, `out` receives the `k` solutions the same way. One
 /// factorization serves every right-hand side; each solution is bit-identical
-/// to its own [`solve_t`] (the pivots depend on `a` alone, and every
+/// to its own [`solve`] (the pivots depend on `a` alone, and every
 /// right-hand side column runs through the same updates in the same order).
 /// Allocates its scratch; [`solve_many_into`] takes it from the caller.
-pub fn solve_many_t<T: Scalar>(a: &[T], b: &[T], n: usize, k: usize, out: &mut [T]) {
-    let mut scratch = vec![T::zero(); solve_scratch_len(n, k)];
+pub fn solve_many(a: &[f64], b: &[f64], n: usize, k: usize, out: &mut [f64]) {
+    let mut scratch = vec![0.0; solve_scratch_len(n, k)];
     solve_many_into(a, b, n, k, out, &mut scratch)
 }
 
-/// [`solve_many_t`] over a `scratch` of at least [`solve_scratch_len`]
+/// [`solve_many`] over a `scratch` of at least [`solve_scratch_len`]
 /// values, allocating nothing.
-pub fn solve_many_into<T: Scalar>(
-    a: &[T],
-    b: &[T],
+pub fn solve_many_into(
+    a: &[f64],
+    b: &[f64],
     n: usize,
     k: usize,
-    out: &mut [T],
-    scratch: &mut [T],
+    out: &mut [f64],
+    scratch: &mut [f64],
 ) {
-    T::solve_many(a, b, n, k, out, &mut scratch[..solve_scratch_len(n, k)])
+    crate::simd::solve_many(a, b, n, k, out, &mut scratch[..solve_scratch_len(n, k)])
 }
-
-pub use crate::constants::{SOLVE_BATCH_MAX_K, SOLVE_BATCH_MAX_N};
 
 /// `count` independent systems of one shape: `a` holds their `n` by `n`
 /// matrices back to back, `b` their `k` right-hand sides each (as
-/// [`solve_many_t`] takes them), `out` their solutions the same way. Each
+/// [`solve_many`] takes them), `out` their solutions the same way. Each
 /// solution is bit-identical to its system's own [`solve_many_into`]; the
 /// systems share the `scratch` of one.
 #[allow(clippy::too_many_arguments)]
@@ -820,8 +659,8 @@ pub(crate) fn lu_panel(n: usize) -> usize {
 }
 
 /// The scratch a solve of `n` unknowns and `k` right-hand sides works in:
-/// the augmented matrix, and past [`LU_UNBLOCKED_MAX`] the panel's buffers
-/// for the trailing update.
+/// the augmented matrix, and past [`crate::constants::LU_UNBLOCKED_MAX`]
+/// the panel's buffers for the trailing update.
 pub fn solve_scratch_len(n: usize, k: usize) -> usize {
     let (w, nb) = (n + k, lu_panel(n));
     n * w
@@ -835,13 +674,13 @@ pub fn solve_scratch_len(n: usize, k: usize) -> usize {
 /// The scratch of a solve cut into its parts: the augmented matrix `[a | b]`
 /// (filled here, rows of `n + k`), and the panel's transposed columns, its
 /// rows and their product for the trailing update.
-pub(crate) fn solve_parts<'s, T: Copy>(
-    scratch: &'s mut [T],
-    a: &[T],
-    b: &[T],
+pub(crate) fn solve_parts<'s>(
+    scratch: &'s mut [f64],
+    a: &[f64],
+    b: &[f64],
     n: usize,
     k: usize,
-) -> [&'s mut [T]; 4] {
+) -> [&'s mut [f64]; 4] {
     let (w, nb) = (n + k, lu_panel(n));
     let (m, rest) = scratch.split_at_mut(n * w);
     for i in 0..n {
@@ -853,132 +692,4 @@ pub(crate) fn solve_parts<'s, T: Copy>(
     let (ut, rest) = rest.split_at_mut(nb * w);
     let (lrows, prod) = rest.split_at_mut(LU_TRAILING_ROWS * nb);
     [m, ut, lrows, prod]
-}
-
-/// [`solve_many_t`] as the generic reference, for any scalar (the `f64`
-/// twin in `simd` mirrors it step for step).
-pub fn solve_many_generic<T: Scalar>(a: &[T], b: &[T], n: usize, k: usize, out: &mut [T]) {
-    let mut scratch = vec![T::zero(); solve_scratch_len(n, k)];
-    solve_generic_into(a, b, n, k, out, &mut scratch)
-}
-
-/// [`solve_many_generic`] over the caller's scratch.
-pub(crate) fn solve_generic_into<T: Scalar>(
-    a: &[T],
-    b: &[T],
-    n: usize,
-    k: usize,
-    out: &mut [T],
-    scratch: &mut [T],
-) {
-    let [m, ut, lrows, prod] = solve_parts(scratch, a, b, n, k);
-    let w = n + k;
-    let nb = match lu_panel(n) {
-        0 => n,
-        nb => nb,
-    };
-    let mut k0 = 0;
-    while k0 < n {
-        // Unblocked, one panel of every column: each pivot updates the
-        // whole trailing matrix and the right-hand sides.
-        let k1 = (k0 + nb).min(n);
-        let upto = if lu_panel(n) == 0 { w } else { k1 };
-        // The panel's columns, right-looking within the panel.
-        for k in k0..k1 {
-            let mut p = k;
-            let mut best = m[k * w + k].magnitude();
-            for i in k + 1..n {
-                let v = m[i * w + k].magnitude();
-                if v > best {
-                    best = v;
-                    p = i;
-                }
-            }
-            if p != k {
-                for j in 0..w {
-                    m.swap(k * w + j, p * w + j);
-                }
-            }
-            let piv = m[k * w + k];
-            for i in k + 1..n {
-                let l = m[i * w + k].div(piv);
-                m[i * w + k] = l;
-                for j in k + 1..upto {
-                    let t = l.mul(m[k * w + j]);
-                    m[i * w + j] = m[i * w + j].sub(t);
-                }
-            }
-        }
-        if upto == w {
-            break;
-        }
-        // The panel's unit lower triangle applied to the columns right of
-        // the panel, for the panel's own rows.
-        for k in k0..k1 {
-            for i in k + 1..k1 {
-                let l = m[i * w + k];
-                for j in k1..w {
-                    let t = l.mul(m[k * w + j]);
-                    m[i * w + j] = m[i * w + j].sub(t);
-                }
-            }
-        }
-        // The trailing block: each entry minus the dot of its row's
-        // multipliers with its column's panel rows.
-        if k1 < n {
-            let nb = k1 - k0;
-            let cols = w - k1;
-            let ut = &mut ut[..cols * nb];
-            for (jj, j) in (k1..w).enumerate() {
-                for (kk, k) in (k0..k1).enumerate() {
-                    ut[jj * nb + kk] = m[k * w + j];
-                }
-            }
-            let mut i = k1;
-            while i < n {
-                let rows = (n - i).min(LU_TRAILING_ROWS);
-                for r in 0..rows {
-                    let at = (i + r) * w;
-                    lrows[r * nb..(r + 1) * nb].copy_from_slice(&m[at + k0..at + k1]);
-                }
-                T::gemm(
-                    &lrows[..rows * nb],
-                    ut,
-                    rows,
-                    nb,
-                    cols,
-                    &mut prod[..rows * cols],
-                );
-                for r in 0..rows {
-                    let at = (i + r) * w + k1;
-                    for jj in 0..cols {
-                        m[at + jj] = m[at + jj].sub(prod[r * cols + jj]);
-                    }
-                }
-                i += rows;
-            }
-        }
-        k0 = k1;
-    }
-    for c in 0..k {
-        let x = &mut out[c * n..(c + 1) * n];
-        for i in (0..n).rev() {
-            let mut s = m[i * w + n + c];
-            for j in i + 1..n {
-                let t = m[i * w + j].mul(x[j]);
-                s = s.sub(t);
-            }
-            x[i] = s.div(m[i * w + i]);
-        }
-    }
-}
-
-/// [`solve_t`] in `f64`.
-pub fn solve(a: &[f64], b: &[f64], n: usize, out: &mut [f64]) {
-    solve_t(a, b, n, out)
-}
-
-/// [`solve_many_t`] in `f64`.
-pub fn solve_many(a: &[f64], b: &[f64], n: usize, k: usize, out: &mut [f64]) {
-    solve_many_t(a, b, n, k, out)
 }

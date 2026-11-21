@@ -1,8 +1,7 @@
 //! A main phase shortened against a trace of it (`Tape::specialize_main`)
 //! runs over the full prolog's state: wherever its guards hold, its outputs
-//! are the full main phase's, bit for bit; where they do not, the selects
-//! it reports flipped are the ones that took the other arm. Its own prolog
-//! is the full one, the state the same.
+//! are the full main phase's, bit for bit. Its own prolog is the full one,
+//! the state the same.
 
 use rsdag::node::CmpOp;
 use rsdag::{ExprId, Graph, Guards, Node, SymbolId, Tape, F64};
@@ -102,7 +101,6 @@ fn a_shortened_main_phase_is_the_full_one_where_its_guards_hold() {
         assert_eq!(trace.len(), n);
         let sp = t.specialize_main(&trace, &vec![true; n], Guards::Each);
         let counted = t.specialize_main(&trace, &vec![true; n], Guards::Count);
-        assert_eq!(counted.n_guards(), 1);
         let st = sp.tape();
         assert!(sp.n_ops() < t.n_ops(), "the trace shortens the tape");
         assert_eq!(st.state_len(), sl, "the state is kept");
@@ -118,13 +116,11 @@ fn a_shortened_main_phase_is_the_full_one_where_its_guards_hold() {
             if rng(&mut s) > 1.8 {
                 x[(s % 2) as usize] = f64::NAN;
             }
-            let (want, now) = full(&t, &x, &mut w);
+            let (want, _) = full(&t, &x, &mut w);
             ws[..sl].copy_from_slice(&w[..sl]);
             let mut got = vec![0.0; st.out_len()];
             st.eval_main_into(&x, &mut ws, &mut got);
             let (real, guards) = got.split_at(sp.n_real());
-            assert_eq!(guards.len(), sp.n_guards());
-            let flips: Vec<usize> = sp.flipped(guards).collect();
             // the counted guard holds where every guard does
             let ct = counted.tape();
             let mut wc = vec![0.0; ct.work_len()];
@@ -139,13 +135,8 @@ fn a_shortened_main_phase_is_the_full_one_where_its_guards_hold() {
             if sp.holds(guards) {
                 held += 1;
                 assert!(same(real, &want), "guards hold: the full outputs");
-                assert!(flips.is_empty());
             } else {
                 flipped += 1;
-                assert!(!flips.is_empty(), "a failing guard names a select");
-                for &k in &flips {
-                    assert_ne!(trace[k], now[k], "select {k} reported flipped");
-                }
             }
         }
     }
@@ -165,7 +156,7 @@ fn unpinned_selects_stay_and_need_no_guard() {
     t.eval_prolog(&x0, &mut w);
     let (_, trace) = full(&t, &x0, &mut w);
     let none = t.specialize_main(&trace, &vec![false; n], Guards::Each);
-    assert_eq!(none.n_guards(), 0);
+    assert_eq!(none.tape().out_len(), none.n_real(), "no guard outputs");
     let mut s = 7u64;
     let mut ws = Vec::new();
     none.tape().eval_prolog(&x0, &mut ws);

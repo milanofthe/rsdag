@@ -5,8 +5,8 @@
 //! results, so it takes an edit here in the same commit, where review sees
 //! it.
 
+use rsdag::constants::{LU_PANEL_LARGE, LU_PANEL_SMALL, LU_PANEL_SWITCH, LU_UNBLOCKED_MAX};
 use rsdag::semantics::exp_ln::*;
-use rsdag::semantics::{LU_PANEL_LARGE, LU_PANEL_SMALL, LU_PANEL_SWITCH, LU_UNBLOCKED_MAX};
 
 fn bits(name: &str, v: f64, want: u64) {
     assert_eq!(

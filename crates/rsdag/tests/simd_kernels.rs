@@ -1,11 +1,17 @@
-//! The `f64` vector twins of the dot-fold kernels are bit-identical to the
-//! generic reference on every shape: chunked, with tails, with remainder
-//! rows and columns, on values whose rounding differs between folds.
+//! The dense kernels hold their contracts on every shape (chunked, with
+//! tails, with remainder rows and columns, on values whose rounding differs
+//! between folds), on whichever vector path the machine takes (`RSDAG_SSE2`
+//! selects the two-lane one on x86-64): the dot is the reduction's fold
+//! over the products, a matrix product is its entries as dots, a solve of
+//! several right-hand sides is each solved alone, and a batch of systems is
+//! each system solved alone.
 
 use rsdag::semantics::{
-    dot_slice, dot_slice_t, gemm, gemm_t, gemv, gemv_t, solve_many, solve_many_generic,
+    dot_slice, gemm, gemv, reduce_slice, solve, solve_batch_into, solve_many, solve_many_into,
+    solve_scratch_len,
 };
 use rsdag::synth::Spec;
+use rsdag::ReduceOp;
 
 fn values(rng: &mut rsdag::synth::Rng, len: usize) -> Vec<f64> {
     (0..len)
@@ -22,21 +28,22 @@ fn same(a: &[f64], b: &[f64]) -> bool {
 }
 
 #[test]
-fn dot_matches_the_reference_on_every_length() {
+fn the_dot_is_the_sum_fold_of_the_products() {
     let mut rng = Spec::new(3).rng();
     for n in 0..70 {
         let a = values(&mut rng, n);
         let b = values(&mut rng, n);
+        let products: Vec<f64> = a.iter().zip(&b).map(|(x, y)| x * y).collect();
         assert_eq!(
             dot_slice(&a, &b).to_bits(),
-            dot_slice_t(&a, &b).to_bits(),
+            reduce_slice(ReduceOp::Sum, &products).to_bits(),
             "n {n}"
         );
     }
 }
 
 #[test]
-fn gemv_matches_the_reference_on_every_shape() {
+fn gemv_rows_are_dots() {
     let mut rng = Spec::new(4).rng();
     for (m, n) in (0..11)
         .flat_map(|m| (0..13).map(move |n| (m, n)))
@@ -44,15 +51,15 @@ fn gemv_matches_the_reference_on_every_shape() {
     {
         let a = values(&mut rng, m * n);
         let x = values(&mut rng, n);
-        let (mut y1, mut y2) = (vec![0.0; m], vec![0.0; m]);
-        gemv(&a, &x, m, n, &mut y1);
-        gemv_t(&a, &x, m, n, &mut y2);
-        assert!(same(&y1, &y2), "m {m} n {n}");
+        let mut y = vec![0.0; m];
+        gemv(&a, &x, m, n, &mut y);
+        let rows: Vec<f64> = (0..m).map(|i| dot_slice(&a[i * n..][..n], &x)).collect();
+        assert!(same(&y, &rows), "m {m} n {n}");
     }
 }
 
 #[test]
-fn gemm_matches_the_reference_on_every_shape() {
+fn gemm_entries_are_dots() {
     let mut rng = Spec::new(5).rng();
     let shapes = (0..7)
         .flat_map(|m| (0..18).flat_map(move |k| (0..10).map(move |n| (m, k, n))))
@@ -66,19 +73,21 @@ fn gemm_matches_the_reference_on_every_shape() {
     for (m, k, n) in shapes {
         let a = values(&mut rng, m * k);
         let b = values(&mut rng, n * k);
-        let (mut c1, mut c2) = (vec![0.0; m * n], vec![0.0; m * n]);
-        gemm(&a, &b, m, k, n, &mut c1);
-        gemm_t(&a, &b, m, k, n, &mut c2);
-        assert!(same(&c1, &c2), "m {m} k {k} n {n}");
+        let mut c = vec![0.0; m * n];
+        gemm(&a, &b, m, k, n, &mut c);
+        let entries: Vec<f64> = (0..m * n)
+            .map(|e| dot_slice(&a[e / n * k..][..k], &b[e % n * k..][..k]))
+            .collect();
+        assert!(same(&c, &entries), "m {m} k {k} n {n}");
     }
 }
 
 #[test]
-fn solve_many_matches_the_generic_reference_on_every_shape() {
+fn each_right_hand_side_is_solved_as_alone() {
     let mut rng = Spec::new(9).rng();
     let shapes = (1..30usize)
-        .flat_map(|n| [1usize, 2, 5].into_iter().map(move |k| (n, k)))
-        .chain([(37, 4), (100, 7), (520, 2)]);
+        .flat_map(|n| [2usize, 5, 9].into_iter().map(move |k| (n, k)))
+        .chain([(37, 4), (100, 7), (520, 5)]);
     // Dominant diagonals and plain random matrices, whose elimination swaps
     // rows.
     for ((n, k), dominant) in shapes.flat_map(|s| [(s, true), (s, false)]) {
@@ -87,16 +96,18 @@ fn solve_many_matches_the_generic_reference_on_every_shape() {
             a[i * n + i] += 4.0 * n as f64;
         }
         let b = values(&mut rng, n * k);
-        let (mut x1, mut x2) = (vec![0.0; n * k], vec![0.0; n * k]);
-        solve_many(&a, &b, n, k, &mut x1);
-        solve_many_generic(&a, &b, n, k, &mut x2);
-        assert!(same(&x1, &x2), "n {n} k {k}");
+        let mut x = vec![0.0; n * k];
+        solve_many(&a, &b, n, k, &mut x);
+        for c in 0..k {
+            let mut xc = vec![0.0; n];
+            solve(&a, &b[c * n..(c + 1) * n], n, &mut xc);
+            assert!(same(&x[c * n..(c + 1) * n], &xc), "n {n} k {k} column {c}");
+        }
     }
 }
 
 #[test]
 fn a_batch_of_solves_matches_each_solve_alone() {
-    use rsdag::semantics::{solve_batch_into, solve_scratch_len};
     let mut rng = Spec::new(10).rng();
     for n in 1..=18usize {
         for k in [1usize, 2, 5] {
@@ -120,12 +131,13 @@ fn a_batch_of_solves_matches_each_solve_alone() {
                 for c in 0..count {
                     let (sa, sb) = (n * n, n * k);
                     let mut x2 = vec![0.0; sb];
-                    solve_many_generic(
+                    solve_many_into(
                         &a[c * sa..(c + 1) * sa],
                         &b[c * sb..(c + 1) * sb],
                         n,
                         k,
                         &mut x2,
+                        &mut scratch,
                     );
                     assert!(
                         same(&x1[c * sb..(c + 1) * sb], &x2),

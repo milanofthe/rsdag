@@ -6,7 +6,8 @@
 //!
 //!     cargo run --release -p rsdag-jit --example variants -- [--n <instances>]
 
-use std::time::Instant;
+mod common;
+use common::per_call;
 
 use rsdag::{CmpOp, ExprId, Graph, Node, ParamRole, SymbolId, Tape, F64};
 use rsdag_jit::NativeTape;
@@ -61,32 +62,6 @@ fn circuit(n: usize, arm: usize) -> (Graph<F64>, Vec<ExprId>, Vec<SymbolId>, Vec
         roots.push(g.call(f, 0, &[x, pp, qq]));
     }
     (g, roots, syms, pure)
-}
-
-/// Seconds per call: the best of five batches of at least 50 ms.
-fn per_call(mut f: impl FnMut()) -> f64 {
-    let mut reps = 1usize;
-    let mut dt;
-    loop {
-        let t = Instant::now();
-        for _ in 0..reps {
-            f();
-        }
-        dt = t.elapsed().as_secs_f64();
-        if dt > 0.05 {
-            break;
-        }
-        reps *= 4;
-    }
-    let mut best = dt / reps as f64;
-    for _ in 0..4 {
-        let t = Instant::now();
-        for _ in 0..reps {
-            f();
-        }
-        best = best.min(t.elapsed().as_secs_f64() / reps as f64);
-    }
-    best
 }
 
 fn main_us(n: usize, arm: usize, variants: bool) -> f64 {

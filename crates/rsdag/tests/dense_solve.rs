@@ -1,11 +1,10 @@
 //! The dense solve as a node: one pivoting kernel for all components,
-//! exact against the numeric twin, differentiable in both modes, and the
-//! route `Builder::solve` takes for a dense matrix.
+//! exact against the reference routine and differentiable in both modes.
 
 use std::collections::HashMap;
 
 use rsdag::synth::Spec;
-use rsdag::{Builder, ExprId, Graph, Node, Numeric, SymbolId, Tape, F64};
+use rsdag::{ExprId, Graph, Node, SymbolId, Tape, F64};
 
 fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
     match g.node(e) {
@@ -46,7 +45,7 @@ fn system(
 }
 
 #[test]
-fn the_kernel_is_the_numeric_twin_to_the_bit() {
+fn the_kernel_is_the_reference_solve_to_the_bit() {
     for (n, seed) in [(2usize, 1u64), (5, 2), (12, 3), (40, 4)] {
         let mut g: Graph<F64> = Graph::new();
         let (a, b, syms, vals) = system(&mut g, n, seed);
@@ -55,8 +54,8 @@ fn the_kernel_is_the_numeric_twin_to_the_bit() {
         assert!(tape.dump().contains("Solve"), "{}", tape.dump());
         let (mut w, mut o) = (Vec::new(), Vec::new());
         tape.eval(&vals, &mut w, &mut o);
-        let dense: Vec<Vec<f64>> = (0..n).map(|i| vals[i * n..(i + 1) * n].to_vec()).collect();
-        let want = Numeric.solve(&dense, &vals[n * n..]);
+        let mut want = vec![0.0; n];
+        rsdag::semantics::solve(&vals[..n * n], &vals[n * n..], n, &mut want);
         for (k, (p, q)) in want.iter().zip(&o).enumerate() {
             assert_eq!(p.to_bits(), q.to_bits(), "n {n} x[{k}]: {p} vs {q}");
         }
@@ -111,24 +110,6 @@ fn forward_and_reverse_derivatives_agree_with_finite_differences() {
             "forward d/d{k}: {} vs fd {fd}",
             g_fwd[k]
         );
-    }
-}
-
-#[test]
-fn a_dense_matrix_through_the_builder_is_one_kernel() {
-    let n = 10;
-    let mut g: Graph<F64> = Graph::new();
-    let (a, b, syms, vals) = system(&mut g, n, 9);
-    let rows: Vec<Vec<ExprId>> = (0..n).map(|i| a[i * n..(i + 1) * n].to_vec()).collect();
-    let x = Builder::solve(&mut g, &rows, &b);
-    let tape = Tape::compile(&g, &x, &syms);
-    assert_eq!(tape.dump().matches("Solve").count(), 1, "{}", tape.dump());
-    let (mut w, mut o) = (Vec::new(), Vec::new());
-    tape.eval(&vals, &mut w, &mut o);
-    let dense: Vec<Vec<f64>> = (0..n).map(|i| vals[i * n..(i + 1) * n].to_vec()).collect();
-    let want = Numeric.solve(&dense, &vals[n * n..]);
-    for (p, q) in want.iter().zip(&o) {
-        assert_eq!(p.to_bits(), q.to_bits());
     }
 }
 
