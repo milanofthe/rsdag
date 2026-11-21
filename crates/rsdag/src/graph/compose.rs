@@ -62,7 +62,7 @@ impl<K: Field> Graph<K> {
     /// Expressions of graph `other` rebuilt here: their symbols by name,
     /// their calls into the functions of `other` imported (see
     /// [`import`](Self::import)).
-    pub fn import_exprs(
+    fn import_exprs(
         &mut self,
         other: &Graph<K>,
         roots: &[ExprId],
