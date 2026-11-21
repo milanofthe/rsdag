@@ -804,17 +804,14 @@ impl<K: Field> Graph<K> {
     pub fn floor(&mut self, a: ExprId) -> ExprId {
         self.unary(UnaryOp::Floor, a)
     }
-    pub fn sinh(&mut self, a: ExprId) -> ExprId {
+    pub(crate) fn sinh(&mut self, a: ExprId) -> ExprId {
         self.unary(UnaryOp::Sinh, a)
     }
-    pub fn cosh(&mut self, a: ExprId) -> ExprId {
+    pub(crate) fn cosh(&mut self, a: ExprId) -> ExprId {
         self.unary(UnaryOp::Cosh, a)
     }
     pub fn tanh(&mut self, a: ExprId) -> ExprId {
         self.unary(UnaryOp::Tanh, a)
-    }
-    pub fn atan(&mut self, a: ExprId) -> ExprId {
-        self.unary(UnaryOp::Atan, a)
     }
 
     // --- conditions and selection ----------------------------------------
