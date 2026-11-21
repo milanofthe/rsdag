@@ -1700,7 +1700,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
     /// A product kernel of fewer than [`INLINE_ROWS`](crate::constants::INLINE_ROWS) rows, `m` rows of `k`
     /// in `a` against `n` rows of `k` in `b`, inline: every entry the dot
     /// of its row and its column (the kernel's own fold, see
-    /// [`rsdag::semantics::gemm_t`]), then the entries that fold, in entry
+    /// [`rsdag::semantics::gemm`]), then the entries that fold, in entry
     /// order, against their accumulator operand or another entry's product.
     fn product(
         &mut self,

@@ -1,10 +1,9 @@
-//! The `f64` twins of the dot-fold kernels: the same fold as the generic
-//! reference in [`crate::semantics`] (four accumulators, merged as
-//! `(0 + 1) + (2 + 3)`, then the tail in order), written once over a
-//! four-lane vector [`Quad`] whose lane `l` is accumulator `l`. Bit-identical
-//! to the reference by construction: every product and every sum rounds
-//! once, nothing is fused. The generic reference stays the definition; the
-//! tests hold the twins to it.
+//! The dense kernels behind [`crate::semantics`]. The dot-fold kernels
+//! (four accumulators, merged as `(0 + 1) + (2 + 3)`, then the tail in
+//! order: the fold of [`crate::semantics::reduce_slice_t`] over the
+//! products) are written once over a four-lane vector [`Quad`] whose lane
+//! `l` is accumulator `l`. Every product and every sum rounds once, nothing
+//! is fused, so no result depends on the vector width.
 //!
 //! A `Quad` is one 256-bit AVX register on x86-64 CPUs that have AVX
 //! (detected at run time), else a pair of two-lane vectors: NEON on
@@ -13,10 +12,11 @@
 //! can be tested on one machine.
 
 use crate::constants::{
-    FOLD_LANES, GEMM_COL_BLOCK, GEMM_ROW_BLOCK, GEMV_ROW_BLOCK, LU_TRAILING_ROWS,
+    FOLD_LANES, GEMM_COL_BLOCK, GEMM_ROW_BLOCK, GEMV_ROW_BLOCK, LU_PANEL_LARGE, LU_PANEL_SMALL,
+    LU_TRAILING_ROWS, SOLVE_BATCH_MAX_K, SOLVE_BATCH_MAX_N,
 };
 
-/// The lanes of a [`Quad`], one per accumulator of the reference fold.
+/// The lanes of a [`Quad`], one per accumulator of the fold.
 const LANES: usize = FOLD_LANES;
 
 /// Four `f64` lanes, every operation lane by lane and rounded once.
@@ -383,11 +383,11 @@ macro_rules! entry {
 }
 
 entry!(
-    /// [`crate::semantics::dot_slice_t`] in `f64`.
+    /// [`crate::semantics::dot_slice`].
     fn dot<>(a: &[f64], b: &[f64]) -> f64 = dot_q
 );
 entry!(
-    /// [`crate::semantics::gemv_t`] in `f64`: four rows at a time, the
+    /// [`crate::semantics::gemv`]: four rows at a time, the
     /// vector loaded once per chunk for all four.
     fn gemv<>(a: &[f64], x: &[f64], m: usize, n: usize, out: &mut [f64]) = gemv_q
 );
@@ -402,11 +402,11 @@ entry!(
     fn solve_batch<>(a: &[f64], b: &[f64], n: usize, k: usize, count: usize, out: &mut [f64], scratch: &mut [f64]) = solve_batch_q
 );
 entry!(
-    /// [`crate::semantics::solve_many_t`] in `f64`: the same panel-blocked
-    /// elimination step for step (pivot search, swaps, panel updates, the
-    /// panel's rows against the trailing columns, the trailing update
-    /// through [`gemm`], the back-substitution), the row updates four
-    /// lanes wide, the augmented matrix in the caller's scratch.
+    /// [`crate::semantics::solve_many_into`]: up to sixteen unknowns
+    /// [`solve_fixed`], else the elimination on the augmented matrix in the
+    /// caller's scratch, panel-blocked past
+    /// [`crate::constants::LU_UNBLOCKED_MAX`] (the trailing update through
+    /// [`gemm`]), the row updates four lanes wide.
     fn solve_many<>(a: &[f64], b: &[f64], n: usize, k: usize, out: &mut [f64], scratch: &mut [f64]) = solve_q
 );
 
@@ -467,14 +467,14 @@ fn gemv_q<Q: Quad>(a: &[f64], x: &[f64], m: usize, n: usize, out: &mut [f64]) {
     }
 }
 
-/// [`crate::semantics::gemm_t`] in `f64`: four rows of `a` against two
+/// [`crate::semantics::gemm`]: four rows of `a` against two
 /// rows of `b` at a time, eight accumulators.
 pub(crate) fn gemm(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, out: &mut [f64]) {
     assert!(a.len() >= m * k && b.len() >= n * k && out.len() >= m * n);
     gemm_with(a, b, m, k, n, |i, v| out[i] = v);
 }
 
-/// [`crate::semantics::gemm_fold_t`] in `f64`: the folds against an
+/// [`crate::semantics::gemm_fold`]: the folds against an
 /// operand at the store, the self folds after.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn gemm_fold(
@@ -576,7 +576,7 @@ fn gemm_q<Q: Quad, F: FnMut(usize, f64)>(
 }
 
 /// `row_i[j] -= l * row_k[j]` over `j`, four lanes at a time; each element
-/// one product and one difference, as the reference.
+/// one product and one difference.
 #[inline(always)]
 fn axpy_sub<Q: Quad>(row_i: &mut [f64], row_k: &[f64], l: f64) {
     let n = row_i.len().min(row_k.len());
@@ -605,7 +605,7 @@ fn solve_q<Q: Quad>(
     out: &mut [f64],
     scratch: &mut [f64],
 ) {
-    use crate::semantics::{lu_panel, LU_PANEL_LARGE, LU_PANEL_SMALL};
+    use crate::semantics::lu_panel;
     macro_rules! fixed {
         ($($n:literal)*) => {
             match n {
@@ -636,7 +636,6 @@ fn solve_batch_q<Q: Quad>(
 ) {
     let (sa, sb) = (n * n, n * k);
     let mut c = 0;
-    use crate::semantics::{SOLVE_BATCH_MAX_K, SOLVE_BATCH_MAX_N};
     if n <= SOLVE_BATCH_MAX_N && k <= SOLVE_BATCH_MAX_K {
         macro_rules! lanes {
             ($($n:literal)*) => {
@@ -665,11 +664,11 @@ fn solve_batch_q<Q: Quad>(
 }
 
 /// Four systems of `N` unknowns and `k` right-hand sides (at most
-/// [`crate::semantics::SOLVE_BATCH_MAX_K`]) side by side, lane `q` system `q`: `a` holds their
+/// [`SOLVE_BATCH_MAX_K`]) side by side, lane `q` system `q`: `a` holds their
 /// matrices back to back, `b` and `out` their right-hand sides and
 /// solutions. Each lane runs [`solve_fixed`] on its own system: its own
 /// pivot, its rows swapped where its pivot says (a lane select), its own
-/// products, differences and quotients in the reference's order, so every
+/// products, differences and quotients in [`solve_fixed`]'s order, so every
 /// solution is bit-identical to its system solved alone. Four independent
 /// eliminations share one chain of latencies.
 #[inline(always)]
@@ -683,7 +682,7 @@ fn solve_lanes<Q: Quad, const N: usize>(a: &[f64], b: &[f64], k: usize, out: &mu
             cj[i] = Q::of(std::array::from_fn(|q| a[q * sa + i * N + j]));
         }
     }
-    let mut x = [[Q::zero(); N]; crate::semantics::SOLVE_BATCH_MAX_K];
+    let mut x = [[Q::zero(); N]; SOLVE_BATCH_MAX_K];
     for (c, xc) in x.iter_mut().enumerate().take(k) {
         for (i, xi) in xc.iter_mut().enumerate() {
             *xi = Q::of(std::array::from_fn(|q| b[q * sb + c * N + i]));
@@ -748,7 +747,7 @@ fn solve_lanes<Q: Quad, const N: usize>(a: &[f64], b: &[f64], k: usize, out: &mu
 /// its loops unroll, the matrix by columns on the stack: the pivot search,
 /// the multipliers and each column's update run down a column, four rows
 /// to a vector. The right-hand sides are eliminated in `out`. Every entry
-/// sees the reference's products and differences in the reference's
+/// sees the products and differences of the row-major elimination in its
 /// order (a row update is entry by entry, the right-hand sides' columns
 /// included), so the result is bit-identical.
 #[inline(always)]
@@ -810,8 +809,7 @@ fn solve_fixed<const N: usize>(a: &[f64], b: &[f64], k: usize, out: &mut [f64]) 
     }
 }
 
-/// The right-looking elimination of [`crate::semantics::solve_many_generic`]
-/// without panels.
+/// The right-looking elimination on the augmented matrix, without panels.
 #[inline(always)]
 fn solve_unblocked<Q: Quad>(
     a: &[f64],

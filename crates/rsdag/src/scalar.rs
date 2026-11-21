@@ -40,22 +40,13 @@ pub trait Scalar: Copy + Send + Sync + std::fmt::Debug + 'static {
     fn bits(self) -> Option<u64> {
         None
     }
-    /// The dot of two slices in the reference fold
-    /// ([`crate::semantics::dot_slice_t`]); `f64` runs its vector twin.
-    fn dot_slice(a: &[Self], b: &[Self]) -> Self {
-        crate::semantics::dot_slice_t(a, b)
-    }
-    /// The matrix-vector product in the reference fold
-    /// ([`crate::semantics::gemv_t`]); `f64` runs its vector twin.
-    fn gemv(a: &[Self], x: &[Self], m: usize, n: usize, out: &mut [Self]) {
-        crate::semantics::gemv_t(a, x, m, n, out)
-    }
-    /// The matrix-matrix product in the reference fold
-    /// ([`crate::semantics::gemm_t`]); `f64` runs its vector twin.
-    fn gemm(a: &[Self], b: &[Self], m: usize, k: usize, n: usize, out: &mut [Self]) {
-        crate::semantics::gemm_t(a, b, m, k, n, out)
-    }
-    /// The product with its entries folded ([`crate::semantics::gemm_fold_t`]).
+    /// The dot of two slices ([`crate::semantics::dot_slice`]).
+    fn dot_slice(a: &[Self], b: &[Self]) -> Self;
+    /// The matrix-vector product ([`crate::semantics::gemv`]).
+    fn gemv(a: &[Self], x: &[Self], m: usize, n: usize, out: &mut [Self]);
+    /// The matrix-matrix product ([`crate::semantics::gemm`]).
+    fn gemm(a: &[Self], b: &[Self], m: usize, k: usize, n: usize, out: &mut [Self]);
+    /// The product with its entries folded ([`crate::semantics::gemm_fold`]).
     #[allow(clippy::too_many_arguments)]
     fn gemm_fold(
         a: &[Self],
@@ -66,11 +57,9 @@ pub trait Scalar: Copy + Send + Sync + std::fmt::Debug + 'static {
         c: Option<&[Self]>,
         codes: &[u32],
         out: &mut [Self],
-    ) {
-        crate::semantics::gemm_fold_t(a, b, m, k, n, c, codes, out)
-    }
+    );
     /// The matrix-vector product with its rows folded
-    /// ([`crate::semantics::gemv_fold_t`]).
+    /// ([`crate::semantics::gemv_fold`]).
     fn gemv_fold(
         a: &[Self],
         x: &[Self],
@@ -79,11 +68,9 @@ pub trait Scalar: Copy + Send + Sync + std::fmt::Debug + 'static {
         c: Option<&[Self]>,
         codes: &[u32],
         out: &mut [Self],
-    ) {
-        crate::semantics::gemv_fold_t(a, x, m, n, c, codes, out)
-    }
+    );
     /// The dense solve of `k` right-hand sides over `scratch` (see
-    /// [`crate::semantics::solve_many_into`]); `f64` runs its vector twin.
+    /// [`crate::semantics::solve_many_into`]).
     fn solve_many(
         a: &[Self],
         b: &[Self],
@@ -91,9 +78,7 @@ pub trait Scalar: Copy + Send + Sync + std::fmt::Debug + 'static {
         k: usize,
         out: &mut [Self],
         scratch: &mut [Self],
-    ) {
-        crate::semantics::solve_generic_into(a, b, n, k, out, scratch)
-    }
+    );
     /// `count` solves of one shape (see
     /// [`crate::semantics::solve_batch_into`]): one after the other, or in
     /// `f64` side by side in the lanes of a vector.
@@ -263,8 +248,7 @@ impl Scalar for f64 {
         codes: &[u32],
         out: &mut [Self],
     ) {
-        crate::simd::gemv(a, x, m, n, out);
-        crate::semantics::fold_in_place(codes, c, out);
+        crate::semantics::gemv_fold(a, x, m, n, c, codes, out)
     }
     fn solve_many(
         a: &[Self],

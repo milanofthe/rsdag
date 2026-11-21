@@ -557,7 +557,7 @@ pub enum Node {
     /// Component `i` of `x` solving the dense system `A x = b`, the list
     /// being `A` row-major (`n * n`) followed by `b` (`n`), with `n` from
     /// the length. The `n` components share the list and evaluate as one
-    /// pivoting kernel (see [`crate::semantics::solve_t`]); the graph
+    /// pivoting kernel (see [`crate::semantics::solve`]); the graph
     /// differentiates through it by the identities of the inverse.
     Solve(ArgList, u32),
     /// A call: output `OutputId` of a function (see [`crate::func`]) applied

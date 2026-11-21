@@ -23,7 +23,7 @@
 //!   [`crate::semantics::trigamma`] and [`crate::semantics::rand_uniform`]
 //!   are defined there, not taken from a platform library.
 //! - **The fold orders.** [`crate::semantics::reduce_slice_t`] and
-//!   [`crate::semantics::dot_slice_t`] fold with four accumulators merged as
+//!   [`crate::semantics::dot_slice`] fold with four accumulators merged as
 //!   `(a0 + a1) + (a2 + a3)`, then the tail in order; a kernel is those
 //!   folds row by row.
 //! - **No contraction.** [`Op::MulAdd`] is a fused *dispatch*, not

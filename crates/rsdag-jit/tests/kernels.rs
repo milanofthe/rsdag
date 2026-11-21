@@ -201,7 +201,7 @@ fn a_batch_of_solves_matches_each_solve_alone() {
         // The systems with two right-hand sides are one batch, those with
         // one another (when there are two), the dependent solve alone;
         // past sixteen unknowns nothing batches.
-        if n <= rsdag::semantics::SOLVE_BATCH_MAX_N {
+        if n <= rsdag::constants::SOLVE_BATCH_MAX_N {
             assert!(d.contains(&format!("SolveBatch(2 of {n}x{n}")), "{d}");
             if count >= 4 {
                 let rest = format!("SolveBatch({} of {n}x{n}", count - 2);
