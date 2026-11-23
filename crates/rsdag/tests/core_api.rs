@@ -288,3 +288,51 @@ fn symbols_and_summands() {
     assert_eq!(g.as_symbol(s), None);
     assert_eq!(g.as_symbol(ea), Some(a));
 }
+
+/// `Tape::reads` lists the inputs the ops of a range read, each once and
+/// ascending: those of every operand, the calls' per instance included.
+#[test]
+fn reads_are_the_inputs_the_operands_name() {
+    let mut g: Graph<F64> = Graph::new();
+    let mut s = Scope::new(&mut g, "dev");
+    let v = s.param("v", ParamRole::State { id: 0 });
+    let p = s.param("p", ParamRole::Param);
+    let e = s.exp(p);
+    let o = s.mul(v, e);
+    let f = s.close([(o, OutputRole::Plain)]);
+    let (mut syms, mut pure) = (Vec::new(), Vec::new());
+    let mut input = |g: &mut Graph<F64>, name: &str, is_pure: bool| {
+        let e = g.sym(name);
+        let Node::Symbol(s) = *g.node(e) else {
+            unreachable!()
+        };
+        syms.push(s);
+        pure.push(is_pure);
+        e
+    };
+    // the instances' inputs listed out of order, a parameter two share
+    let shared = input(&mut g, "p_shared", true);
+    let mut roots = Vec::new();
+    for i in (0..5).rev() {
+        let x = input(&mut g, &format!("x{i}"), false);
+        let q = match i % 2 {
+            0 => shared,
+            _ => input(&mut g, &format!("p{i}"), true),
+        };
+        roots.push(g.call(f, 0, &[x, q]));
+    }
+    let y = input(&mut g, "y", false);
+    let t = g.sin(y);
+    roots.push(g.add(roots[0], t));
+    let tape = Tape::compile_split(&g, &roots, &syms, &pure);
+    let n = tape.n_ops();
+    for range in [0..tape.prolog_len(), tape.prolog_len()..n, 0..n] {
+        let mut want: Vec<u32> = Vec::new();
+        for i in range.clone() {
+            tape.for_each_operand(i, |k| want.extend(rsdag::tape::input_index(k)));
+        }
+        want.sort_unstable();
+        want.dedup();
+        assert_eq!(tape.reads(range.clone()), want, "{range:?}");
+    }
+}
