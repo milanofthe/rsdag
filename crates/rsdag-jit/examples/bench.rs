@@ -72,7 +72,7 @@ fn row(name: &str, tape: &Tape, ins: &[f64]) {
 }
 
 fn main() {
-    let _run = common::Run::new("bench", vec![]);
+    let _run = common::Run::new("bench");
     let mut g: Graph<F64> = Graph::new();
     let (roots, syms) = lorenz(&mut g);
     let tape = Tape::compile(&g, &roots, &syms);

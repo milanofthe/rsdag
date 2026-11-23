@@ -35,10 +35,11 @@ pub fn per_call(mut f: impl FnMut()) -> f64 {
     best
 }
 
-/// An rsprobe context entered on this thread for as long as it lives. On
-/// drop its record goes to the path in `RSPROBE_RECORD`: that file, or in
-/// that directory a file of its own (`<name>.<process id>.json`). Without
-/// the feature `rsprobe/on` the record holds the run's parameters alone.
+/// An rsprobe context entered on this thread for as long as it lives, its
+/// parameters set through it (`Deref`). On drop its record goes to the path
+/// in `RSPROBE_RECORD`: that file, or in that directory a file of its own
+/// (`<name>.<process id>.json`). Without the feature `rsprobe/on` the record
+/// holds the run's parameters alone.
 pub struct Run {
     name: String,
     ctx: rsprobe::Context,
@@ -46,19 +47,23 @@ pub struct Run {
 }
 
 impl Run {
-    /// A run named `name` with the parameters `params`, the name among them.
-    pub fn new(name: &str, params: Vec<(&str, rsprobe::Param)>) -> Run {
+    /// A run named `name`, a parameter of its record.
+    pub fn new(name: &str) -> Run {
         let ctx = rsprobe::Context::new();
         ctx.param("name", name);
-        for (k, v) in params {
-            ctx.param(k, v);
-        }
         let on = Some(ctx.enter());
         Run {
             name: name.to_string(),
             ctx,
             on,
         }
+    }
+}
+
+impl std::ops::Deref for Run {
+    type Target = rsprobe::Context;
+    fn deref(&self) -> &rsprobe::Context {
+        &self.ctx
     }
 }
 

@@ -68,7 +68,7 @@ fn build(kind: &str, n: usize, count: usize) -> (Graph<F64>, Vec<ExprId>, Vec<Sy
 }
 
 fn main() {
-    let _run = common::Run::new("matrices", vec![]);
+    let _run = common::Run::new("matrices");
     println!("kind,n,instances,interp_ns,native_ns");
     for count in [1usize, 16] {
         for kind in ["gemv", "gemm", "solve"] {

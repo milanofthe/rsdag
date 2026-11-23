@@ -323,16 +323,12 @@ fn main() {
     let placed = option("--placed").unwrap_or_else(|| "both".into());
     let bind = args.iter().any(|a| a == "--bind");
     let inline_first = args.iter().any(|a| a == "--inline");
-    let _run = common::Run::new(
-        "scale",
-        vec![
-            ("gates", gates.into()),
-            ("card", card.into()),
-            ("placed", placed.as_str().into()),
-            ("bind", usize::from(bind).into()),
-            ("inline", usize::from(inline_first).into()),
-        ],
-    );
+    let record = common::Run::new("scale");
+    record.param("gates", gates);
+    record.param("card", card);
+    record.param("placed", placed.as_str());
+    record.param("bind", usize::from(bind));
+    record.param("inline", usize::from(inline_first));
     println!(
         "placed,gates,card,states,nodes,build_ms,jacobian_ms,specialize_ms,inline_ms,tapes_ms,native_ms,\
          f_interp_us,f_native_us,j_interp_us,j_native_us,hash"

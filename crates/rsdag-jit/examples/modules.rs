@@ -339,15 +339,11 @@ fn main() {
             .unwrap()
             .to_string_lossy()
             .to_string();
-        let _run = common::Run::new(
-            &name,
-            vec![
-                ("module", name.as_str().into()),
-                ("threads", threads.clone()),
-                ("mode", mode.into()),
-                ("lanes", format!("{lanes:?}").into()),
-            ],
-        );
+        let run = common::Run::new(&name);
+        run.param("module", name.as_str());
+        run.param("threads", threads.clone());
+        run.param("mode", mode);
+        run.param("lanes", format!("{lanes:?}"));
         let (v, mut g, map) = {
             let _s = rsprobe::scope!("load");
             let text = std::fs::read_to_string(path).expect("read the module");
@@ -420,7 +416,7 @@ fn main() {
             .zip(&pure)
             .map(|(&v, &p)| if p { v } else { v + 0.01 })
             .collect();
-        rsprobe::add!("states", states.len());
+        run.param("states", states.len());
         let (fm, fvals, f_counts) = {
             let _s = rsprobe::scope!("residual");
             measure(&g, &residuals, &syms, &pure, &vals, &check)

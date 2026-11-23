@@ -106,7 +106,8 @@ fn main() {
         }
         None => 64,
     };
-    let _run = common::Run::new("variants", vec![("instances", n.into())]);
+    let run = common::Run::new("variants");
+    run.param("instances", n);
     println!("instances,arm_ops,main_full_us,main_variants_us,speedup");
     for arm in [4usize, 16, 64, 256] {
         let full = main_us(n, arm, false);
