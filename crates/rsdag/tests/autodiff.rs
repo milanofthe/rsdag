@@ -712,3 +712,74 @@ fn affine_split_and_its_refusal() {
     let mm = ctx.mul(m, m);
     assert_eq!(affine_in(&mut ctx, &[r1, mm], &[sm, sn]), Err(1));
 }
+
+/// A Jacobian through calls of a body that reads many parameters, each
+/// instance's its own symbols: by the states alone, the parameters' operands
+/// carry no derivative and every entry is the inlined graph's; by the
+/// states and the parameters, the parameters' columns join, the inlined
+/// graph's as well.
+#[test]
+fn a_jacobian_through_calls_by_some_operands_is_the_inlined_ones() {
+    const P: usize = 12;
+    let mut g: Graph<F64> = Graph::new();
+    // dev(v0, v1, p..): i = v0 exp(v1 sum p) + sum p^2, q = v1 p0
+    let mut s = Scope::new(&mut g, "dev");
+    let v0 = s.param("v0", ParamRole::State { id: 0 });
+    let v1 = s.param("v1", ParamRole::State { id: 1 });
+    let ps: Vec<ExprId> = (0..P)
+        .map(|k| s.param(&format!("p{k}"), ParamRole::Param))
+        .collect();
+    let sum = s.reduce(ReduceOp::Sum, ps.clone());
+    let sq: Vec<ExprId> = ps.iter().map(|&p| s.mul(p, p)).collect();
+    let sq = s.reduce(ReduceOp::Sum, sq);
+    let arg = s.mul(v1, sum);
+    let e = s.exp(arg);
+    let ve = s.mul(v0, e);
+    let i = s.add(ve, sq);
+    let q = s.mul(v1, ps[0]);
+    let dev = s.close([(i, OutputRole::Plain), (q, OutputRole::Plain)]);
+    let n = 5;
+    let xs: Vec<ExprId> = (0..=n).map(|k| g.sym(&format!("x{k}"))).collect();
+    let states: Vec<SymbolId> = (0..=n).map(|k| g.symbol_id(&format!("x{k}"))).collect();
+    let mut params = Vec::new();
+    let mut rows = vec![g.zero(); n + 1];
+    for k in 0..n {
+        let mut args = vec![xs[k], xs[k + 1]];
+        for j in 0..P {
+            let name = format!("p{k}_{j}");
+            args.push(g.sym(&name));
+            params.push(g.symbol_id(&name));
+        }
+        let i = g.call(dev, 0, &args);
+        let q = g.call(dev, 1, &args);
+        rows[k] = g.add(rows[k], i);
+        rows[k + 1] = g.sub(rows[k + 1], i);
+        rows[k + 1] = g.add(rows[k + 1], q);
+    }
+    let flat = g.inline_all(&rows);
+    let all: Vec<SymbolId> = states.iter().chain(&params).copied().collect();
+    let ins: Vec<f64> = (0..all.len())
+        .map(|k| 0.05 + 0.3 * ((k * 5) % 7) as f64 / 7.0)
+        .collect();
+    for wrt in [&states[..], &all[..]] {
+        let jac = sparse_jacobian(&mut g, &rows, wrt);
+        let flat_jac = sparse_jacobian(&mut g, &flat, wrt);
+        let cols = |j: &[Vec<(usize, ExprId)>]| -> Vec<Vec<usize>> {
+            j.iter()
+                .map(|r| r.iter().map(|&(c, _)| c).collect())
+                .collect()
+        };
+        assert_eq!(cols(&jac), cols(&flat_jac));
+        let a: Vec<ExprId> = jac.iter().flatten().map(|&(_, e)| e).collect();
+        let b: Vec<ExprId> = flat_jac.iter().flatten().map(|&(_, e)| e).collect();
+        let (mut work, mut va, mut vb) = (Vec::new(), Vec::new(), Vec::new());
+        Tape::compile(&g, &a, &all).eval(&ins, &mut work, &mut va);
+        Tape::compile(&g, &b, &all).eval(&ins, &mut work, &mut vb);
+        for (k, (p, q)) in va.iter().zip(&vb).enumerate() {
+            assert!(
+                (p - q).abs() <= 1e-12 * (1.0 + q.abs()),
+                "entry {k}: {p} vs {q}"
+            );
+        }
+    }
+}
