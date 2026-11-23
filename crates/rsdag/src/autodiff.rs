@@ -15,7 +15,8 @@ use crate::node::{ArgList, BinOp, CmpOp, ExprId, Node, ReduceOp, SymbolId, Unary
 pub fn differentiate<K: Field>(ctx: &mut Graph<K>, expr: ExprId, wrt: SymbolId) -> ExprId {
     let _s = rsprobe::scope!("differentiate");
     let mut memo = NodeTable::new(ctx.len());
-    forward(ctx, &[expr], wrt, &mut memo, &|_| true)[0]
+    let mut calls = CallOperands::new(&|_| true);
+    forward(ctx, &[expr], wrt, &mut memo, &|_| true, &mut calls)[0]
 }
 
 /// Local derivative `d(op(a))/da` of a unary op, shared by the forward
@@ -284,18 +285,42 @@ fn cofactors<K: Field>(
     out
 }
 
-/// Whether `test` holds for every operand of `e` that carries a derivative
-/// (see [`carrying`]), without collecting them: the per-node test of a
-/// forward sweep.
-fn all_carrying<K: Field>(ctx: &Graph<K>, e: ExprId, mut test: impl FnMut(ExprId) -> bool) -> bool {
-    match *ctx.node(e) {
-        Node::Call(o, l) => {
-            let (f, k) = ctx.output(o);
-            ctx.output_support(f, k)
-                .iter()
-                .all(|&p| test(ctx.call_operand(o, l, p)))
+/// The operands a forward sweep differentiates calls through: of a call
+/// node, the operands of its output's support (see [`carrying`]) that
+/// `live` admits, by parameter, found on its first visit and kept for the
+/// sweeps after. `live` admits every operand a sweep moves; the others
+/// carry no derivative, so a call of a wide body (a compact model's
+/// hundreds of parameters) costs a sweep its few live operands, not its
+/// support.
+pub(crate) struct CallOperands<'a> {
+    live: &'a dyn Fn(ExprId) -> bool,
+    kept: HashMap<ExprId, Box<[(u32, ExprId)]>>,
+}
+
+impl<'a> CallOperands<'a> {
+    pub(crate) fn new(live: &'a dyn Fn(ExprId) -> bool) -> Self {
+        CallOperands {
+            live,
+            kept: HashMap::default(),
         }
-        ref node => ctx.operands(e)[inert(node)..].iter().all(|&c| test(c)),
+    }
+
+    /// The live operands of the call node `e`, `Call(o, l)`.
+    fn of<K: Field>(
+        &mut self,
+        ctx: &Graph<K>,
+        e: ExprId,
+        o: OutputId,
+        l: ArgList,
+    ) -> &[(u32, ExprId)] {
+        let live = self.live;
+        self.kept.entry(e).or_insert_with(|| {
+            let (f, k) = ctx.output(o);
+            (ctx.output_support(f, k).iter())
+                .map(|&p| (p, ctx.call_operand(o, l, p)))
+                .filter(|&(_, c)| live(c))
+                .collect()
+        })
     }
 }
 
@@ -347,13 +372,15 @@ fn cone<K: Field>(ctx: &Graph<K>, root: ExprId, seen: &mut NodeTable<u32>) -> Ve
 /// (the order a recursive walk takes), so a deep chain does not overflow
 /// the call stack. Only operands `moves` admits are walked, the others'
 /// derivative is zero: given the support, a sweep visits only what depends
-/// on `wrt`, not the roots' whole cones.
+/// on `wrt`, not the roots' whole cones; through a call, its operands
+/// `calls` keeps.
 pub(crate) fn forward<K: Field>(
     ctx: &mut Graph<K>,
     roots: &[ExprId],
     wrt: SymbolId,
     memo: &mut NodeTable<ExprId>,
     moves: &dyn Fn(ExprId) -> bool,
+    calls: &mut CallOperands,
 ) -> Vec<ExprId> {
     let zero = ctx.zero();
     // lit: a first capacity, grown as needed
@@ -366,11 +393,17 @@ pub(crate) fn forward<K: Field>(
             continue;
         }
         if expanded {
-            let d = tangent(ctx, e, wrt, memo);
+            let d = tangent(ctx, e, wrt, memo, calls);
             memo.set(e, d);
         } else {
             stack.push((e, true));
-            carrying(ctx, e, &mut ops);
+            match *ctx.node(e) {
+                Node::Call(o, l) => {
+                    ops.clear();
+                    ops.extend(calls.of(ctx, e, o, l).iter().map(|&(_, c)| c));
+                }
+                _ => carrying(ctx, e, &mut ops),
+            }
             for &c in ops.iter().rev() {
                 if memo.get(c).is_none() {
                     if moves(c) {
@@ -389,13 +422,14 @@ pub(crate) fn forward<K: Field>(
 }
 
 /// The derivative of node `e` with respect to `wrt`, its operands' already
-/// in `memo`. A node none of whose operands moves is zero: an inactive
-/// subgraph builds nothing.
+/// in `memo` (of a call, the ones `calls` keeps). A node none of whose
+/// operands moves is zero: an inactive subgraph builds nothing.
 fn tangent<K: Field>(
     ctx: &mut Graph<K>,
     e: ExprId,
     wrt: SymbolId,
     memo: &mut NodeTable<ExprId>,
+    calls: &mut CallOperands,
 ) -> ExprId {
     let zero = ctx.zero();
     let node = *ctx.node(e);
@@ -403,7 +437,13 @@ fn tangent<K: Field>(
         return if s == wrt { ctx.one() } else { zero };
     }
     let d = |c: ExprId| memo.get(c).expect("operand differentiated");
-    if all_carrying(ctx, e, |c| d(c) == zero) {
+    let still = match node {
+        Node::Call(o, l) => calls.of(ctx, e, o, l).iter().all(|&(_, c)| d(c) == zero),
+        _ => ctx.operands(e)[inert(&node)..]
+            .iter()
+            .all(|&c| d(c) == zero),
+    };
+    if still {
         return zero;
     }
     match node {
@@ -507,10 +547,8 @@ fn tangent<K: Field>(
         // each partial a call into the function's derivative output.
         Node::Call(o, l) => {
             let (f, out) = ctx.output(o);
-            let moving: Vec<(u32, ExprId)> = ctx
-                .output_support(f, out)
-                .iter()
-                .map(|&i| (i, d(ctx.call_operand(o, l, i))))
+            let moving: Vec<(u32, ExprId)> = (calls.of(ctx, e, o, l).iter())
+                .map(|&(i, c)| (i, d(c)))
                 .filter(|&(_, da)| da != zero)
                 .collect();
             let params: Vec<u32> = moving.iter().map(|&(i, _)| i).collect();
@@ -592,6 +630,9 @@ pub fn sparse_jacobian<K: Field>(
     {
         let _s = rsprobe::scope!("forward");
         let mut memo = NodeTable::new(ctx.len());
+        // a call's operands no column moves are no sweep's
+        let live = |c: ExprId| !flow.get(c).is_bottom();
+        let mut calls = CallOperands::new(&live);
         for (j, members) in by_col.iter().enumerate() {
             if members.is_empty() {
                 continue;
@@ -600,9 +641,8 @@ pub fn sparse_jacobian<K: Field>(
             memo.begin(ctx.len());
             let roots: Vec<ExprId> = members.iter().map(|&i| residuals[i]).collect();
             // through the nodes whose support holds the column only
-            let col = forward(ctx, &roots, wrt[j], &mut memo, &|c| {
-                flow.get(c).contains(j as u32)
-            });
+            let moves = |c: ExprId| flow.get(c).contains(j as u32);
+            let col = forward(ctx, &roots, wrt[j], &mut memo, &moves, &mut calls);
             for (&i, d) in members.iter().zip(col) {
                 rows[i].push((j, d));
             }

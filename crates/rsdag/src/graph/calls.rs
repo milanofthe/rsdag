@@ -643,7 +643,8 @@ impl<K: Field> Graph<K> {
         let exprs: Vec<ExprId> = roots.iter().map(|&(_, e)| e).collect();
         let mut memo = NodeTable::new(self.len());
         let moves = |c: ExprId| (deps.sets.get(&c)).is_some_and(|s| s.binary_search(&j).is_ok());
-        let ds = crate::autodiff::forward(self, &exprs, wrt, &mut memo, &moves);
+        let mut calls = crate::autodiff::CallOperands::new(&moves);
+        let ds = crate::autodiff::forward(self, &exprs, wrt, &mut memo, &moves, &mut calls);
         for (&(o, _), d) in roots.iter().zip(ds) {
             let d = self.as_output(d);
             self.push_output(f, d, OutputRole::Derivative { of: o, wrt: param });
