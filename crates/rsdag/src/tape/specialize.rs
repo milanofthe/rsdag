@@ -37,6 +37,7 @@ impl Tape {
     /// any more is dropped before the program is scheduled and given slots
     /// like a fresh compilation (the prolog split kept).
     pub fn specialize(&self, choices: &[u8], pin: &[bool]) -> SpecializedTape {
+        let _s = rsprobe::scope!("specialize");
         assert_eq!(
             choices.len(),
             self.n_selects,
@@ -58,6 +59,7 @@ impl Tape {
     /// them at any pass: a pass whose guards do not hold is run again on
     /// this tape's main phase, with nothing else to redo.
     pub fn specialize_main(&self, choices: &[u8], pin: &[bool], guards: Guards) -> SpecializedTape {
+        let _s = rsprobe::scope!("specialize");
         let n = self.n_main_selects();
         assert_eq!(choices.len(), n, "choice trace length mismatch");
         assert_eq!(pin.len(), n, "pin mask length mismatch");
@@ -190,12 +192,13 @@ impl Tape {
     /// `p`, a transform of this tape's program, without what nothing
     /// reads any more, scheduled and emitted again like a fresh
     /// compilation over this tape's inputs (`split`: the prolog split
-    /// kept).
+    /// kept); its ops at the current rsprobe node.
     fn emit_again(&self, p: &mut Program, split: bool) -> Tape {
         p.retain_reachable();
         let order = p.schedule();
         let mut tape = p.emit(&order, split);
         tape.n_inputs = self.n_inputs;
+        rsprobe::add!("ops", tape.n_ops());
         tape
     }
 }
@@ -502,6 +505,7 @@ impl Tape {
     /// phase reading no more than the tape's (see `decided`). No guards:
     /// the caller computes the pattern.
     pub fn decide(&self, ps: &ParamSelects, pattern: &[bool]) -> Tape {
+        let _s = rsprobe::scope!("decide");
         let mut p = self.lift();
         assert_eq!(pattern.len(), ps.n_conds(), "pattern length mismatch");
         let arm = ps.arms(&p, pattern);

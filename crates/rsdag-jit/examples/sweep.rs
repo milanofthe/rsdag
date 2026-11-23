@@ -12,6 +12,7 @@ use rsdag::{Graph, Tape, F64};
 use rsdag_jit::NativeTape;
 use std::time::Instant;
 fn main() {
+    let _run = common::Run::new("sweep", vec![]);
     println!("vocab,steps,ops,interp_ns_per_op,native_ns_per_op,compile_ns_per_op,tape_compile_ns_per_op");
     for (name, vocab) in [
         ("ring", Vocabulary::Ring),

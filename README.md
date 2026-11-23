@@ -43,7 +43,9 @@ NOTICE); for a commercial license contact info@milanrother.com.
 - `rsdag-py`: Python package `rsdag` (`trace`, `jit`, `jacobian`, `grad`,
   `where`, `matmul`, `solve`; traced programs compose), built with maturin.
 
-Dependencies of the core: `rustc-hash`, `libm`, `rspool`. `Graph` is `Graph<F64>`.
+Dependencies of the core: `rustc-hash`, `libm`, `rspool` (threads, section
+costs, the clock of the policies), `rsprobe` (scopes, measures and messages).
+`Graph` is `Graph<F64>`.
 Features:
 
 | feature | adds | dependencies |
@@ -52,7 +54,16 @@ Features:
 | `serde` | `Module` serialization | serde |
 
 `rsdag` builds for `wasm32-unknown-unknown` (interpreter only) with every
-feature. It reads no clock unless `hooks::set_clock` installs one.
+feature. A clock is read only where an rsprobe context records or a policy
+times its work (`rspool::Instant`, zero on wasm32).
+
+The compile pipeline (lowering, differentiation, tape passes, native code,
+specialization, variants, background jobs) runs in rsprobe scopes with the
+counts it is tuned by (`ops`, `instances`, `bodies`, `stages`, `regions`,
+`code bytes`, ...), its messages are events at those nodes, and evaluations
+are scopes at DEBUG and finer. A binary that enables `rsprobe/on` and enters
+an `rsprobe::Context` gets one record per run; without the feature all of it
+compiles to nothing.
 
 ## Architecture
 

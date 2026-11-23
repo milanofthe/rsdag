@@ -11,8 +11,9 @@
 //! `--bind` a device is called through a binding of its card instead (see
 //! `Graph::bind`), and the cards are globals above it. The tapes compile the
 //! hierarchy as it stands (its composite functions as templates); with
-//! `--inline` the composite functions are inlined first. `--trace` prints
-//! the stage timings of the compiles.
+//! `--inline` the composite functions are inlined first. With
+//! `--features rsprobe/on` the run's record, the compile stages included,
+//! goes to the path in `RSPROBE_RECORD`.
 //!
 //! Per configuration one CSV row: graph nodes, then the time of each stage
 //! (building, the sparse Jacobian in the states, the calls specialized to
@@ -22,7 +23,7 @@
 //! across versions that compute the same bits.
 //!
 //!     cargo run --release -p rsdag-jit --example scale -- [--gates <n>] [--card <n>] [--placed once|flat|both]
-//!         [--bind] [--inline] [--trace]
+//!         [--bind] [--inline]
 
 use rsdag::Program;
 mod common;
@@ -322,16 +323,16 @@ fn main() {
     let placed = option("--placed").unwrap_or_else(|| "both".into());
     let bind = args.iter().any(|a| a == "--bind");
     let inline_first = args.iter().any(|a| a == "--inline");
-    if args.iter().any(|a| a == "--trace") {
-        // the stage timings of the compiles, on stderr
-        struct Stderr;
-        impl rsdag::hooks::Log for Stderr {
-            fn log(&self, _: rsdag::hooks::Level, message: &str) {
-                eprintln!("{message}");
-            }
-        }
-        rsdag::hooks::set_log(&Stderr);
-    }
+    let _run = common::Run::new(
+        "scale",
+        vec![
+            ("gates", gates.into()),
+            ("card", card.into()),
+            ("placed", placed.as_str().into()),
+            ("bind", usize::from(bind).into()),
+            ("inline", usize::from(inline_first).into()),
+        ],
+    );
     println!(
         "placed,gates,card,states,nodes,build_ms,jacobian_ms,specialize_ms,inline_ms,tapes_ms,native_ms,\
          f_interp_us,f_native_us,j_interp_us,j_native_us,hash"

@@ -6,7 +6,8 @@ use std::time::Instant;
 const BATCH_S: f64 = 0.05;
 
 /// Seconds per call of `f`: the best of five batches of at least
-/// [`BATCH_S`].
+/// [`BATCH_S`]. Every call adds to the measure `evaluations` at the current
+/// rsprobe node.
 pub fn per_call(mut f: impl FnMut()) -> f64 {
     let mut reps = 1usize;
     let mut dt;
@@ -16,6 +17,7 @@ pub fn per_call(mut f: impl FnMut()) -> f64 {
             f();
         }
         dt = t.elapsed().as_secs_f64();
+        rsprobe::add!("evaluations", reps);
         if dt > BATCH_S {
             break;
         }
@@ -28,6 +30,49 @@ pub fn per_call(mut f: impl FnMut()) -> f64 {
             f();
         }
         best = best.min(t.elapsed().as_secs_f64() / reps as f64);
+        rsprobe::add!("evaluations", reps);
     }
     best
+}
+
+/// An rsprobe context entered on this thread for as long as it lives. On
+/// drop its record goes to the path in `RSPROBE_RECORD`: that file, or in
+/// that directory a file of its own (`<name>.<process id>.json`). Without
+/// the feature `rsprobe/on` the record holds the run's parameters alone.
+pub struct Run {
+    name: String,
+    ctx: rsprobe::Context,
+    on: Option<rsprobe::Guard>,
+}
+
+impl Run {
+    /// A run named `name` with the parameters `params`, the name among them.
+    pub fn new(name: &str, params: Vec<(&str, rsprobe::Param)>) -> Run {
+        let ctx = rsprobe::Context::new();
+        ctx.param("name", name);
+        for (k, v) in params {
+            ctx.param(k, v);
+        }
+        let on = Some(ctx.enter());
+        Run {
+            name: name.to_string(),
+            ctx,
+            on,
+        }
+    }
+}
+
+impl Drop for Run {
+    fn drop(&mut self) {
+        // the root's span is in the record once its guard has dropped
+        self.on.take();
+        let Some(path) = std::env::var_os("RSPROBE_RECORD") else {
+            return;
+        };
+        let mut path = std::path::PathBuf::from(path);
+        if path.is_dir() {
+            path.push(format!("{}.{}.json", self.name, std::process::id()));
+        }
+        std::fs::write(&path, self.ctx.record().to_string()).expect("write the record");
+    }
 }

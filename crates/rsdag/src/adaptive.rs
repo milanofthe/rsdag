@@ -23,13 +23,18 @@
 //! ([`Program::state_len`]), so an episode moves from one to the other at any
 //! time; only a specialized episode is tied to its specialization, and
 //! falls back to the full tape when a region flips.
+//!
+//! Each pass adds one to `evals interpreted`, `evals native` or `evals
+//! specialized` at the caller's rsprobe node, by the form that ran it (a
+//! specialized pass whose guards fail counts on the full form too).
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use rspool::Instant;
 
 use crate::choices::{ChoicePolicy, Specializer};
-use crate::hooks::{log, Level};
 use crate::{Program, SpecializedTape, Tape};
 
 /// Native code for [`Adaptive`], from outside the core: `rsdag-jit`
@@ -254,8 +259,14 @@ impl Adaptive {
     /// The full tape, natively once compiled.
     fn eval_full(&self, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
         match self.native() {
-            Some(native) => native.eval(inputs, work, out),
-            None => self.tape.eval(inputs, work, out),
+            Some(native) => {
+                rsprobe::add!("evals native", 1);
+                native.eval(inputs, work, out)
+            }
+            None => {
+                rsprobe::add!("evals interpreted", 1);
+                self.tape.eval(inputs, work, out)
+            }
         }
     }
 
@@ -279,6 +290,7 @@ impl Adaptive {
         };
         let held = match native {
             Some(native) => {
+                rsprobe::add!("evals specialized", 1);
                 native.eval(inputs, work, out);
                 sp.check_outputs(out)
             }
@@ -288,7 +300,10 @@ impl Adaptive {
                 self.maybe_compile_spec(st, cache);
                 return false;
             }
-            None => sp.eval_checked(inputs, work, out),
+            None => {
+                rsprobe::add!("evals specialized", 1);
+                sp.eval_checked(inputs, work, out)
+            }
         };
         if held {
             st.learned.held(ver, 1);
@@ -399,6 +414,7 @@ impl Adaptive {
         }
         match &ep.0 {
             Kind::SpecNative(native, sp, ver) => {
+                rsprobe::add!("evals specialized", 1);
                 native.eval_main(inputs, work, out);
                 if sp.check_outputs(out) {
                     return;
@@ -407,6 +423,7 @@ impl Adaptive {
                 ep.0 = Kind::Full;
             }
             Kind::SpecInterp(sp, ver) => {
+                rsprobe::add!("evals specialized", 1);
                 if sp.eval_main_checked(inputs, work, out) {
                     if let Some(cache) = &self.spec {
                         if let Ok(mut st) = cache.try_lock() {
@@ -423,8 +440,14 @@ impl Adaptive {
             // Mid-episode, the interpreter's state serves the native code
             // as it is (`main` only lengthens the buffer).
             Kind::Full => match self.native() {
-                Some(native) => native.eval_main(inputs, work, out),
-                None => self.tape.eval_main(inputs, work, out),
+                Some(native) => {
+                    rsprobe::add!("evals native", 1);
+                    native.eval_main(inputs, work, out)
+                }
+                None => {
+                    rsprobe::add!("evals interpreted", 1);
+                    self.tape.eval_main(inputs, work, out)
+                }
             },
         }
     }
@@ -435,6 +458,7 @@ impl Adaptive {
     /// it teaches: a specialization where one is due.
     fn retrace(&self, st: &mut Spec, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
         let mut fresh = Vec::new();
+        rsprobe::add!("evals interpreted", 1);
         self.tape.eval_with(inputs, work, out, &mut fresh);
         let tape = &self.tape;
         let built = st
@@ -453,7 +477,10 @@ impl Adaptive {
     fn flip_retrace(&self, ver: u64, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
         match self.spec.as_ref().map(|c| c.lock()) {
             Some(Ok(mut st)) => self.on_flip(&mut st, ver, inputs, work, out),
-            _ => self.tape.eval(inputs, work, out),
+            _ => {
+                rsprobe::add!("evals interpreted", 1);
+                self.tape.eval(inputs, work, out)
+            }
         }
     }
 
@@ -496,10 +523,7 @@ impl Adaptive {
             let compiled = c.compile(sp.tape(), &guards);
             let mut st = cache.lock().unwrap_or_else(|e| e.into_inner());
             if let (true, Some(compiled)) = (st.learned.landed(ver), compiled) {
-                log(
-                    Level::Debug,
-                    "specialized tape compiled, native backend active",
-                );
+                rsprobe::debug!("specialized tape compiled, native backend active");
                 if let Some((_, _, native)) = &mut st.spec {
                     *native = Some(Arc::from(compiled));
                 }
@@ -570,14 +594,10 @@ impl Adaptive {
         let c = compiler.clone();
         compiler.submit(Box::new(move || {
             let compiled = c.compile(&tape, &[]);
-            log(
-                Level::Debug,
-                if compiled.is_some() {
-                    "hot tape compiled, native backend active"
-                } else {
-                    "tape compile failed, staying interpreted"
-                },
-            );
+            match compiled {
+                Some(_) => rsprobe::debug!("hot tape compiled, native backend active"),
+                None => rsprobe::warn!("tape compile failed, staying interpreted"),
+            }
             let _ = jit.compiled.set(compiled.map(Arc::from));
             let (lock, cv) = &jit.landed;
             *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;

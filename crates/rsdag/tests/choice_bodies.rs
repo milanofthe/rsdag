@@ -6,9 +6,7 @@
 //! derivatives.
 
 use rsdag::Program;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
-use rsdag::hooks::{self, Level, Log};
 use rsdag::variant::VariantPolicy;
 use rsdag::{
     BodyBackend, ChoicePolicy, CmpOp, ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope,
@@ -109,27 +107,22 @@ fn same(a: &[f64], b: &[f64]) -> bool {
             .all(|(x, y)| x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()))
 }
 
-/// The reports of the bodies' specialization, counted.
-struct Count {
-    built: AtomicUsize,
-    /// Specialization turned off: the choices thrash, or so many selects
-    /// flipped that pinning the rest does not pay.
-    off: AtomicUsize,
-}
-impl Log for Count {
-    fn log(&self, _: Level, message: &str) {
-        if message.contains("specialized over run-time choices") {
-            self.built.fetch_add(1, Ordering::Relaxed);
-        }
-        if message.contains("specialization over run-time choices off") {
-            self.off.fetch_add(1, Ordering::Relaxed);
-        }
+/// `f` under an rsprobe context: the specializations the bodies built
+/// and how often specialization went off (the choices thrash, or so many
+/// selects flipped that pinning the rest does not pay), as measures of
+/// the record; `None` where nothing records (without `rsprobe/on`).
+fn counted(f: impl FnOnce()) -> Option<[u64; 2]> {
+    let ctx = rsprobe::Context::new();
+    {
+        let _on = ctx.enter();
+        let _s = rsprobe::scope!("counted");
+        f();
     }
+    let r = ctx.record();
+    r.find(&["counted"])?;
+    let sum = |m: &str| r.nodes.iter().map(|n| n.get(m)).sum();
+    Some([sum("specializations built"), sum("specializations off")])
 }
-static SINK: Count = Count {
-    built: AtomicUsize::new(0),
-    off: AtomicUsize::new(0),
-};
 
 fn rng(s: &mut u64) -> f64 {
     *s ^= *s << 13;
@@ -163,45 +156,42 @@ fn run(n: usize, steps: usize, step: impl Fn(usize, usize) -> f64) {
 
 #[test]
 fn bodies_specialize_over_their_choices_and_stay_the_full_bodies() {
-    hooks::set_log(&SINK);
     // Instances drifting slowly, half of them up across the lowest
     // thresholds above them: most hold their regions from one step to the
     // next, a few cross and run again full, and the selects they flip are
     // unpinned in a rebuild.
-    run(64, 60, |i, _| 0.004 * if i % 2 == 0 { 1.0 } else { -1.0 });
-    let built = SINK.built.load(Ordering::Relaxed);
-    assert!(
-        built >= 2,
-        "built, and built again without what flipped: {built}"
-    );
-    assert_eq!(SINK.off.load(Ordering::Relaxed), 0, "drift keeps it on");
+    let drift = counted(|| run(64, 60, |i, _| 0.004 * if i % 2 == 0 { 1.0 } else { -1.0 }));
     // Every instance crossing its regions in one step early in the run,
     // then holding: one region change, the specialization rebuilt, not
     // thrash however many instances flipped together.
-    run(64, 30, |_, k| if k == 4 { 1.2 } else { 0.0 });
-    assert!(
-        SINK.built.load(Ordering::Relaxed) > built,
-        "rebuilt after the change"
-    );
-    assert_eq!(
-        SINK.off.load(Ordering::Relaxed),
-        0,
-        "one change of every instance keeps it on"
-    );
+    let change = counted(|| run(64, 30, |_, k| if k == 4 { 1.2 } else { 0.0 }));
     // Instances holding their regions, then jumping across every region at
     // every step: the selects flip until pinning the rest does not pay,
     // and the specialization goes off.
     let seed = std::cell::Cell::new(11u64);
-    run(64, 40, |_, k| {
-        if k < 3 {
-            return 0.0;
-        }
-        let mut s = seed.get();
-        let d = 2.4 * rng(&mut s) - 1.2;
-        seed.set(s);
-        d
+    let jumps = counted(|| {
+        run(64, 40, |_, k| {
+            if k < 3 {
+                return 0.0;
+            }
+            let mut s = seed.get();
+            let d = 2.4 * rng(&mut s) - 1.2;
+            seed.set(s);
+            d
+        })
     });
-    assert!(SINK.off.load(Ordering::Relaxed) > 0, "jumps turn it off");
+    // The policy's counts, where a record holds them.
+    if let (Some(drift), Some(change), Some(jumps)) = (drift, change, jumps) {
+        let [built, off] = drift;
+        assert!(
+            built >= 2,
+            "built, and built again without what flipped: {built}"
+        );
+        assert_eq!(off, 0, "drift keeps it on");
+        assert!(change[0] > 0, "rebuilt after the change");
+        assert_eq!(change[1], 0, "one change of every instance keeps it on");
+        assert!(jumps[1] > 0, "jumps turn it off");
+    }
 }
 
 #[test]

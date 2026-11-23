@@ -34,7 +34,15 @@ static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
 /// that needs another's result is submitted by it, or does that work
 /// itself. The submission is one channel send, so it costs the caller
 /// nothing measurable; a panic in the job is caught and ends only the job.
+/// The job runs in the scope `background` under the rsprobe node current
+/// where it was submitted.
 pub fn submit(job: impl FnOnce() + Send + 'static) {
+    let node = rsprobe::current();
+    let job = move || {
+        let _node = node.enter();
+        let _s = rsprobe::scope!("background");
+        job()
+    };
     let (lock, _) = &JOBS;
     let mut jobs = lock.lock().unwrap_or_else(|e| e.into_inner());
     let seq = jobs.next;

@@ -528,9 +528,11 @@ impl ExternBundle for NativeBody {
         // Blocks of instances per task, so a thread amortises the
         // scheduler's hand-offs over many bodies.
         let block = blocks(n_groups);
+        let node = rsprobe::current();
         out.par_chunks_mut(block * self.n_out)
             .enumerate()
             .for_each(|(b, dst)| {
+                let _node = node.enter();
                 let g0 = b * block;
                 let g1 = (g0 + block).min(n_groups);
                 let ins = &args[g0 * n_args..g1 * n_args];
@@ -549,6 +551,7 @@ fn native_body(
     no: usize,
     opts: &Options,
 ) -> Result<Arc<dyn ExternBundle>, JitError> {
+    let _s = rsprobe::scope!("body");
     let sl = body.state_len();
     let lanes = match opts.lanes {
         Lanes::Never => Vec::new(),
@@ -578,7 +581,8 @@ fn native_body(
     let lanes = lanes
         .into_iter()
         .filter(|lc| (0..PHASES).any(|k| lc.pays(k, scalar[k])))
-        .collect();
+        .collect::<Vec<_>>();
+    rsprobe::add!("lane forms", lanes.len());
     Ok(Arc::new(NativeBody {
         tape: NativeTape::compile_opts(body, opts, &[])?,
         lanes,
@@ -692,6 +696,7 @@ impl NativeTape {
         opts: &Options,
         live: &[u32],
     ) -> Result<NativeTape, JitError> {
+        let _s = rsprobe::scope!("native");
         let chunk_ops = opts.chunk_ops;
         if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
             return Err(JitError::Unsupported);
@@ -725,29 +730,31 @@ impl NativeTape {
                 .then(|| -> rsdag::Submit { Arc::new(crate::background::submit) }),
             variants: None,
         };
-        let bundles: Result<Bundles, JitError> = tape
-            .bundles()
-            .iter()
-            .map(|b| {
-                let make = || -> Result<Arc<dyn ExternBundle>, JitError> {
-                    if let Some(v) = b.with_backend(&backend) {
-                        return Ok(v);
+        let bundles: Result<Bundles, JitError> = {
+            let _s = rsprobe::scope!("bundles");
+            tape.bundles()
+                .iter()
+                .map(|b| {
+                    let make = || -> Result<Arc<dyn ExternBundle>, JitError> {
+                        if let Some(v) = b.with_backend(&backend) {
+                            return Ok(v);
+                        }
+                        match b.body() {
+                            Some(body) => native_body(body, b.pure_args(), b.n_outputs(), opts),
+                            None => Ok(b.clone()),
+                        }
+                    };
+                    // The form of the bundle the program runs: its code by the
+                    // options, and where its work goes.
+                    // lit: a bit of the key options_key leaves free
+                    let key = options_key(opts) ^ (u64::from(opts.background) << 61);
+                    match b.backend_cache() {
+                        Some(cache) => cache.get_or_try_insert(key, make),
+                        None => make(),
                     }
-                    match b.body() {
-                        Some(body) => native_body(body, b.pure_args(), b.n_outputs(), opts),
-                        None => Ok(b.clone()),
-                    }
-                };
-                // The form of the bundle the program runs: its code by the
-                // options, and where its work goes.
-                // lit: a bit of the key options_key leaves free
-                let key = options_key(opts) ^ (u64::from(opts.background) << 61);
-                match b.backend_cache() {
-                    Some(cache) => cache.get_or_try_insert(key, make),
-                    None => make(),
-                }
-            })
-            .collect();
+                })
+                .collect()
+        };
         let bundles = bundles?;
         // The inputs each phase reads; the code reads none past them nor
         // past an output that is an input.
@@ -815,10 +822,17 @@ impl NativeTape {
                 ops: r.ops() as usize,
             })
             .collect();
-        let emitted: Vec<Emitted> = jobs
-            .par_iter()
-            .map(|ops| emit_chunk::<A>(tape, ops.clone(), &layout, &liveness, &bundles))
-            .collect();
+        let emitted: Vec<Emitted> = {
+            let _s = rsprobe::scope!("emit");
+            // The chunks' tasks run under this node, on whichever thread.
+            let node = rsprobe::current();
+            jobs.par_iter()
+                .map(|ops| {
+                    let _node = node.enter();
+                    emit_chunk::<A>(tape, ops.clone(), &layout, &liveness, &bundles)
+                })
+                .collect()
+        };
         // One mapping for all of them: a chunk is position independent (it
         // reaches host routines, descriptors and tables by absolute
         // address), so it runs from wherever it lands, 16-byte aligned.
@@ -834,7 +848,13 @@ impl NativeTape {
             descs.push((e.calls, e.kernels));
             tables.extend(e.tables);
         }
-        let code = Mapping::new(&bytes)?;
+        rsprobe::add!("ops", n);
+        rsprobe::add!("chunks", offsets.len());
+        rsprobe::add!("code bytes", bytes.len());
+        let code = {
+            let _s = rsprobe::scope!("map");
+            Mapping::new(&bytes)?
+        };
         let chunks = offsets
             .iter()
             // SAFETY: each offset is the entry of a function emitted for the
@@ -899,6 +919,7 @@ impl NativeTape {
             if let Some(r) = self.regions.get(next).filter(|r| r.starts[0] == c) {
                 next += 1;
                 if r.hi <= range.end {
+                    let _s = rsprobe::scope!(TRACE, "region");
                     let piece = |k: usize| {
                         let end = r.starts.get(k + 1).copied().unwrap_or(r.hi);
                         (r.starts[k]..end).for_each(chunk);
@@ -958,9 +979,11 @@ impl NativeTape {
         }
         let block = blocks(n);
         let n_in = self.layout.n_inputs.max(stride);
+        let node = rsprobe::current();
         out.par_chunks_mut(block * n_out)
             .zip(inputs.par_chunks(block * stride))
             .for_each(|(dst, ins)| {
+                let _node = node.enter();
                 rsdag::scratch::with::<Vec<f64>, _>(|work| {
                     work.resize(self.layout.total, 0.0);
                     if n_in == stride {
@@ -2097,12 +2120,15 @@ impl rsdag::Program for NativeTape {
         self.state_len
     }
     fn eval_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]) {
+        let _s = rsprobe::scope!(DEBUG, "eval");
         self.eval_range(0..self.chunks.len(), inputs, work, Some(out));
     }
     fn eval_prolog_into(&self, inputs: &[f64], work: &mut [f64]) {
+        let _s = rsprobe::scope!(DEBUG, "prolog");
         self.eval_range(0..self.prolog_chunks, inputs, work, None);
     }
     fn eval_main_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]) {
+        let _s = rsprobe::scope!(DEBUG, "main");
         self.eval_range(
             self.prolog_chunks..self.chunks.len(),
             inputs,

@@ -12,6 +12,9 @@ rsdag.workspace = true
 rustc-hash.workspace = true
 rayon.workspace = true
 rspool = { workspace = true, features = ["rayon"] }
+# Scopes of the compile and the background jobs; `--features rsprobe/on`
+# records them.
+rsprobe.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
