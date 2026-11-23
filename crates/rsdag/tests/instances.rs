@@ -208,3 +208,60 @@ fn composite_functions_inline_and_leaves_stay_calls() {
         );
     }
 }
+
+/// Instances of a composite function that call its leaf with the same
+/// operands (the same states and the same pure prolog arguments) run that
+/// leaf once: the merged call has one instance per distinct operand list,
+/// and the values are the inlined graph's.
+#[test]
+fn leaf_calls_with_the_same_operands_merge_into_one_instance() {
+    let mut g: Graph<F64> = Graph::new();
+    let mut s = Scope::new(&mut g, "leaf");
+    let v = s.param("v", ParamRole::State { id: 0 });
+    let p = s.param("p", ParamRole::Param);
+    let ep = s.exp(p);
+    let sv = s.sin(v);
+    let o = s.mul(sv, ep);
+    let leaf = s.close([(o, OutputRole::Plain)]);
+    let mut s = Scope::new(&mut g, "top");
+    let v = s.param("v", ParamRole::State { id: 0 });
+    let p = s.param("p", ParamRole::Param);
+    let w = s.param("w", ParamRole::State { id: 1 });
+    let c = s.call(leaf, 0, &[v, p]);
+    let o = s.add(c, w);
+    let top = s.close([(o, OutputRole::Plain)]);
+    let (x0, sx0) = sym(&mut g, "x0");
+    let (x1, sx1) = sym(&mut g, "x1");
+    let (p0, sp0) = sym(&mut g, "p0");
+    let (p1, sp1) = sym(&mut g, "p1");
+    let ws: Vec<(ExprId, SymbolId)> = (0..4).map(|k| sym(&mut g, &format!("w{k}"))).collect();
+    // (x0, p0) three times, (x1, p0) and (x0, p1) once: three distinct
+    let pairs = [(x0, p0), (x0, p0), (x1, p0), (x0, p0), (x0, p1)];
+    let roots: Vec<ExprId> = (pairs.iter().enumerate())
+        .map(|(k, &(x, q))| g.call(top, 0, &[x, q, ws[k % 4].0]))
+        .collect();
+    let mut syms = vec![sx0, sx1, sp0, sp1];
+    syms.extend(ws.iter().map(|w| w.1));
+    let pure: Vec<bool> = syms
+        .iter()
+        .map(|&s| g.symbol_name(s).starts_with('p'))
+        .collect();
+    let tape = Tape::compile_split(&g, &roots, &syms, &pure);
+    let instances: u32 = (tape.ops().iter())
+        .map(|op| match *op {
+            rsdag::tape::Op::Call { n_groups, .. } => n_groups,
+            _ => 0,
+        })
+        .sum();
+    assert_eq!(instances, 3);
+    let all = g.inline_all(&roots);
+    let flat = Tape::compile(&g, &all, &syms);
+    let x = [0.3, -0.7, 0.2, -0.4, 1.0, 2.0, 3.0, 4.0];
+    let (mut w, mut a, mut b) = (Vec::new(), Vec::new(), Vec::new());
+    tape.eval_prolog(&x, &mut w);
+    tape.eval_main(&x, &mut w, &mut a);
+    flat.eval(&x, &mut w, &mut b);
+    for (k, (a, b)) in a.iter().zip(&b).enumerate() {
+        assert!((a - b).abs() <= 1e-13 * (1.0 + b.abs()), "root {k}");
+    }
+}

@@ -27,9 +27,10 @@
 //! A compiled tape can be lifted back into its program ([`Tape::lift`]),
 //! which is how a transform of a tape (a specialization) is compiled.
 
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet, FxHasher};
 
 use super::topo::Topo;
 use super::{input_index, Accum, Fold, Op, Region, Src, Tape, INPUT};
@@ -791,49 +792,65 @@ impl Program {
                 _ => unreachable!("a stateful call's last operand is its state"),
             };
             // The instances, each once: one with the operands of another
-            // (and the pure ones of its prolog) computes the same.
-            let mut seen: HashMap<Vec<Ref>, u32> = HashMap::default();
-            let (mut ins, mut pure_ins): (Vec<Ref>, Vec<Ref>) = (Vec::new(), Vec::new());
-            let (mut out_g, mut state_g) = (0u32, 0u32);
-            for &c in members {
+            // (and the pure ones of its prolog) computes the same. Keyed on
+            // the operand lists in place (`find_rows`), not on copies.
+            let inst: Vec<(u32, usize)> = (members.iter())
+                .flat_map(|&c| (0..n_groups_of(c)).map(move |g| (c, g)))
+                .collect();
+            let key = |k: usize| -> (&[Ref], &[Ref]) {
+                let (c, g) = inst[k];
                 let ng = n_groups_of(c);
                 let own = self.ins(c as usize);
-                let own = &own[..own.len() - usize::from(stateful)];
-                let ni = own.len() / ng;
-                let pro = stateful.then(|| {
-                    let p = prolog_of(c);
-                    (
-                        self.ins(p as usize),
-                        self.bundles[bundle as usize].state_len(),
-                    )
-                });
-                out_g = self.insts[c as usize].n_out / ng as u32;
-                let mut map = Vec::with_capacity(ng);
-                for g in 0..ng {
-                    let mut key = own[g * ni..(g + 1) * ni].to_vec();
-                    if let Some((p, _)) = pro {
+                let ni = (own.len() - usize::from(stateful)) / ng;
+                let pro: &[Ref] = match stateful {
+                    true => {
+                        let p = self.ins(prolog_of(c) as usize);
                         let np = p.len() / ng;
-                        key.extend_from_slice(&p[g * np..(g + 1) * np]);
+                        &p[g * np..(g + 1) * np]
                     }
-                    let n = seen.len() as u32;
-                    let at = *seen.entry(key).or_insert_with(|| {
-                        ins.extend_from_slice(&own[g * ni..(g + 1) * ni]);
-                        if let Some((p, sl)) = pro {
-                            let np = p.len() / ng;
-                            pure_ins.extend_from_slice(&p[g * np..(g + 1) * np]);
-                            state_g = sl as u32;
-                        }
-                        n
-                    });
-                    map.push(at);
+                    false => &[],
+                };
+                (&own[g * ni..(g + 1) * ni], pro)
+            };
+            let hash = |k: usize| {
+                let mut h = FxHasher::default();
+                key(k).hash(&mut h);
+                Some(h.finish())
+            };
+            let mut row = vec![0usize; inst.len()];
+            super::calls::find_rows(inst.len(), hash, |a, b| key(a) == key(b), |k, r| row[k] = r);
+            // the distinct instances numbered in order, their operands
+            // the merged call's
+            let (mut ins, mut pure_ins): (Vec<Ref>, Vec<Ref>) = (Vec::new(), Vec::new());
+            let mut at = vec![0u32; inst.len()];
+            let mut n_groups = 0u32;
+            for k in 0..inst.len() {
+                if row[k] != k {
+                    at[k] = at[row[k]];
+                    continue;
                 }
+                let (own, pro) = key(k);
+                ins.extend_from_slice(own);
+                pure_ins.extend_from_slice(pro);
+                at[k] = n_groups;
+                n_groups += 1;
+            }
+            let state_g = match stateful {
+                true => self.bundles[bundle as usize].state_len() as u32,
+                false => 0,
+            };
+            let mut out_g = 0u32;
+            let mut from = 0;
+            for &c in members {
+                let ng = n_groups_of(c);
+                out_g = self.insts[c as usize].n_out / ng as u32;
                 if stateful {
                     dead[prolog_of(c) as usize] = true;
                 }
                 dead[c as usize] = true;
-                moved.insert(c, (0, map));
+                moved.insert(c, (0, at[from..from + ng].to_vec()));
+                from += ng;
             }
-            let n_groups = seen.len() as u32;
             if stateful {
                 let Kind::CallProlog { n_pure, .. } =
                     self.insts[prolog_of(members[0]) as usize].kind
