@@ -1489,15 +1489,25 @@ impl Tape {
         self.dst[i]
     }
 
-    /// The inputs the ops `ops` read, ascending.
+    /// The inputs the ops `ops` read, ascending. Marked by index, so linear
+    /// in the operands: a program's calls list an input per instance and
+    /// argument.
     pub fn reads(&self, ops: std::ops::Range<usize>) -> Vec<u32> {
-        let mut r: Vec<u32> = Vec::new();
+        let mut read = vec![false; self.n_inputs];
         for i in ops {
-            self.for_each_operand(i, |k| r.extend(input_index(k)));
+            self.for_each_operand(i, |k| {
+                if let Some(j) = input_index(k) {
+                    let j = j as usize;
+                    if j >= read.len() {
+                        read.resize(j + 1, false);
+                    }
+                    read[j] = true;
+                }
+            });
         }
-        r.sort_unstable();
-        r.dedup();
-        r
+        (0..read.len() as u32)
+            .filter(|&j| read[j as usize])
+            .collect()
     }
 
     /// The inputs the main phase reads, ascending: what a call of this
