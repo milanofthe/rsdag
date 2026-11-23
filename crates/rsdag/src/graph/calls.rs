@@ -92,13 +92,17 @@ impl<K: Field> Graph<K> {
         roots: &[ExprId],
         which: &mut dyn FnMut(&Self, FuncId) -> bool,
     ) -> Vec<ExprId> {
+        let _s = rsprobe::scope!("inline");
+        let nodes = self.len();
         let mut rule = Inline {
             g: self,
             which,
             bodies: &mut HashMap::default(),
             contexts: Contexts::default(),
         };
-        crate::transform::rewrite(&mut rule, roots)
+        let out = crate::transform::rewrite(&mut rule, roots);
+        rsprobe::add!("nodes", self.len() - nodes);
+        out
     }
 
     /// Every call under `roots` that passes constants, redirected to a copy
@@ -117,7 +121,11 @@ impl<K: Field> Graph<K> {
     /// `Plain` apart from their non-derivative roles, a derivative of it is
     /// derived anew. Calls into an extern body are left as they are.
     pub fn specialize_calls(&mut self, roots: &[ExprId]) -> Vec<ExprId> {
-        specialize_calls_in(self, roots, &mut HashMap::default())
+        let _s = rsprobe::scope!("specialize calls");
+        let funcs = self.n_funcs();
+        let out = specialize_calls_in(self, roots, &mut HashMap::default());
+        rsprobe::add!("functions", self.n_funcs() - funcs);
+        out
     }
 
     /// `f` with the globals `map` binds to something else than themselves

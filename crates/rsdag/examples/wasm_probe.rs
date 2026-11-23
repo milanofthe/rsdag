@@ -1,9 +1,10 @@
 //! Everything the crate does on one path, built for `wasm32-unknown-unknown`
 //! by CI, which then checks the module imports nothing: a browser supplies
 //! no host functions to a plain wasm module, so any import (a clock, a
-//! random source) fails instantiation.
+//! random source) fails instantiation. The path runs under an rsprobe
+//! context, which records with `--features rsprobe/on`.
 //!
-//!     cargo build --release -p rsdag --example wasm_probe --target wasm32-unknown-unknown --features exact,serde
+//!     cargo build --release -p rsdag --example wasm_probe --target wasm32-unknown-unknown --features exact,serde[,rsprobe/on]
 //!     python3 scripts/wasm_imports.py target/wasm32-unknown-unknown/release/examples/wasm_probe.wasm
 
 use rsdag::Program;
@@ -12,6 +13,8 @@ use std::hint::black_box;
 use rsdag::{sparse_jacobian, Graph, Node, Tape, F64};
 
 fn main() {
+    let ctx = rsprobe::Context::new();
+    let on = ctx.enter();
     let mut g: Graph<F64> = Graph::new();
     let x = g.sym("x");
     let Node::Symbol(xs) = *g.node(x) else {
@@ -27,4 +30,6 @@ fn main() {
     black_box(&o);
     #[cfg(feature = "serde")]
     black_box(g.to_module());
+    drop(on);
+    black_box(ctx.record().to_string());
 }

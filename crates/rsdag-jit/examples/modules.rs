@@ -38,6 +38,12 @@
 //! auto|always|never` sets the device bodies' lane
 //! code (`rsdag_jit::Lanes`, `auto` by default).
 //!
+//! With `--features rsprobe/on` each module's run record (the setup's
+//! stages and the evaluations, under `residual`, `jacobian` and `folded`;
+//! parameters `module`, `states`, `threads`, `mode`, `lanes`) goes to the
+//! path in `RSPROBE_RECORD`: a file for one module, a directory for one
+//! file per module and process.
+//!
 //!     cargo run --release -p rsdag-jit --example modules -- [--values <dir>] [--composed <dir>] [--threads <n>[,<n>...]]
 //!         [--rounds <n>] [--native] [--interleave <MB>] [--no-folded] [--lanes <mode>] [--no-variants] <module.json>...
 
@@ -75,6 +81,7 @@ fn per_call(mut f: impl FnMut()) -> f64 {
                 sum += t.elapsed().as_secs_f64();
                 n += 1;
             }
+            rsprobe::add!("evaluations", n);
             best = best.min(sum / n as f64);
         }
         return best;
@@ -200,7 +207,11 @@ fn measure(
     let first = &pools[0].1;
     let interpreted = !NATIVE_ONLY.get().copied().unwrap_or(false);
     let c_tape = on_pool(first, || {
-        tape.eval_prolog(vals, &mut w);
+        {
+            let _s = rsprobe::scope!("prolog");
+            tape.eval_prolog(vals, &mut w);
+        }
+        let _s = rsprobe::scope!("eval interpreted");
         if interpreted {
             per_call(|| tape.eval_main(vals, &mut w, &mut o))
         } else {
@@ -208,11 +219,15 @@ fn measure(
             f64::NAN
         }
     });
-    on_pool(first, || native.eval_prolog(vals, &mut wn));
+    on_pool(first, || {
+        let _s = rsprobe::scope!("prolog");
+        native.eval_prolog(vals, &mut wn)
+    });
     let mut samples = vec![Vec::new(); pools.len()];
     for _ in 0..ROUNDS.get().copied().unwrap_or(1) {
         for ((_, pool), at) in pools.iter().zip(samples.iter_mut()) {
             at.push(on_pool(pool, || {
+                let _s = rsprobe::scope!("eval native");
                 per_call(|| native.eval_main(vals, &mut wn, &mut on))
             }));
         }
@@ -307,24 +322,49 @@ fn main() {
         ]
         .join(",")
     );
+    let threads: rsprobe::Param = match counts[..] {
+        [n] => n.into(),
+        _ => (counts.iter().map(usize::to_string))
+            .collect::<Vec<_>>()
+            .join(",")
+            .into(),
+    };
+    let mode = match NATIVE_ONLY.get().copied().unwrap_or(false) {
+        true => "native",
+        false => "all",
+    };
     for path in &args {
-        let text = std::fs::read_to_string(path).expect("read the module");
-        let v: serde_json::Value = serde_json::from_str(&text).expect("parse the module");
-        let mut module: Module<F64> =
-            serde_json::from_value(v["module"].clone()).expect("a module");
-        // The derivatives the exporter derived for its own Jacobian lose
-        // their role, so the Jacobian here derives afresh, as the other
-        // tools do.
-        for r in module
-            .funcs
-            .iter_mut()
-            .flat_map(|f| f.output_roles.iter_mut())
-        {
-            if matches!(r, OutputRole::Derivative { .. }) {
-                *r = OutputRole::Plain;
+        let name = std::path::Path::new(path)
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let run = common::Run::new(&name);
+        run.param("module", name.as_str());
+        run.param("threads", threads.clone());
+        run.param("mode", mode);
+        run.param("lanes", format!("{lanes:?}"));
+        let (v, mut g, map) = {
+            let _s = rsprobe::scope!("load");
+            let text = std::fs::read_to_string(path).expect("read the module");
+            let v: serde_json::Value = serde_json::from_str(&text).expect("parse the module");
+            let mut module: Module<F64> =
+                serde_json::from_value(v["module"].clone()).expect("a module");
+            // The derivatives the exporter derived for its own Jacobian
+            // lose their role, so the Jacobian here derives afresh, as the
+            // other tools do.
+            for r in module
+                .funcs
+                .iter_mut()
+                .flat_map(|f| f.output_roles.iter_mut())
+            {
+                if matches!(r, OutputRole::Derivative { .. }) {
+                    *r = OutputRole::Plain;
+                }
             }
-        }
-        let (mut g, map) = Graph::from_module(&module).expect("a valid module");
+            let (g, map) = Graph::from_module(&module).expect("a valid module");
+            (v, g, map)
+        };
         let f = map.funcs[v["circuit"].as_u64().expect("circuit") as usize];
         let x0: Vec<f64> = serde_json::from_value(v["x0"].clone()).expect("x0");
         if let Some(dir) = &composed_dir {
@@ -376,17 +416,25 @@ fn main() {
             .zip(&pure)
             .map(|(&v, &p)| if p { v } else { v + 0.01 })
             .collect();
-        let (fm, fvals, f_counts) = measure(&g, &residuals, &syms, &pure, &vals, &check);
-        let (rows, s_diff) = timed(|| sparse_jacobian(&mut g, &residuals, &states));
-        let (mut ri, mut ci, mut entries) = (Vec::new(), Vec::new(), Vec::new());
-        for (i, row) in rows.iter().enumerate() {
-            for &(j, e) in row {
-                ri.push(i);
-                ci.push(j);
-                entries.push(e);
+        run.param("states", states.len());
+        let (fm, fvals, f_counts) = {
+            let _s = rsprobe::scope!("residual");
+            measure(&g, &residuals, &syms, &pure, &vals, &check)
+        };
+        let (s_diff, ri, ci, entries, (jm, jvals, j_counts)) = {
+            let _s = rsprobe::scope!("jacobian");
+            let (rows, s_diff) = timed(|| sparse_jacobian(&mut g, &residuals, &states));
+            let (mut ri, mut ci, mut entries) = (Vec::new(), Vec::new(), Vec::new());
+            for (i, row) in rows.iter().enumerate() {
+                for &(j, e) in row {
+                    ri.push(i);
+                    ci.push(j);
+                    entries.push(e);
+                }
             }
-        }
-        let (jm, jvals, j_counts) = measure(&g, &entries, &syms, &pure, &vals, &check);
+            let m = measure(&g, &entries, &syms, &pure, &vals, &check);
+            (s_diff, ri, ci, entries, m)
+        };
         let by_count = |name: &str| {
             if counts.len() > 1 {
                 for ((n, f), j) in counts.iter().zip(&f_counts).zip(&j_counts) {
@@ -394,11 +442,6 @@ fn main() {
                 }
             }
         };
-        let name = std::path::Path::new(path)
-            .file_stem()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
         if !folding {
             println!(
                 "{name},{},{:.6},{:.6},{:.4},{:.4},{:.6},{:.6},{:.4},{:.4},{},,,,",
@@ -416,6 +459,7 @@ fn main() {
             by_count(&name);
             continue;
         }
+        let _folded = rsprobe::scope!("folded");
         let (folded, s_fold) = timed(|| {
             let inlined = g.inline_all(&residuals);
             let map = syms

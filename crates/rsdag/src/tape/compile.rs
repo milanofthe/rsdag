@@ -97,6 +97,7 @@ impl Tape {
         input_syms: &[SymbolId],
         pure_inputs: Option<&[bool]>,
     ) -> Tape {
+        let _s = rsprobe::scope!("compile");
         let program = lower(ctx, roots, input_syms, pure_inputs);
         finish(program, pure_inputs, input_syms.len())
     }
@@ -109,26 +110,53 @@ fn lower<K: Field>(
     input_syms: &[SymbolId],
     pure_inputs: Option<&[bool]>,
 ) -> Program {
-    use crate::hooks::timed;
-    let forest = timed("tape analyze", || {
+    let forest = {
+        let _s = rsprobe::scope!("analyze");
         Forest::analyze(ctx, roots, input_syms, pure_inputs)
-    });
+    };
+    rsprobe::add!("nodes", forest.base.len());
     let mut templates = Templates::default();
-    let mut program = timed("tape lower", || forest.lower(ctx, roots, &mut templates));
+    let mut program = {
+        let _s = rsprobe::scope!("lower");
+        forest.lower(ctx, roots, &mut templates)
+    };
     if templates.expanded {
-        timed("tape merge", || program.merge_calls());
+        let _s = rsprobe::scope!("merge");
+        program.merge_calls();
     }
     program
 }
 
-/// Passes 3 to 5: `program` fused, scheduled and given slots.
+/// Passes 3 to 5: `program` fused, scheduled and given slots; the tape's
+/// counts at the current rsprobe node.
 fn finish(mut program: Program, pure_inputs: Option<&[bool]>, n_inputs: usize) -> Tape {
-    use crate::hooks::timed;
-    timed("tape fuse", || program.fuse_accumulators(pure_inputs));
-    let order = timed("tape schedule", || program.schedule());
+    {
+        let _s = rsprobe::scope!("fuse");
+        program.fuse_accumulators(pure_inputs);
+    }
+    let order = {
+        let _s = rsprobe::scope!("schedule");
+        program.schedule()
+    };
     let split = pure_inputs.is_some();
-    let mut tape = timed("tape emit", || program.emit(&order, split));
+    let mut tape = {
+        let _s = rsprobe::scope!("emit");
+        program.emit(&order, split)
+    };
     tape.n_inputs = n_inputs;
+    rsprobe::add!("ops", tape.ops.len());
+    rsprobe::add!("slots", tape.n_work);
+    rsprobe::add!("stages", tape.stages.len());
+    rsprobe::add!("regions", tape.regions.len());
+    let calls = tape.ops.iter().filter_map(|op| match *op {
+        Op::Call { n_groups, .. } => Some(n_groups as usize),
+        _ => None,
+    });
+    rsprobe::add!("instances", calls.sum::<usize>());
+    rsprobe::add!(
+        "bodies",
+        tape.bundles.iter().filter(|b| b.body().is_some()).count()
+    );
     tape
 }
 
@@ -158,6 +186,7 @@ impl Lowered {
         input_syms: &[SymbolId],
         pure_inputs: Option<&[bool]>,
     ) -> Lowered {
+        let _s = rsprobe::scope!("lowered");
         let program = lower(ctx, roots, input_syms, pure_inputs);
         let mut at: HashMap<ExprId, u32> = HashMap::default();
         for (k, &r) in roots.iter().enumerate() {
@@ -195,16 +224,17 @@ impl Lowered {
 
     /// The tape computing `roots`, each one of the lowered roots.
     pub fn tape<K: Field>(&self, ctx: &Graph<K>, roots: &[ExprId]) -> Tape {
-        use crate::hooks::timed;
+        let _s = rsprobe::scope!("view");
         let mut p = self.program.clone();
         p.roots = (roots.iter())
             .map(|r| self.program.roots[*self.at.get(r).expect("a lowered root") as usize])
             .collect();
         let pure = self.pure_inputs.as_deref();
-        timed("tape view", || {
+        {
+            let _s = rsprobe::scope!("narrow");
             p.retain_reachable();
             p.narrow_calls(ctx, pure);
-        });
+        }
         finish(p, pure, self.inputs.len())
     }
 }

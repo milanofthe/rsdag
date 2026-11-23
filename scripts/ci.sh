@@ -13,8 +13,11 @@ export PATH="$TC:$PATH"
 CARGO=cargo
 run() { echo "== $*"; "$@"; }
 run $CARGO fmt --all -- --check
-run $CARGO clippy --workspace --exclude rsdag-py --all-targets --features "$FEATURES" -- -D warnings
-run $CARGO test --workspace --exclude rsdag-py --features "$FEATURES"
+# rsdag's scopes compiled out and, with rsprobe/on, recording.
+for probe in "" rsprobe/on; do
+    run $CARGO clippy --workspace --exclude rsdag-py --all-targets --features "$FEATURES $probe" -- -D warnings
+    run $CARGO test --workspace --exclude rsdag-py --features "$FEATURES $probe"
+done
 # The x86 baseline encodings and the SSE2 dense kernels, which a CPU with
 # SSE4.1 and AVX never runs.
 RSDAG_SSE2=1 run $CARGO test -p rsdag-jit --features rsdag/synth
@@ -26,8 +29,10 @@ for f in "" exact serde exact,serde; do
 done
 # The graph crate in the browser (a consumer's web build interprets there),
 # linked and importing nothing.
-run $CARGO build --release -p rsdag --example wasm_probe --target wasm32-unknown-unknown --features exact,serde
-run python3 scripts/wasm_imports.py target/wasm32-unknown-unknown/release/examples/wasm_probe.wasm
+for probe in "" ,rsprobe/on; do
+    run $CARGO build --release -p rsdag --example wasm_probe --target wasm32-unknown-unknown --features "exact,serde$probe"
+    run python3 scripts/wasm_imports.py target/wasm32-unknown-unknown/release/examples/wasm_probe.wasm
+done
 run $CARGO check -p rsdag-py
 # The Python job: the wheel, installed into the interpreter that runs the
 # tests. Skipped where maturin or pytest is missing.

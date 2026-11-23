@@ -698,13 +698,16 @@ impl Program for Tape {
         self.state_len
     }
     fn eval_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]) {
+        let _s = rsprobe::scope!(DEBUG, "eval");
         self.run_with(0, inputs, work, out, &mut NoTrace)
     }
     fn eval_prolog_into(&self, inputs: &[f64], work: &mut [f64]) {
+        let _s = rsprobe::scope!(DEBUG, "prolog");
         assert!(work.len() >= self.work_len(), "work buffer too short");
         self.run_range(inputs, work, 0, self.prolog_ops, &mut NoTrace);
     }
     fn eval_main_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]) {
+        let _s = rsprobe::scope!(DEBUG, "main");
         self.eval_main_with(inputs, work, out, &mut NoTrace)
     }
 }
@@ -959,6 +962,7 @@ impl Tape {
             {
                 next_region += 1;
                 if !S::RECORDS && r.hi as usize <= hi {
+                    let _s = rsprobe::scope!(TRACE, "region");
                     let slots = Shared::new(work);
                     let piece = |k: usize| {
                         crate::scratch::with_len(self.max_args, 0.0, |s| {
@@ -987,6 +991,7 @@ impl Tape {
                 // `run_stage` runs it on as many threads as it is worth,
                 // one included
                 if st.hi as usize <= hi {
+                    let _s = rsprobe::scope!(TRACE, "stage");
                     let (slots, gather) = (
                         Shared::new(work),
                         Shared::new(&mut scratch[..self.max_args]),

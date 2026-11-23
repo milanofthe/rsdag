@@ -17,4 +17,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --exclude rsdag-py --all-targets --features 'rsdag/synth rsdag/serde' -- -D warnings
-      - run: cargo test --workspace --exclude rsdag-py --features 'rsdag/synth rsdag/serde'
+      # recording, so the tests that read rsdag's measures check them
+      - run: cargo test --workspace --exclude rsdag-py --features 'rsdag/synth rsdag/serde rsprobe/on'

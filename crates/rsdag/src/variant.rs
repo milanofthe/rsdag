@@ -51,7 +51,6 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::extern_fn::{BackendCache, BodyBackend, BodyCompiler, ExternBundle, Instances};
 use crate::func::InterpretedBody;
-use crate::hooks::{log, Level};
 use crate::tape::{Guards, ParamSelects, Program as _, Tape};
 
 use crate::constants::{PERCENT, TRACED};
@@ -206,10 +205,7 @@ impl Shared {
     fn build(&self, ps: &ParamSelects, pattern: &[bool], max: usize) -> u32 {
         if self.bodies.read().unwrap().len() >= max {
             if !self.exhausted.swap(true, Ordering::Relaxed) {
-                log(
-                    Level::Info,
-                    &format!("rsdag: a body keeps {max} variants; later patterns run it whole"),
-                );
+                rsprobe::info!("a body keeps {max} variants; later patterns run it whole");
             }
             return 0;
         }
@@ -219,6 +215,7 @@ impl Shared {
         if decided.n_ops() >= self.ops || decided.state_len() > self.state_len {
             return 0;
         }
+        rsprobe::add!("variants", 1);
         let (pure, n_out) = (full.pure_args().to_vec(), full.n_outputs());
         self.keep(InterpretedBody::new(decided, n_out, pure))
     }
@@ -333,6 +330,8 @@ impl Form {
     /// order: the selects found, each pattern's variant built and made, and
     /// then the conditions' tape made (a prolog interprets it meanwhile).
     fn advance(&self, rows: &[Box<[f64]>]) {
+        let _s = rsprobe::scope!("variants");
+        rsprobe::add!("bindings", rows.len());
         let shared = &self.shared;
         let Some(found) = shared.found.get_or_init(|| shared.find()) else {
             return;

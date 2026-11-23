@@ -16,7 +16,6 @@
 //! out.
 
 use crate::constants::PERCENT;
-use crate::hooks::{log, Level};
 
 /// When specializing against the choices pays. The defaults are what a
 /// circuit simulator's Newton loop measured best with.
@@ -133,6 +132,7 @@ impl Specializer {
         self.cool(policy);
         self.flips += n;
         self.drops += 1;
+        rsprobe::add!("specializations dropped", 1);
         if self.drops >= policy.thrash_flips && self.evals < self.flips * policy.thrash_evals {
             self.turn_off("choices thrash");
             return false;
@@ -185,10 +185,8 @@ impl Specializer {
             self.turn_off(&format!("shrink too small, {ops} of {full} ops"));
             return None;
         }
-        log(
-            Level::Debug,
-            &format!("rsdag: specialized over run-time choices, {ops} of {full} ops"),
-        );
+        rsprobe::add!("specializations built", 1);
+        rsprobe::debug!("specialized over run-time choices, {ops} of {full} ops");
         self.built += 1;
         self.version += 1;
         self.current = true;
@@ -252,12 +250,11 @@ impl Specializer {
     fn turn_off(&mut self, why: &str) {
         self.off = true;
         self.current = false;
-        log(
-            Level::Debug,
-            &format!(
-                "rsdag: specialization over run-time choices off ({why}), {} flips in {} evaluations",
-                self.flips, self.evals
-            ),
+        rsprobe::add!("specializations off", 1);
+        rsprobe::debug!(
+            "specialization over run-time choices off ({why}), {} flips in {} evaluations",
+            self.flips,
+            self.evals
         );
     }
 }

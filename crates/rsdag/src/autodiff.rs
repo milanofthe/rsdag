@@ -13,6 +13,7 @@ use crate::node::{ArgList, BinOp, CmpOp, ExprId, Node, ReduceOp, SymbolId, Unary
 
 /// Derivative of `expr` with respect to the symbol `wrt`.
 pub fn differentiate<K: Field>(ctx: &mut Graph<K>, expr: ExprId, wrt: SymbolId) -> ExprId {
+    let _s = rsprobe::scope!("differentiate");
     let mut memo = NodeTable::new(ctx.len());
     forward(ctx, &[expr], wrt, &mut memo, &|_| true)[0]
 }
@@ -551,6 +552,8 @@ pub fn sparse_jacobian<K: Field>(
     residuals: &[ExprId],
     wrt: &[SymbolId],
 ) -> SparseRows {
+    let _s = rsprobe::scope!("sparse jacobian");
+    let nodes = ctx.len();
     let col: rustc_hash::FxHashMap<SymbolId, u32> = wrt
         .iter()
         .enumerate()
@@ -586,24 +589,30 @@ pub fn sparse_jacobian<K: Field>(
             }
         }
     }
-    let mut memo = NodeTable::new(ctx.len());
-    for (j, members) in by_col.iter().enumerate() {
-        if members.is_empty() {
-            continue;
-        }
-        memo.begin(ctx.len());
-        let roots: Vec<ExprId> = members.iter().map(|&i| residuals[i]).collect();
-        // through the nodes whose support holds the column only
-        let col = forward(ctx, &roots, wrt[j], &mut memo, &|c| {
-            flow.get(c).contains(j as u32)
-        });
-        for (&i, d) in members.iter().zip(col) {
-            rows[i].push((j, d));
+    {
+        let _s = rsprobe::scope!("forward");
+        let mut memo = NodeTable::new(ctx.len());
+        for (j, members) in by_col.iter().enumerate() {
+            if members.is_empty() {
+                continue;
+            }
+            rsprobe::add!("sweeps", 1);
+            memo.begin(ctx.len());
+            let roots: Vec<ExprId> = members.iter().map(|&i| residuals[i]).collect();
+            // through the nodes whose support holds the column only
+            let col = forward(ctx, &roots, wrt[j], &mut memo, &|c| {
+                flow.get(c).contains(j as u32)
+            });
+            for (&i, d) in members.iter().zip(col) {
+                rows[i].push((j, d));
+            }
         }
     }
     for row in rows.iter_mut() {
         row.retain(|&(_, e)| !ctx.is_zero(e));
     }
+    rsprobe::add!("entries", rows.iter().map(Vec::len).sum::<usize>());
+    rsprobe::add!("nodes", ctx.len() - nodes);
     rows
 }
 
@@ -659,6 +668,7 @@ pub fn vjp<K: Field>(
 /// differs. The result is an ordinary expression in the same context, so it can
 /// be differentiated again.
 pub fn gradient<K: Field>(ctx: &mut Graph<K>, f: ExprId, wrt: &[SymbolId]) -> Vec<ExprId> {
+    let _s = rsprobe::scope!("gradient");
     // The cone of f, ascending: walked backwards, every node comes after
     // all of its consumers. `pos` is a node's place in it.
     let mut pos = NodeTable::new(ctx.len());

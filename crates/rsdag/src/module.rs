@@ -382,6 +382,8 @@ impl<K: Field> Graph<K> {
         module: &Module<K>,
         mut externs: impl FnMut(&str) -> Option<Arc<dyn ExternBundle>>,
     ) -> Result<IdMap, ModuleError> {
+        let _s = rsprobe::scope!("load module");
+        rsprobe::add!("nodes", module.nodes.len());
         module.validate()?;
         // Every extern body up front, so a missing one fails before the
         // graph changes.

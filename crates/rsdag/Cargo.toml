@@ -9,8 +9,10 @@ description = "Rust symbolic graph backend: hash-consed expression graph, differ
 
 [features]
 # The core (graph, differentiation, tape, roles, modules) depends on
-# `rustc-hash`, `libm` and `rspool` alone and computes in `f64`. Everything else is
-# opt-in, so a consumer that builds and evaluates pays for nothing more.
+# `rustc-hash`, `libm`, `rspool` and `rsprobe` alone and computes in `f64`;
+# `rsprobe` records only in a binary that enables `rsprobe/on`. Everything
+# else is opt-in, so a consumer that builds and evaluates pays for nothing
+# more.
 default = []
 
 # Exact rational constants: `Graph<BigRational>`, where folding never rounds.
@@ -28,6 +30,7 @@ serde = ["dep:serde", "num-rational?/serde", "num-bigint?/serde"]
 [dependencies]
 rustc-hash.workspace = true
 rspool.workspace = true
+rsprobe.workspace = true
 libm.workspace = true
 serde = { version = "1", features = ["derive"], optional = true }
 num-bigint = { workspace = true, optional = true }
@@ -45,6 +48,7 @@ num-rational.workspace = true
 num-traits.workspace = true
 rustc-hash.workspace = true
 rspool.workspace = true
+rsprobe.workspace = true
 serde_json = "1"
 
 [lints]
