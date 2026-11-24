@@ -78,6 +78,10 @@ pub struct Policy {
     /// the compiler's background queue) and the interpreted one runs its
     /// bodies whole meanwhile; without, the interpreter specializes.
     pub variants: crate::variant::VariantPolicy,
+    /// When the program's main-phase calls keep an instance's outputs
+    /// rather than compute it again (see [`Tape::set_latency`]); `None`
+    /// computes every instance.
+    pub latency: Option<crate::Latency>,
 }
 
 impl Default for Policy {
@@ -165,6 +169,7 @@ impl Adaptive {
             Arc::new(move |job: Box<dyn FnOnce() + Send>| c.submit(job))
         });
         let compiled = policy.jit && compiler.is_some();
+        tape.set_latency(policy.latency);
         tape.with_backend(&crate::BodyBackend {
             submit,
             variants: Some(crate::variant::VariantPolicy {

@@ -55,5 +55,6 @@ impl Policy {
         wait: true,
         choices: ChoicePolicy::DEFAULT,
         variants: VariantPolicy::DEFAULT,
+        latency: None,
     };
 }

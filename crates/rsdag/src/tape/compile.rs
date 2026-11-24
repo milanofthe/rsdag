@@ -3171,6 +3171,8 @@ impl Program {
             interp: super::Interp::new(&ops, &dst, &arg_pool, &outputs, next as usize, prolog_ops),
             stages,
             regions,
+            latency: None,
+            caches: Vec::new(),
             lent,
             ops,
             dst,

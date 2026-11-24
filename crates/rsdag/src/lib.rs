@@ -54,6 +54,7 @@ pub use nonlinearity::{nonlinearity_of, Degree, Nonlinearity, UnarySet};
 pub use num_rational::BigRational;
 pub use role::{Crossing, OutputRole, ParamRole, Signature};
 pub use scope::Scope;
+pub use tape::calls::Latency;
 pub use tape::{
     Guards, Lowered, NoTrace, ParamSelects, Program, Region, SpecializedTape, Tape, TraceSink,
 };

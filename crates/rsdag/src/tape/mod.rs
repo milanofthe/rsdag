@@ -601,6 +601,11 @@ pub struct Tape {
     stages: Vec<Stage>,
     /// Its independent pieces of ops without a call (see [`Region`]).
     regions: Vec<Region>,
+    /// When its main-phase calls keep their instances' outputs, and where:
+    /// `(op, first slot)` of each one's cache, after the other slots (see
+    /// [`set_latency`](Self::set_latency)).
+    latency: Option<calls::Latency>,
+    caches: Vec<(u32, u32)>,
 }
 
 /// A compiled program as a solver drives it, whichever backend runs it:
@@ -704,6 +709,7 @@ impl Program for Tape {
     fn eval_prolog_into(&self, inputs: &[f64], work: &mut [f64]) {
         let _s = rsprobe::scope!(DEBUG, "prolog");
         assert!(work.len() >= self.work_len(), "work buffer too short");
+        calls::void_cache(work, self.cache_slots());
         self.run_range(inputs, work, 0, self.prolog_ops, &mut NoTrace);
     }
     fn eval_main_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]) {
@@ -916,6 +922,9 @@ impl Tape {
     ) {
         assert!(work.len() >= self.work_len(), "work buffer too short");
         assert_eq!(out.len(), self.out_len(), "output buffer of the wrong size");
+        if lo == 0 {
+            calls::void_cache(work, self.cache_slots());
+        }
         self.run_range(inputs, work, lo, self.ops.len(), sink);
         write_outputs(&self.outputs, inputs, work, out);
     }
@@ -1465,6 +1474,58 @@ impl Tape {
             out: self.dst[i] as usize,
             state: state as usize,
             ops: n_groups as u64 * call_ops(b, op),
+            cache: (self.caches.binary_search_by_key(&(i as u32), |c| c.0).ok())
+                .zip(self.latency)
+                .map(|(k, l)| (self.caches[k].1 as usize, l)),
+        }
+    }
+
+    /// Run its main-phase calls under `latency`: an instance whose
+    /// arguments stay within it of those it last computed at takes the
+    /// outputs it computed there (see [`calls::Latency`]); `None` computes
+    /// every instance. The caches are slots after the others, which the
+    /// work buffer grows by, voided by every prolog.
+    pub fn set_latency(&mut self, latency: Option<calls::Latency>) {
+        if let Some(&(_, first)) = self.caches.first() {
+            self.n_work = first as usize;
+        }
+        self.caches.clear();
+        self.latency = latency;
+        if latency.is_none() {
+            return;
+        }
+        for i in self.prolog_ops..self.ops.len() {
+            if let Op::Call {
+                n_groups,
+                n_args,
+                n_in,
+                reads,
+                n_out,
+                state,
+                ..
+            } = self.ops[i]
+            {
+                if state == NO_STATE {
+                    continue;
+                }
+                let nr = if reads == ALL_ARGS { n_args } else { n_in };
+                self.caches.push((i as u32, self.n_work as u32));
+                self.n_work += calls::cache_len(n_groups as usize, nr as usize, n_out as usize);
+            }
+        }
+    }
+
+    /// The latency its calls run under (see [`set_latency`](Self::set_latency)).
+    pub fn latency(&self) -> Option<calls::Latency> {
+        self.latency
+    }
+
+    /// The slots of its calls' caches, which a prolog voids (see
+    /// [`calls::void_cache`]).
+    pub fn cache_slots(&self) -> std::ops::Range<usize> {
+        match self.caches.first() {
+            Some(&(_, first)) => first as usize..self.n_work,
+            None => self.n_work..self.n_work,
         }
     }
 

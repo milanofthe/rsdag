@@ -101,6 +101,9 @@ pub struct NativeTape {
     /// chunks from `starts[k]` to the next piece's, the last one's up to
     /// `hi`.
     regions: Vec<ChunkRegion>,
+    /// The slots of the calls' caches, which a prolog voids (see
+    /// [`Tape::cache_slots`]).
+    caches: std::ops::Range<usize>,
 }
 
 /// A region of the tape as chunks (see [`NativeTape::regions`]), with its
@@ -876,6 +879,7 @@ impl NativeTape {
             reads,
             phase_ops,
             regions,
+            caches: tape.cache_slots(),
         })
     }
 
@@ -1613,12 +1617,13 @@ impl<'a, I: Isa> Emitter<'a, I> {
             n_args: c.n_args,
             n_out: c.n_out,
             operands: table.then(|| self.keep(operands)),
-            places: c.places.filter(|_| table).map(|p| self.keep(p)),
+            places: c.places.map(|p| self.keep(p)),
             own: c.own.map(|o| self.keep(o)),
             args: c.args,
             out: c.out,
             state: c.state,
             ops: c.ops,
+            cache: c.cache,
         };
         let d = self.calls.len();
         assert!(d < self.calls.capacity(), "calls counted before emission");
@@ -2121,10 +2126,12 @@ impl rsdag::Program for NativeTape {
     }
     fn eval_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]) {
         let _s = rsprobe::scope!(DEBUG, "eval");
+        rsdag::tape::calls::void_cache(work, self.caches.clone());
         self.eval_range(0..self.chunks.len(), inputs, work, Some(out));
     }
     fn eval_prolog_into(&self, inputs: &[f64], work: &mut [f64]) {
         let _s = rsprobe::scope!(DEBUG, "prolog");
+        rsdag::tape::calls::void_cache(work, self.caches.clone());
         self.eval_range(0..self.prolog_chunks, inputs, work, None);
     }
     fn eval_main_into(&self, inputs: &[f64], work: &mut [f64], out: &mut [f64]) {

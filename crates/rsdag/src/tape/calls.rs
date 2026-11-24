@@ -19,6 +19,12 @@
 //! them) the values are the same by construction: the rows are found on
 //! the other arguments alone, and only an instance that computes its row
 //! gathers its arguments.
+//!
+//! A main phase run under a [`Latency`] keeps, per instance, the arguments
+//! it last computed at and its outputs there, in a block of the slots
+//! ([`cache_len`]): an instance whose arguments are within the tolerance
+//! of those takes the kept outputs and runs nothing. A prolog voids the
+//! block ([`void_cache`]), since the outputs depend on its states.
 
 use std::hash::Hasher;
 
@@ -74,6 +80,43 @@ pub struct Call<'a> {
     pub state: usize,
     /// Ops it carries: its instances times its body's.
     pub ops: u64,
+    /// Where a main phase keeps its instances' arguments and outputs
+    /// ([`cache_len`]), and when an instance takes them ([`Latency`]);
+    /// `None` for one that computes every instance.
+    pub cache: Option<(usize, Latency)>,
+}
+
+/// When an instance of a call keeps the outputs it computed before: every
+/// argument it reads within `atol + rtol |a|` of the value `a` it was
+/// computed at. With both zero, only arguments the same bit for bit; the
+/// outputs are then those of the computation. Otherwise an output is off by
+/// at most its derivatives times the tolerance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Latency {
+    pub atol: f64,
+    pub rtol: f64,
+}
+
+impl Latency {
+    /// Whether `v` is within the tolerance of `at`.
+    #[inline]
+    fn holds(&self, v: f64, at: f64) -> bool {
+        v.to_bits() == at.to_bits() || (v - at).abs() <= self.atol + self.rtol * at.abs()
+    }
+}
+
+/// Slots of the cache of a main phase over `n_groups` instances that read
+/// `n_reads` arguments and write `n_out` outputs: a row per instance,
+/// whether it computed at the last run, then the arguments and the outputs
+/// it computed at.
+pub fn cache_len(n_groups: usize, n_reads: usize, n_out: usize) -> usize {
+    n_groups * (1 + n_reads + n_out)
+}
+
+/// The cache block `block` of a work buffer voided: every instance computes
+/// at its next run (a NaN argument is within no tolerance).
+pub fn void_cache(work: &mut [f64], block: std::ops::Range<usize>) {
+    work[block].fill(f64::NAN);
 }
 
 /// A region of the work buffer the pieces of work of a stage share.
@@ -155,7 +198,7 @@ pub unsafe fn run_call(
     if c.phase == Phase::Prolog && groups == (0..c.n_groups) {
         unsafe { share_rows(c, slots, gather, inputs) };
     }
-    unsafe { run_part(c, slots, gather, inputs, groups, scratch) }
+    unsafe { run_part(c, slots, gather, inputs, groups, scratch) };
 }
 
 /// The row of every instance of the prolog `c`, after its rows: the first
@@ -225,7 +268,8 @@ pub(crate) fn find_rows(
     })
 }
 
-/// [`run_call`] on the rows [`share_rows`] found.
+/// [`run_call`] on the rows [`share_rows`] found; returns the instances
+/// that computed (a main phase's cache holds the others).
 ///
 /// # Safety
 /// As [`run_call`].
@@ -236,7 +280,7 @@ unsafe fn run_part(
     inputs: &[f64],
     groups: std::ops::Range<usize>,
     scratch: &mut [f64],
-) {
+) -> usize {
     let (na, no, b) = (c.n_args, c.n_out, c.bundle);
     let (g0, ng) = (groups.start, groups.len());
     let shape = match c.phase {
@@ -271,19 +315,63 @@ unsafe fn run_part(
     let args = unsafe { gather.slice(c.args + g0 * na, ng * na) };
     let out = unsafe { slots.slice_mut(c.out + g0 * no, ng * no) };
     match c.phase {
-        Phase::Whole if ng >= 2 => b.call_batch(args, ng, na, out),
-        Phase::Whole => b.call_into(args, scratch, out),
+        Phase::Whole if ng >= 2 => {
+            b.call_batch(args, ng, na, out);
+            ng
+        }
+        Phase::Whole => {
+            b.call_into(args, scratch, out);
+            ng
+        }
         Phase::Main => {
             let (n, sl) = (c.n_groups, b.state_len());
             let states = unsafe { slots.slice(c.state, n * sl) };
             let rows = unsafe { slots.slice(c.state + n * sl + g0, ng) };
-            if ng >= 2 {
-                let at = Instances::first(ng, na, sl).with_rows(Rows::At(rows));
-                b.main_batch(args, states, out, &at);
-            } else if ng == 1 {
-                let r = rows[0] as usize;
-                b.main_into(args, &states[r * sl..(r + 1) * sl], scratch, out);
-            }
+            let at = Instances::first(ng, na, sl).with_rows(Rows::At(rows));
+            let main = |at: &Instances, out: &mut [f64], scratch: &mut [f64]| match at.len() {
+                0 => {}
+                1 => {
+                    let (g, r) = (at.at(0), at.row(at.at(0)));
+                    let o = &mut out[g * no..(g + 1) * no];
+                    b.main_into(&args[g * na..][..na], &states[r * sl..][..sl], scratch, o)
+                }
+                _ => b.main_batch(args, states, out, at),
+            };
+            let Some((cache, latency)) = c.cache else {
+                main(&at, out, scratch);
+                return ng;
+            };
+            // The instances whose arguments moved past the tolerance since
+            // they computed; the others take their kept outputs.
+            let reads: &[u32] = c.places.unwrap_or(&[]);
+            let nr = if c.places.is_some() { reads.len() } else { na };
+            let w = 1 + nr + no;
+            let kept = unsafe { slots.slice_mut(cache + g0 * w, ng * w) };
+            let arg = |g: usize, k: usize| match c.places {
+                Some(_) => args[g * na + reads[k] as usize],
+                None => args[g * na + k],
+            };
+            crate::scratch::with(|moved: &mut Vec<u32>| {
+                moved.clear();
+                for (g, row) in kept.chunks_exact_mut(w).enumerate() {
+                    let still = (0..nr).all(|k| latency.holds(arg(g, k), row[1 + k]));
+                    if still {
+                        row[0] = 0.0;
+                        out[g * no..(g + 1) * no].copy_from_slice(&row[1 + nr..]);
+                    } else {
+                        row[0] = 1.0;
+                        (0..nr).for_each(|k| row[1 + k] = arg(g, k));
+                        moved.push(g as u32);
+                    }
+                }
+                rsprobe::add!(DEBUG, "instances kept", ng - moved.len());
+                main(&at.listed(moved), out, scratch);
+                for &g in moved.iter() {
+                    let g = g as usize;
+                    kept[g * w + 1 + nr..(g + 1) * w].copy_from_slice(&out[g * no..(g + 1) * no]);
+                }
+                moved.len()
+            })
         }
         Phase::Prolog => {
             // the instances whose row is their own: the others read theirs
@@ -304,6 +392,7 @@ unsafe fn run_part(
                 } else if ng == 1 && !own.is_empty() {
                     b.prolog_into(args, scratch, out);
                 }
+                own.len()
             })
         }
     }
@@ -326,7 +415,20 @@ pub unsafe fn run_stage<'a>(
     gather: Shared,
     inputs: &[f64],
 ) {
-    let work_of = |c: &Call| c.ops as f64 * c.bundle.rate().ns_per_op();
+    // A call that keeps outputs counts the ops of the instances that
+    // computed at its last run.
+    let ops_of = |c: &Call| match c.cache {
+        Some((cache, _)) if c.n_groups > 0 => {
+            let nr = c.places.map_or(c.n_args, <[u32]>::len);
+            let w = 1 + nr + c.n_out;
+            let ran = (0..c.n_groups)
+                .filter(|&g| unsafe { slots.get(cache + g * w) } != 0.0)
+                .count();
+            c.ops as f64 * ran as f64 / c.n_groups as f64
+        }
+        _ => c.ops as f64,
+    };
+    let work_of = |c: &Call| ops_of(c) * c.bundle.rate().ns_per_op();
     let work: f64 = (0..n).map(|k| work_of(&call(k))).sum();
     let groups: usize = (0..n).map(|k| call(k).n_groups).sum();
     // the rows the prologs' instances share, before any part of them runs
@@ -345,7 +447,7 @@ pub unsafe fn run_stage<'a>(
     // fastest for work of its size (`rspool::Work`); a serial run is
     // measured as a whole for that choice, and call by call for the ns per
     // op of each body.
-    let ops: f64 = (0..n).map(|k| call(k).ops as f64).sum();
+    let ops: f64 = (0..n).map(|k| ops_of(&call(k))).sum();
     let decide = rspool::Work::estimated(work, ops, call(0).bundle.rate());
     let width = match decide.go::<rspool::Here>(groups) {
         rspool::Go::Wide(k) => k,
@@ -353,9 +455,12 @@ pub unsafe fn run_stage<'a>(
             let whole = decide.serial_timed();
             for k in 0..n {
                 let c = call(k);
-                c.bundle
-                    .rate()
-                    .time(c.ops as f64, || run_groups(&c, 0..c.n_groups));
+                let rate = c.bundle.rate();
+                let timing = rate.begin(ops_of(&c), false);
+                let ran = run_groups(&c, 0..c.n_groups);
+                if let Some(t) = timing {
+                    rate.end(t, c.ops as f64 * ran as f64 / c.n_groups.max(1) as f64);
+                }
             }
             if let Some(t) = whole {
                 decide.record_serial(t);
