@@ -170,6 +170,15 @@ those arguments runs the body's prolog per instance in its own prolog and
 keeps the result in its work buffer (`ExternBundle::state_len`,
 `prolog_into`, `main_into`); per evaluation only the rest of the body runs.
 
+Under a `Latency` (`Tape::set_latency`, `Policy::latency`) a main-phase
+call keeps each instance's arguments and outputs in the work buffer: an
+instance whose arguments all stay within `atol + rtol |a|` of those it last
+computed at takes its kept outputs and runs nothing, so an evaluation costs
+the instances that moved. Each output is then off by at most its
+derivatives times the tolerance; a zero tolerance keeps outputs only for
+arguments equal bit for bit. Interpreter and native code run it through the
+same call runner; a prolog voids what was kept.
+
 ![Function bodies as a tape](docs/diagrams/bodies_tape.svg)
 
 Three instances of a `diode(a, b, is, n)` body in a ring, `is` and `n`
