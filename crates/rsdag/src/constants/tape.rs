@@ -91,3 +91,17 @@ pub(crate) const LANES_PAIR: usize = 2;
 /// would only cost the copy. Time only: a kept output is always that of
 /// its arguments.
 pub(crate) const LATENCY_KEEP_MOVES: f64 = 1024.0;
+
+/// A call under a [`Latency`](crate::Latency) whose run kept, or kept the
+/// outputs of, fewer than one in this many of its instances runs its next
+/// [`LATENCY_SKIP_RUNS`] runs without checking them (the outputs it keeps
+/// stay those of the arguments they were computed at, and its next check
+/// compares against those): checking costs about 7 % of a run that keeps
+/// nothing (device bodies of a circuit simulator, their residuals alone,
+/// native lanes on x86-64), about what keeping that share of the instances
+/// saves.
+pub(crate) const LATENCY_MIN_KEPT: f64 = 8.0;
+
+/// See [`LATENCY_MIN_KEPT`]: one run in this many checks while a call keeps
+/// too few, so checking costs a ninth of its cost in a run of one.
+pub(crate) const LATENCY_SKIP_RUNS: f64 = 8.0;

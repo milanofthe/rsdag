@@ -30,7 +30,7 @@ use std::hash::Hasher;
 
 use rustc_hash::{FxHashMap as HashMap, FxHasher};
 
-use crate::constants::LATENCY_KEEP_MOVES;
+use crate::constants::{LATENCY_KEEP_MOVES, LATENCY_MIN_KEPT, LATENCY_SKIP_RUNS};
 use crate::extern_fn::{ExternBundle, Instances, Rows};
 
 use super::input_index;
@@ -99,24 +99,23 @@ pub struct Latency {
 }
 
 impl Latency {
-    /// How many tolerances `v` is from `at`: `0` the same bits, at most `1`
-    /// within the tolerance, NaN from or to NaN.
+    /// Whether `v` is within `scale` tolerances of `at`: the same bits, or
+    /// a tolerance that is not zero and holds; never from or to NaN.
     #[inline]
-    fn moves(&self, v: f64, at: f64) -> f64 {
-        match v.to_bits() == at.to_bits() {
-            true => 0.0,
-            false => (v - at).abs() / (self.atol + self.rtol * at.abs()),
-        }
+    fn within(&self, v: f64, at: f64, scale: f64) -> bool {
+        let tol = scale * (self.atol + self.rtol * at.abs());
+        v.to_bits() == at.to_bits() || (tol > 0.0 && (v - at).abs() <= tol)
     }
 }
 
 /// Slots of the cache of a main phase over `n_groups` instances that read
-/// `n_reads` arguments and write `n_out` outputs: per instance how it ran
-/// last ([`KEPT`], [`STORED`], [`MOVING`]; NaN voided), then a row per
-/// instance of the arguments it last computed at and, unless it is moving,
-/// the outputs it computed there.
+/// `n_reads` arguments and write `n_out` outputs: the runs it skips
+/// checking (see [`LATENCY_SKIP_RUNS`]), per instance how it ran last
+/// ([`KEPT`], [`STORED`], [`MOVING`]; NaN voided), then a row per instance
+/// of the arguments it last computed at and, unless it is moving, the
+/// outputs it computed there.
 pub fn cache_len(n_groups: usize, n_reads: usize, n_out: usize) -> usize {
-    n_groups * (1 + n_reads + n_out)
+    1 + n_groups * (1 + n_reads + n_out)
 }
 
 /// An instance took its kept outputs.
@@ -136,7 +135,7 @@ const MOVING: f64 = 2.0;
 unsafe fn live_ops(c: &Call, slots: Shared) -> f64 {
     match c.cache {
         Some((cache, _)) if c.n_groups > 0 => {
-            let flags = unsafe { slots.slice(cache, c.n_groups) };
+            let flags = unsafe { slots.slice(cache + 1, c.n_groups) };
             let ran = flags.iter().filter(|&&f| f != KEPT).count();
             c.ops as f64 * ran as f64 / c.n_groups as f64
         }
@@ -148,6 +147,48 @@ unsafe fn live_ops(c: &Call, slots: Shared) -> f64 {
 /// at its next run (a NaN argument is within no tolerance).
 pub fn void_cache(work: &mut [f64], block: std::ops::Range<usize>) {
     work[block].fill(f64::NAN);
+}
+
+/// Whether `c` checks its instances against its cache at this run: not
+/// while it skips (see [`LATENCY_SKIP_RUNS`]).
+///
+/// # Safety
+/// No piece of work writes the call's cache while this runs.
+unsafe fn checks(c: &Call, slots: Shared) -> bool {
+    c.cache
+        .is_some_and(|(cache, _)| !(unsafe { slots.get(cache) } > 0.0))
+}
+
+/// `c` as this run runs it: without its cache where it does not check.
+fn as_run<'a>(c: Call<'a>, checks: bool) -> Call<'a> {
+    match checks {
+        true => c,
+        false => Call { cache: None, ..c },
+    }
+}
+
+/// After a run of `c`, the runs it skips checking: [`LATENCY_SKIP_RUNS`]
+/// after a check that left too few instances kept or with outputs to
+/// keep, one less after a run that skipped.
+///
+/// # Safety
+/// No piece of work accesses the call's cache while this runs.
+unsafe fn settle(c: &Call, slots: Shared, checked: bool) {
+    let Some((cache, _)) = c.cache else {
+        return;
+    };
+    let next = match checked {
+        true => {
+            let flags = unsafe { slots.slice(cache + 1, c.n_groups) };
+            let held = flags.iter().filter(|&&f| f != MOVING).count();
+            match (held as f64) * LATENCY_MIN_KEPT < c.n_groups as f64 {
+                true => LATENCY_SKIP_RUNS,
+                false => 0.0,
+            }
+        }
+        false => (unsafe { slots.get(cache) }) - 1.0,
+    };
+    unsafe { slots.set(cache, next) };
 }
 
 /// A region of the work buffer the pieces of work of a stage share.
@@ -229,7 +270,10 @@ pub unsafe fn run_call(
     if c.phase == Phase::Prolog && groups == (0..c.n_groups) {
         unsafe { share_rows(c, slots, gather, inputs) };
     }
-    unsafe { run_part(c, slots, gather, inputs, groups, scratch) };
+    let checked = unsafe { checks(c, slots) };
+    let run = as_run(*c, checked);
+    unsafe { run_part(&run, slots, gather, inputs, groups, scratch) };
+    unsafe { settle(c, slots, checked) };
 }
 
 /// The row of every instance of the prolog `c`, after its rows: the first
@@ -377,8 +421,8 @@ unsafe fn run_part(
             let reads: &[u32] = c.places.unwrap_or(&[]);
             let nr = if c.places.is_some() { reads.len() } else { na };
             let w = nr + no;
-            let flags = unsafe { slots.slice_mut(cache + g0, ng) };
-            let kept = unsafe { slots.slice_mut(cache + c.n_groups + g0 * w, ng * w) };
+            let flags = unsafe { slots.slice_mut(cache + 1 + g0, ng) };
+            let kept = unsafe { slots.slice_mut(cache + 1 + c.n_groups + g0 * w, ng * w) };
             let arg = |g: usize, k: usize| match c.places {
                 Some(_) => args[g * na + reads[k] as usize],
                 None => args[g * na + k],
@@ -386,25 +430,21 @@ unsafe fn run_part(
             crate::scratch::with(|moved: &mut Vec<u32>| {
                 moved.clear();
                 for (g, row) in kept.chunks_exact_mut(w).enumerate() {
-                    // the most tolerances an argument moved, NaN for a void
-                    let mut m = 0.0f64;
+                    // within the tolerance, and within the bound for
+                    // keeping outputs, of the arguments it computed at
+                    let (mut still, mut slow) = (true, true);
                     for k in 0..nr {
-                        let x = latency.moves(arg(g, k), row[k]);
-                        if x.is_nan() {
-                            m = f64::NAN;
-                            break;
-                        }
-                        m = m.max(x);
+                        let (v, at) = (arg(g, k), row[k]);
+                        still &= latency.within(v, at, 1.0);
+                        slow &= latency.within(v, at, LATENCY_KEEP_MOVES);
                     }
-                    let held = flags[g] == KEPT || flags[g] == STORED;
-                    if held && m <= 1.0 {
+                    if still && (flags[g] == KEPT || flags[g] == STORED) {
                         flags[g] = KEPT;
                         out[g * no..(g + 1) * no].copy_from_slice(&row[nr..]);
                     } else {
-                        flags[g] = match m <= LATENCY_KEEP_MOVES {
-                            true => STORED,
-                            false => MOVING,
-                        };
+                        // after a prolog, kept to be checked at the next run
+                        let void = nr > 0 && row[0].is_nan();
+                        flags[g] = if slow || void { STORED } else { MOVING };
                         (0..nr).for_each(|k| row[k] = arg(g, k));
                         moved.push(g as u32);
                     }
@@ -454,6 +494,29 @@ unsafe fn run_part(
 /// As [`run_call`], for every call; and the calls of the stage read nothing
 /// another one writes, their arguments apart in the gather area.
 pub unsafe fn run_stage<'a>(
+    n: usize,
+    call: impl Fn(usize) -> Call<'a> + Sync,
+    slots: Shared,
+    gather: Shared,
+    inputs: &[f64],
+) {
+    crate::scratch::with(|checked: &mut Vec<bool>| {
+        checked.clear();
+        checked.extend((0..n).map(|k| unsafe { checks(&call(k), slots) }));
+        let checked = &*checked;
+        let run = |k: usize| as_run(call(k), checked[k]);
+        unsafe { run_calls(n, run, slots, gather, inputs) };
+        for (k, &c) in checked.iter().enumerate() {
+            unsafe { settle(&call(k), slots, c) };
+        }
+    })
+}
+
+/// [`run_stage`] with each call as this run runs it.
+///
+/// # Safety
+/// As [`run_stage`].
+unsafe fn run_calls<'a>(
     n: usize,
     call: impl Fn(usize) -> Call<'a> + Sync,
     slots: Shared,

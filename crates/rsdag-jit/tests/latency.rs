@@ -148,3 +148,27 @@ fn an_instance_keeps_its_outputs_within_the_tolerance_and_computes_past_it() {
         assert!(same(&got[5], &want[5]), "prolog");
     }
 }
+
+#[test]
+fn instances_moving_fast_compute_and_settle_to_be_kept_again() {
+    let (reference, forms) = forms(Latency {
+        atol: 1e-3,
+        rtol: 0.0,
+    });
+    // every instance moving by far more than the tolerance for a while
+    // (the call skips its checks), then still
+    let states: Vec<Vec<f64>> = (0..30)
+        .map(|k| {
+            let at = k.min(12) as f64;
+            (0..N).map(|i| 0.1 * i as f64 + at).collect()
+        })
+        .collect();
+    let steps: Vec<(f64, &[f64])> = states.iter().map(|x| (0.3, x.as_slice())).collect();
+    let want = run(&reference, &steps);
+    for prog in &forms {
+        let got = run(&**prog, &steps);
+        for (k, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert!(same(g, w), "state {k}");
+        }
+    }
+}
