@@ -38,8 +38,10 @@ fn a_compile_nothing_records_reads_no_clock() {
         .threshold(Level::TRACE)
         .clock(counting)
         .build();
+    // The build reads the clock once, for the origin of its event times.
+    let built = READS.load(Relaxed);
     compile_and_eval();
-    assert_eq!(READS.load(Relaxed), 0);
+    assert_eq!(READS.load(Relaxed), built);
     drop(all);
     // Entered, below every site of rsdag: the entry's own read alone.
     let errors = Context::builder()
