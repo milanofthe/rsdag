@@ -106,11 +106,28 @@ impl Latency {
 }
 
 /// Slots of the cache of a main phase over `n_groups` instances that read
-/// `n_reads` arguments and write `n_out` outputs: a row per instance,
-/// whether it computed at the last run, then the arguments and the outputs
-/// it computed at.
+/// `n_reads` arguments and write `n_out` outputs: per instance whether it
+/// computed at the last run (`0` where it kept its outputs), then a row per
+/// instance of the arguments and the outputs it computed at.
 pub fn cache_len(n_groups: usize, n_reads: usize, n_out: usize) -> usize {
     n_groups * (1 + n_reads + n_out)
+}
+
+/// The ops `c` runs at most, and of them those of the instances that
+/// computed at its last run where it keeps outputs: what the next run is
+/// expected to compute.
+///
+/// # Safety
+/// No piece of work writes the call's cache while this runs.
+unsafe fn live_ops(c: &Call, slots: Shared) -> f64 {
+    match c.cache {
+        Some((cache, _)) if c.n_groups > 0 => {
+            let flags = unsafe { slots.slice(cache, c.n_groups) };
+            let ran = flags.iter().filter(|&&f| f != 0.0).count();
+            c.ops as f64 * ran as f64 / c.n_groups as f64
+        }
+        _ => c.ops as f64,
+    }
 }
 
 /// The cache block `block` of a work buffer voided: every instance computes
@@ -345,8 +362,9 @@ unsafe fn run_part(
             // they computed; the others take their kept outputs.
             let reads: &[u32] = c.places.unwrap_or(&[]);
             let nr = if c.places.is_some() { reads.len() } else { na };
-            let w = 1 + nr + no;
-            let kept = unsafe { slots.slice_mut(cache + g0 * w, ng * w) };
+            let w = nr + no;
+            let flags = unsafe { slots.slice_mut(cache + g0, ng) };
+            let kept = unsafe { slots.slice_mut(cache + c.n_groups + g0 * w, ng * w) };
             let arg = |g: usize, k: usize| match c.places {
                 Some(_) => args[g * na + reads[k] as usize],
                 None => args[g * na + k],
@@ -354,13 +372,12 @@ unsafe fn run_part(
             crate::scratch::with(|moved: &mut Vec<u32>| {
                 moved.clear();
                 for (g, row) in kept.chunks_exact_mut(w).enumerate() {
-                    let still = (0..nr).all(|k| latency.holds(arg(g, k), row[1 + k]));
+                    let still = (0..nr).all(|k| latency.holds(arg(g, k), row[k]));
+                    flags[g] = f64::from(u8::from(!still));
                     if still {
-                        row[0] = 0.0;
-                        out[g * no..(g + 1) * no].copy_from_slice(&row[1 + nr..]);
+                        out[g * no..(g + 1) * no].copy_from_slice(&row[nr..]);
                     } else {
-                        row[0] = 1.0;
-                        (0..nr).for_each(|k| row[1 + k] = arg(g, k));
+                        (0..nr).for_each(|k| row[k] = arg(g, k));
                         moved.push(g as u32);
                     }
                 }
@@ -368,7 +385,7 @@ unsafe fn run_part(
                 main(&at.listed(moved), out, scratch);
                 for &g in moved.iter() {
                     let g = g as usize;
-                    kept[g * w + 1 + nr..(g + 1) * w].copy_from_slice(&out[g * no..(g + 1) * no]);
+                    kept[g * w + nr..(g + 1) * w].copy_from_slice(&out[g * no..(g + 1) * no]);
                 }
                 moved.len()
             })
@@ -417,19 +434,13 @@ pub unsafe fn run_stage<'a>(
 ) {
     // A call that keeps outputs counts the ops of the instances that
     // computed at its last run.
-    let ops_of = |c: &Call| match c.cache {
-        Some((cache, _)) if c.n_groups > 0 => {
-            let nr = c.places.map_or(c.n_args, <[u32]>::len);
-            let w = 1 + nr + c.n_out;
-            let ran = (0..c.n_groups)
-                .filter(|&g| unsafe { slots.get(cache + g * w) } != 0.0)
-                .count();
-            c.ops as f64 * ran as f64 / c.n_groups as f64
-        }
-        _ => c.ops as f64,
-    };
-    let work_of = |c: &Call| ops_of(c) * c.bundle.rate().ns_per_op();
-    let work: f64 = (0..n).map(|k| work_of(&call(k))).sum();
+    let ops_of = |c: &Call| unsafe { live_ops(c, slots) };
+    let (mut work, mut ops) = (0.0, 0.0);
+    for k in 0..n {
+        let (c, o) = (call(k), ops_of(&call(k)));
+        work += o * c.bundle.rate().ns_per_op();
+        ops += o;
+    }
     let groups: usize = (0..n).map(|k| call(k).n_groups).sum();
     // the rows the prologs' instances share, before any part of them runs
     for k in 0..n {
@@ -447,7 +458,6 @@ pub unsafe fn run_stage<'a>(
     // fastest for work of its size (`rspool::Work`); a serial run is
     // measured as a whole for that choice, and call by call for the ns per
     // op of each body.
-    let ops: f64 = (0..n).map(|k| ops_of(&call(k))).sum();
     let decide = rspool::Work::estimated(work, ops, call(0).bundle.rate());
     let width = match decide.go::<rspool::Here>(groups) {
         rspool::Go::Wide(k) => k,
