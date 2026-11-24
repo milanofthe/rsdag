@@ -83,3 +83,11 @@ pub(crate) const LANES_MID: usize = 8;
 pub(crate) const LANES_NARROW: usize = 4;
 /// See [`LANES_WIDE`].
 pub(crate) const LANES_PAIR: usize = 2;
+
+/// A call under a [`Latency`](crate::Latency) keeps the outputs of an
+/// instance it computes only where its arguments moved less than this many
+/// tolerances since it last computed: one that moves faster is not expected
+/// to stay within the tolerance at its next run, and keeping its outputs
+/// would only cost the copy. Time only: a kept output is always that of
+/// its arguments.
+pub(crate) const LATENCY_KEEP_MOVES: f64 = 1024.0;

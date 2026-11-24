@@ -30,6 +30,7 @@ use std::hash::Hasher;
 
 use rustc_hash::{FxHashMap as HashMap, FxHasher};
 
+use crate::constants::LATENCY_KEEP_MOVES;
 use crate::extern_fn::{ExternBundle, Instances, Rows};
 
 use super::input_index;
@@ -98,20 +99,33 @@ pub struct Latency {
 }
 
 impl Latency {
-    /// Whether `v` is within the tolerance of `at`.
+    /// How many tolerances `v` is from `at`: `0` the same bits, at most `1`
+    /// within the tolerance, NaN from or to NaN.
     #[inline]
-    fn holds(&self, v: f64, at: f64) -> bool {
-        v.to_bits() == at.to_bits() || (v - at).abs() <= self.atol + self.rtol * at.abs()
+    fn moves(&self, v: f64, at: f64) -> f64 {
+        match v.to_bits() == at.to_bits() {
+            true => 0.0,
+            false => (v - at).abs() / (self.atol + self.rtol * at.abs()),
+        }
     }
 }
 
 /// Slots of the cache of a main phase over `n_groups` instances that read
-/// `n_reads` arguments and write `n_out` outputs: per instance whether it
-/// computed at the last run (`0` where it kept its outputs), then a row per
-/// instance of the arguments and the outputs it computed at.
+/// `n_reads` arguments and write `n_out` outputs: per instance how it ran
+/// last ([`KEPT`], [`STORED`], [`MOVING`]; NaN voided), then a row per
+/// instance of the arguments it last computed at and, unless it is moving,
+/// the outputs it computed there.
 pub fn cache_len(n_groups: usize, n_reads: usize, n_out: usize) -> usize {
     n_groups * (1 + n_reads + n_out)
 }
+
+/// An instance took its kept outputs.
+const KEPT: f64 = 0.0;
+/// An instance computed, and its outputs are kept.
+const STORED: f64 = 1.0;
+/// An instance computed, moving too fast for its outputs to be kept (see
+/// [`LATENCY_KEEP_MOVES`](crate::constants::LATENCY_KEEP_MOVES)).
+const MOVING: f64 = 2.0;
 
 /// The ops `c` runs at most, and of them those of the instances that
 /// computed at its last run where it keeps outputs: what the next run is
@@ -123,7 +137,7 @@ unsafe fn live_ops(c: &Call, slots: Shared) -> f64 {
     match c.cache {
         Some((cache, _)) if c.n_groups > 0 => {
             let flags = unsafe { slots.slice(cache, c.n_groups) };
-            let ran = flags.iter().filter(|&&f| f != 0.0).count();
+            let ran = flags.iter().filter(|&&f| f != KEPT).count();
             c.ops as f64 * ran as f64 / c.n_groups as f64
         }
         _ => c.ops as f64,
@@ -372,18 +386,32 @@ unsafe fn run_part(
             crate::scratch::with(|moved: &mut Vec<u32>| {
                 moved.clear();
                 for (g, row) in kept.chunks_exact_mut(w).enumerate() {
-                    let still = (0..nr).all(|k| latency.holds(arg(g, k), row[k]));
-                    flags[g] = f64::from(u8::from(!still));
-                    if still {
+                    // the most tolerances an argument moved, NaN for a void
+                    let mut m = 0.0f64;
+                    for k in 0..nr {
+                        let x = latency.moves(arg(g, k), row[k]);
+                        if x.is_nan() {
+                            m = f64::NAN;
+                            break;
+                        }
+                        m = m.max(x);
+                    }
+                    let held = flags[g] == KEPT || flags[g] == STORED;
+                    if held && m <= 1.0 {
+                        flags[g] = KEPT;
                         out[g * no..(g + 1) * no].copy_from_slice(&row[nr..]);
                     } else {
+                        flags[g] = match m <= LATENCY_KEEP_MOVES {
+                            true => STORED,
+                            false => MOVING,
+                        };
                         (0..nr).for_each(|k| row[k] = arg(g, k));
                         moved.push(g as u32);
                     }
                 }
                 rsprobe::add!(DEBUG, "instances kept", ng - moved.len());
                 main(&at.listed(moved), out, scratch);
-                for &g in moved.iter() {
+                for &g in moved.iter().filter(|&&g| flags[g as usize] == STORED) {
                     let g = g as usize;
                     kept[g * w + nr..(g + 1) * w].copy_from_slice(&out[g * no..(g + 1) * no]);
                 }
