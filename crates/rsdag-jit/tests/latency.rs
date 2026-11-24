@@ -124,23 +124,27 @@ fn an_instance_keeps_its_outputs_within_the_tolerance_and_computes_past_it() {
     far[5] += 5e-3;
     let mut far_near = far.clone();
     far_near[5] -= 5e-4;
+    // the first run after a prolog computes, the second keeps the outputs
+    // of an instance that did not move
     let steps = [
         (0.3, &x0[..]),
+        (0.3, &x0),
         (0.3, &near),
         (0.3, &far),
         (0.3, &far_near),
         (0.7, &near),
     ];
     let want = run(&reference, &steps);
-    assert!(want[1][5] != want[0][5]);
+    assert!(want[2][5] != want[0][5]);
     for prog in &forms {
         let got = run(&**prog, &steps);
+        assert!(same(&got[1], &want[1]), "still");
         // within it: instance 5 keeps what it computed at x0
-        assert!(same(&got[1], &want[0]), "near");
+        assert!(same(&got[2], &want[0]), "near");
         // past it: computed anew, and kept from there
-        assert!(same(&got[2], &want[2]), "far");
-        assert!(same(&got[3], &want[2]), "near far");
+        assert!(same(&got[3], &want[3]), "far");
+        assert!(same(&got[4], &want[3]), "near far");
         // a prolog at other parameters voids what was kept
-        assert!(same(&got[4], &want[4]), "prolog");
+        assert!(same(&got[5], &want[5]), "prolog");
     }
 }
