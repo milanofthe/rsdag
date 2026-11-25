@@ -737,9 +737,10 @@ pub fn gradient<K: Field>(ctx: &mut Graph<K>, f: ExprId, wrt: &[SymbolId]) -> Ve
 
     // Adjoint accumulation: per node a term list, folded into one fused
     // Reduce(Sum) when the node is visited (all consumers seen by then).
-    let mut adj: Vec<Vec<ExprId>> = vec![Vec::new(); nodes.len()];
+    let mut adj = Adjoints::new(nodes.len());
     if act(f) {
-        adj[at(f)].push(ctx.one());
+        let one = ctx.one();
+        adj.push(at(f), one, false);
     }
     let zero = ctx.zero();
     let mut sym_adj: HashMap<SymbolId, ExprId> = HashMap::default();
@@ -759,14 +760,15 @@ pub fn gradient<K: Field>(ctx: &mut Graph<K>, f: ExprId, wrt: &[SymbolId]) -> Ve
             flush_at.entry(k).or_default().push(site);
         }
     }
-    let mut pending: HashMap<Site, Vec<(u32, ExprId, OutputId)>> = HashMap::default();
+    let mut pending: HashMap<Site, Vec<Carried>> = HashMap::default();
     for k in (0..nodes.len()).rev() {
         'node: {
-            if adj[k].is_empty() {
+            if adj.terms[k].is_empty() {
                 break 'node; // no adjoint: inactive, or no value path from f
             }
             let e = nodes[k];
-            let terms = std::mem::take(&mut adj[k]);
+            let terms = std::mem::take(&mut adj.terms[k]);
+            let gated = adj.gated[k];
             let a_bar = ctx.reduce(ReduceOp::Sum, terms);
             if a_bar == zero {
                 break 'node;
@@ -776,7 +778,8 @@ pub fn gradient<K: Field>(ctx: &mut Graph<K>, f: ExprId, wrt: &[SymbolId]) -> Ve
                 at: &at,
                 pos: &pos,
             };
-            sweep_node(ctx, e, a_bar, &sweep, &mut adj, &mut sym_adj, &mut pending);
+            let a = (a_bar, gated);
+            sweep_node(ctx, e, a, &sweep, &mut adj, &mut sym_adj, &mut pending);
         }
         for site in flush_at.remove(&k).unwrap_or_default() {
             if let Some(calls) = pending.remove(&site) {
@@ -801,15 +804,15 @@ type Site = (FuncId, u32, ArgList);
 fn carry<K: Field>(
     ctx: &mut Graph<K>,
     site: Site,
-    mut calls: Vec<(u32, ExprId, OutputId)>,
+    mut calls: Vec<Carried>,
     act: &dyn Fn(ExprId) -> bool,
-    adj: &mut [Vec<ExprId>],
+    adj: &mut Adjoints,
     at: &dyn Fn(ExprId) -> usize,
 ) {
     let (func, context, l) = site;
     let o0 = calls[0].2;
     let mut moving: Vec<u32> = Vec::new();
-    for &(out, _, o) in &calls {
+    for &(out, _, o, _) in &calls {
         for &i in ctx.output_support(func, out).iter() {
             if act(ctx.call_operand(o, l, i)) {
                 moving.push(i);
@@ -824,7 +827,11 @@ fn carry<K: Field>(
             crate::func::Output::Slot(_)
         )
     });
-    if symbolic && moving.len() >= REVERSE_MIN_TOUCHED {
+    // A gated adjoint (see `Adjoints`) is carried per output, its products
+    // gated (see `scaled`): a vector-Jacobian call would take it as a
+    // value, zero, and multiply it by the partials of a branch not taken.
+    let gated = calls.iter().any(|c| c.3);
+    if symbolic && !gated && moving.len() >= REVERSE_MIN_TOUCHED {
         calls.sort_unstable_by_key(|c| c.0);
         let outs: Vec<u32> = calls.iter().map(|c| c.0).collect();
         let g = ctx.vjp_function(func, &outs, &moving);
@@ -833,11 +840,11 @@ fn carry<K: Field>(
         let partials = ctx.calls(g, &(0..moving.len() as u32).collect::<Vec<_>>(), &args);
         for (&i, d) in moving.iter().zip(partials) {
             let arg = ctx.call_operand(o0, l, i);
-            adj[at(arg)].push(d);
+            adj.push(at(arg), d, false);
         }
         return;
     }
-    for (out, a_bar, o) in calls {
+    for (out, a_bar, o, gated) in calls {
         let moving: Vec<(u32, ExprId)> = ctx
             .output_support(func, out)
             .iter()
@@ -848,10 +855,57 @@ fn carry<K: Field>(
         let ks = ctx.derivative_outputs(func, out, &params);
         for (&(_, arg), k) in moving.iter().zip(ks) {
             let partial = ctx.call_list_in(func, k, context, l);
-            let t = ctx.mul(a_bar, partial);
-            adj[at(arg)].push(t);
+            let t = scaled(ctx, (a_bar, gated), partial);
+            adj.push(at(arg), t, gated);
         }
     }
+}
+
+/// The adjoints of a reverse sweep, per node of the cone: the terms its
+/// consumers sent, and whether it is gated. A term is gated where it comes
+/// out of a `Select`'s or a `min`/`max`'s rule (the branch or argument not
+/// taken receives zero there) or is formed from a gated adjoint; a node's
+/// adjoint is gated where any of its terms is. Every rule that forms a
+/// product from a gated adjoint forms it through [`scaled`]; a rule that
+/// passes the adjoint on passes the flag on.
+struct Adjoints {
+    terms: Vec<Vec<ExprId>>,
+    gated: Vec<bool>,
+}
+
+impl Adjoints {
+    fn new(n: usize) -> Self {
+        Adjoints {
+            terms: vec![Vec::new(); n],
+            gated: vec![false; n],
+        }
+    }
+
+    fn push(&mut self, k: usize, term: ExprId, gated: bool) {
+        self.terms[k].push(term);
+        self.gated[k] |= gated;
+    }
+}
+
+/// A call output's adjoint waiting for its site (see `carry`): the output,
+/// the adjoint, the output's id, whether the adjoint is gated.
+type Carried = (u32, ExprId, OutputId, bool);
+
+/// The adjoint `a = (a_bar, gated)` carried through the local partial `p`:
+/// `a_bar * p`, but a gated adjoint (see [`Adjoints`]) is zero where its
+/// branch is not taken, and there the product is selected to zero instead
+/// of formed, `select(a_bar == 0, 0, a_bar * p)`: the derivative of a
+/// `Select` is then that of its taken branch alone, as in forward mode, and
+/// a value or partial of the untaken branch that is not finite at the
+/// point does not reach the result, also through nodes the branches share.
+fn scaled<K: Field>(ctx: &mut Graph<K>, (a_bar, gated): (ExprId, bool), p: ExprId) -> ExprId {
+    let ap = ctx.mul(a_bar, p);
+    if !gated {
+        return ap;
+    }
+    let zero = ctx.zero();
+    let off = ctx.cmp(CmpOp::Eq, a_bar, zero);
+    ctx.select(off, zero, ap)
 }
 
 /// What a reverse sweep reads of its cone: whether a node is active, a
@@ -867,16 +921,18 @@ struct Sweep<'s> {
 fn sweep_node<K: Field>(
     ctx: &mut Graph<K>,
     e: ExprId,
-    a_bar: ExprId,
+    a: (ExprId, bool),
     sweep: &Sweep<'_>,
-    mut adj: &mut [Vec<ExprId>],
+    adj: &mut Adjoints,
     sym_adj: &mut HashMap<SymbolId, ExprId>,
-    pending: &mut HashMap<Site, Vec<(u32, ExprId, OutputId)>>,
+    pending: &mut HashMap<Site, Vec<Carried>>,
 ) {
+    let (a_bar, gated) = a;
     let (act, at, pos) = (sweep.act, sweep.at, sweep.pos);
     let zero = ctx.zero();
-    let push = |adj: &mut [Vec<ExprId>], child: ExprId, term: ExprId| {
-        adj[at(child)].push(term);
+    // a term formed from this node's adjoint, gated where it is
+    let push = |adj: &mut Adjoints, child: ExprId, term: ExprId| {
+        adj.push(at(child), term, gated);
     };
     {
         match *ctx.node(e) {
@@ -888,43 +944,43 @@ fn sweep_node<K: Field>(
             Node::Add(x, y) => {
                 for c in [x, y] {
                     if act(c) {
-                        push(&mut adj, c, a_bar);
+                        push(adj, c, a_bar);
                     }
                 }
             }
             Node::Mul(x, y) => {
                 if act(x) {
-                    let t = ctx.mul(a_bar, y);
-                    push(&mut adj, x, t);
+                    let t = scaled(ctx, a, y);
+                    push(adj, x, t);
                 }
                 if act(y) {
-                    let t = ctx.mul(a_bar, x);
-                    push(&mut adj, y, t);
+                    let t = scaled(ctx, a, x);
+                    push(adj, y, t);
                 }
             }
             Node::Neg(x) => {
                 let t = ctx.neg(a_bar);
-                push(&mut adj, x, t);
+                push(adj, x, t);
             }
             Node::Pow(x, n) => {
                 // d/dx x^n = n * x^(n-1)
                 let coeff = ctx.konst_int(n);
                 let p = ctx.pow_i(x, n - 1);
                 let cp = ctx.mul(coeff, p);
-                let t = ctx.mul(a_bar, cp);
-                push(&mut adj, x, t);
+                let t = scaled(ctx, a, cp);
+                push(adj, x, t);
             }
             Node::Unary(op, x) => {
                 let factor = unary_factor(ctx, op, x);
-                let t = ctx.mul(a_bar, factor);
-                push(&mut adj, x, t);
+                let t = scaled(ctx, a, factor);
+                push(adj, x, t);
             }
             Node::Binary(op, x, y) => {
                 let p = binary_partials(ctx, op, x, y, [act(x), act(y)]);
                 for (c, p) in [(x, p[0]), (y, p[1])] {
                     if act(c) {
-                        let t = ctx.mul(a_bar, p);
-                        push(&mut adj, c, t);
+                        let t = scaled(ctx, a, p);
+                        push(adj, c, t);
                     }
                 }
             }
@@ -933,18 +989,18 @@ fn sweep_node<K: Field>(
             Node::Select(c, t, e2) => {
                 if act(t) {
                     let tt = ctx.select(c, a_bar, zero);
-                    push(&mut adj, t, tt);
+                    adj.push(at(t), tt, true);
                 }
                 if act(e2) {
                     let te = ctx.select(c, zero, a_bar);
-                    push(&mut adj, e2, te);
+                    adj.push(at(e2), te, true);
                 }
             }
             Node::Reduce(op, l) => match op {
                 ReduceOp::Sum => {
                     for &x in ctx.args(l) {
                         if act(x) {
-                            push(&mut adj, x, a_bar);
+                            push(adj, x, a_bar);
                         }
                     }
                 }
@@ -952,10 +1008,10 @@ fn sweep_node<K: Field>(
                 ReduceOp::Product => {
                     let args = ctx.args(l).to_vec();
                     let others = cofactors(ctx, &args, |i| act(args[i]));
-                    for (&a, other) in args.iter().zip(others) {
+                    for (&arg, other) in args.iter().zip(others) {
                         if let Some(other) = other {
-                            let t = ctx.mul(a_bar, other);
-                            push(&mut adj, a, t);
+                            let t = scaled(ctx, a, other);
+                            push(adj, arg, t);
                         }
                     }
                 }
@@ -983,9 +1039,11 @@ fn sweep_node<K: Field>(
                     for i in (0..n).rev() {
                         if act(args[i]) {
                             let c_i = if i == 0 { one } else { conds[i - 1] };
+                            // the adjoint selected, not multiplied by a
+                            // zero coefficient (see `scaled`)
                             let coef = ctx.mul(c_i, tail);
-                            let t = ctx.mul(a_bar, coef);
-                            push(&mut adj, args[i], t);
+                            let t = ctx.select(coef, a_bar, zero);
+                            adj.push(at(args[i]), t, true);
                         }
                         if i > 0 {
                             let not_c = ctx.sub(one, conds[i - 1]);
@@ -999,12 +1057,12 @@ fn sweep_node<K: Field>(
                 let (xs, ys) = (xs.to_vec(), ys.to_vec());
                 for (&x, &y) in xs.iter().zip(ys.iter()) {
                     if act(x) {
-                        let t = ctx.mul(a_bar, y);
-                        push(&mut adj, x, t);
+                        let t = scaled(ctx, a, y);
+                        push(adj, x, t);
                     }
                     if act(y) {
-                        let t = ctx.mul(a_bar, x);
-                        push(&mut adj, y, t);
+                        let t = scaled(ctx, a, x);
+                        push(adj, y, t);
                     }
                 }
             }
@@ -1018,13 +1076,15 @@ fn sweep_node<K: Field>(
                 let (a, b) = (a.to_vec(), b.to_vec());
                 let x = ctx.solve_dense(a.clone(), b.clone());
                 let mut x_bar = vec![zero; n];
+                let mut sg = gated;
                 for (k, &xk) in x.iter().enumerate() {
                     x_bar[k] = if xk == e {
                         a_bar
                     } else {
                         match pos.get(xk) {
                             Some(p) => {
-                                let t = std::mem::take(&mut adj[p as usize]);
+                                let t = std::mem::take(&mut adj.terms[p as usize]);
+                                sg |= adj.gated[p as usize];
                                 ctx.reduce(ReduceOp::Sum, t)
                             }
                             None => zero,
@@ -1032,16 +1092,27 @@ fn sweep_node<K: Field>(
                     };
                 }
                 let a_t: Vec<ExprId> = (0..n * n).map(|k| a[(k % n) * n + k / n]).collect();
-                let b_bar = ctx.solve_dense(a_t, x_bar);
+                let mut b_bar = ctx.solve_dense(a_t, x_bar.clone());
+                // a gated right-hand side: the solve's adjoint is zero where
+                // every x_bar is, selected so instead of solved (the system
+                // may be singular where its branch is not taken)
+                if sg {
+                    let sq = (x_bar.iter()).map(|&v| ctx.mul(v, v)).collect();
+                    let sq = ctx.reduce(ReduceOp::Sum, sq);
+                    let off = ctx.cmp(CmpOp::Eq, sq, zero);
+                    for v in b_bar.iter_mut() {
+                        *v = ctx.select(off, zero, *v);
+                    }
+                }
                 for r in 0..n {
                     if act(b[r]) {
-                        push(&mut adj, b[r], b_bar[r]);
+                        adj.push(at(b[r]), b_bar[r], sg);
                     }
                     for j in 0..n {
                         if act(a[r * n + j]) {
-                            let t = ctx.mul(b_bar[r], x[j]);
+                            let t = scaled(ctx, (b_bar[r], sg), x[j]);
                             let nt = ctx.neg(t);
-                            push(&mut adj, a[r * n + j], nt);
+                            adj.push(at(a[r * n + j]), nt, sg);
                         }
                     }
                 }
@@ -1051,7 +1122,10 @@ fn sweep_node<K: Field>(
             Node::Call(o, l) => {
                 let (func, out) = ctx.output(o);
                 let site = (func, ctx.context_of(o), l);
-                pending.entry(site).or_default().push((out, a_bar, o));
+                pending
+                    .entry(site)
+                    .or_default()
+                    .push((out, a_bar, o, gated));
             }
         }
     }
