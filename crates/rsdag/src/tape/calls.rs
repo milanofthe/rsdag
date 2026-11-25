@@ -341,28 +341,14 @@ pub unsafe fn run_stage<'a>(
             run_part(c, slots, gather, inputs, groups, s)
         })
     };
-    // The stage runs as wide as its runs on the first call's rate were
-    // fastest for work of its size (`rspool::Work`); a serial run is
-    // measured as a whole for that choice, and call by call for the ns per
-    // op of each body.
-    let ops: f64 = (0..n).map(|k| call(k).ops as f64).sum();
-    let decide = rspool::Work::estimated(work, ops, call(0).bundle.rate());
-    let width = match decide.go::<rspool::Here>(groups) {
-        rspool::Go::Wide(k) => k,
-        rspool::Go::Here => {
-            let whole = decide.serial_timed();
-            for k in 0..n {
-                let c = call(k);
-                c.bundle
-                    .rate()
-                    .time(c.ops as f64, || run_groups(&c, 0..c.n_groups));
-            }
-            if let Some(t) = whole {
-                decide.record_serial(t);
-            }
-            return;
+    let width = crate::parallel::width(work, groups);
+    if width < 2 {
+        for k in 0..n {
+            let c = call(k);
+            run_groups(&c, 0..c.n_groups);
         }
-    };
+        return;
+    }
     // Pieces of `bs` instances, call after call; the `it`th found by
     // counting through the calls (a stage has few).
     let bs = crate::parallel::piece_len(groups, width);
@@ -381,7 +367,7 @@ pub unsafe fn run_stage<'a>(
         run_groups(&c, g0..(g0 + bs).min(c.n_groups));
     };
     let total = (0..n).map(|k| pieces(&call(k))).sum();
-    decide.wide::<rspool::Here>(total, width, &run);
+    <crate::parallel::Here as crate::parallel::Place>::run_width(total, width, &run);
 }
 
 #[cfg(test)]

@@ -188,7 +188,7 @@ pub trait ExternBundle: Send + Sync {
         0
     }
 
-    /// What an op of this bundle costs, learned from its runs: what a stage
+    /// What an op of this bundle costs: what a stage
     /// of its calls is worth on a pool ([`crate::parallel`]). The default
     /// is one rate all bundles without their own share.
     fn rate(&self) -> &crate::parallel::Rate {

@@ -29,7 +29,7 @@ pub enum Batch {
     Serial,
     /// Split over the current rayon pool (the caller's `install`, else the
     /// global one) where that is worth it: the batch's ops at what an op of
-    /// the body costs (learned from its runs) against what a section costs
+    /// the body costs (a constant estimate) against what a section costs
     /// rayon (measured on first use, see [`rsdag::parallel::Dispatch`]);
     /// serially below. The result is the serial loop's, bit for bit.
     Parallel,
