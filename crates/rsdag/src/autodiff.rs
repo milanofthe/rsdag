@@ -871,30 +871,21 @@ fn is_gated<K: Field>(ctx: &Graph<K>, a: ExprId) -> bool {
 }
 
 /// The adjoint `a` carried through the local partial `p`: `a * p`, but a
-/// select-gated adjoint takes the product inside its select,
-/// `select(c, x, 0) * p = select(c, x * p, 0)`, a sum of such term by term.
-/// The derivative of a `Select` is then that of the taken branch alone, as
-/// in forward mode: a value or partial of the untaken branch that is not
-/// finite at the point is selected away instead of multiplied by a zero
-/// adjoint, also where it flows into nodes the taken branch shares.
+/// select-gated adjoint (see [`is_gated`]) is zero where its branch is not
+/// taken, and there the product is selected to zero instead of formed,
+/// `select(a == 0, 0, a * p)`: the derivative of a `Select` is then that of
+/// its taken branch alone, as in forward mode, and a value or partial of
+/// the untaken branch that is not finite at the point does not reach the
+/// result, also through nodes the branches share. The product is itself
+/// gated, so the whole untaken side is.
 fn scaled<K: Field>(ctx: &mut Graph<K>, a: ExprId, p: ExprId) -> ExprId {
-    let zero = ctx.zero();
-    match *ctx.node(a) {
-        Node::Select(c, t, f) if f == zero => {
-            let tp = scaled(ctx, t, p);
-            ctx.select(c, tp, zero)
-        }
-        Node::Select(c, t, f) if t == zero => {
-            let fp = scaled(ctx, f, p);
-            ctx.select(c, zero, fp)
-        }
-        Node::Reduce(ReduceOp::Sum, l) if is_gated(ctx, a) => {
-            let terms = ctx.args(l).to_vec();
-            let terms = terms.into_iter().map(|x| scaled(ctx, x, p)).collect();
-            ctx.reduce(ReduceOp::Sum, terms)
-        }
-        _ => ctx.mul(a, p),
+    let ap = ctx.mul(a, p);
+    if !is_gated(ctx, a) {
+        return ap;
     }
+    let zero = ctx.zero();
+    let off = ctx.cmp(CmpOp::Eq, a, zero);
+    ctx.select(off, zero, ap)
 }
 
 /// What a reverse sweep reads of its cone: whether a node is active, a
