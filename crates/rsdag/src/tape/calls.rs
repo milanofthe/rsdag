@@ -168,8 +168,8 @@ fn as_run<'a>(c: Call<'a>, checks: bool) -> Call<'a> {
 }
 
 /// After a run of `c`, the runs it skips checking: [`LATENCY_SKIP_RUNS`]
-/// after a check that left too few instances kept or with outputs to
-/// keep, one less after a run that skipped.
+/// after a check that kept too few instances, unless it was the first after
+/// a prolog (which keeps none); one less after a run that skipped.
 ///
 /// # Safety
 /// No piece of work accesses the call's cache while this runs.
@@ -177,16 +177,18 @@ unsafe fn settle(c: &Call, slots: Shared, checked: bool) {
     let Some((cache, _)) = c.cache else {
         return;
     };
+    let skips = unsafe { slots.get(cache) };
     let next = match checked {
+        true if skips.is_nan() => 0.0,
         true => {
             let flags = unsafe { slots.slice(cache + 1, c.n_groups) };
-            let held = flags.iter().filter(|&&f| f != MOVING).count();
-            match (held as f64) * LATENCY_MIN_KEPT < c.n_groups as f64 {
+            let kept = flags.iter().filter(|&&f| f == KEPT).count();
+            match (kept as f64) * LATENCY_MIN_KEPT < c.n_groups as f64 {
                 true => LATENCY_SKIP_RUNS,
                 false => 0.0,
             }
         }
-        false => (unsafe { slots.get(cache) }) - 1.0,
+        false => skips - 1.0,
     };
     unsafe { slots.set(cache, next) };
 }

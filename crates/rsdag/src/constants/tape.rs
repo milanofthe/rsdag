@@ -92,8 +92,8 @@ pub(crate) const LANES_PAIR: usize = 2;
 /// its arguments.
 pub(crate) const LATENCY_KEEP_MOVES: f64 = 1024.0;
 
-/// A call under a [`Latency`](crate::Latency) whose run kept, or kept the
-/// outputs of, fewer than one in this many of its instances runs its next
+/// A call under a [`Latency`](crate::Latency) whose run kept the outputs of
+/// fewer than one in this many of its instances runs its next
 /// [`LATENCY_SKIP_RUNS`] runs without checking them (the outputs it keeps
 /// stay those of the arguments they were computed at, and its next check
 /// compares against those): checking costs about 7 % of a run that keeps
@@ -102,6 +102,7 @@ pub(crate) const LATENCY_KEEP_MOVES: f64 = 1024.0;
 /// saves.
 pub(crate) const LATENCY_MIN_KEPT: f64 = 8.0;
 
-/// See [`LATENCY_MIN_KEPT`]: one run in this many checks while a call keeps
-/// too few, so checking costs a ninth of its cost in a run of one.
+/// See [`LATENCY_MIN_KEPT`]: the runs a call that keeps too few skips before
+/// it checks again, so checking costs it a ninth of what it costs a call
+/// that checks every run.
 pub(crate) const LATENCY_SKIP_RUNS: f64 = 8.0;
