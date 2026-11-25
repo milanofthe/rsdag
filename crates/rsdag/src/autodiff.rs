@@ -1008,10 +1008,10 @@ fn sweep_node<K: Field>(
                 ReduceOp::Product => {
                     let args = ctx.args(l).to_vec();
                     let others = cofactors(ctx, &args, |i| act(args[i]));
-                    for (&a, other) in args.iter().zip(others) {
+                    for (&arg, other) in args.iter().zip(others) {
                         if let Some(other) = other {
                             let t = scaled(ctx, a, other);
-                            push(adj, a, t);
+                            push(adj, arg, t);
                         }
                     }
                 }
