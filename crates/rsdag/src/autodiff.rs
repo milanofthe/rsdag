@@ -824,7 +824,12 @@ fn carry<K: Field>(
             crate::func::Output::Slot(_)
         )
     });
-    if symbolic && moving.len() >= REVERSE_MIN_TOUCHED {
+    // An adjoint a select gates (one an untaken branch receives) is carried
+    // per output, its products formed inside the select (see `scaled`): a
+    // vector-Jacobian call would take it as a value, zero, and multiply it
+    // by the partials of a branch not taken.
+    let gated = calls.iter().any(|c| is_gated(ctx, c.1));
+    if symbolic && !gated && moving.len() >= REVERSE_MIN_TOUCHED {
         calls.sort_unstable_by_key(|c| c.0);
         let outs: Vec<u32> = calls.iter().map(|c| c.0).collect();
         let g = ctx.vjp_function(func, &outs, &moving);
@@ -848,9 +853,47 @@ fn carry<K: Field>(
         let ks = ctx.derivative_outputs(func, out, &params);
         for (&(_, arg), k) in moving.iter().zip(ks) {
             let partial = ctx.call_list_in(func, k, context, l);
-            let t = ctx.mul(a_bar, partial);
+            let t = scaled(ctx, a_bar, partial);
             adj[at(arg)].push(t);
         }
+    }
+}
+
+/// Whether the adjoint `a` is gated by a select: a select with a zero side
+/// (what the untaken branch of a `Select` receives), or a sum with such a
+/// term.
+fn is_gated<K: Field>(ctx: &Graph<K>, a: ExprId) -> bool {
+    match *ctx.node(a) {
+        Node::Select(_, t, f) => ctx.is_zero(t) || ctx.is_zero(f),
+        Node::Reduce(ReduceOp::Sum, l) => ctx.args(l).iter().any(|&x| is_gated(ctx, x)),
+        _ => false,
+    }
+}
+
+/// The adjoint `a` carried through the local partial `p`: `a * p`, but a
+/// select-gated adjoint takes the product inside its select,
+/// `select(c, x, 0) * p = select(c, x * p, 0)`, a sum of such term by term.
+/// The derivative of a `Select` is then that of the taken branch alone, as
+/// in forward mode: a value or partial of the untaken branch that is not
+/// finite at the point is selected away instead of multiplied by a zero
+/// adjoint, also where it flows into nodes the taken branch shares.
+fn scaled<K: Field>(ctx: &mut Graph<K>, a: ExprId, p: ExprId) -> ExprId {
+    let zero = ctx.zero();
+    match *ctx.node(a) {
+        Node::Select(c, t, f) if f == zero => {
+            let tp = scaled(ctx, t, p);
+            ctx.select(c, tp, zero)
+        }
+        Node::Select(c, t, f) if t == zero => {
+            let fp = scaled(ctx, f, p);
+            ctx.select(c, zero, fp)
+        }
+        Node::Reduce(ReduceOp::Sum, l) if is_gated(ctx, a) => {
+            let terms = ctx.args(l).to_vec();
+            let terms = terms.into_iter().map(|x| scaled(ctx, x, p)).collect();
+            ctx.reduce(ReduceOp::Sum, terms)
+        }
+        _ => ctx.mul(a, p),
     }
 }
 
@@ -894,11 +937,11 @@ fn sweep_node<K: Field>(
             }
             Node::Mul(x, y) => {
                 if act(x) {
-                    let t = ctx.mul(a_bar, y);
+                    let t = scaled(ctx, a_bar, y);
                     push(&mut adj, x, t);
                 }
                 if act(y) {
-                    let t = ctx.mul(a_bar, x);
+                    let t = scaled(ctx, a_bar, x);
                     push(&mut adj, y, t);
                 }
             }
@@ -911,19 +954,19 @@ fn sweep_node<K: Field>(
                 let coeff = ctx.konst_int(n);
                 let p = ctx.pow_i(x, n - 1);
                 let cp = ctx.mul(coeff, p);
-                let t = ctx.mul(a_bar, cp);
+                let t = scaled(ctx, a_bar, cp);
                 push(&mut adj, x, t);
             }
             Node::Unary(op, x) => {
                 let factor = unary_factor(ctx, op, x);
-                let t = ctx.mul(a_bar, factor);
+                let t = scaled(ctx, a_bar, factor);
                 push(&mut adj, x, t);
             }
             Node::Binary(op, x, y) => {
                 let p = binary_partials(ctx, op, x, y, [act(x), act(y)]);
                 for (c, p) in [(x, p[0]), (y, p[1])] {
                     if act(c) {
-                        let t = ctx.mul(a_bar, p);
+                        let t = scaled(ctx, a_bar, p);
                         push(&mut adj, c, t);
                     }
                 }
@@ -954,7 +997,7 @@ fn sweep_node<K: Field>(
                     let others = cofactors(ctx, &args, |i| act(args[i]));
                     for (&a, other) in args.iter().zip(others) {
                         if let Some(other) = other {
-                            let t = ctx.mul(a_bar, other);
+                            let t = scaled(ctx, a_bar, other);
                             push(&mut adj, a, t);
                         }
                     }
@@ -983,8 +1026,10 @@ fn sweep_node<K: Field>(
                     for i in (0..n).rev() {
                         if act(args[i]) {
                             let c_i = if i == 0 { one } else { conds[i - 1] };
+                            // the adjoint selected, not multiplied by a
+                            // zero coefficient (see `scaled`)
                             let coef = ctx.mul(c_i, tail);
-                            let t = ctx.mul(a_bar, coef);
+                            let t = ctx.select(coef, a_bar, zero);
                             push(&mut adj, args[i], t);
                         }
                         if i > 0 {
@@ -999,11 +1044,11 @@ fn sweep_node<K: Field>(
                 let (xs, ys) = (xs.to_vec(), ys.to_vec());
                 for (&x, &y) in xs.iter().zip(ys.iter()) {
                     if act(x) {
-                        let t = ctx.mul(a_bar, y);
+                        let t = scaled(ctx, a_bar, y);
                         push(&mut adj, x, t);
                     }
                     if act(y) {
-                        let t = ctx.mul(a_bar, x);
+                        let t = scaled(ctx, a_bar, x);
                         push(&mut adj, y, t);
                     }
                 }
