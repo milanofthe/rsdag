@@ -198,7 +198,7 @@ impl Tape {
         let order = p.schedule();
         let mut tape = p.emit(&order, split);
         tape.n_inputs = self.n_inputs;
-        tape.set_latency(self.latency);
+        tape.keep_outputs(self.keeps_outputs());
         rsprobe::add!("ops", tape.n_ops());
         tape
     }

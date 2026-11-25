@@ -20,9 +20,10 @@
 //! the other arguments alone, and only an instance that computes its row
 //! gathers its arguments.
 //!
-//! A main phase run under a [`Latency`] keeps, per instance, the arguments
-//! it last computed at and its outputs there, in a block of the slots
-//! ([`cache_len`]): an instance whose arguments are within the tolerance
+//! A main phase with a cache keeps, per instance, the arguments it last
+//! computed at and its outputs there, in a block of the slots
+//! ([`cache_len`]); under a [`Latency`] set in the work buffer
+//! ([`set_latency`]) an instance whose arguments are within the tolerance
 //! of those takes the kept outputs and runs nothing. A prolog voids the
 //! block ([`void_cache`]), since the outputs depend on its states.
 
@@ -82,9 +83,9 @@ pub struct Call<'a> {
     /// Ops it carries: its instances times its body's.
     pub ops: u64,
     /// Where a main phase keeps its instances' arguments and outputs
-    /// ([`cache_len`]), and when an instance takes them ([`Latency`]);
-    /// `None` for one that computes every instance.
-    pub cache: Option<(usize, Latency)>,
+    /// ([`cache_len`]), and the slots of the latency it keeps them under
+    /// ([`set_latency`]); `None` for one that computes every instance.
+    pub cache: Option<(usize, usize)>,
 }
 
 /// When an instance of a call keeps the outputs it computed before: every
@@ -106,6 +107,32 @@ impl Latency {
         let tol = scale * (self.atol + self.rtol * at.abs());
         v.to_bits() == at.to_bits() || (tol > 0.0 && (v - at).abs() <= tol)
     }
+}
+
+/// Slots of the latency in a work buffer: whether one is set, its `atol`
+/// and its `rtol`.
+pub const LATENCY_SLOTS: usize = 3;
+
+/// The latency slots `at` set to `latency` (see [`LATENCY_SLOTS`]).
+pub fn set_latency(at: &mut [f64], latency: Option<Latency>) {
+    let l = latency.unwrap_or(Latency {
+        atol: 0.0,
+        rtol: 0.0,
+    });
+    at[..LATENCY_SLOTS].copy_from_slice(&[f64::from(u8::from(latency.is_some())), l.atol, l.rtol]);
+}
+
+/// The latency `c` keeps outputs under in this buffer, if any.
+///
+/// # Safety
+/// Nothing writes the latency slots while this runs.
+unsafe fn latency(c: &Call, slots: Shared) -> Option<Latency> {
+    let (_, at) = c.cache?;
+    let s = unsafe { slots.slice(at, LATENCY_SLOTS) };
+    (s[0] == 1.0).then_some(Latency {
+        atol: s[1],
+        rtol: s[2],
+    })
 }
 
 /// Slots of the cache of a main phase over `n_groups` instances that read
@@ -155,8 +182,10 @@ pub fn void_cache(work: &mut [f64], block: std::ops::Range<usize>) {
 /// # Safety
 /// No piece of work writes the call's cache while this runs.
 unsafe fn checks(c: &Call, slots: Shared) -> bool {
-    c.cache
-        .is_some_and(|(cache, _)| !(unsafe { slots.get(cache) } > 0.0))
+    match (c.cache, unsafe { latency(c, slots) }) {
+        (Some((cache, _)), Some(_)) => !(unsafe { slots.get(cache) } > 0.0),
+        _ => false,
+    }
 }
 
 /// `c` as this run runs it: without its cache where it does not check.
@@ -174,7 +203,7 @@ fn as_run<'a>(c: Call<'a>, checks: bool) -> Call<'a> {
 /// # Safety
 /// No piece of work accesses the call's cache while this runs.
 unsafe fn settle(c: &Call, slots: Shared, checked: bool) {
-    let Some((cache, _)) = c.cache else {
+    let (Some((cache, _)), Some(_)) = (c.cache, unsafe { latency(c, slots) }) else {
         return;
     };
     let skips = unsafe { slots.get(cache) };
@@ -414,7 +443,7 @@ unsafe fn run_part(
                 }
                 _ => b.main_batch(args, states, out, at),
             };
-            let Some((cache, latency)) = c.cache else {
+            let (Some((cache, _)), Some(latency)) = (c.cache, unsafe { latency(c, slots) }) else {
                 main(&at, out, scratch);
                 return ng;
             };

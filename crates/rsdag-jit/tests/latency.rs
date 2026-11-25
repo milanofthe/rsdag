@@ -62,8 +62,9 @@ fn same(a: &[f64], b: &[f64]) -> bool {
 /// The outputs of `prog` over one work buffer: the main phase at each
 /// parameter and state of `steps`, a prolog first where the parameter
 /// changes.
-fn run(prog: &dyn Program, steps: &[(f64, &[f64])]) -> Vec<Vec<f64>> {
+fn run(prog: &dyn Program, steps: &[(f64, &[f64])], set: &dyn Fn(&mut [f64])) -> Vec<Vec<f64>> {
     let mut w = vec![0.0; prog.work_len()];
+    set(&mut w);
     let mut bound = f64::NAN;
     steps
         .iter()
@@ -79,17 +80,24 @@ fn run(prog: &dyn Program, steps: &[(f64, &[f64])]) -> Vec<Vec<f64>> {
         .collect()
 }
 
-fn forms(latency: Latency) -> (Tape, Vec<Box<dyn Program>>) {
+/// The reference, the tape with caches and its native code, and what
+/// sets the latency in a work buffer of either.
+type Forms = (Tape, Vec<Box<dyn Program>>, Box<dyn Fn(&mut [f64])>);
+
+fn forms(latency: Latency) -> Forms {
     let reference = tape();
     let mut t = tape();
-    t.set_latency(Some(latency));
+    t.keep_outputs(true);
     let native = NativeTape::compile(&t).expect("native");
-    (reference, vec![Box::new(t), Box::new(native)])
+    let mut layout = tape();
+    layout.keep_outputs(true);
+    let set = Box::new(move |w: &mut [f64]| layout.set_latency(w, Some(latency)));
+    (reference, vec![Box::new(t), Box::new(native)], set)
 }
 
 #[test]
 fn a_zero_tolerance_keeps_the_outputs_of_every_instance_computed() {
-    let (reference, forms) = forms(Latency {
+    let (reference, forms, set) = forms(Latency {
         atol: 0.0,
         rtol: 0.0,
     });
@@ -103,9 +111,9 @@ fn a_zero_tolerance_keeps_the_outputs_of_every_instance_computed() {
         .enumerate()
         .map(|(k, x)| (if k < 5 { 0.3 } else { 0.7 }, x.as_slice()))
         .collect();
-    let want = run(&reference, &steps);
+    let want = run(&reference, &steps, &|_| {});
     for prog in &forms {
-        let got = run(&**prog, &steps);
+        let got = run(&**prog, &steps, &*set);
         for (k, (g, w)) in got.iter().zip(&want).enumerate() {
             assert!(same(g, w), "state {k}");
         }
@@ -114,7 +122,7 @@ fn a_zero_tolerance_keeps_the_outputs_of_every_instance_computed() {
 
 #[test]
 fn an_instance_keeps_its_outputs_within_the_tolerance_and_computes_past_it() {
-    let (reference, forms) = forms(Latency {
+    let (reference, forms, set) = forms(Latency {
         atol: 1e-3,
         rtol: 0.0,
     });
@@ -134,10 +142,10 @@ fn an_instance_keeps_its_outputs_within_the_tolerance_and_computes_past_it() {
         (0.3, &far_near),
         (0.7, &near),
     ];
-    let want = run(&reference, &steps);
+    let want = run(&reference, &steps, &|_| {});
     assert!(want[2][5] != want[0][5]);
     for prog in &forms {
-        let got = run(&**prog, &steps);
+        let got = run(&**prog, &steps, &*set);
         assert!(same(&got[1], &want[1]), "still");
         // within it: instance 5 keeps what it computed at x0
         assert!(same(&got[2], &want[0]), "near");
@@ -151,7 +159,7 @@ fn an_instance_keeps_its_outputs_within_the_tolerance_and_computes_past_it() {
 
 #[test]
 fn instances_moving_fast_compute_and_settle_to_be_kept_again() {
-    let (reference, forms) = forms(Latency {
+    let (reference, forms, set) = forms(Latency {
         atol: 1e-3,
         rtol: 0.0,
     });
@@ -164,11 +172,28 @@ fn instances_moving_fast_compute_and_settle_to_be_kept_again() {
         })
         .collect();
     let steps: Vec<(f64, &[f64])> = states.iter().map(|x| (0.3, x.as_slice())).collect();
-    let want = run(&reference, &steps);
+    let want = run(&reference, &steps, &|_| {});
     for prog in &forms {
-        let got = run(&**prog, &steps);
+        let got = run(&**prog, &steps, &*set);
         for (k, (g, w)) in got.iter().zip(&want).enumerate() {
             assert!(same(g, w), "state {k}");
         }
+    }
+}
+
+#[test]
+fn a_buffer_without_a_latency_computes_every_instance() {
+    let (reference, forms, _) = forms(Latency {
+        atol: 1.0,
+        rtol: 0.0,
+    });
+    let x0: Vec<f64> = (0..N).map(|i| 0.1 * i as f64 - 0.4).collect();
+    let mut near = x0.clone();
+    near[5] += 5e-4;
+    let steps = [(0.3, &x0[..]), (0.3, &x0), (0.3, &near)];
+    let want = run(&reference, &steps, &|_| {});
+    for prog in &forms {
+        let got = run(&**prog, &steps, &|_| {});
+        assert!(same(&got[2], &want[2]), "computed");
     }
 }

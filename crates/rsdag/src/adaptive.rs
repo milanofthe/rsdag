@@ -78,10 +78,10 @@ pub struct Policy {
     /// the compiler's background queue) and the interpreted one runs its
     /// bodies whole meanwhile; without, the interpreter specializes.
     pub variants: crate::variant::VariantPolicy,
-    /// When the program's main-phase calls keep an instance's outputs
-    /// rather than compute it again (see [`Tape::set_latency`]); `None`
-    /// computes every instance.
-    pub latency: Option<crate::Latency>,
+    /// Whether the program's main-phase calls have caches, so they can keep
+    /// an instance's outputs under a latency a binding sets
+    /// ([`Tape::keep_outputs`], [`Session::set_latency`]).
+    pub keep_outputs: bool,
 }
 
 impl Default for Policy {
@@ -169,7 +169,7 @@ impl Adaptive {
             Arc::new(move |job: Box<dyn FnOnce() + Send>| c.submit(job))
         });
         let compiled = policy.jit && compiler.is_some();
-        tape.set_latency(policy.latency);
+        tape.keep_outputs(policy.keep_outputs);
         tape.with_backend(&crate::BodyBackend {
             submit,
             variants: Some(crate::variant::VariantPolicy {
@@ -659,6 +659,12 @@ impl Session {
     /// one keeps the value it was bound at).
     pub fn inputs_mut(&mut self) -> &mut [f64] {
         &mut self.inputs
+    }
+
+    /// Its evaluations of `program` under `latency` from here on (see
+    /// [`Tape::set_latency`]); a session starts without one.
+    pub fn set_latency(&mut self, program: &Adaptive, latency: Option<crate::Latency>) {
+        program.tape().set_latency(&mut self.work, latency);
     }
 
     /// `program` at the inputs into `out`.
