@@ -179,7 +179,11 @@ impl Adaptive {
             ..crate::BodyBackend::default()
         });
         let learned = Specializer::new(tape.n_selects());
-        let spec = learned.eligible(&policy.choices).then(|| {
+        // A specialization lays out its slots anew: a program whose calls
+        // keep outputs stays on one layout, so what they keep is a function
+        // of its evaluations alone, not of when a specialization landed.
+        let eligible = learned.eligible(&policy.choices) && tape.cache_slots().is_empty();
+        let spec = eligible.then(|| {
             Arc::new(Mutex::new(Spec {
                 learned,
                 spec: None,
@@ -414,8 +418,17 @@ impl Adaptive {
         // native code, a function body's variant for this binding): the
         // episode runs the prolog again to take it, once per landing,
         // rather than for its whole length on what was ready when it began.
+        // The outputs its calls keep are those of the same binding on every
+        // form, and stay: what an evaluation keeps does not depend on when
+        // a form landed.
         if self.forms() != ep.1 {
-            *ep = self.eval_prolog(inputs, work);
+            let kept = self.tape.cache_slots();
+            crate::scratch::with(|saved: &mut Vec<f64>| {
+                saved.clear();
+                saved.extend_from_slice(&work[kept.clone()]);
+                *ep = self.eval_prolog(inputs, work);
+                work[kept].copy_from_slice(saved);
+            });
         }
         match &ep.0 {
             Kind::SpecNative(native, sp, ver) => {
