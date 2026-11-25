@@ -1682,11 +1682,10 @@ impl Tape {
 
 use crate::constants::OUTPUT_BLOCK;
 
-/// What an op of the interpreter's own costs (a region's), learned from
-/// the runs.
+/// What an op of the interpreter's own costs (a region's).
 static INTERPRETED: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::INTERPRETED_NS_PER_OP);
-/// What an output of a block costs to gather, learned from the runs.
+/// What an output of a block costs to gather.
 static OUTPUTS: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::OUTPUT_NS_PER_VALUE);
 
@@ -1705,7 +1704,7 @@ pub fn write_outputs(outputs: &[u32], inputs: &[f64], work: &[f64], out: &mut [f
     };
     let pieces = n.div_ceil(OUTPUT_BLOCK);
     if pieces <= 1 {
-        // one block: nothing to share out, nothing for the rate to learn
+        // one block: nothing to share out
         return block(&mut out[..n], &outputs[..n]);
     }
     let dst = Shared::new(out);

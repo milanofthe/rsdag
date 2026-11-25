@@ -48,7 +48,7 @@ use rsdag::constants::FOLD_LANES;
 /// Bytes a value takes in the work array and the inputs.
 const F64_BYTES: usize = std::mem::size_of::<f64>();
 
-/// What an op of a native region costs, learned from the runs.
+/// What an op of a native region costs.
 static REGIONS: rsdag::parallel::Rate =
     rsdag::parallel::Rate::new(rsdag::constants::NATIVE_NS_PER_OP);
 use crate::isa::{Arg, Arith, Base, IArg, Isa, Round};
@@ -518,10 +518,8 @@ impl ExternBundle for NativeBody {
                 Batch::Parallel => rspool::rayon::width(ops * self.rate.ns_per_op(), n_groups) > 1,
             };
         if !parallel {
-            self.rate.time(ops, || {
-                rsdag::scratch::with::<Vec<f64>, _>(|work| {
-                    self.run_groups(work, args, n_args, out, 0..n_groups)
-                })
+            rsdag::scratch::with::<Vec<f64>, _>(|work| {
+                self.run_groups(work, args, n_args, out, 0..n_groups)
             });
             return;
         }
