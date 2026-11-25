@@ -3,12 +3,14 @@
 //! at the point (a division by a variable that is zero there) does not reach
 //! the gradient, also where the branches share a variable or a node, under
 //! nested selects, through `min`, and in the rows of a sparse Jacobian above
-//! and below `REVERSE_MIN_TOUCHED`. The bound is the forward result's.
+//! and below `REVERSE_MIN_TOUCHED`, behind every rule of the reverse sweep.
+//! The bound is the forward result's.
 
 use rsdag::autodiff::REVERSE_MIN_TOUCHED;
 use rsdag::eval::eval;
 use rsdag::{
-    differentiate, gradient, sparse_jacobian, CmpOp, ExprId, Graph, Node, ReduceOp, SymbolId, F64,
+    differentiate, gradient, sparse_jacobian, BinOp, CmpOp, ExprId, Graph, Node, OutputRole,
+    ParamRole, ReduceOp, Scope, SymbolId, UnaryOp, F64,
 };
 use std::collections::HashMap;
 
@@ -102,6 +104,65 @@ fn sparse_jacobian_rows_agree_with_forward_mode_on_either_side_of_the_reverse_th
                 "{n} columns, by {j}: {r} vs {}",
                 d[j]
             );
+        }
+    }
+}
+
+/// Behind every rule of the sweep: `select(x > 0, r, y^2)` at x = 0, `r`
+/// built by the rule on a value or partial that is infinite there.
+#[test]
+fn every_sweep_rule_keeps_the_untaken_branch_out() {
+    let mut g: Graph<F64> = Graph::new();
+    // f(a, b) = a / b, a function called with (y, x)
+    let div = {
+        let mut s = Scope::new(&mut g, "div");
+        let (a, b) = (s.param("a", ParamRole::Free), s.param("b", ParamRole::Free));
+        let q = s.div(a, b);
+        s.close([(q, OutputRole::Plain)])
+    };
+    let (x, xs) = sym(&mut g, "x");
+    let (y, ys) = sym(&mut g, "y");
+    let env: HashMap<SymbolId, f64> = [(xs, 0.0), (ys, 2.0)].into_iter().collect();
+    let zero = g.zero();
+    let one = g.one();
+    let pos = g.cmp(CmpOp::Gt, x, zero);
+    let q = g.div(y, x);
+    let ix = g.div(one, x);
+    let yy = g.mul(y, y);
+    let mut cases: Vec<(&str, ExprId)> = Vec::new();
+    cases.push(("add", g.add(q, y)));
+    let nq = g.neg(q);
+    cases.push(("neg", nq));
+    cases.push(("mul", g.mul(ix, y)));
+    cases.push(("pow", g.pow_i(q, 2)));
+    cases.push(("unary", g.unary(UnaryOp::Tanh, q)));
+    cases.push(("binary", g.binary(BinOp::Powf, y, ix)));
+    cases.push(("sum", g.reduce(ReduceOp::Sum, vec![q, y])));
+    cases.push(("product", g.reduce(ReduceOp::Product, vec![q, y])));
+    cases.push(("dot", g.dot(vec![ix, y], vec![y, y])));
+    cases.push(("solve", g.solve_dense(vec![x], vec![y])[0]));
+    cases.push(("call", g.call(div, 0, &[y, x])));
+    cases.push(("neg-unary-div", g.unary(UnaryOp::Tanh, nq)));
+    for (name, r) in cases {
+        // into y^2 on the taken side, and into zero
+        let f = g.select(pos, r, yy);
+        let fz = g.select(pos, r, zero);
+        for f in [f, fz] {
+            let rev = gradient(&mut g, f, &[xs, ys]);
+            let fwd: Vec<ExprId> = [xs, ys]
+                .iter()
+                .map(|&s| differentiate(&mut g, f, s))
+                .collect();
+            let (r, d) = (eval(&g, &rev, &env), eval(&g, &fwd, &env));
+            for k in 0..2 {
+                assert!(d[k].is_finite(), "{name}: forward {k}: {}", d[k]);
+                assert!(
+                    (r[k] - d[k]).abs() <= 4.0 * f64::EPSILON * d[k].abs(),
+                    "{name} by {k}: reverse {}, forward {}",
+                    r[k],
+                    d[k]
+                );
+            }
         }
     }
 }
