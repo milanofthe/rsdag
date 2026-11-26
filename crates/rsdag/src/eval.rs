@@ -133,7 +133,8 @@ impl FuncEval {
         let (f, out) = ctx.output(o);
         let site = (f, ctx.context_of(o), l);
         let func = ctx.func(f);
-        if matches!(func.outputs()[out as usize], Output::Zero) {
+        let output = func.outputs()[out as usize];
+        if matches!(output, Output::Zero) {
             return 0.0;
         }
         let needed = &self.needed;
@@ -144,12 +145,15 @@ impl FuncEval {
                 Some(needed) => func.body_for(ctx, needed),
                 None => func.body_for(ctx, &[out]),
             });
-        let Some(slot) = body.slot_of.get(out as usize).copied().flatten() else {
-            let fresh = func.body(ctx);
-            self.vals.retain(|k, _| k.0 != f);
-            *body = fresh;
-            let slot = body.slot_of[out as usize].expect("a body carries every output");
-            return self.eval_slot(site, args, slot);
+        let slot = match (body.slot_of.get(out as usize).copied().flatten(), output) {
+            (Some(slot), _) | (None, Output::Slot(slot)) => slot,
+            (None, Output::Expr(e)) => {
+                let (fresh, slot) = func.body_leading(ctx, out, e);
+                self.vals.retain(|k, _| k.0 != f);
+                *body = fresh;
+                slot
+            }
+            (None, Output::Zero) => return 0.0,
         };
         self.eval_slot(site, args, slot)
     }

@@ -63,6 +63,13 @@ pub(crate) struct Body {
     pub(crate) slot_of: Vec<Option<u32>>,
 }
 
+fn push_root(roots: &mut Vec<ExprId>, slot_of: &mut [Option<u32>], k: u32, e: ExprId) -> u32 {
+    let slot = roots.len() as u32;
+    slot_of[k as usize] = Some(slot);
+    roots.push(e);
+    slot
+}
+
 /// A function of a [`Graph`](crate::graph::Graph), read through its
 /// accessors and changed only through the graph, so the derivative index
 /// always says what the output roles say.
@@ -312,9 +319,18 @@ impl Function {
         self.extern_body.as_ref()
     }
 
-    pub(crate) fn body<K: crate::field::Field>(&self, ctx: &crate::graph::Graph<K>) -> Body {
+    pub(crate) fn body_leading<K: crate::field::Field>(
+        &self,
+        ctx: &crate::graph::Graph<K>,
+        out: u32,
+        e: ExprId,
+    ) -> (Body, u32) {
+        let mut roots = Vec::new();
+        let mut slot_of = vec![None; self.outputs.len()];
+        let slot = push_root(&mut roots, &mut slot_of, out, e);
         let all: Vec<u32> = (0..self.outputs.len() as u32).collect();
-        self.body_for(ctx, &all)
+        self.push_expr_roots(&all, &mut roots, &mut slot_of);
+        (self.interpreted_body(ctx, roots, slot_of), slot)
     }
 
     pub(crate) fn body_for<K: crate::field::Field>(
@@ -352,12 +368,29 @@ impl Function {
         }
         let mut roots = Vec::new();
         let mut slot_of = vec![None; self.outputs.len()];
+        self.push_expr_roots(needed, &mut roots, &mut slot_of);
+        self.interpreted_body(ctx, roots, slot_of)
+    }
+
+    fn push_expr_roots(
+        &self,
+        needed: &[u32],
+        roots: &mut Vec<ExprId>,
+        slot_of: &mut [Option<u32>],
+    ) {
         for &k in needed {
             if let (Output::Expr(e), None) = (self.outputs[k as usize], slot_of[k as usize]) {
-                slot_of[k as usize] = Some(roots.len() as u32);
-                roots.push(e);
+                push_root(roots, slot_of, k, e);
             }
         }
+    }
+
+    fn interpreted_body<K: crate::field::Field>(
+        &self,
+        ctx: &crate::graph::Graph<K>,
+        roots: Vec<ExprId>,
+        slot_of: Vec<Option<u32>>,
+    ) -> Body {
         let globals = &self.globals_in(ctx).symbols;
         let params_then_globals: Vec<crate::node::SymbolId> = self
             .params
