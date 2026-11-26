@@ -3,8 +3,9 @@
 //! values, thresholds and limits, which decide how a program runs but not
 //! what it computes.
 //!
-//! Each constant says what it is and in what unit, why it has its value,
-//! and what a change would change: results (the contract), or time alone.
+//! Each public constant says what it is and in what unit, why it has its
+//! value, and what a change would change: results (the contract), or time
+//! alone.
 //! The modules that use one re-export it where it was before
 //! (`rsdag::semantics::EXP_LIMIT`, ...).
 //! `tests/constants_guard.rs` keeps numbers from drifting back into the

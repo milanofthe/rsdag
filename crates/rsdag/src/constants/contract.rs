@@ -47,11 +47,6 @@ pub const FOLD_LANES: usize = 4;
 /// out inline (`POWI_INLINE`) is a matter of code size, not this.
 pub const POWF_AS_POWI_MAX: f64 = 64.0;
 
-// The bits of an `f64` that the exponential and the logarithm take apart
-// (`crate::semantics::exp_core` and `ln_core`), the same in every backend
-// that computes them in its own instructions; their tables and
-// coefficients are in `exp_ln`.
-
 /// The exponent bias of an `f64`: a biased exponent of `1023` is `2^0`.
 pub const F64_EXP_BIAS: i64 = 1023;
 /// The fraction bits of an `f64`, below its exponent.

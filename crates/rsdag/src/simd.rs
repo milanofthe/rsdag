@@ -12,8 +12,8 @@
 //! can be tested on one machine.
 
 use crate::constants::{
-    FOLD_LANES, GEMM_COL_BLOCK, GEMM_ROW_BLOCK, GEMV_ROW_BLOCK, LU_PANEL_LARGE, LU_PANEL_SMALL,
-    LU_TRAILING_ROWS, SOLVE_BATCH_MAX_K, SOLVE_BATCH_MAX_N,
+    for_each_fixed_solve_size, FOLD_LANES, GEMM_COL_BLOCK, GEMM_ROW_BLOCK, GEMV_ROW_BLOCK,
+    LU_PANEL_LARGE, LU_PANEL_SMALL, LU_TRAILING_ROWS, SOLVE_BATCH_MAX_K, SOLVE_BATCH_MAX_N,
 };
 
 /// The lanes of a [`Quad`], one per accumulator of the fold.
@@ -624,8 +624,7 @@ fn solve_q<Q: Quad>(
             }
         };
     }
-    // lit: the sizes the fixed eliminations are instantiated for
-    fixed!(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16);
+    for_each_fixed_solve_size!(fixed);
     match lu_panel(n) {
         0 => solve_unblocked::<Q>(a, b, n, k, out, scratch),
         LU_PANEL_SMALL => solve_blocked::<Q, LU_PANEL_SMALL>(a, b, n, k, out, scratch),
@@ -658,8 +657,7 @@ fn solve_batch_q<Q: Quad>(
                 }
             };
         }
-        // lit: the sizes of a batch, 1 to SOLVE_BATCH_MAX_N
-        lanes!(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16);
+        for_each_fixed_solve_size!(lanes);
     }
     for c in c..count {
         solve_q::<Q>(
