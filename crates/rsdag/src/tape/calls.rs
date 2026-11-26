@@ -97,37 +97,32 @@ impl Shared {
         Shared(ptr, len)
     }
 
-    /// The region's first value, for a piece of work that accesses it
-    /// as [`get`](Self::get) and [`set`](Self::set) would.
     pub(super) fn ptr(self) -> *mut f64 {
         self.0
     }
 
-    /// # Safety
-    /// No piece of work writes slot `k` while this runs.
+    // SAFETY: the caller ensures that no piece of work writes slot `k` while this runs.
     pub(super) unsafe fn get(self, k: usize) -> f64 {
         assert!(k < self.1);
         unsafe { *self.0.add(k) }
     }
 
-    /// # Safety
-    /// No piece of work writes `k` while another reads it.
+    // SAFETY: the caller ensures that no piece of work writes `k` while another reads it.
     pub(super) unsafe fn set(self, k: usize, v: f64) {
         assert!(k < self.1);
         unsafe { *self.0.add(k) = v }
     }
 
-    /// # Safety
-    /// No piece of work writes `at..at + n` while the slice lives.
+    // SAFETY: the caller ensures that no piece of work writes `at..at + n` while the
+    // slice lives.
     unsafe fn slice<'a>(self, at: usize, n: usize) -> &'a [f64] {
         assert!(at + n <= self.1);
         unsafe { std::slice::from_raw_parts(self.0.add(at), n) }
     }
 
-    /// # Safety
-    /// No other piece of work reads or writes `at..at + n` while the slice
-    /// lives.
     #[allow(clippy::mut_from_ref)]
+    // SAFETY: the caller ensures that no other piece of work reads or writes
+    // `at..at + n` while the slice lives.
     pub(super) unsafe fn slice_mut<'a>(self, at: usize, n: usize) -> &'a mut [f64] {
         assert!(at + n <= self.1);
         unsafe { std::slice::from_raw_parts_mut(self.0.add(at), n) }
@@ -180,8 +175,8 @@ pub unsafe fn share_rows(c: &Call, slots: Shared, gather: Shared, inputs: &[f64]
         None => unsafe { gather.get(c.args + g * na + j) },
     };
     let set = |g: usize, row: usize| unsafe { slots.set(at + g, row as f64) };
-    // The arguments every instance shares are the first one's.
-    if own.is_empty() {
+    let every_instance_shares_every_argument = own.is_empty();
+    if every_instance_shares_every_argument {
         (0..n).for_each(|g| set(g, 0));
         return;
     }
@@ -199,36 +194,32 @@ pub unsafe fn share_rows(c: &Call, slots: Shared, gather: Shared, inputs: &[f64]
     find_rows(n, hash, same, set);
 }
 
-/// The row of each of `n` instances, handed to `set`: the first instance
-/// with its key. `hash` is an instance's key hashed (`None`: a value
-/// without bits, its own row), `same` whether two instances' keys are
-/// equal; a hash two keys give, their values unequal, keeps its own row.
 pub(crate) fn find_rows(
     n: usize,
-    hash: impl Fn(usize) -> Option<u64>,
-    same: impl Fn(usize, usize) -> bool,
-    mut set: impl FnMut(usize, usize),
+    key_hash_or_own_row: impl Fn(usize) -> Option<u64>,
+    same_key: impl Fn(usize, usize) -> bool,
+    mut set_row: impl FnMut(usize, usize),
 ) {
-    crate::scratch::with(|first: &mut HashMap<u64, usize>| {
-        first.clear();
+    crate::scratch::with(|first_with_hash: &mut HashMap<u64, usize>| {
+        first_with_hash.clear();
         for g in 0..n {
-            let row = match hash(g) {
-                Some(h) => match first.entry(h) {
-                    std::collections::hash_map::Entry::Occupied(e) if same(*e.get(), g) => *e.get(),
+            let row = match key_hash_or_own_row(g) {
+                Some(h) => match first_with_hash.entry(h) {
+                    std::collections::hash_map::Entry::Occupied(e) if same_key(*e.get(), g) => {
+                        *e.get()
+                    }
                     std::collections::hash_map::Entry::Occupied(_) => g,
                     std::collections::hash_map::Entry::Vacant(e) => *e.insert(g),
                 },
                 None => g,
             };
-            set(g, row);
+            set_row(g, row);
         }
     })
 }
 
-/// [`run_call`] on the rows [`share_rows`] found.
-///
-/// # Safety
-/// As [`run_call`].
+// SAFETY: the caller upholds the contract of `run_call`, and `share_rows` has
+// already run for a prolog.
 unsafe fn run_part(
     c: &Call,
     slots: Shared,
@@ -250,11 +241,10 @@ unsafe fn run_part(
             Some(i) => inputs.get(i as usize).copied().unwrap_or(f64::NAN),
             None => unsafe { slots.get(k as usize) },
         };
-        // a prolog's instance that reads another's row computes nothing
         let rows = c.out + c.n_groups * no;
-        let computes =
+        let gathers_own_arguments =
             |g: &usize| c.phase != Phase::Prolog || unsafe { slots.get(rows + g) } as usize == *g;
-        for g in groups.clone().filter(computes) {
+        for g in groups.clone().filter(gathers_own_arguments) {
             let (from, to) = (&ops[g * ni..(g + 1) * ni], c.args + g * na);
             match c.places {
                 None => from
@@ -286,22 +276,21 @@ unsafe fn run_part(
             }
         }
         Phase::Prolog => {
-            // the instances whose row is their own: the others read theirs
             let rows = unsafe { slots.slice(c.out + c.n_groups * no + g0, ng) };
-            crate::scratch::with(|own: &mut Vec<u32>| {
-                own.clear();
-                own.extend(
+            crate::scratch::with(|own_row_instances: &mut Vec<u32>| {
+                own_row_instances.clear();
+                own_row_instances.extend(
                     (0..ng)
                         .filter(|&k| rows[k] as usize == g0 + k)
                         .map(|k| k as u32),
                 );
                 if ng >= 2 {
                     let at = Instances::first(ng, na, b.state_len());
-                    match own.len() == ng {
+                    match own_row_instances.len() == ng {
                         true => b.prolog_batch(args, out, &at),
-                        false => b.prolog_batch(args, out, &at.listed(own)),
+                        false => b.prolog_batch(args, out, &at.listed(own_row_instances)),
                     }
-                } else if ng == 1 && !own.is_empty() {
+                } else if ng == 1 && !own_row_instances.is_empty() {
                     b.prolog_into(args, scratch, out);
                 }
             })
@@ -328,7 +317,6 @@ pub unsafe fn run_stage<'a>(
 ) {
     let work_of = |c: &Call| c.ops as f64 * c.bundle.rate().ns_per_op();
     let work: f64 = (0..n).map(|k| work_of(&call(k))).sum();
-    // the rows the prologs' instances share, before any part of them runs
     for k in 0..n {
         let c = call(k);
         if c.phase == Phase::Prolog {
@@ -340,33 +328,34 @@ pub unsafe fn run_stage<'a>(
             run_part(c, slots, gather, inputs, groups, s)
         })
     };
-    // The items claimed are lane groups, the smallest part of a batch worth
-    // running alone ([`ExternBundle::batch_lanes`]), call after call, the
-    // last one of a call partial; a range's part in each call found by
-    // counting through the calls (a stage has few).
     let lanes = |c: &Call| c.bundle.batch_lanes().max(1);
-    let items: usize = (0..n)
+    let n_lane_groups: usize = (0..n)
         .map(|k| {
             let c = call(k);
             c.n_groups.div_ceil(lanes(&c))
         })
         .sum();
-    crate::parallel::ranges::<crate::parallel::Here>(items, crate::parallel::Work::ns(work), |r| {
-        let mut i0 = 0;
-        for k in 0..n {
-            let c = call(k);
-            let l = lanes(&c);
-            let ni = c.n_groups.div_ceil(l);
-            let (a, b) = (r.start.max(i0), r.end.min(i0 + ni));
-            if a < b {
-                run_groups(&c, (a - i0) * l..((b - i0) * l).min(c.n_groups));
+    crate::parallel::ranges::<crate::parallel::Here>(
+        n_lane_groups,
+        crate::parallel::Work::ns(work),
+        |r| {
+            let mut first_lane_group_of_call = 0;
+            for k in 0..n {
+                let c = call(k);
+                let l = lanes(&c);
+                let lane_groups_of_call = c.n_groups.div_ceil(l);
+                let i0 = first_lane_group_of_call;
+                let (a, b) = (r.start.max(i0), r.end.min(i0 + lane_groups_of_call));
+                if a < b {
+                    run_groups(&c, (a - i0) * l..((b - i0) * l).min(c.n_groups));
+                }
+                first_lane_group_of_call += lane_groups_of_call;
+                if first_lane_group_of_call >= r.end {
+                    break;
+                }
             }
-            i0 += ni;
-            if i0 >= r.end {
-                break;
-            }
-        }
-    });
+        },
+    );
 }
 
 #[cfg(test)]
@@ -374,7 +363,6 @@ mod tests {
     use super::find_rows;
     use std::hash::Hasher;
 
-    /// The rows of `keys` keyed on the positions `on`, hashed by `hash`.
     fn rows(keys: &[[f64; 3]], on: &[usize], hash: impl Fn(&[u64]) -> u64) -> Vec<usize> {
         let bits = |g: usize| {
             on.iter()
@@ -393,24 +381,19 @@ mod tests {
 
     #[test]
     fn rows_on_the_owned_arguments_are_the_rows_on_all() {
-        // Position 0 and 2 the same for all instances, 1 their own: equal
-        // and unequal instances, 0.0 and -0.0 apart. With a hash every key
-        // gives (every unequal pair collides) and with a real one, keying
-        // the owned position finds the rows keying all of them finds.
-        let qs = [0.2, 0.3, 0.2, 0.2, 0.0, -0.0, 0.3, 0.7, 0.2, 0.0];
-        let keys: Vec<[f64; 3]> = qs.iter().map(|&q| [1.5, q, -2.0]).collect();
+        let owned = [0.2, 0.3, 0.2, 0.2, 0.0, -0.0, 0.3, 0.7, 0.2, 0.0];
+        let keys: Vec<[f64; 3]> = owned.iter().map(|&q| [1.5, q, -2.0]).collect();
         let fx = |b: &[u64]| {
             let mut h = rustc_hash::FxHasher::default();
             b.iter().for_each(|&x| h.write_u64(x));
             h.finish()
         };
-        let collide = |_: &[u64]| 7u64;
+        let every_key_collides = |_: &[u64]| 7u64;
         let real = rows(&keys, &[0, 1, 2], fx);
         assert_eq!(real, [0, 1, 0, 0, 4, 5, 1, 7, 0, 4]);
         assert_eq!(rows(&keys, &[1], fx), real);
-        // every instance unequal to the first keeps its own row
-        let colliding = rows(&keys, &[0, 1, 2], collide);
+        let colliding = rows(&keys, &[0, 1, 2], every_key_collides);
         assert_eq!(colliding, [0, 1, 0, 0, 4, 5, 6, 7, 0, 9]);
-        assert_eq!(rows(&keys, &[1], collide), colliding);
+        assert_eq!(rows(&keys, &[1], every_key_collides), colliding);
     }
 }
