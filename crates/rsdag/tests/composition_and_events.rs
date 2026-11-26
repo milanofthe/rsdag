@@ -15,9 +15,7 @@ use rsdag::{
     differentiate, substitute, ExprId, Graph, OutputRole, ParamRole, Scope, SymbolId, Tape, F64,
 };
 
-/// A first-order lag: `y = x`, `dx/dt = (u - x) / tau`. Built in its own
-/// graph, as a block library would.
-fn lag(name: &str) -> (Graph<F64>, rsdag::Module<F64>) {
+fn first_order_lag(name: &str) -> (Graph<F64>, rsdag::Module<F64>) {
     let mut g: Graph<F64> = Graph::new();
     let mut s = Scope::new(&mut g, name);
     let x = s.param("x", ParamRole::State { id: 0 });
@@ -33,9 +31,7 @@ fn lag(name: &str) -> (Graph<F64>, rsdag::Module<F64>) {
     (g, module)
 }
 
-/// A saturating gain: `y = clamp(k * u, -1, 1)`, written with the selects a
-/// clamp lowers into.
-fn saturation(name: &str) -> (Graph<F64>, rsdag::Module<F64>) {
+fn saturating_gain_as_lowered_clamp(name: &str) -> (Graph<F64>, rsdag::Module<F64>) {
     let mut g: Graph<F64> = Graph::new();
     let mut s = Scope::new(&mut g, name);
     let u = s.param("u", ParamRole::Input { port: 0, elem: 0 });
@@ -52,16 +48,16 @@ fn saturation(name: &str) -> (Graph<F64>, rsdag::Module<F64>) {
     (g, module)
 }
 
-/// Two blocks built apart, loaded into one graph and spliced: the
-/// saturation's output feeds the lag's input, and the result is one
-/// expression for `dx/dt` over the system's own symbols.
 #[test]
 fn separate_blocks_compose_into_one_graph() {
-    let (_, lag_mod) = lag("lag");
-    let (_, sat_mod) = saturation("sat");
+    const X: f64 = 0.5;
+    const TAU: f64 = 2.0;
+    const GAIN: f64 = 10.0;
+    const U_PAST_THE_CAP: f64 = 0.4;
+    const CAP: f64 = 1.0;
+    let (_, lag_mod) = first_order_lag("lag");
+    let (_, sat_mod) = saturating_gain_as_lowered_clamp("sat");
 
-    // One arena for the system. Loading re-interns, so shared structure
-    // between the blocks is shared here, and each block's ids are mapped.
     let mut sys: Graph<F64> = Graph::new();
     let lag_map = sys.load_module(&lag_mod).unwrap();
     let sat_map = sys.load_module(&sat_mod).unwrap();
@@ -79,52 +75,44 @@ fn separate_blocks_compose_into_one_graph() {
         _ => panic!("the saturation's output is an expression"),
     };
 
-    // Splice: the lag's `u` becomes the saturation's output. Everything the
-    // saturation reads (its own `u`, `k`) stays a system input.
-    let mut wire: HashMap<SymbolId, ExprId> = HashMap::default();
-    wire.insert(lag_u, sat_y);
-    let dx = substitute(&mut sys, &[lag_dx], &wire)[0];
+    let mut lag_input_from_saturation_output: HashMap<SymbolId, ExprId> = HashMap::default();
+    lag_input_from_saturation_output.insert(lag_u, sat_y);
+    let dx = substitute(&mut sys, &[lag_dx], &lag_input_from_saturation_output)[0];
 
-    // The composed derivative reads exactly the surviving system symbols.
     let free = sys.free_symbols(dx);
     let names: Vec<&str> = free.iter().map(|&s| sys.symbol_name(s)).collect();
-    assert!(names.contains(&"x") && names.contains(&"tau") && names.contains(&"k"));
+    assert!(
+        names.contains(&"x") && names.contains(&"tau") && names.contains(&"k"),
+        "the composed derivative does not read the system symbols x, tau and k"
+    );
 
-    // Evaluate the composed system: k*u saturates at 1, so with tau = 2 and
-    // x = 0.5 the derivative is (1 - 0.5) / 2.
     let order: Vec<SymbolId> = free.iter().copied().collect();
     let tape = Tape::compile(&sys, &[dx], &order);
     let row: Vec<f64> = order
         .iter()
         .map(|&s| match sys.symbol_name(s) {
-            "x" => 0.5,
-            "tau" => 2.0,
-            "k" => 10.0,
-            _ => 0.4, // the saturation's own input, driven past the cap
+            "x" => X,
+            "tau" => TAU,
+            "k" => GAIN,
+            _ => U_PAST_THE_CAP,
         })
         .collect();
     let (mut w, mut o) = (Vec::new(), Vec::new());
     tape.eval(&row, &mut w, &mut o);
-    assert_eq!(o[0], 0.25, "dx/dt");
+    assert_eq!(o[0], (CAP - X) / TAU, "dx/dt");
 
-    // And the composition differentiates like anything else: below the cap
-    // the chain rule carries the gain through.
     let x_sym = *free.iter().find(|&&s| sys.symbol_name(s) == "x").unwrap();
     let ddx = differentiate(&mut sys, dx, x_sym);
     let tape = Tape::compile(&sys, &[ddx], &order);
     let (mut w, mut o) = (Vec::new(), Vec::new());
     tape.eval(&row, &mut w, &mut o);
-    assert_eq!(o[0], -0.5, "d(dx/dt)/dx");
+    assert_eq!(o[0], -1.0 / TAU, "d(dx/dt)/dx");
 }
 
-/// An event needs no mechanism of its own: the crossing function is a
-/// `Guard` output, its derivative comes from `differentiate`, and the effect
-/// is a function with `StateWrite` outputs.
 #[test]
 fn an_event_is_a_guard_output_and_a_state_write() {
     let mut g: Graph<F64> = Graph::new();
 
-    // Crossing: the ball hits the floor when its height reaches zero.
     let mut s = Scope::new(&mut g, "bounce");
     let h = s.param("h", ParamRole::State { id: 0 });
     let v = s.param("v", ParamRole::State { id: 1 });
@@ -142,21 +130,17 @@ fn an_event_is_a_guard_output_and_a_state_write() {
     ]);
     let params = g.func(f).params().to_vec();
 
-    // The roles select the event's parts without any lookup by name.
     let guards = g
         .func(f)
         .exprs_with_role(|r| matches!(r, OutputRole::Guard { .. }));
-    assert_eq!(guards.len(), 1);
+    assert_eq!(guards.len(), 1, "the role does not select the guard");
 
-    // A derivative-based locator wants dg/dt along the flow: (dg/dh) dh/dt
-    // with dh/dt = v.
     let h_sym = params[0];
     let v_sym = params[1];
     let dgdh = rsdag::differentiate(&mut g, guard, h_sym);
     let v = g.symbol_expr(v_sym);
     let dgdt = g.mul(dgdh, v);
 
-    // The effect: a second function writing the reflected velocity.
     let mut e = Scope::new(&mut g, "bounce_effect");
     let ve = e.param("v", ParamRole::State { id: 1 });
     let restitution = e.konst_f64(-0.8);
@@ -169,8 +153,6 @@ fn an_event_is_a_guard_output_and_a_state_write() {
         1
     );
 
-    // Everything evaluates in one tape: guard, its rate, the derivatives and
-    // the effect.
     let v_new_expr = match g.func(eff).outputs()[0] {
         rsdag::Output::Expr(x) => x,
         _ => unreachable!(),
@@ -184,12 +166,9 @@ fn an_event_is_a_guard_output_and_a_state_write() {
     assert_eq!(o[3], -0.8 * -3.0, "reflected velocity");
 }
 
-/// A `Select` is a discontinuity the tape can watch on its own: specializing
-/// against a traced region gives a shorter program plus guards that report
-/// when the region no longer holds. That report is the event.
 #[test]
 fn a_region_flip_is_reported_by_the_specialization() {
-    let (g, _) = saturation("sat");
+    let (g, _) = saturating_gain_as_lowered_clamp("sat");
     let f = rsdag::FuncId(0);
     let y = match g.func(f).outputs()[0] {
         rsdag::Output::Expr(e) => e,
@@ -198,30 +177,33 @@ fn a_region_flip_is_reported_by_the_specialization() {
     let params = g.func(f).params().to_vec();
     let tape = Tape::compile(&g, &[y], &params);
 
-    // Trace inside the linear region and specialize there.
+    let traced_in_the_linear_region = [0.05f64, 10.0];
+    let still_in_the_linear_region = [0.06f64, 10.0];
+    let past_the_cap = [0.5f64, 10.0];
     let (mut w, mut o, mut choices) = (Vec::new(), Vec::new(), Vec::new());
     choices.clear();
-    tape.eval_with(&[0.05f64, 10.0], &mut w, &mut o, &mut choices);
+    tape.eval_with(&traced_in_the_linear_region, &mut w, &mut o, &mut choices);
     let spec = tape.specialize(&choices, &vec![true; tape.n_selects()]);
     assert!(spec.n_ops() < tape.n_ops(), "the specialization is shorter");
 
-    // Still inside: the guards hold and the value matches the full tape.
     let (mut sw, mut so) = (Vec::new(), Vec::new());
-    assert!(spec.eval_checked(&[0.06, 10.0], &mut sw, &mut so));
-    tape.eval(&[0.06f64, 10.0], &mut w, &mut o);
-    assert_eq!(so[0].to_bits(), o[0].to_bits());
-
-    // Past the cap: the guard reports the flip instead of returning a wrong
-    // value, which is exactly the signal an integrator needs.
     assert!(
-        !spec.eval_checked(&[0.5, 10.0], &mut sw, &mut so),
+        spec.eval_checked(&still_in_the_linear_region, &mut sw, &mut so),
+        "a guard fails inside the traced region"
+    );
+    tape.eval(&still_in_the_linear_region, &mut w, &mut o);
+    assert_eq!(
+        so[0].to_bits(),
+        o[0].to_bits(),
+        "the specialization differs from the full tape inside the traced region"
+    );
+
+    assert!(
+        !spec.eval_checked(&past_the_cap, &mut sw, &mut so),
         "a crossing into the saturated region must be reported"
     );
 }
 
-/// Composition is not a special case: a module loaded twice shares its
-/// structure, so two instances of one block cost one copy of the shared
-/// subexpressions.
 #[test]
 fn loading_a_block_twice_shares_its_structure() {
     let mut spec = Spec::new(11).steps(120).params(3);
@@ -236,7 +218,6 @@ fn loading_a_block_twice_shares_its_structure() {
     assert_eq!(sys.len(), after_first, "the second instance added nodes");
     assert_eq!(first.exprs, second.exprs);
 
-    // The shared instance still evaluates like the original.
     let row = inputs(&mut spec.rng(), syms.len());
     let order: Vec<SymbolId> = syms.iter().map(|s| first.symbols[s.0 as usize]).collect();
     let mapped: Vec<ExprId> = roots.iter().map(|r| first.exprs[r.0 as usize]).collect();
@@ -244,5 +225,8 @@ fn loading_a_block_twice_shares_its_structure() {
     Tape::compile(&src, &roots, &syms).eval(&row, &mut w1, &mut o1);
     let (mut w2, mut o2) = (Vec::new(), Vec::new());
     Tape::compile(&sys, &mapped, &order).eval(&row, &mut w2, &mut o2);
-    assert!(o1.iter().zip(&o2).all(|(a, b)| a.to_bits() == b.to_bits()));
+    assert!(
+        o1.iter().zip(&o2).all(|(a, b)| a.to_bits() == b.to_bits()),
+        "the shared instance evaluates differently from the original"
+    );
 }
