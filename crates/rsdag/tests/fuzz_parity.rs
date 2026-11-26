@@ -29,17 +29,37 @@ fn sym_id(ctx: &Graph<BigRational>, e: ExprId) -> SymbolId {
     }
 }
 
-fn operations(ctx: &Graph<BigRational>, root: ExprId) -> Vec<Node> {
+fn cone(ctx: &Graph<BigRational>, root: ExprId) -> Vec<Node> {
     reachable(ctx, &[root])
         .into_iter()
         .map(|e| *ctx.node(e))
-        .filter(|n| !matches!(n, Node::Const(_) | Node::Symbol(_)))
         .collect()
 }
 
+fn roundings(nodes: &[Node]) -> usize {
+    nodes
+        .iter()
+        .map(|n| match *n {
+            Node::Const(_) | Node::Symbol(_) | Node::Neg(_) | Node::Cmp(..) | Node::Select(..) => 0,
+            Node::Add(..) | Node::Mul(..) | Node::Unary(..) | Node::Binary(..) => 1,
+            Node::Pow(_, k) => {
+                let e = k.unsigned_abs();
+                let squarings = e.checked_ilog2().unwrap_or(0) as usize;
+                let products = e.count_ones().saturating_sub(1) as usize;
+                squarings + products + usize::from(k < 0)
+            }
+            Node::Reduce(ReduceOp::Sum | ReduceOp::Product, l) | Node::Dot(l) => {
+                l.len().saturating_sub(1)
+            }
+            Node::Reduce(ReduceOp::Min | ReduceOp::Max, _) => 0,
+            Node::Call(..) | Node::Solve(..) => unreachable!("the draw has no calls or solves"),
+        })
+        .sum()
+}
+
 // https://github.com/milanofthe/rsdag/issues/243
-fn has_gamma(ops: &[Node]) -> bool {
-    ops.iter().any(|n| {
+fn has_gamma(nodes: &[Node]) -> bool {
+    nodes.iter().any(|n| {
         matches!(
             n,
             Node::Unary(UnaryOp::Tgamma | UnaryOp::Lgamma | UnaryOp::Digamma, _)
@@ -345,10 +365,12 @@ fn differentiate_matches_finite_differences() {
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
         let steps = 4 + rng.below(10);
         let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, true);
-        let ops = operations(&ctx, root);
-        if has_gamma(&ops) {
+        let nodes = cone(&ctx, root);
+        if has_gamma(&nodes) {
             continue;
         }
+
+        let n = roundings(&nodes);
 
         let wrt = rng.below(nsym);
         let d = differentiate(&mut ctx, root, sym_ids[wrt]);
@@ -367,7 +389,7 @@ fn differentiate_matches_finite_differences() {
             env.insert(sym_ids[wrt], xm);
             let fm = eval(&ctx, &[root], &env)[0];
             let step = xp - xm;
-            ((fp - fm) / step, central_round_off(ops.len(), fp, fm, step))
+            ((fp - fm) / step, central_round_off(n, fp, fm, step))
         };
         let h = CENTRAL_DIFFERENCE_STEP;
         let (fd, round_off) = central(h);
@@ -382,8 +404,7 @@ fn differentiate_matches_finite_differences() {
         let bound = TRUNCATION_ESTIMATE_MULTIPLE * truncation + round_off;
         assert!(
             (ad - fd).abs() <= bound,
-            "seed {seed}: d/dx{wrt} AD={ad:e} FD(h)={fd:e} FD(h/2)={fine:e} ops={} bound={bound:e}",
-            ops.len()
+            "seed {seed}: d/dx{wrt} AD={ad:e} FD(h)={fd:e} FD(h/2)={fine:e} roundings={n} bound={bound:e}"
         );
         checked += 1;
     }

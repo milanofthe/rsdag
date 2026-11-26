@@ -50,23 +50,29 @@ pub const RICHARDSON_CENTRAL: f64 = 4.0 / 3.0;
 pub const TRUNCATION_ESTIMATE_MULTIPLE: f64 = 4.0;
 
 /// Bound on the round-off of the central difference (f(x+) - f(x-)) / (x+ -
-/// x-) of an expression of `ops` operations, where `fp` and `fm` are the
-/// computed values f(x+) and f(x-) at the rounded arguments x+ = x + h and
-/// x- = x - h, and `step` is their difference x+ - x-, which is exact. The
-/// model is of first order in the unit round-off u = 2^-53. Each operation
-/// that produces a floating-point result contributes a relative error of at
-/// most u, which is at most one ulp of its result, and the errors of the
-/// operations add up in the function value, so an expression of n
-/// operations is computed within n u |f| of its exact value. The difference
-/// of the two values then carries at most n u (|f(x+)| + |f(x-)|), and the
-/// division by the step carries it into the quotient. The model assumes that
-/// no operation amplifies the relative error of its operand strongly, which
-/// excludes for example a sum that cancels or a logarithm of an argument near
-/// 1, whose condition numbers are large. The roundings of the subtraction and
-/// the division add at most 2u relative to the quotient, which the truncation
-/// term covers.
-pub fn central_round_off(ops: usize, fp: f64, fm: f64, step: f64) -> f64 {
-    ops as f64 * (f64::EPSILON / 2.0) * (fp.abs() + fm.abs()) / step
+/// x-) of an expression whose evaluation performs n = `roundings`
+/// floating-point roundings, where `fp` and `fm` are the computed values
+/// f(x+) and f(x-) at the rounded arguments x+ = x + h and x- = x - h, and
+/// `step` is their difference x+ - x-, which is exact. The count n is the
+/// number of roundings that the reference evaluation performs, not the
+/// number of nodes: a node that performs several operations, such as a dot
+/// product of m terms with its m multiplications and m - 1 additions,
+/// contributes all of them, and an exact operation such as a negation
+/// contributes none. The model is of first order in the unit round-off
+/// u = 2^-53. Each rounding contributes a relative error of at most u, which
+/// is at most one ulp of its result, and the errors add up in the function
+/// value, so the expression is computed within n u |f| of its exact value.
+/// The difference of the two values then carries at most
+/// n u (|f(x+)| + |f(x-)|), and the division by the step carries it into the
+/// quotient. An operation with a condition number above one amplifies the
+/// error of its operand, which the model does not include, and for this
+/// reason sinh(x0 + x0 x1) at the argument 4.88, where sinh has the
+/// condition number 4.88, was measured at 1.86 ulp after three roundings
+/// against 1.55 ulp in the model. The
+/// roundings of the subtraction and the division add at most 2u relative to
+/// the quotient, which the truncation term covers.
+pub fn central_round_off(roundings: usize, fp: f64, fm: f64, step: f64) -> f64 {
+    roundings as f64 * (f64::EPSILON / 2.0) * (fp.abs() + fm.abs()) / step
 }
 
 /// Absolute error of `digamma`. The recurrence shifts the argument to x >= 6,
