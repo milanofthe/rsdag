@@ -197,6 +197,16 @@ pub trait ExternBundle: Send + Sync {
         &SHARED
     }
 
+    /// The instances a batch of this bundle runs side by side in one pass
+    /// ([`main_batch`](Self::main_batch) and the other batches): a pass
+    /// costs as much with lanes left empty, so this many instances are the
+    /// smallest part of a batch worth running alone, the unit a stage's
+    /// instances are claimed in ([`crate::parallel::ranges`]). The default
+    /// runs them one by one.
+    fn batch_lanes(&self) -> usize {
+        1
+    }
+
     /// [`call`](Self::call) over a work buffer the caller owns: the form a
     /// solver drives per instance per iteration, with nothing allocated and
     /// nothing hidden in a thread-local.

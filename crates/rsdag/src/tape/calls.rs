@@ -328,7 +328,6 @@ pub unsafe fn run_stage<'a>(
 ) {
     let work_of = |c: &Call| c.ops as f64 * c.bundle.rate().ns_per_op();
     let work: f64 = (0..n).map(|k| work_of(&call(k))).sum();
-    let groups: usize = (0..n).map(|k| call(k).n_groups).sum();
     // the rows the prologs' instances share, before any part of them runs
     for k in 0..n {
         let c = call(k);
@@ -341,27 +340,33 @@ pub unsafe fn run_stage<'a>(
             run_part(c, slots, gather, inputs, groups, s)
         })
     };
-    // The instances of all calls, call after call, in ranges the threads
-    // claim; a range's part in each call found by counting through the
-    // calls (a stage has few).
-    crate::parallel::ranges::<crate::parallel::Here>(
-        groups,
-        crate::parallel::Work::ns(work),
-        |r| {
-            let mut g0 = 0;
-            for k in 0..n {
-                let c = call(k);
-                let (a, b) = (r.start.max(g0), r.end.min(g0 + c.n_groups));
-                if a < b {
-                    run_groups(&c, a - g0..b - g0);
-                }
-                g0 += c.n_groups;
-                if g0 >= r.end {
-                    break;
-                }
+    // The items claimed are lane groups, the smallest part of a batch worth
+    // running alone ([`ExternBundle::batch_lanes`]), call after call, the
+    // last one of a call partial; a range's part in each call found by
+    // counting through the calls (a stage has few).
+    let lanes = |c: &Call| c.bundle.batch_lanes().max(1);
+    let items: usize = (0..n)
+        .map(|k| {
+            let c = call(k);
+            c.n_groups.div_ceil(lanes(&c))
+        })
+        .sum();
+    crate::parallel::ranges::<crate::parallel::Here>(items, crate::parallel::Work::ns(work), |r| {
+        let mut i0 = 0;
+        for k in 0..n {
+            let c = call(k);
+            let l = lanes(&c);
+            let ni = c.n_groups.div_ceil(l);
+            let (a, b) = (r.start.max(i0), r.end.min(i0 + ni));
+            if a < b {
+                run_groups(&c, (a - i0) * l..((b - i0) * l).min(c.n_groups));
             }
-        },
-    );
+            i0 += ni;
+            if i0 >= r.end {
+                break;
+            }
+        }
+    });
 }
 
 #[cfg(test)]

@@ -418,6 +418,10 @@ impl ExternBundle for NativeBody {
     fn work_len(&self) -> usize {
         self.tape.layout.total + self.pure.len()
     }
+    /// Its widest lane code's width (see `lanes_first`).
+    fn batch_lanes(&self) -> usize {
+        self.lanes.first().map_or(1, |lc| lc.tape.lanes)
+    }
     fn call_into(&self, args: &[f64], work: &mut [f64], out: &mut [f64]) {
         let w = &mut work[..self.tape.layout.total];
         self.run_groups_into(w, args, args.len(), out, 0..1);
