@@ -1313,6 +1313,16 @@ impl Tape {
         });
     }
 
+    /// The instances a batch runs side by side in one pass of its widest
+    /// block ([`instances`](Self::instances)): one where the tape has a
+    /// kernel.
+    pub fn batch_lanes(&self) -> usize {
+        match self.interp.kernels {
+            true => 1,
+            false => crate::constants::LANES_WIDE,
+        }
+    }
+
     /// Ops `ops` for `n` instances, in blocks of lanes as wide as the
     /// instances fill (see [`LANES_WIDE`](crate::constants::LANES_WIDE)),
     /// one by one where the tape has a kernel: `fill(k, lane)` lays out the

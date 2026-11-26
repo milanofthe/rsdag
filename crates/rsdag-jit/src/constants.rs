@@ -38,10 +38,6 @@ pub(crate) const INLINE_MINMAX_MAX: usize = 16;
 /// time, an eight by eight one on the host in two thirds of the inline).
 pub(crate) const INLINE_ROWS: u32 = 8;
 
-/// Instances a parallel task of a batch takes at most, however few the
-/// threads: the tasks stay small enough to balance.
-pub(crate) const TASK_MAX_INSTANCES: usize = 4096;
-
 /// Bytes each emitted chunk is aligned to in the code mapping.
 pub(crate) const CODE_ALIGN: usize = 16;
 

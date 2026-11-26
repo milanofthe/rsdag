@@ -819,6 +819,9 @@ impl ExternBundle for VariantBody {
     fn work_len(&self) -> usize {
         self.full.work_len()
     }
+    fn batch_lanes(&self) -> usize {
+        self.full.batch_lanes()
+    }
     fn call_into(&self, args: &[f64], work: &mut [f64], out: &mut [f64]) {
         self.full.call_into(args, work, out);
     }

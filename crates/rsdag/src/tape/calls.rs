@@ -311,9 +311,9 @@ unsafe fn run_part(
 
 /// A stage of `n` independent calls, the `k`th of them `call(k)`: on as
 /// many threads of the installed pool as its work is worth
-/// ([`crate::parallel::width`]; each call's ops at its bundle's
-/// [`rate`](ExternBundle::rate)), every block of instances over scratch of
-/// its thread's, else one call after the other. Either way the results are
+/// ([`crate::parallel::ranges`]; each call's ops at its bundle's
+/// [`rate`](ExternBundle::rate)), every range of instances a thread claims
+/// over scratch of its thread's, else one call after the other. Either way the results are
 /// the serial ones, and nothing is allocated.
 ///
 /// # Safety
@@ -328,7 +328,6 @@ pub unsafe fn run_stage<'a>(
 ) {
     let work_of = |c: &Call| c.ops as f64 * c.bundle.rate().ns_per_op();
     let work: f64 = (0..n).map(|k| work_of(&call(k))).sum();
-    let groups: usize = (0..n).map(|k| call(k).n_groups).sum();
     // the rows the prologs' instances share, before any part of them runs
     for k in 0..n {
         let c = call(k);
@@ -341,33 +340,33 @@ pub unsafe fn run_stage<'a>(
             run_part(c, slots, gather, inputs, groups, s)
         })
     };
-    let width = crate::parallel::width(work, groups);
-    if width < 2 {
+    // The items claimed are lane groups, the smallest part of a batch worth
+    // running alone ([`ExternBundle::batch_lanes`]), call after call, the
+    // last one of a call partial; a range's part in each call found by
+    // counting through the calls (a stage has few).
+    let lanes = |c: &Call| c.bundle.batch_lanes().max(1);
+    let items: usize = (0..n)
+        .map(|k| {
+            let c = call(k);
+            c.n_groups.div_ceil(lanes(&c))
+        })
+        .sum();
+    crate::parallel::ranges::<crate::parallel::Here>(items, crate::parallel::Work::ns(work), |r| {
+        let mut i0 = 0;
         for k in 0..n {
             let c = call(k);
-            run_groups(&c, 0..c.n_groups);
-        }
-        return;
-    }
-    // Pieces of `bs` instances, call after call; the `it`th found by
-    // counting through the calls (a stage has few).
-    let bs = crate::parallel::piece_len(groups, width);
-    let pieces = |c: &Call| c.n_groups.div_ceil(bs);
-    let run = |mut it: usize| {
-        let mut k = 0;
-        let c = loop {
-            let c = call(k);
-            if it < pieces(&c) {
-                break c;
+            let l = lanes(&c);
+            let ni = c.n_groups.div_ceil(l);
+            let (a, b) = (r.start.max(i0), r.end.min(i0 + ni));
+            if a < b {
+                run_groups(&c, (a - i0) * l..((b - i0) * l).min(c.n_groups));
             }
-            it -= pieces(&c);
-            k += 1;
-        };
-        let g0 = it * bs;
-        run_groups(&c, g0..(g0 + bs).min(c.n_groups));
-    };
-    let total = (0..n).map(|k| pieces(&call(k))).sum();
-    <crate::parallel::Here as crate::parallel::Place>::run_width(total, width, &run);
+            i0 += ni;
+            if i0 >= r.end {
+                break;
+            }
+        }
+    });
 }
 
 #[cfg(test)]

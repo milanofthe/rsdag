@@ -22,7 +22,7 @@
 //! threads and one cost model with them.
 
 pub use rspool::{
-    current, dispatch, in_piece, install, install_lent, piece_len, run_rated, threads, width,
-    Dispatch, Go, Here, Lent, Piece, Place, Pool, Rate, Serial, Spawn, Task, Work, Workers, GAIN,
-    PIECES_PER_WORKER, SPIN,
+    chunks_mut, current, dispatch, in_piece, install, install_lent, map, map_init, ranges,
+    ranges_init, run_rated, threads, width, Disjoint, Dispatch, Go, Here, Lent, Piece, Place, Pool,
+    Rate, Serial, Spawn, Task, Work, Workers, GAIN, SPIN,
 };

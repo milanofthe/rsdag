@@ -154,6 +154,9 @@ impl ExternBundle for InterpretedBody {
     fn rate(&self) -> &crate::parallel::Rate {
         &self.rate
     }
+    fn batch_lanes(&self) -> usize {
+        self.tape.batch_lanes()
+    }
     fn call_into(&self, args: &[f64], _work: &mut [f64], out: &mut [f64]) {
         let at = crate::Instances::first(1, args.len(), 0);
         self.tape.eval_batch(args, out, self.n_out, &at);
