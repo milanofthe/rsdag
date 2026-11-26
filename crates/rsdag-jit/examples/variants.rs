@@ -8,18 +8,11 @@
 
 use rsdag::Program;
 mod common;
+use common::graph::sym;
 use common::per_call;
 
-use rsdag::{CmpOp, ExprId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
+use rsdag::{CmpOp, ExprId, Graph, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
 use rsdag_jit::NativeTape;
-
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    let Node::Symbol(s) = *g.node(e) else {
-        unreachable!()
-    };
-    (e, s)
-}
 
 fn chain(g: &mut Graph<F64>, x: ExprId, n: usize, c: f64) -> ExprId {
     let mut y = x;
@@ -32,8 +25,6 @@ fn chain(g: &mut Graph<F64>, x: ExprId, n: usize, c: f64) -> ExprId {
     y
 }
 
-/// `n` instances of a device of two parameter branches with arms of
-/// `arm` steps, and its inputs: states, then per instance `p` and `q`.
 fn circuit(n: usize, arm: usize) -> (Graph<F64>, Vec<ExprId>, Vec<SymbolId>, Vec<bool>) {
     let mut g: Graph<F64> = Graph::new();
     let (v, vs) = sym(&mut g, "dev.v");
@@ -76,14 +67,11 @@ fn main_us(n: usize, arm: usize, variants: bool) -> f64 {
         }),
         ..Default::default()
     });
-    // The variants built and compiled by the first prolog, so the one
-    // measured runs on them.
     let opts = rsdag_jit::Options {
         background: false,
         ..Default::default()
     };
     let native = NativeTape::compile_opts(&tape, &opts, &[]).expect("native");
-    // Half the instances one polarity, a third on the higher level.
     let ins: Vec<f64> = (0..n)
         .flat_map(|i| {
             let p = if i % 2 == 0 { 0.7 } else { -0.4 };

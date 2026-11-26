@@ -2,26 +2,16 @@
 //! compute exactly what the serial loop computes: prologs, main phases over
 //! the instances' states, and calls without state.
 
-use rsdag::Program;
-use std::sync::Arc;
+mod common;
+use common::{bits, pool, sym};
 
-use rsdag::parallel::{self, Lent};
-use rsdag::{
-    ExprId, FuncId, Graph, Node, OutputRole, ParamRole, ReduceOp, Scope, SymbolId, Tape, F64,
-};
+use rsdag::Program;
+
+use rsdag::parallel::{self};
+use rsdag::{ExprId, FuncId, Graph, OutputRole, ParamRole, ReduceOp, Scope, SymbolId, Tape, F64};
 
 const N: usize = 64;
 
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    match *g.node(e) {
-        Node::Symbol(s) => (e, s),
-        _ => unreachable!(),
-    }
-}
-
-/// A two-terminal device: the current `p0 tanh(p1 (a - b))` and a charge
-/// `p0 exp(-a b)`, its parameters with the `Param` role.
 fn device(g: &mut Graph<F64>, name: &str, k: f64) -> FuncId {
     let mut s = Scope::new(g, name);
     let a = s.param("a", ParamRole::State { id: 0 });
@@ -43,8 +33,6 @@ fn device(g: &mut Graph<F64>, name: &str, k: f64) -> FuncId {
     s.close([(i, OutputRole::Plain), (q, OutputRole::Plain)])
 }
 
-/// A ring of `N` nodes with two kinds of device between neighbours: the
-/// node equations, and the symbols (the states, then the parameters).
 fn ring() -> (Graph<F64>, Vec<ExprId>, Vec<SymbolId>, Vec<bool>) {
     let mut g: Graph<F64> = Graph::new();
     let (fa, fb) = (device(&mut g, "na", 1.0), device(&mut g, "nb", 0.5));
@@ -70,13 +58,6 @@ fn ring() -> (Graph<F64>, Vec<ExprId>, Vec<SymbolId>, Vec<bool>) {
     (g, roots, syms, pure)
 }
 
-fn pool(threads: usize) -> Lent {
-    Lent {
-        pool: Arc::new(parallel::Workers::new(threads)),
-        dispatch: rsdag::parallel::Dispatch::free(threads),
-    }
-}
-
 fn inputs() -> Vec<f64> {
     (0..3 * N)
         .map(|k| 0.3 + 0.01 * k as f64 - (k % 7) as f64 * 0.05)
@@ -89,10 +70,6 @@ fn eval(tape: &Tape, x: &[f64]) -> Vec<f64> {
     out
 }
 
-fn bits(v: &[f64]) -> Vec<u64> {
-    v.iter().map(|x| x.to_bits()).collect()
-}
-
 #[test]
 fn stages_hold_the_independent_calls() {
     let (g, roots, syms, pure) = ring();
@@ -100,8 +77,11 @@ fn stages_hold_the_independent_calls() {
     let st = tape.stages();
     assert!(!st.is_empty(), "the device calls form stages");
     let calls: u32 = st.iter().map(|s| s.instances).sum();
-    // every instance once in the prolog and once in the main phase
-    assert_eq!(calls, 2 * N as u32);
+    assert_eq!(
+        calls,
+        2 * N as u32,
+        "every instance once in the prolog and once in the main phase"
+    );
 }
 
 #[test]
@@ -119,9 +99,12 @@ fn a_split_program_on_a_pool_is_the_serial_one() {
             tape.eval_main(&x, &mut wp, &mut op);
         });
         assert_eq!(bits(&out), bits(&op), "{threads} threads");
-        // the states the prologs left, too
         let n = tape.state_len();
-        assert_eq!(bits(&w[..n]), bits(&wp[..n]), "{threads} threads");
+        assert_eq!(
+            bits(&w[..n]),
+            bits(&wp[..n]),
+            "the states the prologs left on {threads} threads"
+        );
     }
 }
 

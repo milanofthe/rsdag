@@ -16,22 +16,15 @@ fn a_seed_reproduces_the_same_program_and_values() {
     let (nodes, ops, out) = run();
     let (nodes2, ops2, out2) = run();
     assert_eq!((nodes, ops), (nodes2, ops2));
-    // Bit patterns, not values: a deep chain of `exp` overflows to
-    // infinity and `0 * inf` gives NaN. Those are legitimate results
-    // that every evaluation path must reproduce, so they are coverage
-    // rather than a defect, and the corpus compares bit patterns
-    // everywhere for that reason.
-    assert!(out
+    let same = out
         .iter()
         .zip(&out2)
-        .all(|(a, b)| a.to_bits() == b.to_bits()));
+        .all(|(a, b)| a.to_bits() == b.to_bits());
+    assert!(same);
 }
 
 #[test]
 fn every_in_crate_path_matches_the_arena() {
-    // The paths rsdag itself offers, over a corpus that varies size and
-    // vocabulary with the seed. The backends add their own paths to the
-    // same corpus in their own tests.
     for case in cases(0..24, |seed| {
         let spec = Spec::new(seed)
             .steps(20 + 12 * (seed as usize % 8))
@@ -47,8 +40,6 @@ fn every_in_crate_path_matches_the_arena() {
             case.tape.eval(row, &mut w, &mut o);
             o.clone()
         });
-        // Mark every other input parameter-pure, so the prolog split
-        // actually has a prefix to hoist.
         let pure: Vec<bool> = (0..case.syms.len()).map(|k| k % 2 == 0).collect();
         let split = Tape::compile_split(&case.graph, &case.roots, &case.syms, &pure);
         let (mut sw, mut so) = (Vec::new(), Vec::new());

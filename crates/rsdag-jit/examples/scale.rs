@@ -27,30 +27,20 @@
 
 use rsdag::Program;
 mod common;
+use common::graph::sym;
 use common::per_call;
 use std::time::Instant;
 
 use rsdag::{
-    sparse_jacobian, Bound, ExprId, FuncId, Graph, Node, OutputRole, ParamRole, ReduceOp, Scope,
+    sparse_jacobian, Bound, ExprId, FuncId, Graph, OutputRole, ParamRole, ReduceOp, Scope,
     SymbolId, Tape, F64,
 };
 use rsdag_jit::NativeTape;
-
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    match *g.node(e) {
-        Node::Symbol(s) => (e, s),
-        _ => unreachable!(),
-    }
-}
 
 fn ms(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1e3
 }
 
-/// The device: `(d, g, s)` states, `w`, `l`, then the card. The card's
-/// parameters enter a threshold and a gain (work on the card alone), the
-/// instance's a ratio; the current from `d` to `s` and its negation out.
 fn device(g: &mut Graph<F64>, card: usize) -> FuncId {
     let mut s = Scope::new(g, "device");
     let vd = s.param("d", ParamRole::State { id: 0 });
@@ -86,9 +76,6 @@ fn device(g: &mut Graph<F64>, card: usize) -> FuncId {
     s.close([(id, OutputRole::Plain), (is, OutputRole::Plain)])
 }
 
-/// The gate over `(a, b, y, vdd, m)` and both cards: two devices of card
-/// `p` from `vdd` to `y`, two of card `n` from `y` through `m` to ground.
-/// Out: the currents into `y`, `m` and `vdd`.
 fn gate(g: &mut Graph<F64>, dev: FuncId, card: usize, bound: Option<[Bound; 2]>) -> FuncId {
     let mut s = Scope::new(g, "gate");
     let node: Vec<ExprId> = ["a", "b", "y", "vdd", "m"]
@@ -97,8 +84,6 @@ fn gate(g: &mut Graph<F64>, dev: FuncId, card: usize, bound: Option<[Bound; 2]>)
         .map(|(k, n)| s.param(*n, ParamRole::State { id: k as u32 }))
         .collect();
     let (a, b, y, vdd, m) = (node[0], node[1], node[2], node[3], node[4]);
-    // the cards: parameters passed down, or bound into the devices and
-    // globals of the gate
     let (cn, cp): (Vec<ExprId>, Vec<ExprId>) = match bound {
         Some(_) => {
             for k in 0..2 * card {
@@ -117,7 +102,6 @@ fn gate(g: &mut Graph<F64>, dev: FuncId, card: usize, bound: Option<[Bound; 2]>)
     };
     let (w, l) = (s.konst_f64(2e-6), s.konst_f64(1e-7));
     let zero = s.konst_f64(0.0);
-    // a device: its card passed with the arguments, or bound
     let place = |s: &mut Scope<F64>, d: ExprId, gt: ExprId, src: ExprId, c: &[ExprId], k| {
         let args: Vec<ExprId> = [d, gt, src, w, l]
             .into_iter()
@@ -142,16 +126,12 @@ fn gate(g: &mut Graph<F64>, dev: FuncId, card: usize, bound: Option<[Bound; 2]>)
     ])
 }
 
-/// The gates' wiring over `n` nodes: gate `k` reads two nodes, drives one
-/// and has its own internal node `n + k`.
 fn wiring(gates: usize, n: usize) -> Vec<[usize; 3]> {
     (0..gates)
         .map(|k| [(7 * k + 3) % n, (13 * k + 5) % n, k % n])
         .collect()
 }
 
-/// The residuals over node expressions `v` (the pool, then one internal
-/// node per gate) and `vdd`: per node the sum of the currents into it.
 fn residuals(
     g: &mut Graph<F64>,
     gt: FuncId,
@@ -193,7 +173,6 @@ fn run(gates: usize, card: usize, once: bool, bind: bool, inline_first: bool) {
         .map(|k| sym(&mut g, &format!("card{k}")))
         .collect();
     let all_cards: Vec<ExprId> = cards.iter().map(|&(e, _)| e).collect();
-    // bound: a device function per card, the cards its globals
     let bound = bind.then(|| {
         let at = |c: usize| -> Vec<(u32, ExprId)> {
             (0..card)
@@ -210,7 +189,6 @@ fn run(gates: usize, card: usize, once: bool, bind: bool, inline_first: bool) {
         .collect();
     let card_e: Vec<ExprId> = if bind { Vec::new() } else { all_cards.clone() };
     let roots = if once {
-        // the block over formal nodes, placed once on the top-level ones
         let mut s = Scope::new(&mut g, "block");
         let fv: Vec<ExprId> = (0..n + gates)
             .map(|k| s.param(&format!("blk.v{k}"), ParamRole::State { id: k as u32 }))
@@ -251,7 +229,6 @@ fn run(gates: usize, card: usize, once: bool, bind: bool, inline_first: bool) {
     let spec = g.specialize_calls(&both);
     let specialize = ms(t);
 
-    // the hierarchy compiled as it stands, or (`--inline`) inlined first
     let t = Instant::now();
     let flat = if inline_first {
         g.inline_composite(&spec)
@@ -262,7 +239,6 @@ fn run(gates: usize, card: usize, once: bool, bind: bool, inline_first: bool) {
     let (res, jac) = flat.split_at(roots.len());
     let nodes = g.len();
 
-    // inputs: the states vary, the cards are bound (the prolog's share)
     let syms: Vec<SymbolId> = states
         .iter()
         .copied()

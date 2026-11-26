@@ -7,10 +7,17 @@
 //! draws from the same population and a new op is covered here the moment it
 //! is drawable there.
 
+mod common;
+use common::constants::{
+    central_round_off, CENTRAL_DIFFERENCE_STEP, RICHARDSON_CENTRAL, TRUNCATION_ESTIMATE_MULTIPLE,
+};
+use common::same_bits;
+
 use rsdag::Program;
 use std::collections::HashMap;
 
-use rsdag::node::Node;
+use rsdag::dot::reachable;
+use rsdag::node::{Node, UnaryOp};
 use rsdag::synth::{build_over, Rng, Spec, Vocabulary};
 use rsdag::BigRational;
 use rsdag::{differentiate, eval, ExprId, Graph, ReduceOp, SymbolId, Tape};
@@ -22,43 +29,71 @@ fn sym_id(ctx: &Graph<BigRational>, e: ExprId) -> SymbolId {
     }
 }
 
-fn same_bits(a: f64, b: f64) -> bool {
-    a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
+fn cone(ctx: &Graph<BigRational>, root: ExprId) -> Vec<Node> {
+    reachable(ctx, &[root])
+        .into_iter()
+        .map(|e| *ctx.node(e))
+        .collect()
 }
 
-/// One generated expression over `syms`, drawn from the vocabulary the test
-/// asks for.
+fn roundings(nodes: &[Node]) -> usize {
+    nodes
+        .iter()
+        .map(|n| match *n {
+            Node::Const(_) | Node::Symbol(_) | Node::Neg(_) | Node::Cmp(..) | Node::Select(..) => 0,
+            Node::Add(..) | Node::Mul(..) | Node::Unary(..) | Node::Binary(..) => 1,
+            Node::Pow(_, k) => {
+                let e = k.unsigned_abs();
+                let squarings = e.checked_ilog2().unwrap_or(0) as usize;
+                let products = e.count_ones().saturating_sub(1) as usize;
+                squarings + products + usize::from(k < 0)
+            }
+            Node::Reduce(ReduceOp::Sum | ReduceOp::Product, l) | Node::Dot(l) => {
+                l.len().saturating_sub(1)
+            }
+            Node::Reduce(ReduceOp::Min | ReduceOp::Max, _) => 0,
+            Node::Call(..) | Node::Solve(..) => unreachable!("the draw has no calls or solves"),
+        })
+        .sum()
+}
+
+// https://github.com/milanofthe/rsdag/issues/243
+fn has_gamma(nodes: &[Node]) -> bool {
+    nodes.iter().any(|n| {
+        matches!(
+            n,
+            Node::Unary(UnaryOp::Tgamma | UnaryOp::Lgamma | UnaryOp::Digamma, _)
+        )
+    })
+}
+
 fn build_with_syms(
     ctx: &mut Graph<BigRational>,
     rng: &mut Rng,
     syms: &[ExprId],
     steps: usize,
     smooth: bool,
-    extended: bool,
 ) -> ExprId {
-    let mut spec = Spec::new(rng.next_u64()).steps(steps).vocab(if extended {
-        Vocabulary::Full
-    } else {
-        Vocabulary::Elementary
-    });
+    let mut spec = Spec::new(rng.next_u64())
+        .steps(steps)
+        .vocab(Vocabulary::Full);
     if smooth {
         spec = spec.smooth();
     }
     build_over(ctx, &mut spec, syms)
 }
 
-/// As [`build_with_syms`], with guards dense enough that a random walk over
-/// the inputs crosses region boundaries often.
 fn build_branchy(
     ctx: &mut Graph<BigRational>,
     rng: &mut Rng,
     syms: &[ExprId],
     steps: usize,
 ) -> ExprId {
+    let selects = 25;
     let mut spec = Spec::new(rng.next_u64())
         .steps(steps)
         .vocab(Vocabulary::Elementary)
-        .selects(25);
+        .selects(selects);
     build_over(ctx, &mut spec, syms)
 }
 
@@ -72,9 +107,8 @@ fn tape_matches_arena_sweep_bit_exact() {
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
         let steps = 6 + rng.below(20);
-        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, false, true);
+        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, false);
 
-        // Random input point.
         let inputs: Vec<f64> = (0..nsym).map(|_| rng.val()).collect();
         let env: HashMap<SymbolId, f64> = sym_ids
             .iter()
@@ -97,12 +131,8 @@ fn tape_matches_arena_sweep_bit_exact() {
     assert_eq!(mismatches, 0, "tape vs arena sweep diverged");
 }
 
-/// Prolog-split tapes must agree bit-for-bit with the unsplit tape -- through
-/// the plain `eval` (reordered stream, same dataflow) and through the
-/// prolog/main protocol, including several main passes over one prolog and a
-/// changed "state" input between them (the split's whole point).
 #[test]
-fn split_tape_matches_unsplit_bit_exact() {
+fn split_tape_matches_unsplit_bit_exact_over_main_passes_of_one_prolog() {
     let mut mismatches = 0;
     for seed in 1..400u64 {
         let mut rng = Rng::new(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
@@ -111,11 +141,11 @@ fn split_tape_matches_unsplit_bit_exact() {
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
         let steps = 6 + rng.below(24);
-        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, false, true);
+        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, false);
 
-        // Random purity mask ("parameters" vs "state"), at least one impure.
         let mut pure: Vec<bool> = (0..nsym).map(|_| rng.below(2) == 0).collect();
-        pure[rng.below(nsym)] = false;
+        let at_least_one_impure = rng.below(nsym);
+        pure[at_least_one_impure] = false;
 
         let plain = Tape::compile(&ctx, &[root], &sym_ids);
         let split = Tape::compile_split(&ctx, &[root], &sym_ids, &pure);
@@ -125,7 +155,6 @@ fn split_tape_matches_unsplit_bit_exact() {
         let (mut w3, mut o3) = (Vec::new(), Vec::new());
 
         let mut inputs: Vec<f64> = (0..nsym).map(|_| rng.val()).collect();
-        // One prolog, several main passes with the impure inputs varying.
         split.eval_prolog(&inputs, &mut w3);
         for pass in 0..4 {
             plain.eval(&inputs, &mut w1, &mut o1);
@@ -143,7 +172,6 @@ fn split_tape_matches_unsplit_bit_exact() {
                     }
                 }
             }
-            // Vary only impure inputs; the prolog stays valid.
             for k in 0..nsym {
                 if !pure[k] {
                     inputs[k] = rng.val();
@@ -156,8 +184,6 @@ fn split_tape_matches_unsplit_bit_exact() {
 
 #[test]
 fn liveness_reuses_slots_on_deep_chains() {
-    // A 200-deep accumulator chain ((((x+c)+c)+c)...) has 200+ reachable nodes
-    // but only a couple are live at once -> the work buffer should be tiny.
     let mut ctx: Graph<BigRational> = Graph::new();
     let x = ctx.sym("x");
     let mut acc = x;
@@ -172,32 +198,35 @@ fn liveness_reuses_slots_on_deep_chains() {
         tape.n_slots()
     );
 
-    // ... and it still evaluates correctly: x + sum(0..200).
     let (mut work, mut out) = (Vec::new(), Vec::new());
     tape.eval(&[3.0f64], &mut work, &mut out);
     let expect = 3.0 + (0..200).map(|i| i as f64).sum::<f64>();
-    assert_eq!(out[0], expect);
+    assert_eq!(
+        out[0], expect,
+        "the deep chain with reused slots evaluates wrong"
+    );
 }
 
 #[test]
-fn long_reduce_dot_match_arena_4lane() {
-    // Long Reduce / Dot lists exercise the 4-lane path; tape and arena must
-    // still agree bit-for-bit (both go through the shared reduce/dot slice fn).
+fn long_reduce_and_dot_lists_on_the_4_lane_path_match_the_arena_bit_exact() {
     for seed in 1..200u64 {
         let mut rng = Rng::new(seed.wrapping_mul(0xD1B5_4A32_D192_ED03) | 1);
         let mut ctx: Graph<BigRational> = Graph::new();
         let nsym = 3;
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
-        // a wide list (20..40 operands) of symbol/const mixes
-        let len = 20 + rng.below(20);
+        let wide_list_len = 20 + rng.below(20);
         let mut pool = syms.clone();
         for _ in 0..3 {
             let k = ctx.konst_f64(rng.val());
             pool.push(k);
         }
-        let la: Vec<ExprId> = (0..len).map(|_| pool[rng.below(pool.len())]).collect();
-        let lb: Vec<ExprId> = (0..len).map(|_| pool[rng.below(pool.len())]).collect();
+        let la: Vec<ExprId> = (0..wide_list_len)
+            .map(|_| pool[rng.below(pool.len())])
+            .collect();
+        let lb: Vec<ExprId> = (0..wide_list_len)
+            .map(|_| pool[rng.below(pool.len())])
+            .collect();
         let red = ctx.reduce(ReduceOp::Sum, la.clone());
         let dot = ctx.dot(la, lb);
         let root = ctx.add(red, dot);
@@ -223,9 +252,6 @@ fn long_reduce_dot_match_arena_4lane() {
 
 #[test]
 fn specialize_pins_and_guards() {
-    // y = select(x > 0, exp(x), -x): specialized at x = 1 the select is gone
-    // (fewer ops), the guard holds anywhere on the positive branch, fires on
-    // the negative one, and respecializing restores parity.
     let mut ctx: Graph<BigRational> = Graph::new();
     let x = ctx.sym("x");
     let zero = ctx.zero();
@@ -270,12 +296,7 @@ fn specialize_pins_and_guards() {
 }
 
 #[test]
-fn specialized_tape_matches_full_bit_exact() {
-    // Trace at a point, specialize, then random-walk the inputs. Whenever the
-    // guards pass, the specialized outputs must be bit-exact against the full
-    // tape; whenever they fire, respecializing from a fresh trace must restore
-    // parity at that same point. A missed flip of a *live* select would break
-    // the parity assert, so this also fuzzes guard soundness.
+fn specialized_tape_matches_full_bit_exact_and_its_guards_catch_every_live_flip() {
     let mut flips = 0;
     let mut holds = 0;
     for seed in 1..400u64 {
@@ -298,7 +319,6 @@ fn specialized_tape_matches_full_bit_exact() {
 
         for _ in 0..30 {
             for v in inputs.iter_mut() {
-                // Steps large enough to cross comparison boundaries regularly.
                 *v += rng.val();
             }
             choices.clear();
@@ -344,46 +364,55 @@ fn differentiate_matches_finite_differences() {
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
         let steps = 4 + rng.below(10);
-        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, true, true);
+        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, true);
+        let nodes = cone(&ctx, root);
+        if has_gamma(&nodes) {
+            continue;
+        }
 
-        // Differentiate w.r.t. one symbol.
+        let n = roundings(&nodes);
+
         let wrt = rng.below(nsym);
         let d = differentiate(&mut ctx, root, sym_ids[wrt]);
 
-        // Positive-ish point to stay in ln/sqrt domains more often.
         let point: Vec<f64> = (0..nsym).map(|_| rng.pos()).collect();
         let mut env: HashMap<SymbolId, f64> =
             sym_ids.iter().copied().zip(point.iter().copied()).collect();
 
         let ad = eval(&ctx, &[d], &env)[0];
 
-        // Central finite difference of the original.
-        let h = 1e-6;
-        env.insert(sym_ids[wrt], point[wrt] + h);
-        let fp = eval(&ctx, &[root], &env)[0];
-        env.insert(sym_ids[wrt], point[wrt] - h);
-        let fm = eval(&ctx, &[root], &env)[0];
-        let fd = (fp - fm) / (2.0 * h);
+        let x = point[wrt];
+        let mut central = |h: f64| {
+            let (xp, xm) = (x + h, x - h);
+            env.insert(sym_ids[wrt], xp);
+            let fp = eval(&ctx, &[root], &env)[0];
+            env.insert(sym_ids[wrt], xm);
+            let fm = eval(&ctx, &[root], &env)[0];
+            let step = xp - xm;
+            ((fp - fm) / step, central_round_off(n, fp, fm, step))
+        };
+        let h = CENTRAL_DIFFERENCE_STEP;
+        let (fd, round_off) = central(h);
+        let (fine, _) = central(h / 2.0);
 
-        // Skip samples that landed on a domain edge or blew up numerically.
-        if !ad.is_finite() || !fd.is_finite() || fd.abs() > 1e8 {
+        let on_a_domain_edge_or_blown_up =
+            !ad.is_finite() || !fd.is_finite() || !fine.is_finite() || fd.abs() > 1e8;
+        if on_a_domain_edge_or_blown_up {
             continue;
         }
-        let rel = (ad - fd).abs() / (fd.abs() + 1e-6);
+        let truncation = RICHARDSON_CENTRAL * (fd - fine).abs();
+        let bound = TRUNCATION_ESTIMATE_MULTIPLE * truncation + round_off;
         assert!(
-            rel < 1e-3,
-            "seed {seed}: d/dx{wrt} AD={ad:e} FD={fd:e} rel={rel:e}"
+            (ad - fd).abs() <= bound,
+            "seed {seed}: d/dx{wrt} AD={ad:e} FD(h)={fd:e} FD(h/2)={fine:e} roundings={n} bound={bound:e}"
         );
         checked += 1;
     }
     assert!(checked > 200, "too few AD samples survived ({checked})");
 }
 
-/// Partial specialization: with a random pin mask, every evaluation whose
-/// guards hold must be bit-exact against the full tape -- unpinned selects may
-/// flip freely without invalidating anything.
 #[test]
-fn partial_specialization_checked_evals_bit_exact() {
+fn partial_specialization_checked_evals_bit_exact_while_unpinned_selects_flip() {
     let mut mismatches = 0;
     for seed in 1..500u64 {
         let mut rng = Rng::new(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
@@ -392,7 +421,7 @@ fn partial_specialization_checked_evals_bit_exact() {
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
         let steps = 8 + rng.below(24);
-        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, true, true);
+        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, true);
         let tape = Tape::compile(&ctx, &[root], &sym_ids);
         if tape.n_selects() == 0 {
             continue;

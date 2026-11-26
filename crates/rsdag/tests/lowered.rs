@@ -2,27 +2,20 @@
 //! program: a view computes what its own compilation computes, value for
 //! value, and its calls run bodies of the outputs it reads only.
 
+mod common;
+use common::sym;
+
 use rsdag::Program;
 use rsdag::{
     sparse_jacobian, tape::Op, ExprId, FuncId, Graph, Lowered, Node, OutputRole, ParamRole,
     ReduceOp, Scope, SymbolId, Tape, F64,
 };
 
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    let Node::Symbol(s) = *g.node(e) else {
-        unreachable!()
-    };
-    (e, s)
-}
-
-/// `d(va, vb, k, w)`: a current and a charge over a card parameter and an
-/// instance parameter, those pure with `roles` (a body with a prolog).
-fn device(g: &mut Graph<F64>, roles: bool) -> FuncId {
+fn device(g: &mut Graph<F64>, params_pure_with_a_prolog: bool) -> FuncId {
     let mut s = Scope::new(g, "d");
     let va = s.param("va", ParamRole::State { id: 0 });
     let vb = s.param("vb", ParamRole::State { id: 1 });
-    let role = if roles {
+    let role = if params_pure_with_a_prolog {
         ParamRole::Param
     } else {
         ParamRole::State { id: 2 }
@@ -50,12 +43,9 @@ struct System {
     pure: Vec<bool>,
 }
 
-/// A ring of `n` cells, each a composite function calling the device twice
-/// (so its calls are expanded from a template and merged), with the
-/// Jacobians of its currents and charges.
-fn ring(n: usize, roles: bool) -> System {
+fn ring(n: usize, params_pure_with_a_prolog: bool) -> System {
     let mut g: Graph<F64> = Graph::new();
-    let d = device(&mut g, roles);
+    let d = device(&mut g, params_pure_with_a_prolog);
     let (a, sa) = sym(&mut g, "cell.a");
     let (b, sb) = sym(&mut g, "cell.b");
     let (w, sw) = sym(&mut g, "cell.w");
@@ -125,7 +115,6 @@ fn bits(tape: &Tape, inputs: &[f64]) -> Vec<u64> {
     out.iter().map(|v| v.to_bits()).collect()
 }
 
-/// Per call of the tape, the outputs its body computes per instance.
 fn call_widths(tape: &Tape) -> Vec<u32> {
     let mut w: Vec<u32> = (tape.ops().iter())
         .filter_map(|op| match *op {
@@ -139,12 +128,12 @@ fn call_widths(tape: &Tape) -> Vec<u32> {
 
 #[test]
 fn a_view_computes_what_its_own_compilation_does() {
-    for roles in [true, false] {
-        views_compute_what_their_own_compilations_do(ring(7, roles));
+    for params_pure_with_a_prolog in [true, false] {
+        check_views(ring(7, params_pure_with_a_prolog));
     }
 }
 
-fn views_compute_what_their_own_compilations_do(s: System) {
+fn check_views(s: System) {
     let values: Vec<f64> = (0..s.inputs.len()).map(|j| 0.1 + 0.07 * j as f64).collect();
     let all: Vec<ExprId> = (s.currents.iter())
         .chain(&s.charges)
@@ -186,9 +175,6 @@ fn a_view_of_every_root_is_the_compilation() {
 
 #[test]
 fn a_view_narrows_onto_a_body_built_before_its_function_grew() {
-    // the currents compiled while the device has no derivative outputs yet:
-    // the body of its current is built then, and a view of the currents
-    // out of a program with the Jacobian narrows back onto it
     let mut g: Graph<F64> = Graph::new();
     let d = device(&mut g, true);
     let v: Vec<(ExprId, SymbolId)> = (0..3).map(|j| sym(&mut g, &format!("v{j}"))).collect();
@@ -210,5 +196,9 @@ fn a_view_narrows_onto_a_body_built_before_its_function_grew() {
     let view = lowered.tape(&g, &currents);
     let values = [0.3, 0.5, 0.7, 1.1, 1.3];
     assert_eq!(bits(&view, &values), bits(&first, &values));
-    assert_eq!(call_widths(&view), call_widths(&first));
+    assert_eq!(
+        call_widths(&view),
+        call_widths(&first),
+        "a view of the currents does not narrow back onto the body built before the derivatives"
+    );
 }

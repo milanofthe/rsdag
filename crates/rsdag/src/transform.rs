@@ -10,8 +10,6 @@ use crate::func::FuncId;
 use crate::graph::{Graph, Pooled, NO_CONTEXT};
 use crate::node::{ArgList, ExprId, Node, SymbolId};
 
-/// A bottom-up rewrite (see [`rewrite`]): the graph it reads and what it
-/// makes of each node.
 pub(crate) trait Rule<K: Field> {
     /// What a node becomes: a node of a graph, a drawn node.
     type V: Copy + 'static;
@@ -26,9 +24,6 @@ pub(crate) trait Rule<K: Field> {
     fn calls(&mut self, call: &Call<Self::V>, outs: &[(ExprId, u32)], vals: &mut Vec<Self::V>);
 }
 
-/// An instance a rewrite meets: function `f` called in context `ctx` of
-/// the source over one argument list, the list rewritten, and the context's
-/// bound expressions, rewritten once however many instances share them.
 pub(crate) struct Call<'a, V> {
     pub f: FuncId,
     pub ctx: u32,
@@ -37,21 +32,14 @@ pub(crate) struct Call<'a, V> {
 }
 
 impl<V: Copy> Call<'_, V> {
-    /// The operands rewritten, in the function's parameter order (see
-    /// [`Graph::full_args`]).
     pub(crate) fn params<K: Field>(&self, g: &Graph<K>) -> Cow<'_, [V]> {
         g.in_param_order(self.ctx, self.args, self.bound)
     }
 }
 
-/// Rewrite the DAG under `roots` bottom-up, every node once, in the order
-/// of [`Graph::cone`] (the order a recursive walk finishes the nodes): a
-/// call's instance at its first call, with every call of the instance under
-/// `roots`, so an instance of a wide body costs its width once and its
-/// outputs share what the rule makes of it.
 pub(crate) fn rewrite<K: Field, R: Rule<K>>(r: &mut R, roots: &[ExprId]) -> Vec<R::V> {
     let cone = r.source().cone(roots, false);
-    let mut scratch: Pooled<Scratch<R::V>> = Pooled::take();
+    let mut scratch: Pooled<Scratch<R::V>> = Pooled::take_uncleared();
     let Scratch {
         index,
         place,
@@ -74,8 +62,6 @@ pub(crate) fn rewrite<K: Field, R: Rule<K>>(r: &mut R, roots: &[ExprId]) -> Vec<
     outs.clear();
     done.clear();
     vals.clear();
-    // Per call its instance and its place among the instance's calls, and
-    // the calls laid out by instance: `outs[start[s]..start[s + 1]]`.
     let g = r.source();
     for &e in cone.nodes.iter() {
         place.push(match *g.node(e) {
@@ -104,7 +90,6 @@ pub(crate) fn rewrite<K: Field, R: Rule<K>>(r: &mut R, roots: &[ExprId]) -> Vec<
         outs[next[s as usize] as usize] = call;
         next[s as usize] += 1;
     }
-    // per instance, where its calls' values start in `done`
     at_done.clear();
     at_done.resize(index.len(), u32::MAX);
     for (&e, &(s, k)) in cone.nodes.iter().zip(place.iter()) {
@@ -148,7 +133,6 @@ pub(crate) fn rewrite<K: Field, R: Rule<K>>(r: &mut R, roots: &[ExprId]) -> Vec<
     roots.iter().map(|&e| vals[cone.pos(e)]).collect()
 }
 
-/// The buffers of [`rewrite`], kept in the per-thread pool.
 struct Scratch<V> {
     index: HashMap<(FuncId, u32, ArgList), u32>,
     place: Vec<(u32, u32)>,
@@ -183,16 +167,10 @@ impl<V> Default for Scratch<V> {
     }
 }
 
-/// The contexts the calls of a rewrite in place run in: per context of the
-/// source and function called, the context over the context's bound
-/// expressions rewritten, made once per rewrite (a model card shared by many
-/// instances costs its width once).
 #[derive(Default)]
 pub(crate) struct Contexts(HashMap<(u32, FuncId), u32>);
 
 impl Contexts {
-    /// The context `call`'s calls of `f` (its function, or a copy with its
-    /// parameters) run in.
     pub(crate) fn of<K: Field>(&mut self, g: &mut Graph<K>, call: &Call<ExprId>, f: FuncId) -> u32 {
         match call.ctx {
             NO_CONTEXT => NO_CONTEXT,
@@ -201,12 +179,9 @@ impl Contexts {
     }
 }
 
-/// [`substitute`]: a symbol `map` binds its expression, a call whose body
-/// reads one as a global the copy bound so (see [`Graph::rebound`]).
 struct Substitute<'a, K: Field> {
     g: &'a mut Graph<K>,
     map: &'a HashMap<SymbolId, ExprId>,
-    /// per function, the copy its calls run
     copies: HashMap<FuncId, Option<FuncId>>,
     contexts: Contexts,
 }

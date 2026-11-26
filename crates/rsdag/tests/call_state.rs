@@ -3,19 +3,27 @@
 //! split over those parameters runs that prolog in its own prolog, once
 //! per binding, and only the rest per evaluation.
 
-use rsdag::Program;
-use rsdag::{ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
+mod common;
+use common::{identical, sym};
 
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    let Node::Symbol(s) = *g.node(e) else {
-        unreachable!()
-    };
-    (e, s)
+use rsdag::Program;
+use rsdag::{FuncId, Graph, OutputRole, ParamRole, Scope, Tape, F64};
+
+const PARAMS: [f64; 12] = [0.2, 0.3, 0.2, 0.2, 0.0, -0.0, 0.3, 0.7, 0.2, 0.0, 0.7, 0.3];
+
+fn params() -> [f64; 12] {
+    let has = |v: f64| PARAMS.iter().any(|q| q.to_bits() == v.to_bits());
+    assert!(
+        has(0.0) && has(-0.0),
+        "the parameters hold both signed zeros"
+    );
+    assert!(
+        (1..PARAMS.len()).any(|i| PARAMS[..i].contains(&PARAMS[i])),
+        "the parameters repeat"
+    );
+    PARAMS
 }
 
-/// `f(v, p) = [tanh(v) * k(p), v^2 + k(p)]` with `k(p)` an expensive chain
-/// over `p` alone: the prolog's work.
 fn device(g: &mut Graph<F64>) -> FuncId {
     let (v, vs) = sym(g, "dev.v");
     let (p, ps) = sym(g, "dev.p");
@@ -34,10 +42,6 @@ fn device(g: &mut Graph<F64>) -> FuncId {
     s.param(vs, ParamRole::State { id: 0 });
     s.param(ps, ParamRole::Param);
     s.close([(o0, OutputRole::Plain), (o1, OutputRole::Plain)])
-}
-
-fn same(a: &[f64], b: &[f64]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
 }
 
 #[test]
@@ -81,12 +85,12 @@ fn a_split_caller_runs_the_callees_prolog_in_its_own() {
         let mut got = vec![0.0; split.out_len()];
         let (mut ww, mut want) = (Vec::new(), Vec::new());
         split.eval_prolog_into(&ins(0.0), &mut w);
-        for t in [0.0, 0.5, -1.25] {
-            // Only the state changes between these: the prolog stands.
+        let states_after_one_prolog = [0.0, 0.5, -1.25];
+        for t in states_after_one_prolog {
             split.eval_main_into(&ins(t), &mut w, &mut got);
             whole.eval(&ins(t), &mut ww, &mut want);
             assert!(
-                same(&got, &want),
+                identical(&got, &want),
                 "{n} instances at t = {t}: {got:?} vs {want:?}"
             );
         }
@@ -95,10 +99,7 @@ fn a_split_caller_runs_the_callees_prolog_in_its_own() {
 
 #[test]
 fn instances_of_the_same_parameters_share_a_state_with_the_same_results() {
-    // Twelve instances over five parameter values, some repeated; 0.0 and
-    // -0.0 are apart (not the same bits). Serially and on a pool, the split
-    // tape's outputs are the whole one's, bit for bit.
-    let qs = [0.2, 0.3, 0.2, 0.2, 0.0, -0.0, 0.3, 0.7, 0.2, 0.0, 0.7, 0.3];
+    let qs = params();
     let mut g: Graph<F64> = Graph::new();
     let f = device(&mut g);
     let (mut syms, mut roots) = (Vec::new(), Vec::new());
@@ -130,7 +131,7 @@ fn instances_of_the_same_parameters_share_a_state_with_the_same_results() {
         for t in [0.0, 0.5, -1.25] {
             split.eval_main_into(&ins(t), &mut w, &mut got);
             whole.eval(&ins(t), &mut ww, &mut want);
-            assert!(same(&got, &want), "at t = {t}: {got:?} vs {want:?}");
+            assert!(identical(&got, &want), "at t = {t}: {got:?} vs {want:?}");
         }
     };
     run();
@@ -141,8 +142,6 @@ fn instances_of_the_same_parameters_share_a_state_with_the_same_results() {
     rsdag::parallel::install_lent(pool, run);
 }
 
-/// `f(v, c, q)`: a card parameter `c` and an instance parameter `q`, the
-/// prolog's chain over both.
 fn carded(g: &mut Graph<F64>) -> FuncId {
     let (v, vs) = sym(g, "dev.v");
     let (c, cs) = sym(g, "dev.c");
@@ -165,11 +164,7 @@ fn carded(g: &mut Graph<F64>) -> FuncId {
 
 #[test]
 fn instances_share_rows_by_the_arguments_they_own() {
-    // One card for all twelve instances, an instance parameter each (some
-    // repeated, 0.0 and -0.0 apart), or one for all. The rows found are
-    // those of keying every pure argument, and the outputs the whole
-    // tape's, bit for bit.
-    let qs = [0.2, 0.3, 0.2, 0.2, 0.0, -0.0, 0.3, 0.7, 0.2, 0.0, 0.7, 0.3];
+    let qs = params();
     for shared_q in [false, true] {
         let mut g: Graph<F64> = Graph::new();
         let f = carded(&mut g);
@@ -210,19 +205,22 @@ fn instances_share_rows_by_the_arguments_they_own() {
         let rows: Vec<usize> = (0..c.n_groups)
             .map(|k| w[c.out + c.n_groups * c.n_out + k] as usize)
             .collect();
-        // every pure argument keyed: the first instance with the same bits
-        let key = |k: usize| -> [u64; 2] {
+        let key_of_every_pure_argument = |k: usize| -> [u64; 2] {
             let q = if shared_q { 0.4 } else { qs[k] };
             [1.5f64.to_bits(), f64::to_bits(q)]
         };
         let want: Vec<usize> = (0..qs.len())
-            .map(|k| (0..=k).find(|&j| key(j) == key(k)).unwrap())
+            .map(|k| {
+                (0..=k)
+                    .find(|&j| key_of_every_pure_argument(j) == key_of_every_pure_argument(k))
+                    .unwrap()
+            })
             .collect();
         assert_eq!(rows, want);
 
         let (mut got, mut ww, mut out) = (vec![0.0; split.out_len()], Vec::new(), Vec::new());
         split.eval_main_into(&vals, &mut w, &mut got);
         whole.eval(&vals, &mut ww, &mut out);
-        assert!(same(&got, &out), "{got:?} vs {out:?}");
+        assert!(identical(&got, &out), "{got:?} vs {out:?}");
     }
 }

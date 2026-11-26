@@ -1,41 +1,35 @@
 #!/bin/sh
-# The full gate, locally and with the toolchain CI uses (rustup stable): the
-# minimal Linux CI (.github/workflows/ci.yml) and everything it leaves out.
 set -eu
 cd "$(dirname "$0")/.."
 export CARGO_TERM_COLOR=always
 FEATURES='rsdag/synth rsdag/serde'
-# The toolchain's own binaries first on the PATH: `rustup run` leaves a
-# Homebrew cargo ahead of the toolchain's, and that one lacks the wasm target
-# and mixes its rustc, rustdoc and clippy into one target directory.
-TC=$(dirname "$(rustup which cargo --toolchain stable)")
-export PATH="$TC:$PATH"
+STABLE_BIN=$(dirname "$(rustup which cargo --toolchain stable)")
+export PATH="$STABLE_BIN:$PATH"
 CARGO=cargo
 run() { echo "== $*"; "$@"; }
 run $CARGO fmt --all -- --check
-# rsdag's scopes compiled out and, with rsprobe/on, recording.
 for probe in "" rsprobe/on; do
     run $CARGO clippy --workspace --exclude rsdag-py --all-targets --features "$FEATURES $probe" -- -D warnings
     run $CARGO test --workspace --exclude rsdag-py --features "$FEATURES $probe"
 done
-# The x86 baseline encodings and the SSE2 dense kernels, which a CPU with
-# SSE4.1 and AVX never runs.
-RSDAG_SSE2=1 run $CARGO test -p rsdag-jit --features rsdag/synth
-RSDAG_SSE2=1 run $CARGO test -p rsdag --features synth --test simd_kernels
+test_sse2() {
+    RSDAG_SSE2=1 run $CARGO test -p rsdag-jit --features rsdag/synth
+    RSDAG_SSE2=1 run $CARGO test -p rsdag --features synth --test simd_kernels
+}
+test_sse2
 run $CARGO clippy -p rsdag --all-targets -- -D warnings
 RUSTDOCFLAGS='-D warnings' run $CARGO doc --no-deps --workspace --exclude rsdag-py --features "$FEATURES rsdag/exact"
 for f in "" exact serde exact,serde; do
     run $CARGO clippy -p rsdag --lib --no-default-features --features "$f" -- -D warnings
 done
-# The graph crate in the browser (a consumer's web build interprets there),
-# linked and importing nothing.
-for probe in "" ,rsprobe/on; do
-    run $CARGO build --release -p rsdag --example wasm_probe --target wasm32-unknown-unknown --features "exact,serde$probe"
-    run python3 scripts/wasm_imports.py target/wasm32-unknown-unknown/release/examples/wasm_probe.wasm
-done
+check_wasm() {
+    for probe in "" ,rsprobe/on; do
+        run $CARGO build --release -p rsdag --example wasm_probe --target wasm32-unknown-unknown --features "exact,serde$probe"
+        run python3 scripts/wasm_imports.py target/wasm32-unknown-unknown/release/examples/wasm_probe.wasm
+    done
+}
+check_wasm
 run $CARGO check -p rsdag-py
-# The Python job: the wheel, installed into the interpreter that runs the
-# tests. Skipped where maturin or pytest is missing.
 if command -v maturin >/dev/null && python3 -m pytest --version >/dev/null 2>&1; then
     DIST="${TMPDIR:-/tmp}/rsdag-dist"
     rm -rf "$DIST"

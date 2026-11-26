@@ -38,8 +38,7 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static A: Counting = Counting;
 
-/// Allocations of `runs` runs of `f`, after one warm-up run.
-fn allocs(runs: usize, mut f: impl FnMut()) -> usize {
+fn allocs_after_a_warm_up(runs: usize, mut f: impl FnMut()) -> usize {
     f();
     let before = counted();
     for _ in 0..runs {
@@ -72,12 +71,11 @@ fn the_evaluation_paths_do_not_allocate() {
     let mut work = vec![0.0; tape.work_len()];
     let mut out = vec![0.0; tape.out_len()];
     assert_eq!(
-        allocs(50, || tape.eval_into(&inputs, &mut work, &mut out)),
+        allocs_after_a_warm_up(50, || tape.eval_into(&inputs, &mut work, &mut out)),
         0,
         "eval_into allocated"
     );
 
-    // The same as a function body, called from a program.
     let mut s = Scope::new(&mut g, "body");
     for &x in &syms {
         s.param(x, ParamRole::Free);
@@ -88,14 +86,15 @@ fn the_evaluation_paths_do_not_allocate() {
     let mut work = vec![0.0; tape.work_len()];
     let mut out = vec![0.0; tape.out_len()];
     assert_eq!(
-        allocs(50, || tape.eval_into(&inputs, &mut work, &mut out)),
+        allocs_after_a_warm_up(50, || tape.eval_into(&inputs, &mut work, &mut out)),
         0,
         "a call of a body allocated"
     );
 
-    // A dense solve works in the scratch the work buffer lends, on both
-    // sides of the blocked elimination.
-    for n in [3usize, 80] {
+    let orders = [3usize, 80];
+    assert!(orders[0] <= rsdag::constants::LU_UNBLOCKED_MAX);
+    assert!(orders[1] > rsdag::constants::LU_UNBLOCKED_MAX);
+    for n in orders {
         let mut g: Graph<F64> = Graph::new();
         let xs: Vec<_> = (0..n).map(|i| g.sym(&format!("x{i}"))).collect();
         let syms: Vec<_> = xs
@@ -121,7 +120,7 @@ fn the_evaluation_paths_do_not_allocate() {
         let mut work = vec![0.0; tape.work_len()];
         let mut out = vec![0.0; tape.out_len()];
         assert_eq!(
-            allocs(5, || tape.eval_into(&vals, &mut work, &mut out)),
+            allocs_after_a_warm_up(5, || tape.eval_into(&vals, &mut work, &mut out)),
             0,
             "solve of {n} allocated"
         );

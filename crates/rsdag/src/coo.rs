@@ -16,7 +16,6 @@ pub struct Coo {
 }
 
 impl Coo {
-    /// The entries of `rows`, row by row, each row's in its order.
     fn from_rows(rows: SparseRows) -> Self {
         let mut out = Coo::default();
         for (i, row) in rows.into_iter().enumerate() {
@@ -107,7 +106,6 @@ mod tests {
         let (sx, sy) = (g.as_symbol(x).unwrap(), g.as_symbol(y).unwrap());
         let xy = g.mul(x, y);
         let x2 = g.mul(x, x);
-        // rows: x*y, y, x*x
         let coo = Coo::jacobian(&mut g, &[xy, y, x2], &[sx, sy]);
         assert_eq!(coo.rows, vec![0, 0, 1, 2]);
         assert_eq!(coo.cols, vec![0, 1, 1, 0]);
@@ -118,7 +116,6 @@ mod tests {
         let mut whole = Coo::default();
         whole.append(&blocks[1], 1, 0);
         assert_eq!(whole.rows, vec![1, 2]);
-        // [y x; 0 1; 2x 0] (1, 2)
         let one = g.one();
         let two = g.konst_f64(2.0);
         let p = coo.matvec(&mut g, &[one, two], 3);

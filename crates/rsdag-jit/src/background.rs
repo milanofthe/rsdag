@@ -45,29 +45,26 @@ pub fn submit(job: impl FnOnce() + Send + 'static) {
     };
     let (lock, _) = &JOBS;
     let mut jobs = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let seq = jobs.next;
-    jobs.next += 1;
-    jobs.running.insert(seq);
+    let seq = jobs.next_seq;
+    jobs.next_seq += 1;
+    jobs.unfinished.insert(seq);
     drop(jobs);
-    let _ = queue().send(Box::new(move || {
+    let _ = queue_spawning_off_caller_path().send(Box::new(move || {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
         let (lock, done) = &JOBS;
         lock.lock()
             .unwrap_or_else(|e| e.into_inner())
-            .running
+            .unfinished
             .remove(&seq);
         done.notify_all();
     }));
 }
 
-/// The thread that hands the jobs to the pool, so a submission is a
-/// channel send and the pool's threads start off the caller's path.
-fn queue() -> &'static Sender<Job> {
+fn queue_spawning_off_caller_path() -> &'static Sender<Job> {
     static Q: OnceLock<Sender<Job>> = OnceLock::new();
     Q.get_or_init(|| {
         let (tx, rx) = channel::<Job>();
-        // A detached thread parked on `recv` keeps the process free to exit.
-        std::thread::Builder::new()
+        let detached_so_process_can_exit = std::thread::Builder::new()
             .name("rsdag-jit-queue".into())
             .spawn(move || {
                 while let Ok(job) = rx.recv() {
@@ -75,6 +72,7 @@ fn queue() -> &'static Sender<Job> {
                 }
             })
             .expect("spawn the compile queue");
+        drop(detached_so_process_can_exit);
         tx
     })
 }
@@ -85,21 +83,20 @@ type Job = Box<dyn FnOnce() + Send>;
 pub fn drain() {
     let (lock, done) = &JOBS;
     let jobs = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let before = jobs.next;
-    let waiting = |j: &mut Jobs| j.running.first().is_some_and(|&s| s < before);
+    let before = jobs.next_seq;
+    let waiting = |j: &mut Jobs| j.unfinished.first().is_some_and(|&s| s < before);
     drop(done.wait_while(jobs, waiting));
 }
 
-/// The jobs submitted, by number, and those not finished.
 struct Jobs {
-    next: u64,
-    running: BTreeSet<u64>,
+    next_seq: u64,
+    unfinished: BTreeSet<u64>,
 }
 
 static JOBS: (Mutex<Jobs>, Condvar) = (
     Mutex::new(Jobs {
-        next: 0,
-        running: BTreeSet::new(),
+        next_seq: 0,
+        unfinished: BTreeSet::new(),
     }),
     Condvar::new(),
 );

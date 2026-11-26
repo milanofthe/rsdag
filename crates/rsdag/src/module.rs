@@ -127,10 +127,6 @@ impl<K> Module<K> {
         }
     }
 
-    /// Check that every id the module holds names something that is there
-    /// and, for a node's operands, precedes it; and that every operand list
-    /// has a length its node can have. A module that passes loads without
-    /// a panic.
     pub(crate) fn validate(&self) -> Result<(), ModuleError> {
         if self.version != MODULE_VERSION {
             return Err(ModuleError::Version {
@@ -139,8 +135,6 @@ impl<K> Module<K> {
             });
         }
         let n_nodes = self.nodes.len();
-        // The node of each symbol: `sym` interns one when it creates the
-        // symbol, so every parameter has one.
         let mut sym_node = vec![usize::MAX; self.symbols.len()];
         for (i, node) in self.nodes.iter().enumerate() {
             if let Node::Symbol(s) = *node {
@@ -149,9 +143,7 @@ impl<K> Module<K> {
                 }
             }
         }
-        // `ready[f]`: the first node at which function `f` and every one
-        // before it can be defined (their parameters exist).
-        let mut ready = Vec::with_capacity(self.funcs.len());
+        let mut definable_from_node = Vec::with_capacity(self.funcs.len());
         let mut at = 0;
         for (fi, f) in self.funcs.iter().enumerate() {
             let bad = |what| Err(ModuleError::Function { func: fi, what });
@@ -174,7 +166,7 @@ impl<K> Module<K> {
                     i => at = at.max(i + 1),
                 }
             }
-            ready.push(at);
+            definable_from_node.push(at);
         }
         if self.call_contexts.len() != self.call_outputs.len() {
             return Err(ModuleError::Function {
@@ -244,9 +236,7 @@ impl<K> Module<K> {
                     match *node {
                         Node::Dot(_) if n % 2 != 0 => return shape("dot of uneven halves"),
                         Node::Solve(_, k) => {
-                            // `n*n + n` values for some `n`, component below `n`.
-                            // lit: m from n = m^2 + m
-                            let m = ((((4 * n + 1) as f64).sqrt() - 1.0) / 2.0).round() as usize;
+                            let m = n.isqrt();
                             if m == 0 || m * m + m != n || k as usize >= m {
                                 return shape("solve list of no square system");
                             }
@@ -262,10 +252,7 @@ impl<K> Module<K> {
                             if data.params.len() != n + bound {
                                 return shape("call with another argument count than its function");
                             }
-                            // The loader defines the callee here with the
-                            // outputs up to the called one; later outputs
-                            // (derivatives demanded after the call) follow.
-                            if ready[f.0 as usize] > i {
+                            if definable_from_node[f.0 as usize] > i {
                                 return dangling("callee parameter after its call");
                             }
                             let late = data.outputs[..=k as usize].iter().any(|o| match o {
@@ -385,8 +372,7 @@ impl<K: Field> Graph<K> {
         let _s = rsprobe::scope!("load module");
         rsprobe::add!("nodes", module.nodes.len());
         module.validate()?;
-        // Every extern body up front, so a missing one fails before the
-        // graph changes.
+        // https://github.com/milanofthe/rsdag/issues/242
         let mut bodies: Vec<Option<Arc<dyn ExternBundle>>> = Vec::with_capacity(module.funcs.len());
         for data in &module.funcs {
             bodies.push(match &data.extern_body {
@@ -398,12 +384,8 @@ impl<K: Field> Graph<K> {
         }
         let mut map = LoadMap {
             exprs: Vec::with_capacity(module.nodes.len()),
-            // A symbol is created when its node is met in the sweep, not up
-            // front: `sym` interns the node at creation, so that is where
-            // the original put it, and a fresh graph then reproduces the
-            // module's id layout exactly.
             symbols: vec![SymbolId(u32::MAX); module.symbols.len()],
-            funcs: vec![None; module.funcs.len()],
+            funcs: Vec::with_capacity(module.funcs.len()),
         };
         let mut ops: Vec<ExprId> = Vec::new();
         for node in &module.nodes {
@@ -441,7 +423,7 @@ impl<K: Field> Graph<K> {
                         }
                     }
                 }
-                _ => self.intern_over(*node, &ops),
+                _ => self.intern_unfolded(*node, &ops),
             };
             map.exprs.push(e);
         }
@@ -451,19 +433,10 @@ impl<K: Field> Graph<K> {
         Ok(IdMap {
             exprs: map.exprs,
             symbols: map.symbols,
-            funcs: map
-                .funcs
-                .into_iter()
-                .map(|f| f.expect("every function defined"))
-                .collect(),
+            funcs: map.funcs,
         })
     }
 
-    /// Bring function `f` of a module being loaded up to the sweep: it and
-    /// every function before it defined (so the ids keep their order), and
-    /// holding each of its outputs, in order, whose node the sweep has met.
-    /// Outputs appended to a function after a call to it (derivatives
-    /// demanded later) are appended here as late as they were there.
     fn sync_loaded(
         &mut self,
         module: &Module<K>,
@@ -471,44 +444,57 @@ impl<K: Field> Graph<K> {
         map: &mut LoadMap,
         bodies: &[Option<Arc<dyn ExternBundle>>],
     ) -> FuncId {
-        for g in 0..=f.0 as usize {
-            let data = &module.funcs[g];
-            let id = *map.funcs[g].get_or_insert_with(|| {
+        for g in 0..f.0 as usize {
+            self.sync_one(module, g, map, bodies);
+        }
+        self.sync_one(module, f.0 as usize, map, bodies)
+    }
+
+    fn sync_one(
+        &mut self,
+        module: &Module<K>,
+        g: usize,
+        map: &mut LoadMap,
+        bodies: &[Option<Arc<dyn ExternBundle>>],
+    ) -> FuncId {
+        let data = &module.funcs[g];
+        let id = match map.funcs.get(g) {
+            Some(&id) => id,
+            None => {
                 let params = data
                     .params
                     .iter()
                     .map(|s| map.symbols[s.0 as usize])
                     .collect();
-                // not interned: its outputs come as the sweep meets them
                 let roles = data.param_roles.clone();
                 let func = crate::func::Function::new(&data.name, params, roles, bodies[g].clone());
-                self.push_function(func)
-            });
-            let func = self.func(id);
-            for k in func.outputs().len()..data.outputs.len() {
-                let o = match data.outputs[k] {
-                    Output::Expr(e) => match map.exprs.get(e.0 as usize) {
-                        Some(&e) => Output::Expr(e),
-                        None => break,
-                    },
-                    other => other,
-                };
-                let role = data
-                    .output_roles
-                    .get(k)
-                    .copied()
-                    .unwrap_or(OutputRole::Plain);
-                self.push_output(id, o, role);
+                let id = self.push_function(func);
+                map.funcs.push(id);
+                id
             }
+        };
+        let start = self.func(id).outputs().len();
+        for k in start..data.outputs.len() {
+            let o = match data.outputs[k] {
+                Output::Expr(e) => match map.exprs.get(e.0 as usize) {
+                    Some(&e) => Output::Expr(e),
+                    None => break,
+                },
+                other => other,
+            };
+            let role = data
+                .output_roles
+                .get(k)
+                .copied()
+                .unwrap_or(OutputRole::Plain);
+            self.push_output(id, o, role);
         }
-        map.funcs[f.0 as usize].expect("defined above")
+        id
     }
 }
 
-/// The id map while a load is in progress: functions are defined on
-/// demand, so their entries are optional until the end.
 struct LoadMap {
     exprs: Vec<ExprId>,
     symbols: Vec<SymbolId>,
-    funcs: Vec<Option<FuncId>>,
+    funcs: Vec<FuncId>,
 }

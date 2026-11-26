@@ -3,17 +3,18 @@
 //! bundle whose output count changed after compile is refused instead of
 //! being handed a write past its block.
 
+#[path = "../../rsdag/tests/common/mod.rs"]
+mod common;
+use common::sym;
+
 use rsdag::Program;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use rsdag::{
-    ExprId, ExternBundle, Graph, Node, Output, OutputRole, ParamRole, SymbolId, Tape, F64,
-};
+use rsdag::{ExternBundle, Graph, Output, OutputRole, ParamRole, Tape, F64};
 use rsdag_jit::NativeTape;
 
-/// `[a + b]`, panicking when `a` is negative; reports `n_out` outputs.
 struct Touchy {
     n_out: Arc<AtomicUsize>,
 }
@@ -28,16 +29,6 @@ impl ExternBundle for Touchy {
     }
 }
 
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    let Node::Symbol(s) = *g.node(e) else {
-        unreachable!()
-    };
-    (e, s)
-}
-
-/// `calls` instances of the bundle over distinct arguments, summed; many
-/// instances lower to one batched call.
 fn program(calls: usize) -> (NativeTape, Arc<AtomicUsize>, usize) {
     let n_out = Arc::new(AtomicUsize::new(1));
     let mut g: Graph<F64> = Graph::new();
@@ -79,7 +70,6 @@ fn a_panicking_bundle_raises_in_the_caller() {
             "{calls} calls: {msg:?}"
         );
 
-        // Nothing is left pending: the next evaluation is an ordinary one.
         native.eval(&[2.0], &mut w, &mut o);
         assert_eq!(o[0], (0..n).map(|k| 2.0 + k as f64).sum::<f64>());
     }

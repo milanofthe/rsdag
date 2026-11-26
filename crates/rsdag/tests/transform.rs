@@ -4,7 +4,6 @@ use rustc_hash::FxHashMap as HashMap;
 
 #[test]
 fn substitution_is_simultaneous() {
-    // Swap x<->y in x - y: simultaneous, so the result is y - x (not 0).
     let mut ctx: Graph<BigRational> = Graph::new();
     let x = ctx.sym("x");
     let y = ctx.sym("y");
@@ -15,11 +14,9 @@ fn substitution_is_simultaneous() {
     map.insert(ys, x);
     let g = substitute(&mut ctx, &[f], &map)[0];
     let want = ctx.sub(y, x);
-    assert_eq!(g, want);
+    assert_eq!(g, want, "swapping x and y in x - y is not y - x");
 }
 
-/// Substituting and inlining walk the graph with an explicit stack: a chain
-/// far deeper than a small thread stack could recurse through is fine.
 #[test]
 fn deep_chains_substitute_and_inline_on_a_small_stack() {
     std::thread::Builder::new()

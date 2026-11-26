@@ -1,21 +1,17 @@
 //! The dense solve as a node: one pivoting kernel for all components,
 //! exact against the reference routine and differentiable in both modes.
 
+mod common;
+use common::constants::FINITE_DIFFERENCE;
+use common::symbol_of;
+
 use rsdag::Program;
 use std::collections::HashMap;
 
 use rsdag::synth::Spec;
-use rsdag::{ExprId, Graph, Node, SymbolId, Tape, F64};
+use rsdag::{ExprId, Graph, SymbolId, Tape, F64};
 
-fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
-    match g.node(e) {
-        Node::Symbol(s) => *s,
-        _ => unreachable!(),
-    }
-}
-
-/// A random diagonally dominant system over symbols, with its values.
-fn system(
+fn diagonally_dominant_system(
     g: &mut Graph<F64>,
     n: usize,
     seed: u64,
@@ -25,7 +21,7 @@ fn system(
     let a: Vec<ExprId> = (0..n * n)
         .map(|k| {
             let e = g.sym(&format!("a{k}"));
-            syms.push(sym(g, e));
+            syms.push(symbol_of(g, e));
             vals.push(if k / n == k % n {
                 4.0 + rng.val()
             } else {
@@ -37,7 +33,7 @@ fn system(
     let b: Vec<ExprId> = (0..n)
         .map(|i| {
             let e = g.sym(&format!("b{i}"));
-            syms.push(sym(g, e));
+            syms.push(symbol_of(g, e));
             vals.push(rng.val());
             e
         })
@@ -49,7 +45,7 @@ fn system(
 fn the_kernel_is_the_reference_solve_to_the_bit() {
     for (n, seed) in [(2usize, 1u64), (5, 2), (12, 3), (40, 4)] {
         let mut g: Graph<F64> = Graph::new();
-        let (a, b, syms, vals) = system(&mut g, n, seed);
+        let (a, b, syms, vals) = diagonally_dominant_system(&mut g, n, seed);
         let x = g.solve_dense(a.clone(), b.clone());
         let tape = Tape::compile(&g, &x, &syms);
         assert!(tape.dump().contains("Solve"), "{}", tape.dump());
@@ -60,7 +56,6 @@ fn the_kernel_is_the_reference_solve_to_the_bit() {
         for (k, (p, q)) in want.iter().zip(&o).enumerate() {
             assert_eq!(p.to_bits(), q.to_bits(), "n {n} x[{k}]: {p} vs {q}");
         }
-        // And the arena agrees.
         let env: HashMap<SymbolId, f64> = syms.iter().copied().zip(vals.iter().copied()).collect();
         let arena = rsdag::eval(&g, &x, &env);
         for (k, (p, q)) in want.iter().zip(&arena).enumerate() {
@@ -73,9 +68,8 @@ fn the_kernel_is_the_reference_solve_to_the_bit() {
 fn forward_and_reverse_derivatives_agree_with_finite_differences() {
     let n = 6;
     let mut g: Graph<F64> = Graph::new();
-    let (a, b, syms, vals) = system(&mut g, n, 7);
+    let (a, b, syms, vals) = diagonally_dominant_system(&mut g, n, 7);
     let x = g.solve_dense(a.clone(), b.clone());
-    // A scalar of the solution, so the gradient has one root.
     let squares: Vec<ExprId> = x.iter().map(|&xi| g.mul(xi, xi)).collect();
     let f = g.reduce(rsdag::ReduceOp::Sum, squares);
     let grad = rsdag::gradient(&mut g, f, &syms);
@@ -102,12 +96,12 @@ fn forward_and_reverse_derivatives_agree_with_finite_differences() {
         let fm = o[0];
         let fd = (fp - fm) / (2.0 * h);
         assert!(
-            (g_rev[k] - fd).abs() <= 1e-5 * (1.0 + fd.abs()),
+            (g_rev[k] - fd).abs() <= FINITE_DIFFERENCE * (1.0 + fd.abs()),
             "reverse d/d{k}: {} vs fd {fd}",
             g_rev[k]
         );
         assert!(
-            (g_fwd[k] - fd).abs() <= 1e-5 * (1.0 + fd.abs()),
+            (g_fwd[k] - fd).abs() <= FINITE_DIFFERENCE * (1.0 + fd.abs()),
             "forward d/d{k}: {} vs fd {fd}",
             g_fwd[k]
         );
@@ -144,7 +138,6 @@ fn solves_over_one_matrix_fuse_into_one_kernel_and_match_the_single_solves() {
         .collect();
     let (mut w, mut o) = (Vec::new(), Vec::new());
     tape.eval(&inputs, &mut w, &mut o);
-    // The reference: one solve per column, and the multi-solve routine.
     let av = &inputs[..n * n];
     let mut many = vec![0.0; n * k];
     solve_many(av, &inputs[n * n..], n, k, &mut many);

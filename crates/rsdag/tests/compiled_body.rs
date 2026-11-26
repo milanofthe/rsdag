@@ -2,13 +2,13 @@
 //! per set of outputs a program calls, shared by the programs over one
 //! graph, and specialized to the constants a call passes.
 
+mod common;
+use common::constants::AGAINST_LIBM;
 use rsdag::Program;
 use rsdag::{ExprId, Graph, Node, OutputRole, ParamRole, Scope, Tape, F64};
 
 #[test]
 fn an_interpreted_body_computes_only_the_outputs_called() {
-    // A function of five outputs, a program calling two of them: the body
-    // the tape builds carries those two, the others are not computed.
     let mut g: Graph<F64> = Graph::new();
     let x = g.sym("x");
     let outs: Vec<ExprId> = (1..=5)
@@ -37,14 +37,12 @@ fn an_interpreted_body_computes_only_the_outputs_called() {
     assert_eq!(body.n_outputs(), 2);
     let (mut w, mut o) = (Vec::new(), Vec::new());
     tape.eval(&[0.5], &mut w, &mut o);
-    assert!((o[0] - 6.0 * 0.5f64.exp()).abs() < 1e-12);
+    let want = 6.0 * 0.5f64.exp();
+    assert!((o[0] - want).abs() <= AGAINST_LIBM * want);
 }
 
 #[test]
 fn calls_with_constant_arguments_run_a_specialized_copy() {
-    // f(x, c) = [c exp(x) + sin(c), c x]; calls pass c = 0 twice and c = 2
-    // once. The two calls with c = 0 share one copy over x alone, the
-    // values and the derivatives stay.
     let mut g: Graph<F64> = Graph::new();
     let sym = |g: &mut Graph<F64>, n: &str| {
         let e = g.sym(n);
@@ -87,15 +85,12 @@ fn calls_with_constant_arguments_run_a_specialized_copy() {
     let jr = rsdag::sparse_jacobian(&mut g, &[root], &vars);
     let js = rsdag::sparse_jacobian(&mut g, &[spec], &vars);
     for ((_, a), (_, b)) in jr[0].iter().zip(&js[0]) {
-        assert!((eval(&g, *a) - eval(&g, *b)).abs() < 1e-15);
+        assert_eq!(eval(&g, *a).to_bits(), eval(&g, *b).to_bits());
     }
 }
 
 #[test]
 fn constant_parameters_stay_arguments() {
-    // f(x, c) with c a `Param`: calls passing c = 1 and c = 2 keep calling
-    // f itself (one body for both), while a constant state argument is
-    // still specialized away.
     let mut g: Graph<F64> = Graph::new();
     let mut s = rsdag::Scope::new(&mut g, "f");
     let x = s.param("x", rsdag::ParamRole::State { id: 0 });
@@ -130,8 +125,6 @@ fn constant_parameters_stay_arguments() {
 
 #[test]
 fn programs_over_one_graph_share_a_body() {
-    // Two tapes calling the same output of f take the same interpreted
-    // body: it is built once per function and output set, not per tape.
     let mut g: Graph<F64> = Graph::new();
     let mut s = rsdag::Scope::new(&mut g, "f");
     let x = s.param("x", ParamRole::Free);

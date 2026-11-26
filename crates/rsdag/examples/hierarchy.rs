@@ -9,25 +9,18 @@
 //!
 //!     cargo run --release -p rsdag --example hierarchy
 
+#[path = "../tests/common/mod.rs"]
+mod common;
+use common::sym;
+
 use std::time::Instant;
 
-use rsdag::{
-    sparse_jacobian, ExprId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64,
-};
-
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    match *g.node(e) {
-        Node::Symbol(s) => (e, s),
-        _ => unreachable!(),
-    }
-}
+use rsdag::{sparse_jacobian, ExprId, Graph, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
 
 fn main() {
     println!("n,build_ms,jacobian_ms,substitute_ms,specialize_ms,program_ms,nodes");
     for n in [1000usize, 2000, 4000, 8000, 16000, 32000] {
         let mut g: Graph<F64> = Graph::new();
-        // d(va, vb, p) = p tanh(va - vb): the current from a to b
         let mut s = Scope::new(&mut g, "d");
         let va = s.param("va", ParamRole::State { id: 0 });
         let vb = s.param("vb", ParamRole::State { id: 1 });
@@ -35,9 +28,7 @@ fn main() {
         let dv = s.sub(va, vb);
         let th = s.tanh(dv);
         let i = s.mul(p, th);
-        let d = s.close([(i, OutputRole::Plain)]);
-        // body(v, vdot, p, c): node k takes c_k vdot_k, the device from k to
-        // k + 1 and the one from k - 1 to k
+        let device_current_from_a_to_b = s.close([(i, OutputRole::Plain)]);
         let mut s = Scope::new(&mut g, "body");
         let v: Vec<ExprId> = (0..n)
             .map(|k| s.param(&format!("v{k}"), ParamRole::State { id: k as u32 }))
@@ -52,12 +43,12 @@ fn main() {
             .map(|k| s.param(&format!("c{k}"), ParamRole::Param))
             .collect();
         let currents: Vec<ExprId> = (0..n)
-            .map(|k| s.call(d, 0, &[v[k], v[(k + 1) % n], p[k]]))
+            .map(|k| s.call(device_current_from_a_to_b, 0, &[v[k], v[(k + 1) % n], p[k]]))
             .collect();
         let outs: Vec<ExprId> = (0..n)
             .map(|k| {
-                let q = s.mul(c[k], vd[k]);
-                let out = s.add(q, currents[k]);
+                let capacitor_current = s.mul(c[k], vd[k]);
+                let out = s.add(capacitor_current, currents[k]);
                 s.sub(out, currents[(k + n - 1) % n])
             })
             .collect();

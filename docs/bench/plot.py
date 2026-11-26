@@ -9,6 +9,7 @@ redraw from the committed ones.
 import csv
 import os
 import sys
+from collections import namedtuple
 
 import matplotlib
 
@@ -23,8 +24,7 @@ DATA = os.path.join(HERE, "data")
 sys.path.insert(0, os.path.join(HERE, ".."))
 from style import BLUE, FONT, GREEN, GREY, ORANGE  # noqa: E402
 
-# Transparent, grey axes and text: legible on a light and on a dark page.
-plt.rcParams.update({
+STYLE = {
     "font.family": FONT,
     "font.size": 10,
     "axes.spines.top": False,
@@ -45,7 +45,10 @@ plt.rcParams.update({
     "ytick.color": GREY,
     "legend.labelcolor": GREY,
     "hatch.linewidth": 1.0,
-})
+}
+plt.rcParams.update(STYLE)
+ASCII_TEXT_ONLY = {"axes.unicode_minus": False}
+plt.rcParams.update(ASCII_TEXT_ONLY)
 
 
 def rows(name):
@@ -168,9 +171,8 @@ def modules():
 
     ms = 1e3
     cas_in, cas = "CasADi (parameter inputs)", "CasADi"
-    # label, color, solid (parameters constant), hatch; per module the residual
-    # and the Jacobian per call (us), then their setup (ms)
-    bars = (
+    Bar = namedtuple("Bar", "label color parameters_constant hatch call_f_us call_j_us setup_f_ms setup_j_ms")
+    bars = tuple(Bar(*b) for b in (
         ("rsdag", BLUE, False, "////",
          ours_col("call_f_interp_us"), ours_col("call_j_interp_us"),
          ours_col("setup_f_interp_s", ms), ours_col("setup_j_interp_s", ms)),
@@ -189,26 +191,24 @@ def modules():
         ("JAX", GREEN, True, None,
          other_col("JAX", "call_f_us"), other_col("JAX", "call_j_us"),
          other_col("JAX", "setup_f_s", ms), other_col("JAX", "setup_j_s", ms)),
-    )
+    ))
     modules_ = sorted({x["module"] for x in ours})
     fig, axes = plt.subplots(2, 2, figsize=(9.6, 6.4), sharey="row")
     width = 0.13
-    panels = ((axes[0, 0], "Residual, per call", 4), (axes[0, 1], "Jacobian, per call", 5),
-              (axes[1, 0], "Residual, setup", 6), (axes[1, 1], "Jacobian, setup", 7))
-    for a, title, k in panels:
+    panels = ((axes[0, 0], "Residual, per call", "call_f_us"), (axes[0, 1], "Jacobian, per call", "call_j_us"),
+              (axes[1, 0], "Residual, setup", "setup_f_ms"), (axes[1, 1], "Jacobian, setup", "setup_j_ms"))
+    for a, title, measure in panels:
         for gi, (gname, member) in enumerate(groups):
             mods = [m for m in modules_ if member(m)]
             for bi, bar in enumerate(bars):
-                vals = [v for m in mods for v in bar[k](m)]
+                vals = [v for m in mods for v in getattr(bar, measure)(m)]
                 x = gi + (bi - (len(bars) - 1) / 2) * width
                 if not vals:
-                    a.text(x, 1.2, "x", color=bar[1], ha="center", va="bottom", fontsize=9)
+                    a.text(x, 1.2, "x", color=bar.color, ha="center", va="bottom", fontsize=9)
                     continue
                 med = float(np.median(vals))
-                # Constants filled, inputs outlined, the interpreter hatched:
-                # no transparency, legible on a light and a dark page.
-                a.bar(x, med, width * 0.9, facecolor=bar[1] if bar[2] else "none",
-                      edgecolor=bar[1], linewidth=1.2, hatch=bar[3])
+                a.bar(x, med, width * 0.9, facecolor=bar.color if bar.parameters_constant else "none",
+                      edgecolor=bar.color, linewidth=1.2, hatch=bar.hatch)
                 if len(vals) > 1:
                     a.errorbar(x, med, yerr=[[med - min(vals)], [max(vals) - med]], color=GREY,
                                lw=0.8, capsize=2)

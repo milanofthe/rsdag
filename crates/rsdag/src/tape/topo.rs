@@ -9,39 +9,33 @@ use rustc_hash::FxHashMap as HashMap;
 use super::compile::{Kind, Program, Ref};
 use crate::constants::ORDER_RELABEL_GROWTH;
 
-/// A topological order of a program's instructions that the fold pass
-/// keeps valid as kernels take accumulators, by two-way search (Haeupler,
-/// Kavitha, Mathew, Sen and Tarjan). Whether accumulator `a` depends on
-/// kernel `k` is only a question when `a` comes after `k`; then the
-/// readers of `k` searched forward up to `a`, and what `a` reads searched
-/// backward down to `k`, step in turn. Either finding the other end is a
-/// cycle. The side that runs out first is closed under its direction
-/// between the two and moves, the backward side right before `k` or the
-/// forward side right after `a`, so a question costs the smaller side.
-/// Instructions added after the order was taken (the placeholder) are
-/// constants and take part in no edge.
+const STAMPS_PER_SEARCH: u32 = 2;
+
+// Two-way search incremental topological order: https://doi.org/10.1145/2071379.2071382
 pub(super) struct Topo {
     order: Order,
-    /// Readers of each instruction (`readers[start[i]..start[i + 1]]`),
-    /// and the ones the pass added.
-    start: Vec<u32>,
+    reader_start: Vec<u32>,
     readers: Vec<u32>,
-    added: HashMap<u32, Vec<u32>>,
+    readers_added: HashMap<u32, Vec<u32>>,
     seen: Vec<u32>,
     stamp: u32,
-    stack_f: Vec<(u32, u32)>,
-    stack_b: Vec<(u32, u32)>,
+    forward_stack: Vec<(u32, u32)>,
+    backward_stack: Vec<(u32, u32)>,
     fwd: Vec<u32>,
     back: Vec<u32>,
 }
 
 impl Topo {
-    /// The order of `p` with kernel `k` also reading `taken`, the
-    /// accumulators it took before the order was needed.
-    pub(super) fn new(p: &Program, hints: &[(u32, u32)], k: u32, taken: &[u32]) -> Topo {
+    // https://github.com/milanofthe/rsdag/issues/241
+    pub(super) fn new(
+        p: &Program,
+        hints: &[(u32, u32)],
+        k: u32,
+        taken_before_order: &[u32],
+    ) -> Topo {
+        debug_assert!(hints.is_sorted());
         let m = p.insts.len();
-        // Every edge `(j, i)`, instruction `i` reading `j`, once.
-        let edges = |f: &mut dyn FnMut(u32, u32)| {
+        let for_each_distinct_read_edge = |f: &mut dyn FnMut(u32, u32)| {
             let mut last = vec![u32::MAX; m];
             for i in 0..m {
                 for r in p.ins(i) {
@@ -53,7 +47,7 @@ impl Topo {
                     }
                 }
             }
-            for &a in taken {
+            for &a in taken_before_order {
                 if last[a as usize] != k {
                     last[a as usize] = k;
                     f(a, k);
@@ -61,24 +55,16 @@ impl Topo {
             }
         };
         let mut count = vec![0u32; m + 1];
-        edges(&mut |j, _| count[j as usize + 1] += 1);
+        for_each_distinct_read_edge(&mut |j, _| count[j as usize + 1] += 1);
         for i in 0..m {
             count[i + 1] += count[i];
         }
         let mut fill = count.clone();
         let mut readers = vec![0u32; count[m] as usize];
-        edges(&mut |j, i| {
+        for_each_distinct_read_edge(&mut |j, i| {
             readers[fill[j as usize] as usize] = i;
             fill[j as usize] += 1;
         });
-        // The starting order: a kernel after the accumulators `hints`
-        // offers it (`(operand, kernel)`, sorted) where the program allows,
-        // and otherwise as late as its readers allow. The lowering places a
-        // kernel with its first consumer, before the accumulators of its
-        // other outputs and before the kernels those depend on, so most
-        // accumulators would otherwise come after their kernel. When
-        // nothing else can go, the kernel with the fewest hints open does
-        // (a hint that depends on its kernel never closes).
         let kernel = |i: usize| matches!(p.insts[i].kind, Kind::Gemv { .. } | Kind::Gemm { .. });
         let mut pending = vec![0u32; m];
         for &r in &readers {
@@ -94,150 +80,148 @@ impl Topo {
             &hints[lo..hi]
         };
         let mut ready: Vec<u32> = Vec::new();
-        let mut ready_kernels: BTreeSet<u32> = BTreeSet::new();
-        // Kernels whose operands are there, by their hints still open.
-        let mut blocked: BTreeSet<(u32, u32)> = BTreeSet::new();
+        let mut kernels_hints_closed: BTreeSet<u32> = BTreeSet::new();
+        let mut kernels_by_open_hints: BTreeSet<(u32, u32)> = BTreeSet::new();
         let release = |r: u32,
                        hinted: &[u32],
                        ready: &mut Vec<u32>,
-                       ready_kernels: &mut BTreeSet<u32>,
-                       blocked: &mut BTreeSet<(u32, u32)>| {
+                       kernels_hints_closed: &mut BTreeSet<u32>,
+                       kernels_by_open_hints: &mut BTreeSet<(u32, u32)>| {
             if !kernel(r as usize) {
                 ready.push(r);
             } else if hinted[r as usize] == 0 {
-                ready_kernels.insert(r);
+                kernels_hints_closed.insert(r);
             } else {
-                blocked.insert((hinted[r as usize], r));
+                kernels_by_open_hints.insert((hinted[r as usize], r));
             }
         };
         for i in (0..m as u32).rev() {
             if pending[i as usize] == 0 {
-                release(i, &hinted, &mut ready, &mut ready_kernels, &mut blocked);
+                release(
+                    i,
+                    &hinted,
+                    &mut ready,
+                    &mut kernels_hints_closed,
+                    &mut kernels_by_open_hints,
+                );
             }
         }
         let mut at: Vec<u32> = Vec::with_capacity(m);
         while let Some(i) = ready
             .pop()
-            .or_else(|| ready_kernels.pop_first())
-            .or_else(|| blocked.pop_first().map(|(_, k)| k))
+            .or_else(|| kernels_hints_closed.pop_first())
+            .or_else(|| kernels_by_open_hints.pop_first().map(|(_, k)| k))
         {
             at.push(i);
             for &(_, k) in hints_of(i) {
                 let h = hinted[k as usize];
                 hinted[k as usize] = h - 1;
-                if blocked.remove(&(h, k)) {
+                if kernels_by_open_hints.remove(&(h, k)) {
                     if h == 1 {
-                        ready_kernels.insert(k);
+                        kernels_hints_closed.insert(k);
                     } else {
-                        blocked.insert((h - 1, k));
+                        kernels_by_open_hints.insert((h - 1, k));
                     }
                 }
             }
             for &r in &readers[count[i as usize] as usize..count[i as usize + 1] as usize] {
                 pending[r as usize] -= 1;
                 if pending[r as usize] == 0 {
-                    release(r, &hinted, &mut ready, &mut ready_kernels, &mut blocked);
+                    release(
+                        r,
+                        &hinted,
+                        &mut ready,
+                        &mut kernels_hints_closed,
+                        &mut kernels_by_open_hints,
+                    );
                 }
             }
         }
         debug_assert_eq!(at.len(), m, "the lowered program is acyclic");
         Topo {
             order: Order::new(&at),
-            start: count,
+            reader_start: count,
             readers,
-            added: HashMap::default(),
+            readers_added: HashMap::default(),
             seen: vec![0; m],
             stamp: 0,
-            stack_f: Vec::new(),
-            stack_b: Vec::new(),
+            forward_stack: Vec::new(),
+            backward_stack: Vec::new(),
             fwd: Vec::new(),
             back: Vec::new(),
         }
     }
 
-    /// Lets kernel `k` read instruction `a` unless `a` depends on `k`;
-    /// whether it did.
+    // https://github.com/milanofthe/rsdag/issues/241
     pub(super) fn read(&mut self, p: &Program, k: u32, a: u32) -> bool {
         let n = self.seen.len() as u32;
-        if a >= n {
+        let a_is_constant_added_after_order = a >= n;
+        if a_is_constant_added_after_order {
             return true;
         }
         let label = &self.order.label;
         let (lb, ub) = (label[k as usize], label[a as usize]);
         if ub < lb {
-            self.added.entry(a).or_default().push(k);
+            self.readers_added.entry(a).or_default().push(k);
             return true;
         }
-        // Forward marks are `sf`, backward ones `sb`. The sides take one
-        // edge each in turn (a kernel's readers can be thousands), each a
-        // stack of nodes with the next edge to look at.
-        // lit: room for the next search's two stamps
-        if self.stamp > u32::MAX - 4 {
+        if self.stamp > u32::MAX - 2 * STAMPS_PER_SEARCH {
             self.seen.fill(0);
             self.stamp = 0;
         }
-        self.stamp += 2;
-        let (sf, sb) = (self.stamp, self.stamp + 1);
-        self.stack_f.clear();
-        self.stack_b.clear();
+        self.stamp += STAMPS_PER_SEARCH;
+        let (forward_mark, backward_mark) = (self.stamp, self.stamp + 1);
+        self.forward_stack.clear();
+        self.backward_stack.clear();
         self.fwd.clear();
         self.back.clear();
-        self.stack_f.push((k, 0));
+        self.forward_stack.push((k, 0));
         self.fwd.push(k);
-        self.seen[k as usize] = sf;
-        self.stack_b.push((a, 0));
+        self.seen[k as usize] = forward_mark;
+        self.backward_stack.push((a, 0));
         self.back.push(a);
-        self.seen[a as usize] = sb;
+        self.seen[a as usize] = backward_mark;
         let backward = loop {
-            // One forward edge.
-            let Some(&(w, e)) = self.stack_f.last() else {
+            let Some((w, e)) = self.forward_stack.pop() else {
                 break false;
             };
-            let (s0, s1) = (self.start[w as usize], self.start[w as usize + 1]);
+            let (s0, s1) = (
+                self.reader_start[w as usize],
+                self.reader_start[w as usize + 1],
+            );
             let deg = s1 - s0;
             let r = if e < deg {
                 Some(self.readers[(s0 + e) as usize])
             } else {
-                self.added
+                self.readers_added
                     .get(&w)
                     .and_then(|v| v.get((e - deg) as usize))
                     .copied()
             };
-            match r {
-                None => {
-                    self.stack_f.pop();
+            if let Some(r) = r {
+                self.forward_stack.push((w, e + 1));
+                if r == a {
+                    return false;
                 }
-                Some(r) => {
-                    self.stack_f.last_mut().unwrap().1 += 1;
-                    if r == a {
-                        return false;
-                    }
-                    if self.seen[r as usize] != sf && label[r as usize] < ub {
-                        self.seen[r as usize] = sf;
-                        self.fwd.push(r);
-                        self.stack_f.push((r, 0));
-                    }
+                if self.seen[r as usize] != forward_mark && label[r as usize] < ub {
+                    self.seen[r as usize] = forward_mark;
+                    self.fwd.push(r);
+                    self.forward_stack.push((r, 0));
                 }
             }
-            // One backward edge.
-            let Some(&(w, e)) = self.stack_b.last() else {
+            let Some((w, e)) = self.backward_stack.pop() else {
                 break true;
             };
-            match p.ins(w as usize).get(e as usize) {
-                None => {
-                    self.stack_b.pop();
-                }
-                Some(&r) => {
-                    self.stack_b.last_mut().unwrap().1 += 1;
-                    if let Ref::Value(j, _) = r {
-                        if j == k {
-                            return false;
-                        }
-                        if j < n && self.seen[j as usize] != sb && label[j as usize] > lb {
-                            self.seen[j as usize] = sb;
-                            self.back.push(j);
-                            self.stack_b.push((j, 0));
-                        }
+            if let Some(&r) = p.ins(w as usize).get(e as usize) {
+                self.backward_stack.push((w, e + 1));
+                if let Ref::Value(j, _) = r {
+                    if j == k {
+                        return false;
+                    }
+                    if j < n && self.seen[j as usize] != backward_mark && label[j as usize] > lb {
+                        self.seen[j as usize] = backward_mark;
+                        self.back.push(j);
+                        self.backward_stack.push((j, 0));
                     }
                 }
             }
@@ -257,16 +241,12 @@ impl Topo {
             order.insert_after(at, w);
             at = w;
         }
-        self.added.entry(a).or_default().push(k);
+        self.readers_added.entry(a).or_default().push(k);
         true
     }
 }
 
-/// A list whose order is compared by labels (the order maintenance of
-/// Bender, Cole, Demaine, Farach-Colton and Zito): an element moved in
-/// takes the middle of the gap it lands in, and a gap too narrow relabels
-/// the smallest aligned label range around it that is sparse enough, its
-/// allowance shrinking with its size, amortized O(log n) labels a move.
+// Order maintenance by labels: https://doi.org/10.1007/3-540-45749-6_17
 struct Order {
     label: Vec<u64>,
     prev: Vec<u32>,
@@ -274,8 +254,6 @@ struct Order {
 }
 
 impl Order {
-    /// The elements `0..n` in `order`, between a head (`n`, label 0) and a
-    /// tail (`n + 1`, the largest label).
     fn new(order: &[u32]) -> Order {
         let n = order.len();
         let (head, tail) = (n as u32, n as u32 + 1);
@@ -302,7 +280,6 @@ impl Order {
         self.prev[q as usize] = p;
     }
 
-    /// Links `w` right after `x`.
     fn insert_after(&mut self, x: u32, w: u32) {
         let y = self.next[x as usize];
         self.prev[w as usize] = x;
@@ -333,8 +310,8 @@ impl Order {
                 c += 1;
                 v = self.next[v as usize];
             }
-            // Sparse enough: fewer than (2 / 1.5)^i elements in 2^i labels.
-            if i == u64::BITS || (c as f64) < ORDER_RELABEL_GROWTH.powi(i as i32) {
+            let range_sparse_enough = (c as f64) < ORDER_RELABEL_GROWTH.powi(i as i32);
+            if i == u64::BITS || range_sparse_enough {
                 let from = base.max(1);
                 let to = end.min(u64::MAX as u128);
                 let gap = (to - from) / (c + 1);

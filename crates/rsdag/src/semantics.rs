@@ -33,7 +33,6 @@ pub fn reduce_slice(op: ReduceOp, xs: &[f64]) -> f64 {
     }
 }
 
-/// The fold of [`reduce_slice`] by `f` from the identity `id`.
 #[inline(always)]
 fn fold_lanes(xs: &[f64], id: f64, f: impl Fn(f64, f64) -> f64) -> f64 {
     let mut a = [id; FOLD_LANES];
@@ -47,7 +46,6 @@ fn fold_lanes(xs: &[f64], id: f64, f: impl Fn(f64, f64) -> f64) -> f64 {
     (xs[ch * FOLD_LANES..].iter()).fold(acc, |acc, &x| f(acc, x))
 }
 
-/// `xs` folded by `f` from its first value, `empty` without one.
 #[inline(always)]
 fn fold_first(xs: &[f64], empty: f64, f: impl Fn(f64, f64) -> f64) -> f64 {
     match xs.split_first() {
@@ -69,9 +67,8 @@ pub fn elementary_f64(f: Elementary, args: &[f64]) -> f64 {
     match f {
         Elementary::Unary(op) => unary_f64(op, args[0]),
         Elementary::Binary(op) => binary_f64(op, args[0], args[1]),
-        Elementary::Min | Elementary::Max => {
-            reduce_slice(f.reduction().expect("an extremum"), &args[..2])
-        }
+        Elementary::Min => reduce_slice(ReduceOp::Min, &args[..2]),
+        Elementary::Max => reduce_slice(ReduceOp::Max, &args[..2]),
     }
 }
 
@@ -92,9 +89,6 @@ pub fn digamma(x: f64) -> f64 {
         return x;
     }
     if x <= 0.0 {
-        // A pole at every non-positive integer; elsewhere the reflection
-        // `psi(x) = psi(1 - x) - pi / tan(pi x)`, so the recurrence below
-        // never walks up from a huge negative `x` (where `x + 1 == x`).
         if x == x.floor() {
             return f64::NAN;
         }
@@ -139,7 +133,7 @@ pub fn trigamma(x: f64) -> f64 {
         + inv * inv2 * (1.0 / 6.0 - inv2 * (1.0 / 30.0 - inv2 * (1.0 / 42.0 - inv2 / 30.0)))
 }
 
-/// The splitmix64 finalizer of `z`.
+// https://prng.di.unimi.it/splitmix64.c
 fn splitmix64(mut z: u64) -> u64 {
     z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -147,7 +141,6 @@ fn splitmix64(mut z: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// `[0, 1)` from the top 53 bits of `z`.
 fn unit(z: u64) -> f64 {
     ((z >> 11) as f64) * (1.0 / ((1u64 << 53) as f64))
 }
@@ -169,6 +162,8 @@ pub fn rand_stream(key: f64, counter: f64) -> f64 {
 }
 
 pub use crate::constants::{EXP_AT_LIMIT, EXP_LIMIT, LN_AT_FLOOR, LN_FLOOR};
+#[cfg(target_arch = "x86_64")]
+pub use crate::simd::sse2_baseline;
 
 /// Whether a multiply-add rounds once on this machine: where the CPU has a
 /// fused multiply-add (x86-64 with AVX and FMA, unless `RSDAG_SSE2` is set;
@@ -179,7 +174,7 @@ pub fn fused() -> bool {
     {
         static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *F.get_or_init(|| {
-            std::env::var_os("RSDAG_SSE2").is_none()
+            !sse2_baseline()
                 && std::is_x86_feature_detected!("avx")
                 && std::is_x86_feature_detected!("fma")
         })
@@ -250,11 +245,6 @@ pub const LN_SHIFT: u32 = F64_FRAC_BITS - LN_TABLE_BITS;
 /// The sign and exponent bits of an `f64`.
 pub const LN_EXP_MASK: u64 = u64::MAX << F64_FRAC_BITS;
 
-// The exponential and the logarithm are rsdag's own (the tables and the
-// method in `crate::constants::exp_ln`), written without branches on the
-// value over one multiply-add primitive. So every backend computes them by
-// the same steps, a lane of vector code as a scalar does.
-
 /// `exp(x)` for `x <= EXP_LIMIT` (and NaN), multiply-adds by `M`: `x = k
 /// ln 2 / N + r`, `exp(x) = 2^(k / N) exp(r)`. Zero below the subnormals.
 #[inline(always)]
@@ -262,7 +252,6 @@ pub fn exp_with<M: MulAdd>(x: f64) -> f64 {
     let t = M::mul_add(x, EXP_INV_LN2_N, MAGIC);
     let kd = t - MAGIC;
     let ki = t.to_bits();
-    // exact: `kd EXP_LN2_HI_N` has 53 bits, and `x` is near it
     let r = M::mul_add(kd, -EXP_LN2_HI_N, x);
     let r = M::mul_add(kd, -EXP_LN2_LO_N, r);
     let j = (ki & EXP_INDEX_MASK) as usize;
@@ -294,7 +283,6 @@ pub fn ln_with<M: MulAdd>(x: f64) -> f64 {
     let z = f64::from_bits(ix.wrapping_sub(tmp & LN_EXP_MASK));
     let [invc, c, logc_hi, logc_lo] = LN_TABLE[i];
     let r = (z - c) * invc;
-    // exact: `k LN_LN2_HI` and `logc_hi` are multiples of 2^-43 below 2^10
     let w = M::mul_add(kd, LN_LN2_HI, logc_hi);
     let hi = w + r;
     let lo = (w - hi) + r;
@@ -424,9 +412,6 @@ pub fn powi_f64(x: f64, n: i32) -> f64 {
 /// The derivative rules in [`crate::autodiff`] mirror these guards exactly.
 pub fn unary_f64(op: UnaryOp, x: f64) -> f64 {
     match op {
-        // The guards test for the out-of-range side, so a NaN argument
-        // falls through to the bare op and stays NaN: a guard clamps a
-        // wild iterate, it does not turn a missing value into a number.
         UnaryOp::Exp => exp_guarded(x),
         UnaryOp::Ln => ln_guarded(x),
         UnaryOp::Sqrt => {
@@ -547,7 +532,6 @@ pub fn gemm_fold(
     crate::simd::gemm_fold(a, b, m, k, n, c, codes, out)
 }
 
-/// The self folds of `out` (products stored plain), in place.
 pub(crate) fn fold_in_place(codes: &[u32], c: Option<&[f64]>, out: &mut [f64]) {
     for i in 0..out.len() {
         let f = Fold(codes[i]);
@@ -614,7 +598,6 @@ pub fn solve_batch_into(
     crate::simd::solve_batch(a, b, n, k, count, out, scratch)
 }
 
-/// The column panel of the elimination of `n` unknowns, 0 unblocked.
 pub(crate) fn lu_panel(n: usize) -> usize {
     if n <= LU_UNBLOCKED_MAX {
         0
@@ -638,9 +621,6 @@ pub fn solve_scratch_len(n: usize, k: usize) -> usize {
         }
 }
 
-/// The scratch of a solve cut into its parts: the augmented matrix `[a | b]`
-/// (filled here, rows of `n + k`), and the panel's transposed columns, its
-/// rows and their product for the trailing update.
 pub(crate) fn solve_parts<'s>(
     scratch: &'s mut [f64],
     a: &[f64],

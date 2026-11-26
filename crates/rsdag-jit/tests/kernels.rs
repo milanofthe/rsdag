@@ -2,19 +2,25 @@
 //! products and the dense solve, inputs read in place and gathered slots,
 //! bit-identical to the interpreter.
 
+#[path = "../../rsdag/tests/common/mod.rs"]
+mod common;
+use common::identical;
+
 use rsdag::Program;
 use rsdag::{ExprId, Graph, SymbolId, Tape, F64};
 use rsdag_jit::NativeTape;
 
-fn same(a: &[f64], b: &[f64]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
-}
-
 #[test]
 fn the_gemv_kernel_matches_the_interpreter() {
-    // `computed` 1: the matrix and the vector are computed and gathered;
-    // 2: the matrix is an input run and only the vector is gathered.
-    for (n, m, computed) in [(8usize, 2usize, 0u8), (40, 3, 0), (12, 1, 1), (16, 2, 2)] {
+    const INPUT_RUNS: u8 = 0;
+    const BOTH_COMPUTED_AND_GATHERED: u8 = 1;
+    const ONLY_THE_VECTOR_GATHERED: u8 = 2;
+    for (n, m, computed) in [
+        (8usize, 2usize, INPUT_RUNS),
+        (40, 3, INPUT_RUNS),
+        (12, 1, BOTH_COMPUTED_AND_GATHERED),
+        (16, 2, ONLY_THE_VECTOR_GATHERED),
+    ] {
         let mut g: Graph<F64> = Graph::new();
         let a: Vec<ExprId> = (0..n * n).map(|k| g.sym(&format!("a{k}"))).collect();
         let x: Vec<ExprId> = (0..n).map(|i| g.sym(&format!("x{i}"))).collect();
@@ -22,12 +28,12 @@ fn the_gemv_kernel_matches_the_interpreter() {
         let u: Vec<ExprId> = (0..m).map(|i| g.sym(&format!("u{i}"))).collect();
         let syms: Vec<SymbolId> = (0..(n * n + n + n * m + m) as u32).map(SymbolId).collect();
         let (a, x) = match computed {
-            1 => {
+            BOTH_COMPUTED_AND_GATHERED => {
                 let a2 = a.iter().map(|&e| g.exp(e)).collect();
                 let x2 = x.iter().map(|&e| g.sin(e)).collect();
                 (a2, x2)
             }
-            2 => (a, x.iter().map(|&e| g.sin(e)).collect()),
+            ONLY_THE_VECTOR_GATHERED => (a, x.iter().map(|&e| g.sin(e)).collect()),
             _ => (a, x),
         };
         let roots: Vec<ExprId> = (0..n)
@@ -46,7 +52,7 @@ fn the_gemv_kernel_matches_the_interpreter() {
         let (mut w1, mut o1, mut w2, mut o2) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         tape.eval(&inputs, &mut w1, &mut o1);
         native.eval(&inputs, &mut w2, &mut o2);
-        assert!(same(&o1, &o2), "n {n} computed {computed}");
+        assert!(identical(&o1, &o2), "n {n} computed {computed}");
     }
 }
 
@@ -84,7 +90,7 @@ fn the_gemm_kernel_matches_the_interpreter() {
         let (mut w1, mut o1, mut w2, mut o2) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         tape.eval(&inputs, &mut w1, &mut o1);
         native.eval(&inputs, &mut w2, &mut o2);
-        assert!(same(&o1, &o2), "m {m} k {k} n {n} computed {computed}");
+        assert!(identical(&o1, &o2), "m {m} k {k} n {n} computed {computed}");
     }
 }
 
@@ -120,7 +126,7 @@ fn the_solve_kernel_matches_the_interpreter() {
         tape.eval(&inputs, &mut w1, &mut o1);
         native.eval(&inputs, &mut w2, &mut o2);
         assert!(
-            same(&o1, &o2),
+            identical(&o1, &o2),
             "n {n} computed {computed}: {o1:?} vs {o2:?}"
         );
     }
@@ -154,14 +160,9 @@ fn the_multi_solve_kernel_matches_the_interpreter() {
     let (mut w1, mut o1, mut w2, mut o2) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     tape.eval(&inputs, &mut w1, &mut o1);
     native.eval(&inputs, &mut w2, &mut o2);
-    assert!(same(&o1, &o2));
+    assert!(identical(&o1, &o2));
 }
 
-/// Independent solves of one shape run as one batch (up to sixteen
-/// unknowns): interpreted and natively, each solution bit-identical to its system solved alone. The
-/// systems are plain random matrices (their eliminations swap rows), two
-/// of them with a second right-hand side; a solve that reads another's
-/// solution is no part of its batch.
 #[test]
 fn a_batch_of_solves_matches_each_solve_alone() {
     for (n, count, computed) in [
@@ -194,14 +195,10 @@ fn a_batch_of_solves_matches_each_solve_alone() {
             }
             systems.push(a);
         }
-        // A solve of the first solution against the last matrix: one level up.
         let first: Vec<ExprId> = roots[..n].to_vec();
         roots.extend(g.solve_dense(systems[count - 1].clone(), first));
         let tape = Tape::compile(&g, &roots, &syms);
         let d = tape.dump();
-        // The systems with two right-hand sides are one batch, those with
-        // one another (when there are two), the dependent solve alone;
-        // past sixteen unknowns nothing batches.
         if n <= rsdag::constants::SOLVE_BATCH_MAX_N {
             assert!(d.contains(&format!("SolveBatch(2 of {n}x{n}")), "{d}");
             if count >= 4 {
@@ -219,8 +216,7 @@ fn a_batch_of_solves_matches_each_solve_alone() {
         let (mut w1, mut o1, mut w2, mut o2) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         tape.eval(&inputs, &mut w1, &mut o1);
         native.eval(&inputs, &mut w2, &mut o2);
-        assert!(same(&o1, &o2), "n {n} count {count}: native differs");
-        // Each solve compiled alone.
+        assert!(identical(&o1, &o2), "n {n} count {count}: native differs");
         let mut at = 0;
         let mut i = 0;
         while at < roots.len() {
@@ -229,7 +225,7 @@ fn a_batch_of_solves_matches_each_solve_alone() {
             let (mut w, mut o) = (Vec::new(), Vec::new());
             alone.eval(&inputs, &mut w, &mut o);
             assert!(
-                same(&o, &o1[at..at + n]),
+                identical(&o, &o1[at..at + n]),
                 "n {n} count {count}: solve {i} differs"
             );
             at += n;

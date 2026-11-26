@@ -6,6 +6,10 @@
 //! caller binding a global by a parameter of its own name. Each against the
 //! program with every call inlined, where the globals are plain symbols.
 
+mod common;
+use common::constants::REORDERED;
+use common::sym;
+
 use rsdag::Program;
 use std::collections::HashMap;
 
@@ -15,16 +19,6 @@ use rsdag::{
 };
 use rustc_hash::FxHashMap;
 
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    let Node::Symbol(s) = *g.node(e) else {
-        unreachable!()
-    };
-    (e, s)
-}
-
-/// `d(va, vb)` reading the card `t1`, `t2`: `t1 tanh(va - vb) + exp(t2 va)`
-/// and its negation.
 fn device(g: &mut Graph<F64>) -> FuncId {
     let mut s = Scope::new(g, "d");
     let t1 = s.global("t1");
@@ -41,8 +35,6 @@ fn device(g: &mut Graph<F64>) -> FuncId {
     s.close([(i, OutputRole::Plain), (n, OutputRole::Plain)])
 }
 
-/// `gate(a, b, c)`: a device from `a` to `b` and one from `b` to `c`; the
-/// currents into `a`, `b`, `c`.
 fn gate(g: &mut Graph<F64>, d: FuncId) -> FuncId {
     let mut s = Scope::new(g, "gate");
     let a = s.param("a", ParamRole::State { id: 0 });
@@ -65,8 +57,7 @@ struct Circuit {
     card: Vec<SymbolId>,
 }
 
-/// A chain of `n` gates over nodes `v0..v2n`.
-fn circuit(n: usize) -> Circuit {
+fn chain_of_gates(n: usize) -> Circuit {
     let mut g: Graph<F64> = Graph::new();
     let d = device(&mut g);
     let gt = gate(&mut g, d);
@@ -112,7 +103,7 @@ fn close(a: &[f64], b: &[f64]) {
     assert_eq!(a.len(), b.len());
     for (k, (x, y)) in a.iter().zip(b).enumerate() {
         assert!(
-            (x - y).abs() <= 1e-13 * (1.0 + x.abs()),
+            (x - y).abs() <= REORDERED * (1.0 + x.abs()),
             "value {k}: {x:e} vs {y:e}"
         );
     }
@@ -120,7 +111,7 @@ fn close(a: &[f64], b: &[f64]) {
 
 #[test]
 fn a_call_reads_the_globals_of_its_body() {
-    let mut c = circuit(4);
+    let mut c = chain_of_gates(4);
     let d = FuncId(0);
     let gt = FuncId(1);
     let card: Vec<SymbolId> =
@@ -139,14 +130,19 @@ fn a_call_reads_the_globals_of_its_body() {
         d_card.iter().flatten().map(|&(k, _)| k).collect();
     assert!(cols.contains(&0) && cols.contains(&1));
     assert!(c.g.depends_on(&roots[..1], &[c.card[1]])[0]);
-    // what the roots read, not only what they mention
-    assert!(c.g.free_symbols_in(&roots).contains(&c.card[0]));
-    assert!(!c.g.mentioned_symbols_in(&roots).contains(&c.card[0]));
+    assert!(
+        c.g.free_symbols_in(&roots).contains(&c.card[0]),
+        "the free symbols miss a global that the roots read"
+    );
+    assert!(
+        !c.g.mentioned_symbols_in(&roots).contains(&c.card[0]),
+        "the roots mention a global that only their bodies read"
+    );
 }
 
 #[test]
 fn calls_with_globals_evaluate_as_inlined() {
-    let mut c = circuit(4);
+    let mut c = chain_of_gates(4);
     let env = env(&c);
     let roots = c.roots.clone();
     let flat = c.g.inline_all(&roots);
@@ -154,7 +150,6 @@ fn calls_with_globals_evaluate_as_inlined() {
     close(&eval(&c.g, &roots, &env), &want);
     let composed = c.g.inline_composite(&roots);
     close(&eval(&c.g, &composed, &env), &want);
-    // the tape, plain and split over the card
     let syms: Vec<SymbolId> = c.states.iter().chain(&c.card).copied().collect();
     let x: Vec<f64> = syms.iter().map(|s| env[s]).collect();
     let tape = Tape::compile(&c.g, &roots, &syms);
@@ -171,7 +166,7 @@ fn calls_with_globals_evaluate_as_inlined() {
 
 #[test]
 fn the_jacobian_runs_through_the_globals() {
-    let mut c = circuit(3);
+    let mut c = chain_of_gates(3);
     let env = env(&c);
     let roots = c.roots.clone();
     let wrt: Vec<SymbolId> = c.states.iter().chain(&c.card).copied().collect();
@@ -186,14 +181,16 @@ fn the_jacobian_runs_through_the_globals() {
         let fes: Vec<ExprId> = fr.iter().map(|&(_, e)| e).collect();
         close(&eval(&c.g, &es, &env), &eval(&c.g, &fes, &env));
     }
-    // every row reads the card
     let n = c.states.len();
-    assert!(rows.iter().all(|r| r.iter().any(|&(j, _)| j >= n)));
+    assert!(
+        rows.iter().all(|r| r.iter().any(|&(j, _)| j >= n)),
+        "a row of the Jacobian does not read the card"
+    );
 }
 
 #[test]
 fn substituting_a_global_binds_the_bodies_reading_it() {
-    let mut c = circuit(3);
+    let mut c = chain_of_gates(3);
     let mut env = env(&c);
     let roots = c.roots.clone();
     let (t1, v1) = (c.card[0], env[&c.card[0]]);
@@ -210,8 +207,6 @@ fn substituting_a_global_binds_the_bodies_reading_it() {
 
 #[test]
 fn a_parameter_binds_a_global_of_its_name_below() {
-    // gate2(a, b, t1): its device reads `t1`, which gate2 takes as a
-    // parameter: a call of gate2 binds it
     let mut g: Graph<F64> = Graph::new();
     let d = device(&mut g);
     let mut s = Scope::new(&mut g, "gate2");
@@ -229,7 +224,6 @@ fn a_parameter_binds_a_global_of_its_name_below() {
     let root = g.call(gate2, 0, &[x, y, q]);
     let inlined = g.inline_all(&[root]);
     let env: HashMap<SymbolId, f64> = [(xs, 0.4), (ys, 0.1), (qs, 1.7), (t2s, 0.3)].into();
-    // by hand: q * (q tanh(x - y) + exp(t2 x))
     let want = 1.7 * (1.7 * (0.4f64 - 0.1).tanh() + (0.3f64 * 0.4).exp());
     close(&eval(&g, &[root], &env), &[want]);
     close(&eval(&g, &inlined, &env), &[want]);

@@ -12,29 +12,29 @@
 
 use rsdag::node::{CmpOp, ReduceOp};
 
-/// Which base pointer a memory operand is relative to.
 #[derive(Clone, Copy)]
 pub(crate) enum Base {
-    /// The work array (slots, bundle scratch, gather area).
     Work,
-    /// The input vector.
     Inputs,
 }
 
-/// An integer argument of a host call.
+impl Base {
+    pub(crate) fn register<R>(self, work: R, inputs: R) -> R {
+        match self {
+            Base::Work => work,
+            Base::Inputs => inputs,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum IArg {
     Imm(u64),
-    /// The address of a byte offset into the work array.
     WorkAddr(usize),
-    /// The address of a byte offset into the input vector.
     InputAddr(usize),
-    /// The layout pointer the chunk received.
     Layout,
 }
 
-/// One argument of a host call, in the routine's signature order: the
-/// conventions differ in whether floats and integers are counted together.
 #[derive(Clone, Copy)]
 pub(crate) enum Arg {
     F(u8),
@@ -72,7 +72,7 @@ pub(crate) trait Isa {
     /// an architecture keeps as many of them in callee-saved registers as it
     /// has to spare, so those calls need no address immediate.
     fn new(hot: &[*const ()]) -> Self;
-    fn finish(self) -> Vec<u8>;
+    fn finish(self) -> Result<Vec<u8>, crate::JitError>;
 
     /// Function entry: `fn(work: *mut f64, inputs: *const f64, layout: *const _)`
     /// in the platform's C convention, the three pointers kept in callee-saved

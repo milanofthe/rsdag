@@ -17,7 +17,6 @@ use crate::node::ArgList;
 use crate::node::{ExprId, Node, SymbolId};
 use crate::semantics::{binary_f64, cmp_bool, dot_slice, powi_f64, reduce_slice, unary_f64};
 
-/// The value of one node from its operands.
 fn node_value<K: Field>(
     ctx: &Graph<K>,
     node: &Node,
@@ -57,10 +56,11 @@ fn node_value<K: Field>(
             dot_slice(&va, &vb)
         }
         Node::Call(o, l) => {
-            // the operands in parameter order, then the globals the body reads
             let globals = ctx.globals(ctx.output(o).0);
-            let full = ctx.full_args(o, l);
-            let vals: Vec<f64> = full.iter().chain(&globals[..]).map(|&a| get(a)).collect();
+            let params_in_order = ctx.full_args(o, l);
+            let vals: Vec<f64> = (params_in_order.iter().chain(&globals[..]))
+                .map(|&a| get(a))
+                .collect();
             call(o, l, &vals)
         }
         Node::Solve(l, i) => {
@@ -78,7 +78,6 @@ fn node_value<K: Field>(
 /// root: the lowest-index non-finite value is the origin, since a node's
 /// operands have smaller ids.
 pub fn eval<K: Field>(ctx: &Graph<K>, roots: &[ExprId], env: &HashMap<SymbolId, f64>) -> Vec<f64> {
-    // the nodes the roots reach, each after its operands
     let cone = ctx.cone(roots, true);
     let at = |e: ExprId| cone.pos(e);
     let mut fe = FuncEval::new();
@@ -89,7 +88,6 @@ pub fn eval<K: Field>(ctx: &Graph<K>, roots: &[ExprId], env: &HashMap<SymbolId, 
         }
     }
     let mut w: Vec<f64> = Vec::with_capacity(cone.nodes.len());
-    // A dense system is solved once for all its components.
     let mut solved: HashMap<ArgList, Vec<f64>> = HashMap::new();
     for &e in cone.nodes.iter() {
         let node = *ctx.node(e);
@@ -109,14 +107,9 @@ pub fn eval<K: Field>(ctx: &Graph<K>, roots: &[ExprId], env: &HashMap<SymbolId, 
     roots.iter().map(|&r| w[at(r)]).collect()
 }
 
-/// Per-sweep function evaluation: a body per function and the outputs of
-/// every distinct `(function, argument list)` already evaluated.
 struct FuncEval {
     bodies: rustc_hash::FxHashMap<FuncId, Body>,
-    /// Per instance (function, context, argument list), its outputs.
     vals: rustc_hash::FxHashMap<(FuncId, u32, ArgList), Vec<f64>>,
-    /// The outputs the sweep calls per function, declared up front so one
-    /// body serves the whole sweep (see [`Function::body_for`]).
     needed: rustc_hash::FxHashMap<FuncId, Vec<u32>>,
 }
 
@@ -129,8 +122,6 @@ impl FuncEval {
         }
     }
 
-    /// Declare that the sweep calls output `out` of `f`, before the first
-    /// call; a body is chosen for the declared set.
     fn need(&mut self, f: FuncId, out: u32) {
         let v = self.needed.entry(f).or_default();
         if !v.contains(&out) {
@@ -138,14 +129,12 @@ impl FuncEval {
         }
     }
 
-    /// The value of a call of output `o` over the list `l` at the values
-    /// `args` of its operands (in its function's parameter order, then its
-    /// globals); the instance keys the memo.
     fn output<K: Field>(&mut self, ctx: &Graph<K>, o: OutputId, l: ArgList, args: &[f64]) -> f64 {
         let (f, out) = ctx.output(o);
         let site = (f, ctx.context_of(o), l);
         let func = ctx.func(f);
-        if matches!(func.outputs()[out as usize], Output::Zero) {
+        let output = func.outputs()[out as usize];
+        if matches!(output, Output::Zero) {
             return 0.0;
         }
         let needed = &self.needed;
@@ -156,14 +145,15 @@ impl FuncEval {
                 Some(needed) => func.body_for(ctx, needed),
                 None => func.body_for(ctx, &[out]),
             });
-        let Some(slot) = body.slot_of.get(out as usize).copied().flatten() else {
-            // The cached body predates this output (a derivative demanded
-            // later): rebuild it over every output.
-            let fresh = func.body(ctx);
-            self.vals.retain(|k, _| k.0 != f);
-            *body = fresh;
-            let slot = body.slot_of[out as usize].expect("a body carries every output");
-            return self.eval_slot(site, args, slot);
+        let slot = match (body.slot_of.get(out as usize).copied().flatten(), output) {
+            (Some(slot), _) | (None, Output::Slot(slot)) => slot,
+            (None, Output::Expr(e)) => {
+                let (fresh, slot) = func.body_leading(ctx, out, e);
+                self.vals.retain(|k, _| k.0 != f);
+                *body = fresh;
+                slot
+            }
+            (None, Output::Zero) => return 0.0,
         };
         self.eval_slot(site, args, slot)
     }

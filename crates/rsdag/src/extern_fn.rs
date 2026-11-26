@@ -11,6 +11,18 @@
 //! compiled body survives `Graph` mutation and crosses thread boundaries with
 //! the per-thread tapes the solver clones.
 
+pub fn spread_pure(mask: &[bool], pure: &[f64], args: &mut [f64]) {
+    debug_assert_eq!(mask.iter().filter(|&&is_pure| is_pure).count(), pure.len());
+    args.fill(f64::NAN);
+    let slots = args
+        .iter_mut()
+        .zip(mask)
+        .filter_map(|(a, &m)| m.then_some(a));
+    for (a, &v) in slots.zip(pure) {
+        *a = v;
+    }
+}
+
 /// The forms a backend compiled of a bundle, kept with the bundle so every
 /// program that calls it shares them (a native body is emitted once, not
 /// once per calling program). Keyed by the backend's options.
@@ -24,6 +36,7 @@ impl BackendCache {
         v.iter().find(|(k, _)| *k == key).map(|(_, b)| b.clone())
     }
 
+    // https://github.com/milanofthe/rsdag/issues/242
     /// The form compiled under `key`, compiled by `make` on its first use.
     pub fn get_or_try_insert<E>(
         &self,
@@ -33,14 +46,13 @@ impl BackendCache {
         if let Some(b) = self.get(key) {
             return Ok(b);
         }
-        // Compiled outside the lock: a body's own calls take their bodies'.
-        let b = make()?;
+        let made_before_locking = make()?;
         let mut v = self.0.lock().unwrap();
         if let Some((_, first)) = v.iter().find(|(k, _)| *k == key) {
             return Ok(first.clone());
         }
-        v.push((key, b.clone()));
-        Ok(b)
+        v.push((key, made_before_locking.clone()));
+        Ok(made_before_locking)
     }
 }
 
@@ -115,7 +127,6 @@ impl<'a> Instances<'a> {
         }
     }
 
-    /// These, their state rows `rows`.
     pub(crate) fn with_rows(self, rows: Rows<'a>) -> Self {
         Instances { rows, ..self }
     }
@@ -129,7 +140,6 @@ impl<'a> Instances<'a> {
         }
     }
 
-    /// The instances `index` lists, in the arrays of these.
     pub(crate) fn listed(self, index: &'a [u32]) -> Self {
         Instances {
             n: index.len(),

@@ -17,8 +17,6 @@ fn prolog_guards_are_checked_against_the_native_prolog() {
             _ => unreachable!(),
         })
         .collect();
-    // The choice depends on the parameter alone: its guard lives in the
-    // prolog.
     let zero = g.zero();
     let c = g.cmp(CmpOp::Gt, p, zero);
     let two = g.konst_f64(2.0);

@@ -1,21 +1,21 @@
 name: ci
-# rsdag is infrastructure for its consumers, never used on its own: no
-# builds and no platform matrix here, one Linux job that lints and tests.
-# The full gate (the x86 baseline path, the feature matrix, rustdoc, wasm,
-# the Python bindings) runs locally with scripts/ci.sh.
 on:
   pull_request:
   workflow_dispatch:
 jobs:
   rust:
+    name: Lint and test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: milanofthe/negentropy@v1.7.0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --exclude rsdag-py --all-targets --features 'rsdag/synth rsdag/serde' -- -D warnings
-      # recording, so the tests that read rsdag's measures check them
-      - run: cargo test --workspace --exclude rsdag-py --features 'rsdag/synth rsdag/serde rsprobe/on'
+      - name: Test with rsprobe recording
+        run: cargo test --workspace --exclude rsdag-py --features 'rsdag/synth rsdag/serde rsprobe/on'

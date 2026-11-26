@@ -38,14 +38,20 @@ pub enum Kind {
 pub enum Notation {
     /// `*`, `neg`, `^-1`, `exp`, `>`, `select`, `sum`, `dot`.
     Ascii,
-    /// `×`, `−(·)`, `(·)^-1`, `exp(·)`, `(·) > (·)`, `(·) ? (·) : (·)`,
-    /// `Σ`, `<·,·>`.
+    /// Mathematical symbols, with a middle dot in place of each operand:
+    /// the multiplication sign, the minus sign before the operand, `(.)^-1`,
+    /// `exp(.)`, `(.) > (.)`, `(.) ? (.) : (.)`, the capital sigma for a sum,
+    /// the capital pi for a product and `<.,.>`.
     Math,
 }
 
-/// A number as a label: an integer as one, else four significant digits,
-/// in exponent form beyond `1e5` or below `1e-3`.
-fn number(x: f64) -> String {
+const MULTIPLICATION_SIGN: &str = "\u{00d7}";
+const MINUS_SIGN: &str = "\u{2212}";
+const MIDDLE_DOT: &str = "\u{00b7}";
+const CAPITAL_SIGMA: &str = "\u{03a3}";
+const CAPITAL_PI: &str = "\u{03a0}";
+
+fn number_label(x: f64) -> String {
     if x.fract() == 0.0 && x.abs() < LABEL_INT_MAX {
         return format!("{}", x as i64);
     }
@@ -146,24 +152,24 @@ impl<'g, K: Field> GraphView<'g, K> {
         self
     }
 
-    /// The label and kind of node `e`.
-    fn style(&self, e: ExprId) -> (String, Kind) {
-        let (label, kind) = self.own_style(e);
+    fn label_and_kind(&self, e: ExprId) -> (String, Kind) {
+        let (label, kind) = self.own_label_and_kind(e);
         match self.labels.get(&e) {
             Some(l) => (l.clone(), kind),
             None => (label, kind),
         }
     }
 
-    /// The node's own label and its kind.
-    fn own_style(&self, e: ExprId) -> (String, Kind) {
+    fn own_label_and_kind(&self, e: ExprId) -> (String, Kind) {
         let g = self.g;
         let math = self.notation == Notation::Math;
         match *g.node(e) {
             Node::Const(c) => {
                 let exact = g.const_val(c).render();
                 let label = match g.const_f64(e) {
-                    Some(x) if exact.len() > LABEL_EXACT_MAX || !exact.contains('/') => number(x),
+                    Some(x) if exact.len() > LABEL_EXACT_MAX || !exact.contains('/') => {
+                        number_label(x)
+                    }
                     _ => exact,
                 };
                 (label, Kind::Const)
@@ -177,42 +183,42 @@ impl<'g, K: Field> GraphView<'g, K> {
                 },
             ),
             Node::Add(..) => ("+".into(), Kind::Op),
-            Node::Mul(..) => (if math { "\u{00d7}" } else { "*" }.into(), Kind::Op),
-            Node::Neg(_) => (
-                if math { "\u{2212}(\u{00b7})" } else { "neg" }.into(),
+            Node::Mul(..) => (
+                if math { MULTIPLICATION_SIGN } else { "*" }.into(),
                 Kind::Op,
             ),
-            Node::Pow(_, n) if math => (format!("(\u{00b7})^{n}"), Kind::Op),
+            Node::Neg(_) if math => (format!("{MINUS_SIGN}({MIDDLE_DOT})"), Kind::Op),
+            Node::Neg(_) => ("neg".into(), Kind::Op),
+            Node::Pow(_, n) if math => (format!("({MIDDLE_DOT})^{n}"), Kind::Op),
             Node::Pow(_, n) => (format!("^{n}"), Kind::Op),
-            Node::Unary(op, _) if math => (format!("{}(\u{00b7})", op.name()), Kind::Op),
+            Node::Unary(op, _) if math => (format!("{}({MIDDLE_DOT})", op.name()), Kind::Op),
             Node::Unary(op, _) => (op.name().into(), Kind::Op),
             Node::Binary(op, ..) => (op.name().into(), Kind::Op),
             Node::Cmp(op, ..) => {
                 let c = op.symbol();
                 let label = if math {
-                    format!("(\u{00b7}) {c} (\u{00b7})")
+                    format!("({MIDDLE_DOT}) {c} ({MIDDLE_DOT})")
                 } else {
                     c.to_string()
                 };
                 (label, Kind::Choice)
             }
-            Node::Select(..) if math => {
-                ("(\u{00b7}) ? (\u{00b7}) : (\u{00b7})".into(), Kind::Choice)
-            }
+            Node::Select(..) if math => (
+                format!("({MIDDLE_DOT}) ? ({MIDDLE_DOT}) : ({MIDDLE_DOT})"),
+                Kind::Choice,
+            ),
             Node::Select(..) => ("select".into(), Kind::Choice),
             Node::Reduce(op, _) => (
                 match (op, math) {
-                    (ReduceOp::Sum, true) => "\u{03a3}",
-                    (ReduceOp::Product, true) => "\u{03a0}",
+                    (ReduceOp::Sum, true) => CAPITAL_SIGMA,
+                    (ReduceOp::Product, true) => CAPITAL_PI,
                     (op, _) => op.name(),
                 }
                 .into(),
                 Kind::Kernel,
             ),
-            Node::Dot(_) => (
-                if math { "<\u{00b7},\u{00b7}>" } else { "dot" }.into(),
-                Kind::Kernel,
-            ),
+            Node::Dot(_) if math => (format!("<{MIDDLE_DOT},{MIDDLE_DOT}>"), Kind::Kernel),
+            Node::Dot(_) => ("dot".into(), Kind::Kernel),
             Node::Solve(_, i) => (format!("solve[{i}]"), Kind::Kernel),
             Node::Call(o, _) => {
                 let (f, k) = g.output(o);
@@ -234,13 +240,12 @@ impl<'g, K: Field> GraphView<'g, K> {
         }
         let g = self.g;
         let seeds: Vec<ExprId> = self.roots.iter().map(|r| r.0).collect();
-        // Nodes in id order: operands before the nodes that read them.
-        let mut exprs = g.cone(&seeds, false).nodes.to_vec();
-        exprs.sort_unstable();
+        let mut operands_first = g.cone(&seeds, false).nodes.to_vec();
+        operands_first.sort_unstable();
         let mut data = GraphData::default();
         let mut at: NodeTable<u32> = NodeTable::new(g.len());
-        for &e in &exprs {
-            let (label, kind) = self.style(e);
+        for &e in &operands_first {
+            let (label, kind) = self.label_and_kind(e);
             at.set(e, data.nodes.len() as u32);
             data.nodes.push(GraphNode {
                 id: format!("n{}", e.0),
@@ -250,7 +255,7 @@ impl<'g, K: Field> GraphView<'g, K> {
             });
         }
         let pos = |e: &ExprId| at.get(*e).expect("drawn") as usize;
-        for &e in &exprs {
+        for &e in &operands_first {
             let select = matches!(g.node(e), Node::Select(..));
             for (k, a) in g.operands(e).iter().enumerate() {
                 let label = if select {
@@ -277,20 +282,12 @@ impl<'g, K: Field> GraphView<'g, K> {
     }
 }
 
-/// [`GraphView::inline`]: the drawn graph with every call of a body
-/// replaced by the body, per instance. A rewrite into the drawn nodes (see
-/// [`crate::transform::rewrite`]) in frames: 0 the top, an instance's frame
-/// the index of its cluster plus one, its body rewritten there with its
-/// parameters bound to the drawn operands of the call in the caller's frame.
 struct Inliner<'v, 'g, K: Field> {
     view: &'v GraphView<'g, K>,
     data: GraphData,
-    /// The free symbols drawn, at the top.
-    top: FxHashMap<ExprId, u32>,
+    free_symbols_at_top: FxHashMap<ExprId, u32>,
 }
 
-/// One frame of an [`Inliner`]: its index and the drawn operands its
-/// parameters are bound to.
 struct Frame<'a, 'v, 'g, K: Field> {
     inl: &'a mut Inliner<'v, 'g, K>,
     fr: usize,
@@ -309,11 +306,11 @@ impl<K: Field> Rule<K> for Frame<'_, '_, '_, K> {
         if let Some(&n) = self.bound.get(&s) {
             return n;
         }
-        if let Some(&n) = self.inl.top.get(&e) {
+        if let Some(&n) = self.inl.free_symbols_at_top.get(&e) {
             return n;
         }
         let n = self.inl.draw(0, e, ops);
-        self.inl.top.insert(e, n);
+        self.inl.free_symbols_at_top.insert(e, n);
         n
     }
     fn calls(&mut self, call: &Call<u32>, outs: &[(ExprId, u32)], vals: &mut Vec<u32>) {
@@ -340,7 +337,6 @@ impl<K: Field> Rule<K> for Frame<'_, '_, '_, K> {
             };
             drawn = rewrite(&mut frame, &exprs).into_iter();
         }
-        // a call of no body is drawn as the call
         for &(e, k) in outs {
             vals.push(match body(k) {
                 Some(_) => drawn.next().expect("one per body"),
@@ -351,9 +347,8 @@ impl<K: Field> Rule<K> for Frame<'_, '_, '_, K> {
 }
 
 impl<'v, 'g, K: Field> Inliner<'v, 'g, K> {
-    /// Node `e` drawn in frame `fr`, read from the drawn `ops`.
     fn draw(&mut self, fr: usize, e: ExprId, ops: &[u32]) -> u32 {
-        let (label, kind) = self.view.style(e);
+        let (label, kind) = self.view.label_and_kind(e);
         let n = self.data.nodes.len();
         self.data.nodes.push(GraphNode {
             id: match fr {
@@ -380,7 +375,7 @@ impl<'v, 'g, K: Field> Inliner<'v, 'g, K> {
         let mut inl = Inliner {
             view,
             data: GraphData::default(),
-            top: FxHashMap::default(),
+            free_symbols_at_top: FxHashMap::default(),
         };
         let seeds: Vec<ExprId> = view.roots.iter().map(|r| r.0).collect();
         let mut top = Frame {

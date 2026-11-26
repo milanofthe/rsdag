@@ -31,9 +31,11 @@ fn integer_powers_agree_with_the_reference_natively() {
         Node::Symbol(s) => s,
         _ => unreachable!(),
     };
-    // inline up to |n| = 64, the host beyond
-    let ns: Vec<i64> = (-70..=70).filter(|&n| n != 0).collect();
-    let roots: Vec<_> = ns.iter().map(|&n| g.pow_i(x, n)).collect();
+    let ns_across_the_inline_limit: Vec<i64> = (-70..=70).filter(|&n| n != 0).collect();
+    let roots: Vec<_> = ns_across_the_inline_limit
+        .iter()
+        .map(|&n| g.pow_i(x, n))
+        .collect();
     let tape = Tape::compile(&g, &roots, &[s]);
     let native = NativeTape::compile(&tape).expect("native code");
     for &v in &xs {
@@ -41,7 +43,7 @@ fn integer_powers_agree_with_the_reference_natively() {
         tape.eval(&[v], &mut w, &mut o);
         let (mut wn, mut on) = (Vec::new(), Vec::new());
         native.eval(&[v], &mut wn, &mut on);
-        for (k, &n) in ns.iter().enumerate() {
+        for (k, &n) in ns_across_the_inline_limit.iter().enumerate() {
             let r = rsdag::semantics::powi_f64(v, n as i32);
             let same = |a: f64| a.to_bits() == r.to_bits() || (a.is_nan() && r.is_nan());
             assert!(same(o[k]), "interpreter {v:e}^{n}");

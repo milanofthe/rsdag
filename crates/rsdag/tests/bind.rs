@@ -4,27 +4,20 @@
 //! once per card) evaluates, differentiates, specializes, inlines, compiles
 //! and serializes to the same bits.
 
+mod common;
+use common::{bits, sym};
+
 use rsdag::Program;
 use std::collections::HashMap;
 
 use rsdag::{
-    eval, sparse_jacobian, substitute, ExprId, FuncId, Graph, Node, OutputRole, ParamRole,
-    ReduceOp, Scope, SymbolId, Tape, F64,
+    eval, sparse_jacobian, substitute, ExprId, FuncId, Graph, OutputRole, ParamRole, ReduceOp,
+    Scope, SymbolId, Tape, F64,
 };
 use rustc_hash::FxHashMap;
 
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    let Node::Symbol(s) = *g.node(e) else {
-        unreachable!()
-    };
-    (e, s)
-}
-
 const CARD: usize = 6;
 
-/// `d(va, vb, c0..c5, w)`: a current over a card of six and an instance
-/// parameter.
 fn device(g: &mut Graph<F64>) -> FuncId {
     let mut s = Scope::new(g, "d");
     let va = s.param("va", ParamRole::State { id: 0 });
@@ -52,9 +45,7 @@ struct Built {
     params: Vec<SymbolId>,
 }
 
-/// A ring of `n` devices over two cards (alternating), one with a ground
-/// terminal; `bound` passes the card through a binding.
-fn ring(n: usize, bound: bool) -> Built {
+fn ring_over_two_alternating_cards(n: usize, card_through_a_binding: bool) -> Built {
     let mut g: Graph<F64> = Graph::new();
     let d = device(&mut g);
     let v: Vec<(ExprId, SymbolId)> = (0..n).map(|k| sym(&mut g, &format!("v{k}"))).collect();
@@ -82,7 +73,7 @@ fn ring(n: usize, bound: bool) -> Built {
     for k in 0..n {
         let b = if k == 3 { zero } else { v[(k + 1) % n].0 };
         let card = k % 2;
-        let outs = if bound {
+        let outs = if card_through_a_binding {
             g.calls_bound(binds[card], &[0, 1], &[v[k].0, b, w[k].0])
         } else {
             let args: Vec<ExprId> = [v[k].0, b]
@@ -122,11 +113,6 @@ fn env(b: &Built) -> HashMap<SymbolId, f64> {
         .collect()
 }
 
-fn bits(v: &[f64]) -> Vec<u64> {
-    v.iter().map(|x| x.to_bits()).collect()
-}
-
-/// The values of every entry of a sparse Jacobian, by row.
 fn jacobian_values(b: &mut Built, wrt: &[SymbolId]) -> Vec<Vec<(usize, u64)>> {
     let roots = b.roots.clone();
     let rows = sparse_jacobian(&mut b.g, &roots, wrt);
@@ -142,7 +128,10 @@ fn jacobian_values(b: &mut Built, wrt: &[SymbolId]) -> Vec<Vec<(usize, u64)>> {
 
 #[test]
 fn a_bound_call_evaluates_and_differentiates_as_the_full_one() {
-    let (mut full, mut bound) = (ring(9, false), ring(9, true));
+    let (mut full, mut bound) = (
+        ring_over_two_alternating_cards(9, false),
+        ring_over_two_alternating_cards(9, true),
+    );
     assert_eq!(
         bits(&eval(&full.g, &full.roots, &env(&full))),
         bits(&eval(&bound.g, &bound.roots, &env(&bound)))
@@ -165,7 +154,10 @@ fn a_bound_call_evaluates_and_differentiates_as_the_full_one() {
 
 #[test]
 fn a_bound_call_compiles_and_inlines_as_the_full_one() {
-    let (mut full, mut bound) = (ring(9, false), ring(9, true));
+    let (mut full, mut bound) = (
+        ring_over_two_alternating_cards(9, false),
+        ring_over_two_alternating_cards(9, true),
+    );
     let run = |b: &mut Built| -> Vec<Vec<u64>> {
         let syms: Vec<SymbolId> = b.states.iter().chain(&b.params).copied().collect();
         let env = env(b);
@@ -197,9 +189,7 @@ fn a_bound_call_compiles_and_inlines_as_the_full_one() {
 
 #[test]
 fn a_main_phase_gathers_what_it_reads() {
-    // the device's main phase reads its states, `w` and the card entries
-    // it multiplies a state by; the card's sum is the prolog's
-    let b = ring(9, true);
+    let b = ring_over_two_alternating_cards(9, true);
     let syms: Vec<SymbolId> = b.states.iter().chain(&b.params).copied().collect();
     let pure: Vec<bool> = (0..syms.len()).map(|k| k >= b.states.len()).collect();
     let tape = Tape::compile_split(&b.g, &b.roots, &syms, &pure);
@@ -217,34 +207,38 @@ fn a_main_phase_gathers_what_it_reads() {
         })
         .collect();
     assert!(!calls.is_empty(), "the calls keep a state");
-    assert!(calls.iter().all(|&(n_args, n_in)| n_in == 5 && n_args == 9));
+    assert!(
+        calls.iter().all(|&(n_args, n_in)| n_in == 5 && n_args == 9),
+        "the main phase gathers its states, w and the card entries it multiplies a state by, and not the card's sum"
+    );
 }
 
 #[test]
 fn substitution_reaches_into_a_binding() {
-    // a card parameter made a constant: the bound circuit as the full one
     let run = |mut b: Built| -> (Vec<u64>, bool) {
         let mut env = env(&b);
         let roots = b.roots.clone();
-        let c = b.params[b.states.len() + 5];
-        let k = b.g.konst_f64(env[&c]);
-        let map: FxHashMap<SymbolId, ExprId> = [(c, k)].into_iter().collect();
+        let card_param = b.params[b.states.len() + 5];
+        let card_param_as_constant = b.g.konst_f64(env[&card_param]);
+        let map: FxHashMap<SymbolId, ExprId> =
+            [(card_param, card_param_as_constant)].into_iter().collect();
         let sub = substitute(&mut b.g, &roots, &map);
-        env.remove(&c);
+        env.remove(&card_param);
         (
             bits(&eval(&b.g, &sub, &env)),
-            b.g.free_symbols_in(&sub).contains(&c),
+            b.g.free_symbols_in(&sub).contains(&card_param),
         )
     };
-    let (full, bound) = (run(ring(5, false)), run(ring(5, true)));
+    let (full, bound) = (
+        run(ring_over_two_alternating_cards(5, false)),
+        run(ring_over_two_alternating_cards(5, true)),
+    );
     assert_eq!(full, bound);
     assert!(!bound.1, "the constant replaced the symbol");
 }
 
 #[test]
 fn substitution_reaches_every_binding_of_one_argument_list() {
-    // two devices on the same terminals with the same instance parameter,
-    // each on its own card: one argument list, two bindings
     let mut g: Graph<F64> = Graph::new();
     let d = device(&mut g);
     let (v0, s0) = sym(&mut g, "v0");
@@ -283,8 +277,6 @@ fn substitution_reaches_every_binding_of_one_argument_list() {
 
 #[test]
 fn inlining_reaches_every_binding_of_one_argument_list() {
-    // a body of two devices on the same terminals, each on its own card;
-    // the devices stay calls
     let mut g: Graph<F64> = Graph::new();
     let d = device(&mut g);
     let (a, sa) = sym(&mut g, "a");
@@ -328,7 +320,7 @@ fn inlining_reaches_every_binding_of_one_argument_list() {
 #[cfg(feature = "serde")]
 #[test]
 fn a_module_keeps_its_bindings() {
-    let b = ring(5, true);
+    let b = ring_over_two_alternating_cards(5, true);
     let module = b.g.to_module();
     let (g2, map) = Graph::from_module(&module).expect("a valid module");
     let roots: Vec<ExprId> = b.roots.iter().map(|r| map.exprs[r.0 as usize]).collect();

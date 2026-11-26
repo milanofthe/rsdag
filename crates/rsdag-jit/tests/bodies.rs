@@ -3,18 +3,14 @@
 //! shape, nested when a body calls another, and the result is the
 //! interpreter's to the bit.
 
+#[path = "../../rsdag/tests/common/mod.rs"]
+mod common;
+use common::{same, symbol_of};
+
 use rsdag::Program;
-use rsdag::{ExprId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
+use rsdag::{ExprId, Graph, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
 use rsdag_jit::{Batch, NativeTape, Options};
 
-fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
-    match g.node(e) {
-        Node::Symbol(s) => *s,
-        _ => unreachable!(),
-    }
-}
-
-/// `cell(l, c, r) = exp(c - l) - exp(r - c) + 2c - 1`, as a function.
 fn cell(g: &mut Graph<F64>) -> rsdag::FuncId {
     let mut s = Scope::new(g, "cell");
     let [l, c, r] = ["l", "c", "r"].map(|n| s.param(n, ParamRole::Free));
@@ -31,21 +27,13 @@ fn cell(g: &mut Graph<F64>) -> rsdag::FuncId {
     s.close([(out, OutputRole::Plain)])
 }
 
-fn same(a: &[f64], b: &[f64]) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .zip(b)
-            .all(|(x, y)| x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()))
-}
-
 #[test]
 fn batched_instances_of_a_body_match_the_interpreter() {
     for n in [3usize, 64, 5000] {
         let mut g: Graph<F64> = Graph::new();
         let f = cell(&mut g);
         let xs: Vec<ExprId> = (0..n).map(|i| g.sym(&format!("x{i}"))).collect();
-        let syms: Vec<SymbolId> = xs.iter().map(|&e| sym(&g, e)).collect();
-        // Leaf arguments: the calls batch into one call over n groups.
+        let syms: Vec<SymbolId> = xs.iter().map(|&e| symbol_of(&g, e)).collect();
         let roots: Vec<ExprId> = (0..n)
             .map(|i| g.call(f, 0, &[xs[(i + n - 1) % n], xs[i], xs[(i + 1) % n]]))
             .collect();
@@ -65,7 +53,7 @@ fn a_parallel_batch_is_the_serial_loop() {
         let mut g: Graph<F64> = Graph::new();
         let f = cell(&mut g);
         let xs: Vec<ExprId> = (0..n).map(|i| g.sym(&format!("x{i}"))).collect();
-        let syms: Vec<SymbolId> = xs.iter().map(|&e| sym(&g, e)).collect();
+        let syms: Vec<SymbolId> = xs.iter().map(|&e| symbol_of(&g, e)).collect();
         let roots: Vec<ExprId> = (0..n)
             .map(|i| g.call(f, 0, &[xs[(i + n - 1) % n], xs[i], xs[(i + 1) % n]]))
             .collect();
@@ -88,18 +76,17 @@ fn a_parallel_batch_is_the_serial_loop() {
 fn a_body_called_on_expressions_and_a_body_calling_a_body() {
     let mut g: Graph<F64> = Graph::new();
     let f = cell(&mut g);
-    // A function whose body calls `cell` twice on transformed arguments.
     let (a, b) = (g.sym("a"), g.sym("b"));
     let ab = g.mul(a, b);
     let c1 = g.call(f, 0, &[a, ab, b]);
     let c2 = g.call(f, 0, &[b, c1, a]);
-    let (sa, sb) = (sym(&g, a), sym(&g, b));
+    let (sa, sb) = (symbol_of(&g, a), symbol_of(&g, b));
     let mut s = Scope::new(&mut g, "outer");
     s.param(sa, ParamRole::Free);
     s.param(sb, ParamRole::Free);
     let outer = s.close([(c2, OutputRole::Plain)]);
     let (x, y, z) = (g.sym("x"), g.sym("y"), g.sym("z"));
-    let syms = vec![sym(&g, x), sym(&g, y), sym(&g, z)];
+    let syms = vec![symbol_of(&g, x), symbol_of(&g, y), symbol_of(&g, z)];
     let xy = g.add(x, y);
     let o1 = g.call(outer, 0, &[xy, z]);
     let o2 = g.call(f, 0, &[o1, x, xy]);

@@ -72,18 +72,20 @@ fn exp_and_ln_coefficients() {
     }
 }
 
-/// FNV-1a over a table's bits.
-fn fnv(bits: impl IntoIterator<Item = u64>) -> u64 {
-    bits.into_iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
-        (h ^ b).wrapping_mul(0x0000_0100_0000_01b3)
+const FNV1A_64_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV1A_64_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+fn fnv1a_over_words(bits: impl IntoIterator<Item = u64>) -> u64 {
+    bits.into_iter().fold(FNV1A_64_OFFSET_BASIS, |h, b| {
+        (h ^ b).wrapping_mul(FNV1A_64_PRIME)
     })
 }
 
 #[test]
 fn exp_and_ln_tables() {
-    assert_eq!(fnv(EXP_TABLE), 0xa1af_296a_f08c_1db8);
+    assert_eq!(fnv1a_over_words(EXP_TABLE), 0xa1af_296a_f08c_1db8);
     assert_eq!(
-        fnv(LN_TABLE.iter().flatten().map(|v| v.to_bits())),
+        fnv1a_over_words(LN_TABLE.iter().flatten().map(|v| v.to_bits())),
         0xaead_42a1_6854_2e23
     );
 }

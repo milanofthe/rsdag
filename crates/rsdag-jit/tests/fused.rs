@@ -17,9 +17,8 @@ fn sym(g: &mut Graph<F64>, name: &str, syms: &mut Vec<SymbolId>) -> ExprId {
 
 #[test]
 fn chained_block_updates_run_natively_with_folded_kernels() {
-    // Small blocks run as inline dots, the eight-block's products on the
-    // host.
-    for b in [3usize, 4, 8] {
+    let blocks = [3usize, 4, 8];
+    for b in blocks {
         chained_block_updates(b);
     }
 }
@@ -33,9 +32,6 @@ fn chained_block_updates(b: usize) {
             .map(|k| sym(g, &format!("{name}{k}"), syms))
             .collect()
     };
-    // Parameter-pure: the running block and the factors, `L` row-major and
-    // `U` column-major so both operands of a product are runs; main: a
-    // vector.
     let mut acc = matrix(&mut g, "c", &mut syms);
     let factors: Vec<(Vec<ExprId>, Vec<ExprId>)> = (0..updates)
         .map(|u| {
@@ -48,7 +44,6 @@ fn chained_block_updates(b: usize) {
     let v: Vec<ExprId> = (0..b)
         .map(|k| sym(&mut g, &format!("v{k}"), &mut syms))
         .collect();
-    // acc -= L_u U_u, entry by entry, one product after the other.
     for (l, r) in &factors {
         acc = (0..b * b)
             .map(|q| {
@@ -60,7 +55,6 @@ fn chained_block_updates(b: usize) {
             })
             .collect();
     }
-    // y = v - acc v, the main part.
     let roots: Vec<ExprId> = (0..b)
         .map(|i| {
             let row: Vec<ExprId> = (0..b).map(|k| acc[i * b + k]).collect();
@@ -85,7 +79,6 @@ fn chained_block_updates(b: usize) {
     for (k, (a, b)) in o.iter().zip(&on).enumerate() {
         assert_eq!(a.to_bits(), b.to_bits(), "output {k}: {a} vs {b}");
     }
-    // The prolog and main split evaluate the same.
     native.eval_prolog(&vals, &mut wn);
     native.eval_main(&vals, &mut wn, &mut on);
     for (a, b) in o.iter().zip(&on) {
@@ -93,9 +86,6 @@ fn chained_block_updates(b: usize) {
     }
 }
 
-/// The complex product pattern, small enough to run as inline dots:
-/// `re = rr - ii` and `im = ri + ir` folded from the kernel's own outputs,
-/// a negated product beside them.
 #[test]
 fn a_small_kernel_folding_its_own_outputs_runs_natively() {
     let (m, n) = (6usize, 4usize);

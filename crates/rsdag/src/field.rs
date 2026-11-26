@@ -85,8 +85,6 @@ impl Field for BigRational {
         if Zero::is_zero(self) && n < 0 {
             return None;
         }
-        // Digits grow with the exponent; past this a power of a constant
-        // stays a node and evaluates in floating point.
         if n.unsigned_abs() > EXACT_POWI_MAX && !One::is_one(&num_traits::Signed::abs(self)) {
             return None;
         }
@@ -111,9 +109,8 @@ impl Field for BigRational {
             format!("{}/{}", self.numer(), self.denom())
         }
     }
+    // https://github.com/milanofthe/rsdag/issues/242
     fn stable_hash(&self) -> u64 {
-        // The canonical bytes, not the digits: those are 64 bits wide on a
-        // 64-bit host and 32 on wasm32.
         let n = crate::node::shape::of_hash(&self.numer().to_signed_bytes_le()[..]);
         let d = crate::node::shape::of_hash(&self.denom().to_signed_bytes_le()[..]);
         crate::node::shape::mix(n, d)
@@ -123,10 +120,9 @@ impl Field for BigRational {
 #[cfg(feature = "exact")]
 pub use crate::constants::EXACT_POWI_MAX;
 
-/// Exact integer power of a rational by repeated squaring (negative
-/// exponents invert; the caller excludes zero to a negative power).
 #[cfg(feature = "exact")]
 fn ratio_powi(base: &BigRational, n: i64) -> BigRational {
+    debug_assert!(n >= 0 || !num_traits::Zero::is_zero(base));
     if n == 0 {
         return <BigRational as One>::one();
     }

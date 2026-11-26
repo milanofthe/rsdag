@@ -1,3 +1,5 @@
+mod common;
+use common::constants::{CENTRAL_DIFFERENCE_STEP, FINITE_DIFFERENCE, REORDERED};
 use rsdag::eval::eval;
 use rsdag::BigRational;
 use rsdag::*;
@@ -6,7 +8,6 @@ use std::collections::HashMap;
 #[test]
 fn derivative_matches_finite_difference() {
     let mut ctx: Graph<BigRational> = Graph::new();
-    // f = Is*(exp(v/Vt) - 1) + g*v^2  (a diode current plus a quadratic term)
     let v = ctx.sym("v");
     let vt = ctx.sym("Vt");
     let is = ctx.sym("Is");
@@ -23,10 +24,12 @@ fn derivative_matches_finite_difference() {
     let v_id = ctx.symbol_id("v");
     let df = differentiate(&mut ctx, f, v_id);
 
-    // Derivative wrt an absent symbol is structurally zero.
     let w_id = ctx.symbol_id("w");
     let dfw = differentiate(&mut ctx, f, w_id);
-    assert!(ctx.is_zero(dfw));
+    assert!(
+        ctx.is_zero(dfw),
+        "the derivative by an absent symbol is not structurally zero"
+    );
 
     let vt_id = ctx.symbol_id("Vt");
     let is_id = ctx.symbol_id("Is");
@@ -37,7 +40,7 @@ fn derivative_matches_finite_difference() {
     env.insert(is_id, 1e-12);
     env.insert(g_id, 0.3);
 
-    let h = 1e-6;
+    let h = CENTRAL_DIFFERENCE_STEP;
     for &x0 in &[-0.1, 0.0, 0.1, 0.3] {
         env.insert(v_id, x0);
         let analytic = eval(&ctx, &[df], &env)[0];
@@ -47,7 +50,7 @@ fn derivative_matches_finite_difference() {
         let fm = eval(&ctx, &[f], &env)[0];
         let numeric = (fp - fm) / (2.0 * h);
         assert!(
-            (analytic - numeric).abs() <= 1e-4 * (1.0 + analytic.abs()),
+            (analytic - numeric).abs() <= FINITE_DIFFERENCE * (1.0 + analytic.abs()),
             "x0={x0}: analytic={analytic} numeric={numeric}"
         );
     }
@@ -61,11 +64,13 @@ fn exp_derivative_shares_primal_and_matches_limexp_tail() {
     let e = ctx.exp(x);
     let xid = ctx.symbol_id("x");
     let de = differentiate(&mut ctx, e, xid);
-    // The derivative reuses the primal exp node (no second exp in the DAG).
     let n_exp = (0..ctx.len())
         .filter(|&i| matches!(ctx.node(ExprId(i as u32)), Node::Unary(UnaryOp::Exp, _)))
         .count();
-    assert_eq!(n_exp, 1);
+    assert_eq!(
+        n_exp, 1,
+        "the derivative does not reuse the primal exp node"
+    );
     let mut env: HashMap<SymbolId, f64> = HashMap::new();
     for &xv in &[-3.0, 0.0, 10.0, EXP_LIMIT, EXP_LIMIT + 5.0, 500.0] {
         env.insert(xid, xv);
@@ -122,7 +127,6 @@ fn expm1_derivative_is_the_unguarded_exponential() {
 fn select_and_opaque_autodiff() {
     use rsdag::node::CmpOp;
     let mut ctx: Graph<BigRational> = Graph::new();
-    // f = select(x > 0, x*x, -x);  df/dx = select(x>0, 2x, -1)
     let x = ctx.sym("x");
     let zero = ctx.zero();
     let cond = ctx.cmp(CmpOp::Gt, x, zero);
@@ -137,12 +141,9 @@ fn select_and_opaque_autodiff() {
         env.insert(xid, xv);
         eval(ctx, &[e], &env)[0]
     };
-    assert!((eval_at(&ctx, df, 3.0) - 6.0).abs() < 1e-9); // 2*3
-    assert!((eval_at(&ctx, df, -2.0) + 1.0).abs() < 1e-9); // -1
+    assert_eq!(eval_at(&ctx, df, 3.0), 2.0 * 3.0);
+    assert_eq!(eval_at(&ctx, df, -2.0), -1.0);
 
-    // Chain rule through a call: g = f(2*x) with f(p) = p^3; dg/dx must
-    // reference the derivative output of f (3p^2, a call) times 2:
-    // at x = 1, 3*4*2 = 24.
     let two = ctx.konst_int(2);
     let two_x = ctx.mul(two, x);
     let p = ctx.sym("p");
@@ -154,14 +155,16 @@ fn select_and_opaque_autodiff() {
     let g = ctx.call(f, 0, &[two_x]);
     let dg = differentiate(&mut ctx, g, xid);
     assert!(!ctx.is_zero(dg));
-    assert!(rsdag::to_string(&ctx, dg).contains("cube#1"));
-    assert!((eval_at(&ctx, dg, 1.0) - 24.0).abs() < 1e-9);
+    assert!(
+        rsdag::to_string(&ctx, dg).contains("cube#1"),
+        "the chain rule does not call the derivative output of cube"
+    );
+    let cube_derivative_at_2_times_2 = 3.0 * 2.0f64.powi(2) * 2.0;
+    assert_eq!(eval_at(&ctx, dg, 1.0), cube_derivative_at_2_times_2);
 }
 
 #[test]
-fn gradient_matches_forward_mode() {
-    // A device-like expression exercising every node kind the reverse sweep
-    // handles: exp/ln guards, select subgradients, powers, reduce, dot.
+fn gradient_matches_forward_mode_on_every_node_kind() {
     let mut ctx: Graph<BigRational> = Graph::new();
     let x = ctx.sym("x");
     let y = ctx.sym("y");
@@ -204,7 +207,7 @@ fn gradient_matches_forward_mode() {
             let gv = eval(&ctx, &[*g], &env)[0];
             let dv = eval(&ctx, &[*d], &env)[0];
             assert!(
-                (gv - dv).abs() <= 1e-12 * (1.0 + dv.abs()),
+                (gv - dv).abs() <= REORDERED * (1.0 + dv.abs()),
                 "at ({xv},{yv},{zv}): reverse={gv} forward={dv}"
             );
         }
@@ -229,14 +232,15 @@ fn gradient_handles_calls_and_absent_symbols() {
     let grad = gradient(&mut ctx, g, &[xs, ws]);
     assert!(!ctx.is_zero(grad[0]));
     assert!(rsdag::to_string(&ctx, grad[0]).contains("cube#1"));
-    // Absent symbol: structurally zero.
-    assert!(ctx.is_zero(grad[1]));
+    assert!(
+        ctx.is_zero(grad[1]),
+        "the gradient by an absent symbol is not structurally zero"
+    );
 }
 
 #[test]
 fn the_jacobian_is_sparse() {
     let mut ctx: Graph<BigRational> = Graph::new();
-    // r0 = a*x + b*y ; r1 = x  (so dr1/dy = 0)
     let x = ctx.sym("x");
     let y = ctx.sym("y");
     let a = ctx.sym("a");
@@ -258,9 +262,6 @@ fn the_jacobian_is_sparse() {
     assert_eq!(jac[1][0].1, ctx.one());
 }
 
-/// Rows touching many unknowns take a reverse sweep, the rest forward
-/// sweeps shared across rows; either way every entry is the forward
-/// derivative's value, and the pattern is the same.
 #[test]
 fn sparse_jacobian_modes_agree_with_forward_derivatives() {
     use rsdag::synth::{build, inputs, Spec, Vocabulary};
@@ -303,15 +304,13 @@ fn sparse_jacobian_modes_agree_with_forward_derivatives() {
             let same = (x.is_nan() && y.is_nan()) || x == y || (x - y).abs() <= tol;
             assert!(same, "seed {seed} entry {k}: {x} vs {y}");
         }
-        // No structural nonzero is lost: a forward entry that is not zero
-        // symbolically is in the sparse pattern.
         for (i, row) in jac.iter().enumerate() {
             for (j, &s) in syms.iter().enumerate() {
                 let d = differentiate(&mut g, roots[i], s);
                 if !g.is_zero(d) {
                     assert!(
                         row.iter().any(|&(c, _)| c == j),
-                        "seed {seed}: ({i}, {j}) missing"
+                        "seed {seed}: the structural nonzero ({i}, {j}) is missing from the sparse pattern"
                     );
                 }
             }
@@ -319,8 +318,6 @@ fn sparse_jacobian_modes_agree_with_forward_derivatives() {
     }
 }
 
-/// Both modes walk the graph with an explicit stack: a chain far deeper
-/// than a small thread stack could recurse through is fine.
 #[test]
 fn deep_chains_differentiate_on_a_small_stack() {
     std::thread::Builder::new()
@@ -334,10 +331,17 @@ fn deep_chains_differentiate_on_a_small_stack() {
                 sines = g.sin(sines);
                 sum = g.add(sum, x);
             }
-            // d/dx of x + x + ... + x folds to the count.
             let n = g.konst_int(100_001);
-            assert_eq!(differentiate(&mut g, sum, xs), n);
-            assert_eq!(gradient(&mut g, sum, &[xs])[0], n);
+            assert_eq!(
+                differentiate(&mut g, sum, xs),
+                n,
+                "d/dx of a sum of x does not fold to the count"
+            );
+            assert_eq!(
+                gradient(&mut g, sum, &[xs])[0],
+                n,
+                "the gradient of a sum of x does not fold to the count"
+            );
             let d = differentiate(&mut g, sines, xs);
             assert!(!g.is_zero(d));
             let r = gradient(&mut g, sines, &[xs])[0];
@@ -351,11 +355,8 @@ fn deep_chains_differentiate_on_a_small_stack() {
         .unwrap();
 }
 
-/// A subgraph that does not depend on the symbols asked for builds
-/// nothing in either mode, and a call's constant arguments get no
-/// derivative output.
 #[test]
-fn derivatives_skip_what_does_not_move() {
+fn derivatives_build_nothing_for_constant_subgraphs_and_constant_call_arguments() {
     let mut g: Graph = Graph::new();
     let x = g.sym("x");
     let z = g.sym("z");
@@ -387,8 +388,6 @@ fn derivatives_skip_what_does_not_move() {
     assert_eq!(g.func(h).outputs().len(), 2, "d/dp only");
 }
 
-/// The sparse Jacobian of a ring of nonlinear cells (each residual touching
-/// its two neighbours) holds exactly the nonzero derivatives.
 #[test]
 fn the_sparse_jacobian_holds_every_nonzero_derivative() {
     let mut g: Graph<F64> = Graph::new();
@@ -423,10 +422,6 @@ fn the_sparse_jacobian_holds_every_nonzero_derivative() {
 
 #[test]
 fn many_moving_call_arguments_take_one_vector_jacobian_call() {
-    // A body over 20 parameters, called with 20 symbols: the gradient carries
-    // through the call as one call of the body's vector-Jacobian product (a
-    // second function, 20 outputs, the body itself untouched); the values
-    // match one forward sweep per argument on a twin graph.
     fn build(g: &mut Graph) -> (ExprId, Vec<SymbolId>, FuncId) {
         let n = 20;
         let ps: Vec<ExprId> = (0..n).map(|k| g.sym(&format!("p{k}"))).collect();
@@ -453,10 +448,26 @@ fn many_moving_call_arguments_take_one_vector_jacobian_call() {
     let (fc, fs, ff) = build(&mut fg);
     let rev = gradient(&mut rg, rc, &rs);
     let fwd: Vec<ExprId> = fs.iter().map(|&s| differentiate(&mut fg, fc, s)).collect();
-    assert_eq!(rg.func(rf).outputs().len(), 1);
-    assert_eq!(rg.n_funcs(), 2);
-    assert_eq!(rg.func(rsdag::FuncId(1)).outputs().len(), 20);
-    assert_eq!(fg.func(ff).outputs().len(), 21);
+    assert_eq!(
+        rg.func(rf).outputs().len(),
+        1,
+        "the reverse sweep changed the body"
+    );
+    assert_eq!(
+        rg.n_funcs(),
+        2,
+        "the reverse sweep did not make exactly one vector-Jacobian product function"
+    );
+    assert_eq!(
+        rg.func(rsdag::FuncId(1)).outputs().len(),
+        20,
+        "the vector-Jacobian product does not have one output per argument"
+    );
+    assert_eq!(
+        fg.func(ff).outputs().len(),
+        21,
+        "the forward sweeps on the twin graph did not add one derivative output per argument"
+    );
     let env = |ids: &[SymbolId]| -> HashMap<SymbolId, f64> {
         ids.iter()
             .enumerate()
@@ -466,17 +477,13 @@ fn many_moving_call_arguments_take_one_vector_jacobian_call() {
     let vr: Vec<f64> = eval(&rg, &rev, &env(&rs));
     let vf: Vec<f64> = eval(&fg, &fwd, &env(&fs));
     for (a, b) in vr.iter().zip(&vf) {
-        assert!((a - b).abs() <= 1e-13 * b.abs().max(1.0), "{a} vs {b}");
+        assert!((a - b).abs() <= REORDERED * b.abs().max(1.0), "{a} vs {b}");
     }
 }
 
-/// A call reads only what its output's body reads: through a nested call
-/// the arguments the inner output's support names, and not a comparison's
-/// operands (they carry no derivative).
 #[test]
-fn the_support_reads_through_nested_calls() {
+fn the_support_reads_through_nested_calls_and_not_comparison_operands() {
     let mut g: Graph<F64> = Graph::new();
-    // f(a, b, c) = [a b, a > 0 ? sin(c) : c]
     let mut s = Scope::new(&mut g, "f");
     let (a, b, c) = (
         s.param("a", ParamRole::Free),
@@ -489,7 +496,6 @@ fn the_support_reads_through_nested_calls() {
     let sc = s.sin(c);
     let pick = s.select(pos, sc, c);
     let f = s.close([(ab, OutputRole::Plain), (pick, OutputRole::Plain)]);
-    // g(x, y, z, w) = [f0(x, y, z) + w, f1(x, y, z w)]
     let mut s = Scope::new(&mut g, "g");
     let (x, y, z, w) = (
         s.param("x", ParamRole::Free),
@@ -502,36 +508,33 @@ fn the_support_reads_through_nested_calls() {
     let zw = s.mul(z, w);
     let g1 = s.call(f, 1, &[x, y, zw]);
     let gf = s.close([(g0, OutputRole::Plain), (g1, OutputRole::Plain)]);
-    // the columns of a call's Jacobian: the arguments its output reads
     let names = ["p", "q", "r", "t"];
     let args: Vec<ExprId> = names.iter().map(|n| g.sym(n)).collect();
     let wrt: Vec<SymbolId> = names.iter().map(|n| g.symbol_id(n)).collect();
-    let cols = |g: &mut Graph<F64>, func, out, n: usize| -> Vec<usize> {
+    let jacobian_columns = |g: &mut Graph<F64>, func, out, n: usize| -> Vec<usize> {
         let call = g.call(func, out, &args[..n]);
         let rows = sparse_jacobian(g, &[call], &wrt[..n]);
         rows[0].iter().map(|&(k, _)| k).collect()
     };
-    assert_eq!(cols(&mut g, f, 0, 3), [0, 1]);
-    assert_eq!(cols(&mut g, f, 1, 3), [2]);
-    assert_eq!(cols(&mut g, gf, 0, 4), [0, 1, 3]);
-    assert_eq!(cols(&mut g, gf, 1, 4), [2, 3]);
+    assert_eq!(jacobian_columns(&mut g, f, 0, 3), [0, 1]);
+    assert_eq!(jacobian_columns(&mut g, f, 1, 3), [2]);
+    assert_eq!(jacobian_columns(&mut g, gf, 0, 4), [0, 1, 3]);
+    assert_eq!(jacobian_columns(&mut g, gf, 1, 4), [2, 3]);
     let call = g.call(gf, 1, &args);
-    // the value reads the selector's condition too
     let (p, q) = (g.symbol_id("p"), g.symbol_id("q"));
     let g0 = g.call(gf, 0, &args);
-    assert_eq!(g.depends_on(&[call, g0], &[p]), [true, true]);
+    assert_eq!(
+        g.depends_on(&[call, g0], &[p]),
+        [true, true],
+        "the value of a call does not read the condition of its select"
+    );
     assert_eq!(g.depends_on(&[call, g0], &[q]), [false, true]);
 }
 
-/// A row that is a call of a wide function touches only the columns its
-/// output reads, two levels of calls deep: the Jacobian makes one derivative
-/// output per structural nonzero, and its entries and a gradient through the
-/// calls are the inlined graph's.
 #[test]
 fn a_jacobian_through_wide_calls_makes_only_its_entries() {
     const N: usize = 48;
     let mut g: Graph<F64> = Graph::new();
-    // f(x)_k = x_k exp(x_{k+1}), cyclic: each output reads two of N parameters
     let mut s = Scope::new(&mut g, "f");
     let xs: Vec<ExprId> = (0..N)
         .map(|k| s.param(&format!("x{k}"), ParamRole::Free))
@@ -543,7 +546,6 @@ fn a_jacobian_through_wide_calls_makes_only_its_entries() {
         })
         .collect();
     let f = s.close(outs.into_iter().map(|e| (e, OutputRole::Plain)));
-    // h(y)_k = f(y)_k + y_k: a body that is all calls into f
     let mut s = Scope::new(&mut g, "h");
     let ys: Vec<ExprId> = (0..N)
         .map(|k| s.param(&format!("y{k}"), ParamRole::Free))
@@ -566,9 +568,17 @@ fn a_jacobian_through_wide_calls_makes_only_its_entries() {
         want.sort_unstable();
         assert_eq!(cols, want, "row {k}");
     }
-    // N outputs and 2 N derivative outputs each, not N^2
-    assert_eq!(g.func(f).outputs().len(), 3 * N);
-    assert_eq!(g.func(h).outputs().len(), 3 * N);
+    let n_out = 3 * N;
+    assert_eq!(
+        g.func(f).outputs().len(),
+        n_out,
+        "f has more than one derivative output per structural nonzero"
+    );
+    assert_eq!(
+        g.func(h).outputs().len(),
+        n_out,
+        "h has more than one derivative output per structural nonzero"
+    );
 
     let flat = g.inline_all(&rows);
     let flat_jac = sparse_jacobian(&mut g, &flat, &wrt);
@@ -589,21 +599,16 @@ fn a_jacobian_through_wide_calls_makes_only_its_entries() {
     Tape::compile(&g, &b, &wrt).eval(&ins, &mut work, &mut vb);
     for (k, (p, q)) in va.iter().zip(&vb).enumerate() {
         assert!(
-            (p - q).abs() <= 1e-12 * (1.0 + q.abs()),
+            (p - q).abs() <= REORDERED * (1.0 + q.abs()),
             "entry {k}: {p} vs {q}"
         );
     }
 }
 
-/// The pull's shape: a gradient of a weighted sum of a body's outputs and of
-/// its derivative outputs (second derivatives), the body calling another
-/// function, its many operands moving: one call of the vector-Jacobian
-/// product per call site, the values those of forward sweeps on a twin.
 #[test]
 fn a_call_site_with_several_outputs_and_their_derivatives_takes_one_vjp() {
     fn build(g: &mut Graph) -> (ExprId, Vec<SymbolId>) {
         let n = 20;
-        // inner(q) = q * exp(q)
         let q = g.sym("q");
         let qs = g.symbol_id("q");
         let eq = g.exp(q);
@@ -611,7 +616,6 @@ fn a_call_site_with_several_outputs_and_their_derivatives_takes_one_vjp() {
         let mut s = Scope::new(g, "inner");
         s.param(qs, ParamRole::Free);
         let inner = s.close([(qe, OutputRole::Plain)]);
-        // dev(p) = [sum_k p_k inner(p_{k+1}), prod-ish second output]
         let ps: Vec<ExprId> = (0..n).map(|k| g.sym(&format!("p{k}"))).collect();
         let pids: Vec<SymbolId> = (0..n).map(|k| g.symbol_id(&format!("p{k}"))).collect();
         let mut acc = g.zero();
@@ -637,7 +641,6 @@ fn a_call_site_with_several_outputs_and_their_derivatives_takes_one_vjp() {
             })
             .collect();
         let aids: Vec<SymbolId> = (0..n).map(|k| g.symbol_id(&format!("a{k}"))).collect();
-        // the outputs and a derivative of one call site, weighted
         let mut outs = g.calls(f, &[0, 1], &args);
         let a3 = g.symbol_id("a3");
         outs.push(differentiate(g, outs[0], a3));
@@ -664,17 +667,17 @@ fn a_call_site_with_several_outputs_and_their_derivatives_takes_one_vjp() {
     let vr: Vec<f64> = eval(&rg, &rev, &env(&rs));
     let vf: Vec<f64> = eval(&fg, &fwd, &env(&fs));
     for (a, b) in vr.iter().zip(&vf) {
-        assert!((a - b).abs() <= 1e-12 * b.abs().max(1.0), "{a} vs {b}");
+        assert!((a - b).abs() <= REORDERED * b.abs().max(1.0), "{a} vs {b}");
     }
-    // one vector-Jacobian product of dev made, none of the forward kind
     let vjps = (0..rg.n_funcs())
         .filter(|&f| rg.func(FuncId(f as u32)).name().starts_with("dev#vjp"))
         .count();
-    assert_eq!(vjps, 1);
+    assert_eq!(
+        vjps, 1,
+        "the call site did not take exactly one vector-Jacobian product of dev"
+    );
 }
 
-/// A vector-Jacobian product: the weights fresh symbols, the entries the
-/// gradient of the weighted sum at any weights.
 #[test]
 fn vjp_is_the_weighted_gradient() {
     let mut ctx: Graph = Graph::new();
@@ -691,11 +694,9 @@ fn vjp_is_the_weighted_gradient() {
         .collect();
     let got = eval(&ctx, &g, &env);
     let want = [1.5 * 2.0 - 0.5 * 0.3f64.cos(), 1.5 * 0.3];
-    assert!((got[0] - want[0]).abs() < 1e-15 && (got[1] - want[1]).abs() < 1e-15);
+    assert_eq!(got, want);
 }
 
-/// An affine split: the rest at the symbols zero and their coefficients;
-/// a root nonlinear in them is reported.
 #[test]
 fn affine_split_and_its_refusal() {
     let mut ctx: Graph = Graph::new();
@@ -713,16 +714,10 @@ fn affine_split_and_its_refusal() {
     assert_eq!(affine_in(&mut ctx, &[r1, mm], &[sm, sn]), Err(1));
 }
 
-/// A Jacobian through calls of a body that reads many parameters, each
-/// instance's its own symbols: by the states alone, the parameters' operands
-/// carry no derivative and every entry is the inlined graph's; by the
-/// states and the parameters, the parameters' columns join, the inlined
-/// graph's as well.
 #[test]
 fn a_jacobian_through_calls_by_some_operands_is_the_inlined_ones() {
     const P: usize = 12;
     let mut g: Graph<F64> = Graph::new();
-    // dev(v0, v1, p..): i = v0 exp(v1 sum p) + sum p^2, q = v1 p0
     let mut s = Scope::new(&mut g, "dev");
     let v0 = s.param("v0", ParamRole::State { id: 0 });
     let v1 = s.param("v1", ParamRole::State { id: 1 });
@@ -777,7 +772,7 @@ fn a_jacobian_through_calls_by_some_operands_is_the_inlined_ones() {
         Tape::compile(&g, &b, &all).eval(&ins, &mut work, &mut vb);
         for (k, (p, q)) in va.iter().zip(&vb).enumerate() {
             assert!(
-                (p - q).abs() <= 1e-12 * (1.0 + q.abs()),
+                (p - q).abs() <= REORDERED * (1.0 + q.abs()),
                 "entry {k}: {p} vs {q}"
             );
         }

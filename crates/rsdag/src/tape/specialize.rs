@@ -8,8 +8,12 @@ use super::compile::{Inst, Kind, Program, Ref};
 use super::{input_index, Op, Program as _, Tape};
 use crate::node::{CmpOp, ReduceOp};
 
-/// A pinned select: its condition, the arm it took and the choice.
-type Pin = Option<(Ref, Ref, u8)>;
+#[derive(Clone, Copy)]
+struct PinnedSelect {
+    cond: Ref,
+    taken_arm: Ref,
+    choice: u8,
+}
 
 /// How a shortened tape reports its guards, after its real outputs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,7 +49,7 @@ impl Tape {
         );
         assert_eq!(pin.len(), self.n_selects, "pin mask length mismatch");
         let p = self.lift();
-        let pins = Self::pins(&p, 0, choices, pin);
+        let pins = Self::pins_per_inst(&p, 0, choices, pin);
         self.shorten(p, pins, false, Guards::Each)
     }
 
@@ -64,15 +68,18 @@ impl Tape {
         assert_eq!(choices.len(), n, "choice trace length mismatch");
         assert_eq!(pin.len(), n, "pin mask length mismatch");
         let mut p = self.lift();
-        let pins = Self::pins(&p, self.prolog_ops, choices, pin);
-        // The state where this tape's prolog puts it.
-        let mut at = vec![u32::MAX; p.insts.len()];
-        for (i, a) in at.iter_mut().enumerate().take(self.prolog_ops) {
+        let pins = Self::pins_per_inst(&p, self.prolog_ops, choices, pin);
+        let mut state_slot_of_inst = vec![u32::MAX; p.insts.len()];
+        for (i, a) in state_slot_of_inst
+            .iter_mut()
+            .enumerate()
+            .take(self.prolog_ops)
+        {
             if (self.dst[i] as usize) < self.state_len {
                 *a = self.dst[i];
             }
         }
-        p.state = Some((at, self.state_len as u32));
+        p.state = Some((state_slot_of_inst, self.state_len as u32));
         self.shorten(p, pins, true, guards)
     }
 
@@ -84,17 +91,24 @@ impl Tape {
             .count()
     }
 
-    /// Per instruction of `p`, its pin when it is one of the selects from
-    /// instruction `from` on that `pin` pins.
-    fn pins(p: &Program, from: usize, choices: &[u8], pin: &[bool]) -> Vec<Pin> {
-        let mut pinned: Vec<Pin> = vec![None; p.insts.len()];
+    fn pins_per_inst(
+        p: &Program,
+        first_traced_inst: usize,
+        choices: &[u8],
+        pin: &[bool],
+    ) -> Vec<Option<PinnedSelect>> {
+        let mut pinned: Vec<Option<PinnedSelect>> = vec![None; p.insts.len()];
         let mut k = 0usize;
-        for (i, slot) in pinned.iter_mut().enumerate().skip(from) {
+        for (i, slot) in pinned.iter_mut().enumerate().skip(first_traced_inst) {
             if matches!(p.insts[i].kind, Kind::Select) {
                 if pin[k] {
                     let ins = p.ins(i);
                     let arm = if choices[k] != 0 { ins[1] } else { ins[2] };
-                    *slot = Some((ins[0], arm, choices[k]));
+                    *slot = Some(PinnedSelect {
+                        cond: ins[0],
+                        taken_arm: arm,
+                        choice: choices[k],
+                    });
                 }
                 k += 1;
             }
@@ -102,46 +116,42 @@ impl Tape {
         pinned
     }
 
-    /// `p` with the selects `pinned` pins replaced by their arms and
-    /// guarded, scheduled and emitted again; with `main_only` the trace's
-    /// selects are the main phase's.
     fn shorten(
         &self,
         mut p: Program,
-        pinned: Vec<Pin>,
-        main_only: bool,
+        pinned: Vec<Option<PinnedSelect>>,
+        trace_is_main_phase: bool,
         form: Guards,
     ) -> SpecializedTape {
         let m = p.insts.len();
-        // A pinned select is its arm, through chains of them (the guards'
-        // count, built after, pins nothing).
-        let mut arm: Vec<Option<Ref>> = pinned.iter().map(|q| q.map(|(_, a, _)| a)).collect();
-        // The selects the outputs reach, a pinned one reading only its
-        // condition and its arm: their conditions are the guards.
-        let mut live = vec![false; m];
+        let mut arm: Vec<Option<Ref>> = pinned.iter().map(|q| q.map(|q| q.taken_arm)).collect();
+        let mut reached_from_outputs = vec![false; m];
         let mut stack: Vec<Ref> = p.roots.clone();
         while let Some(r) = stack.pop() {
             let Ref::Value(i, _) = r else { continue };
-            if std::mem::replace(&mut live[i as usize], true) {
+            if std::mem::replace(&mut reached_from_outputs[i as usize], true) {
                 continue;
             }
             match pinned[i as usize] {
-                Some((cond, arm, _)) => stack.extend([cond, arm]),
+                Some(q) => stack.extend([q.cond, q.taken_arm]),
                 None => stack.extend_from_slice(p.ins(i as usize)),
             }
         }
-        // Hash-consing makes shared conditions common; two selects sharing
-        // one traced the same truth, and one guard checks both.
-        let mut guarded: FxHashSet<Ref> = FxHashSet::default();
+        // https://github.com/milanofthe/rsdag/issues/241
+        let mut distinct_guard_conds: FxHashSet<Ref> = FxHashSet::default();
         let mut guards: Vec<Ref> = Vec::new();
         let mut expected: Vec<u8> = Vec::new();
-        let first = if main_only { self.prolog_ops } else { 0 };
+        let first = if trace_is_main_phase {
+            self.prolog_ops
+        } else {
+            0
+        };
         for i in first..m {
-            if let (Kind::Select, true, Some((cond, _, choice))) =
-                (&p.insts[i].kind, live[i], pinned[i])
+            if let (Kind::Select, true, Some(PinnedSelect { cond, choice, .. })) =
+                (&p.insts[i].kind, reached_from_outputs[i], pinned[i])
             {
                 let cond = decided(&p, &arm, cond, false);
-                if guarded.insert(cond) {
+                if distinct_guard_conds.insert(cond) {
                     guards.push(cond);
                     expected.push(choice);
                 }
@@ -151,11 +161,10 @@ impl Tape {
         match form {
             Guards::Each => p.roots.extend(guards),
             Guards::Count => {
-                let count = mismatches(&mut p, &guards, &expected);
+                let count = count_unexpected_conds(&mut p, &guards, &expected);
                 p.roots.push(count);
-                // the count is the main phase's, in no kept state
-                if let Some((at, _)) = &mut p.state {
-                    at.resize(p.insts.len(), u32::MAX);
+                if let Some((state_slot_of_inst, _)) = &mut p.state {
+                    state_slot_of_inst.resize(p.insts.len(), u32::MAX);
                 }
             }
         }
@@ -164,14 +173,13 @@ impl Tape {
             |v: &[Ref]| -> Vec<Ref> { v.iter().map(|&r| decided(&p, &arm, r, false)).collect() };
         (p.pool, p.roots) = (resolve(&p.pool), resolve(&p.roots));
         let tape = self.emit_again(&mut p, self.prolog_ops > 0);
-        // Guards on an input or a prolog value: checked once after a prolog
-        // pass (roots are pinned, so valid across every later main pass).
-        let checked = if form == Guards::Each {
+        let n_individual_guards = if form == Guards::Each {
             expected.len()
         } else {
             0
         };
-        let prolog_guards: Vec<(u32, u8)> = (0..checked)
+        // https://github.com/milanofthe/rsdag/issues/241
+        let prolog_guards: Vec<(u32, u8)> = (0..n_individual_guards)
             .filter(|&g| match p.roots[n_real + g] {
                 Ref::Input(_) => true,
                 Ref::Value(i, _) => p.insts[i as usize].pure && tape.prolog_ops > 0,
@@ -181,33 +189,26 @@ impl Tape {
         SpecializedTape {
             tape,
             n_real,
-            expected,
+            expected_truth: expected,
             prolog_guards,
-            count: form == Guards::Count,
+            guards_as_count: form == Guards::Count,
         }
     }
 }
 
 impl Tape {
-    /// `p`, a transform of this tape's program, without what nothing
-    /// reads any more, scheduled and emitted again like a fresh
-    /// compilation over this tape's inputs (`split`: the prolog split
-    /// kept); its ops at the current rsprobe node.
-    fn emit_again(&self, p: &mut Program, split: bool) -> Tape {
+    fn emit_again(&self, p: &mut Program, keep_prolog_split: bool) -> Tape {
         p.retain_reachable();
         let order = p.schedule();
-        let mut tape = p.emit(&order, split);
+        let mut tape = p.emit(&order, keep_prolog_split);
         tape.n_inputs = self.n_inputs;
         rsprobe::add!("ops", tape.n_ops());
         tape
     }
 }
 
-/// One value of `p` counting the conditions `conds` whose truth is not
-/// `expected`: zero exactly when every one holds. A condition is taken as a
-/// select takes it, a NaN true: `c != 0`, one or zero, unless it is a
-/// comparison already. The counts are small integers, exact in any order.
-fn mismatches(p: &mut Program, conds: &[Ref], expected: &[u8]) -> Ref {
+// https://github.com/milanofthe/rsdag/issues/241
+fn count_unexpected_conds(p: &mut Program, conds: &[Ref], expected: &[u8]) -> Ref {
     let push = |p: &mut Program, kind: Kind, ins: &[Ref]| -> Ref {
         let start = p.pool.len() as u32;
         p.pool.extend_from_slice(ins);
@@ -220,21 +221,21 @@ fn mismatches(p: &mut Program, conds: &[Ref], expected: &[u8]) -> Ref {
         Ref::Value(p.insts.len() as u32 - 1, 0)
     };
     let zero = push(p, Kind::Const(0.0), &[]);
-    let (mut held, mut not) = (Vec::new(), Vec::new());
+    let (mut expected_true, mut expected_false) = (Vec::new(), Vec::new());
     for (&c, &e) in conds.iter().zip(expected) {
-        let one_or_zero = match c {
+        let is_comparison = match c {
             Ref::Value(i, 0) => matches!(p.insts[i as usize].kind, Kind::Cmp(_)),
             _ => false,
         };
-        let t = if one_or_zero {
+        let truth_as_select_reads_it = if is_comparison {
             c
         } else {
             push(p, Kind::Cmp(CmpOp::Ne), &[c, zero])
         };
         if e != 0 {
-            held.push(t);
+            expected_true.push(truth_as_select_reads_it);
         } else {
-            not.push(t);
+            expected_false.push(truth_as_select_reads_it);
         }
     }
     let sum = |p: &mut Program, v: &[Ref]| match v.len() {
@@ -242,15 +243,14 @@ fn mismatches(p: &mut Program, conds: &[Ref], expected: &[u8]) -> Ref {
         1 => Some(v[0]),
         _ => Some(push(p, Kind::Reduce(ReduceOp::Sum), v)),
     };
-    // the false ones taken, plus the true ones not taken
-    let n_held = push(p, Kind::Const(held.len() as f64), &[]);
-    let a = match sum(p, &not) {
-        Some(s) => push(p, Kind::Add, &[s, n_held]),
-        None => n_held,
+    let n_expected_true = push(p, Kind::Const(expected_true.len() as f64), &[]);
+    let false_and_n_true = match sum(p, &expected_false) {
+        Some(s) => push(p, Kind::Add, &[s, n_expected_true]),
+        None => n_expected_true,
     };
-    match sum(p, &held) {
-        Some(s) => push(p, Kind::Sub, &[a, s]),
-        None => a,
+    match sum(p, &expected_true) {
+        Some(s) => push(p, Kind::Sub, &[false_and_n_true, s]),
+        None => false_and_n_true,
     }
 }
 
@@ -259,15 +259,10 @@ fn mismatches(p: &mut Program, conds: &[Ref], expected: &[u8]) -> Ref {
 /// that re-validate the trace at every evaluation.
 pub struct SpecializedTape {
     tape: Tape,
-    /// The first `n_real` outputs are the original tape's; the rest are guards.
     n_real: usize,
-    /// Expected truth (`1`/`0`) of each guard output.
-    expected: Vec<u8>,
-    /// Guards whose condition lives in the inherited prolog (or is an
-    /// input), as `(operand, expected)`, checked right after a prolog pass.
+    expected_truth: Vec<u8>,
     prolog_guards: Vec<(u32, u8)>,
-    /// The guards as one count ([`Guards::Count`]).
-    count: bool,
+    guards_as_count: bool,
 }
 
 impl SpecializedTape {
@@ -296,12 +291,12 @@ impl SpecializedTape {
     /// after the real ones) hold: the real outputs are then the full
     /// tape's, bit for bit.
     pub fn holds(&self, guards: &[f64]) -> bool {
-        if self.count {
+        if self.guards_as_count {
             return guards.len() == 1 && guards[0] == 0.0;
         }
         guards
             .iter()
-            .zip(&self.expected)
+            .zip(&self.expected_truth)
             .all(|(&v, &e)| (v != 0.0) == (e != 0))
     }
 
@@ -368,19 +363,14 @@ impl SpecializedTape {
 /// parameter binding makes once for every evaluation after it (see
 /// [`Tape::param_selects`]).
 pub struct ParamSelects {
-    /// The distinct conditions, one output each, over the tape's inputs.
-    conds: Tape,
-    /// Per decided select, its instruction in the tape's program and the
-    /// output of `conds` that is its condition.
-    of: Vec<(u32, u32)>,
+    distinct_conds: Tape,
+    select_inst_and_cond_output: Vec<(u32, u32)>,
 }
 
 impl ParamSelects {
-    /// Per instruction of `p` (the tape's program), the arm `pattern`
-    /// decides it to, for the selects this decides.
-    fn arms(&self, p: &Program, pattern: &[bool]) -> Vec<Option<Ref>> {
+    fn decided_arm_per_inst(&self, p: &Program, pattern: &[bool]) -> Vec<Option<Ref>> {
         let mut arm: Vec<Option<Ref>> = vec![None; p.insts.len()];
-        for &(i, c) in &self.of {
+        for &(i, c) in &self.select_inst_and_cond_output {
             let ins = p.ins(i as usize);
             arm[i as usize] = Some(if pattern[c as usize] { ins[1] } else { ins[2] });
         }
@@ -389,20 +379,20 @@ impl ParamSelects {
 
     /// The number of distinct conditions, the length of a pattern.
     pub fn n_conds(&self) -> usize {
-        self.conds.outputs.len()
+        self.distinct_conds.outputs.len()
     }
 
     /// The pattern of the conditions at the inputs `args` (the tape's
     /// inputs; only the pure ones are read): one truth per condition.
     pub fn pattern(&self, args: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) -> Vec<bool> {
-        self.conds.eval(args, work, out);
+        self.distinct_conds.eval(args, work, out);
         out.iter().map(|&c| c != 0.0).collect()
     }
 
     /// The tape of the conditions, an output each, over the tape's inputs:
     /// what a backend compiles to compute [`pattern`](Self::pattern).
     pub fn tape(&self) -> &Tape {
-        &self.conds
+        &self.distinct_conds
     }
 }
 
@@ -460,8 +450,10 @@ impl Tape {
             return None;
         }
         p.roots = conds;
-        let conds = self.emit_again(&mut p, false);
-        Some(ParamSelects { conds, of })
+        Some(ParamSelects {
+            distinct_conds: self.emit_again(&mut p, false),
+            select_inst_and_cond_output: of,
+        })
     }
 
     /// The instructions, undecided and decided by each of `patterns` (see
@@ -471,7 +463,7 @@ impl Tape {
         let p = self.lift();
         let count = |pattern: Option<&[bool]>| -> usize {
             let arm = match pattern {
-                Some(pattern) => ps.arms(&p, pattern),
+                Some(pattern) => ps.decided_arm_per_inst(&p, pattern),
                 None => vec![None; p.insts.len()],
             };
             let mut seen = vec![false; p.insts.len()];
@@ -508,15 +500,14 @@ impl Tape {
         let _s = rsprobe::scope!("decide");
         let mut p = self.lift();
         assert_eq!(pattern.len(), ps.n_conds(), "pattern length mismatch");
-        let arm = ps.arms(&p, pattern);
-        // Each operand as the instruction reading it sees it decided.
-        let mut main = vec![false; p.pool.len()];
+        let arm = ps.decided_arm_per_inst(&p, pattern);
+        let mut operand_read_by_main = vec![false; p.pool.len()];
         for inst in &p.insts {
             let (s, l) = inst.ins;
-            main[s as usize..(s + l) as usize].fill(!inst.pure);
+            operand_read_by_main[s as usize..(s + l) as usize].fill(!inst.pure);
         }
         let pool: Vec<Ref> = (0..p.pool.len())
-            .map(|k| decided(&p, &arm, p.pool[k], main[k]))
+            .map(|k| decided(&p, &arm, p.pool[k], operand_read_by_main[k]))
             .collect();
         let roots: Vec<Ref> = p
             .roots
@@ -528,17 +519,13 @@ impl Tape {
     }
 }
 
-/// The operand `r` of the program `p`, read by the main phase (`main`) or
-/// the prolog, with the selects `arm` decides resolved to their arms. A
-/// prolog select whose arm is an input stays, for the main phase: its value
-/// is in the state, where its arm would be a parameter the main phase reads
-/// itself, passed on every evaluation. Deciding it saves the prolog one op
-/// per binding, nothing per evaluation.
-fn decided(p: &Program, arm: &[Option<Ref>], r: Ref, main: bool) -> Ref {
+// https://github.com/milanofthe/rsdag/issues/241
+fn decided(p: &Program, arm: &[Option<Ref>], r: Ref, read_by_main: bool) -> Ref {
     let mut r = r;
     while let Ref::Value(i, _) = r {
+        let from_state = read_by_main && p.insts[i as usize].pure;
         match arm[i as usize] {
-            Some(Ref::Input(_)) if main && p.insts[i as usize].pure => break,
+            Some(Ref::Input(_)) if from_state => break,
             Some(a) => r = a,
             None => break,
         }

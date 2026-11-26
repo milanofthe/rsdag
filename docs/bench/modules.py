@@ -38,7 +38,7 @@ sys.setrecursionlimit(100000)
 
 EXP_LIMIT = 80.0
 LN_FLOOR = 1e-30
-# JAX runs per module in a child process under these limits.
+DC_VALUE_OF_DERIVATIVES_AND_TIME = 0.0
 JAX_SECONDS = 60
 JAX_MEMORY = 16 * 2**30
 
@@ -57,9 +57,7 @@ class Module:
         self.symbols = m["symbols"]
         self.funcs = m["funcs"]
         self.call_outputs = m["call_outputs"]
-        # per call output, the parameters its calls have bound and the list
-        # of their expressions (a model card bound to its device function)
-        self.contexts = m.get("call_contexts") or [None] * len(self.call_outputs)
+        self.bound_params_per_call_output = m.get("call_contexts") or [None] * len(self.call_outputs)
         self.params = d["params"]
         self.x0 = np.array(d["x0"])
         f = self.funcs[d["circuit"]]
@@ -70,11 +68,13 @@ class Module:
             elif role == "Param":
                 self.bound[s] = self.params[self.symbols[s]]
             else:
-                self.bound[s] = 0.0  # derivatives and time: the DC residual
+                self.bound[s] = DC_VALUE_OF_DERIVATIVES_AND_TIME
         self.states.sort()
         self.residuals = [o["Expr"] for o, r in zip(f["outputs"], f["output_roles"])
                           if isinstance(r, dict) and "Residual" in r]
-        # A symbol a body reads without it being a parameter is a global.
+        self.bind_globals_that_bodies_read()
+
+    def bind_globals_that_bodies_read(self):
         for s, name in enumerate(self.symbols):
             if name in self.params:
                 self.bound.setdefault(s, self.params[name])
@@ -87,9 +87,9 @@ class Module:
         parameter order: the arguments, and where its context binds a
         parameter the bound expression."""
         args = self.args(lst)
-        if self.contexts[o] is None:
+        if self.bound_params_per_call_output[o] is None:
             return args
-        at, exprs = self.contexts[o]
+        at, exprs = self.bound_params_per_call_output[o]
         bound = dict(zip(at, self.args(exprs)))
         rest = iter(args)
         return [bound[p] if p in bound else next(rest) for p in range(len(args) + len(bound))]
@@ -237,8 +237,6 @@ def body_outputs(mod, f):
     return fd["params"], [o["Expr"] if isinstance(o, dict) and "Expr" in o else None for o in fd["outputs"]]
 
 
-# ---- CasADi -----------------------------------------------------------------
-
 def casadi_model(mod, params_as_inputs=False):
     """The residual over SX states, and the SX parameters (empty unless
     `params_as_inputs`, where the parameters are inputs rather than
@@ -261,7 +259,8 @@ def casadi_model(mod, params_as_inputs=False):
             vals = evaluate(mod, ops, roots, dict(zip(params, args)), call)
             it = iter(vals)
             res = [next(it) if o is not None else ca.SX(0) for o in outs]
-            bodies[f] = ca.Function(f"f{f}", args, res)  # a name CasADi takes
+            name_that_casadi_takes = f"f{f}"
+            bodies[f] = ca.Function(name_that_casadi_takes, args, res)
         return bodies[f]
 
     def call(f, out, args, _node):
@@ -274,15 +273,11 @@ def casadi_model(mod, params_as_inputs=False):
     return x, ca.vertcat(*psyms), res
 
 
-# ---- JAX --------------------------------------------------------------------
-
 def jax_model(mod):
     ops = Ops("jax")
     fns = {}
 
     def body(f, wanted):
-        """The body of `f` as a function of its argument vector, the
-        outputs `wanted` (a zero output as 0) and no others."""
         key = (f, tuple(wanted))
         if key not in fns:
             params, outs = body_outputs(mod, f)
@@ -300,18 +295,17 @@ def jax_model(mod):
     def direct(f, out, args, _node):
         return body(f, [out])(jnp.stack([jnp.asarray(a, dtype=jnp.float64) for a in args]))[0]
 
-    # The circuit's calls, grouped by body: one vmap per body.
-    calls = {}
+    calls_by_body_for_one_vmap_each = {}
     for i in mod.cone(mod.residuals):
         n = mod.nodes[i]
         if "Call" in n:
             f, out = mod.call_outputs[n["Call"][0]]
-            calls.setdefault(f, []).append((i, out, tuple(mod.call_args(n["Call"][0], n["Call"][1]))))
+            calls_by_body_for_one_vmap_each.setdefault(f, []).append((i, out, tuple(mod.call_args(n["Call"][0], n["Call"][1]))))
 
     def residual(x):
         env = {s: x[k] for k, (_, s) in enumerate(mod.states)}
         done = {}
-        for f, sites in calls.items():
+        for f, sites in calls_by_body_for_one_vmap_each.items():
             lists = sorted({a for _, _, a in sites})
             index = {a: k for k, a in enumerate(lists)}
             flat = sorted({a for lst in lists for a in lst})
@@ -331,8 +325,6 @@ def jax_model(mod):
 
     return residual
 
-
-# ---- measuring --------------------------------------------------------------
 
 def per_call(fn, x):
     reps = 1

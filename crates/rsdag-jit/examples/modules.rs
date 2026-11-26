@@ -59,7 +59,6 @@ use rsdag_jit::{Lanes, NativeTape, Options};
 
 static INTERLEAVE: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
 
-/// Write through the `--interleave` buffer (a no-op without one).
 fn interleave() {
     let mut buf = INTERLEAVE.lock().unwrap();
     for v in buf.iter_mut().step_by(8) {
@@ -67,8 +66,6 @@ fn interleave() {
     }
 }
 
-/// Seconds per call ([`common::per_call`]); with
-/// `--interleave`, the calls alone, the buffer written before each.
 fn per_call(mut f: impl FnMut()) -> f64 {
     if !INTERLEAVE.lock().unwrap().is_empty() {
         let mut best = f64::INFINITY;
@@ -95,24 +92,17 @@ fn timed<R>(f: impl FnOnce() -> R) -> (R, f64) {
     (r, t.elapsed().as_secs_f64())
 }
 
-/// The pools `--threads` asks for, by count (none for one thread): the
-/// programs' independent calls run on them (`rsdag::parallel`).
 static POOLS: std::sync::OnceLock<Vec<(usize, Option<rsdag::parallel::Lent>)>> =
     std::sync::OnceLock::new();
 
-/// Rounds over the thread counts (`--rounds`), and whether the interpreted
-/// calls go unmeasured (`--native`).
 static ROUNDS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 static NATIVE_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static STATS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-/// The lane code `--lanes` asks for.
 static LANES: std::sync::OnceLock<Lanes> = std::sync::OnceLock::new();
 
-/// Whether device bodies run their per-binding variants (`--no-variants`).
 static VARIANTS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-/// `f` with `pool` installed, if any.
 fn on_pool<R: Send>(pool: &Option<rsdag::parallel::Lent>, f: impl FnOnce() -> R + Send) -> R {
     match pool.clone() {
         Some(p) => rsdag::parallel::install_lent(p, f),
@@ -120,8 +110,6 @@ fn on_pool<R: Send>(pool: &Option<rsdag::parallel::Lent>, f: impl FnOnce() -> R 
     }
 }
 
-/// `--stats`: per called body, its instances and the ops of its prolog and
-/// main phase, the main phase's by kind.
 fn print_stats(tape: &Tape) {
     use rsdag::tape::Op;
     for (b, bundle) in tape.bundles().iter().enumerate() {
@@ -170,9 +158,6 @@ fn median(mut v: Vec<f64>) -> f64 {
     v[v.len() / 2]
 }
 
-/// Setup (seconds) and per-call time (seconds) of `roots` over the inputs,
-/// interpreted then native, on the first `--threads` count; the values at
-/// `check`; the native per-call time at every count (see `--rounds`).
 fn measure(
     g: &Graph<F64>,
     roots: &[ExprId],
@@ -192,8 +177,6 @@ fn measure(
         }),
         ..Default::default()
     });
-    // Variants built by the first prolog, so the main phases measured run
-    // on them.
     let opts = Options {
         lanes: LANES.get().copied().unwrap_or_default(),
         background: false,
@@ -350,9 +333,6 @@ fn main() {
             let v: serde_json::Value = serde_json::from_str(&text).expect("parse the module");
             let mut module: Module<F64> =
                 serde_json::from_value(v["module"].clone()).expect("a module");
-            // The derivatives the exporter derived for its own Jacobian
-            // lose their role, so the Jacobian here derives afresh, as the
-            // other tools do.
             for r in module
                 .funcs
                 .iter_mut()
@@ -372,7 +352,6 @@ fn main() {
         }
         let zero = g.zero();
         let func = g.func(f);
-        // Inputs: the function's parameters; the states vary, the rest is bound.
         let syms = func.params().to_vec();
         let roles = func.param_roles().to_vec();
         let mut states = Vec::new();
@@ -384,7 +363,7 @@ fn main() {
                     v["params"][g.symbol_name(s)].as_f64().expect("a value"),
                     false,
                 ),
-                _ => (0.0, false), // derivatives and time: the DC residual
+                _derivative_or_time_zero_for_the_dc_residual => (0.0, false),
             };
             if is_state {
                 states.push(s);
@@ -402,7 +381,6 @@ fn main() {
                 _ => zero,
             })
             .collect();
-        // x' and t as the constant zero, every call specialized to it.
         let at_rest = syms
             .iter()
             .zip(&roles)
@@ -531,10 +509,6 @@ fn main() {
     }
 }
 
-/// The module at `path` (its graph `g`, its system `f`, its JSON `v`) as
-/// rsdag compiles it: the system's outputs with the composite functions
-/// inlined, a new system function over them with the same roles, written
-/// to `dir` under the module's file name.
 fn write_composed(
     g: &mut Graph<F64>,
     f: rsdag::FuncId,
@@ -556,7 +530,6 @@ fn write_composed(
         })
         .collect();
     let program = g.inline_composite(&outs);
-    // what the inlined bodies read past the parameters stays global
     let globals: Vec<SymbolId> = (g.mentioned_symbols_in(&program).into_iter())
         .filter(|s| !params.contains(s))
         .collect();

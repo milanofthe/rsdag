@@ -2,27 +2,18 @@
 //! installed pool, bit for bit as serially and as the interpreter: prologs,
 //! main phases over the instances' states, and calls without state.
 
-use rsdag::Program;
-use std::sync::Arc;
+#[path = "../../rsdag/tests/common/mod.rs"]
+mod common;
+use common::{bits, pool, sym};
 
-use rsdag::parallel::{self, Lent};
-use rsdag::{
-    ExprId, FuncId, Graph, Node, OutputRole, ParamRole, ReduceOp, Scope, SymbolId, Tape, F64,
-};
+use rsdag::Program;
+
+use rsdag::parallel::{self};
+use rsdag::{ExprId, FuncId, Graph, OutputRole, ParamRole, ReduceOp, Scope, SymbolId, Tape, F64};
 use rsdag_jit::{NativeTape, Options};
 
 const N: usize = 96;
 
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    let Node::Symbol(s) = *g.node(e) else {
-        unreachable!()
-    };
-    (e, s)
-}
-
-/// A two-terminal device with `Param`-role parameters and enough work per
-/// instance for a stage to be worth a pool.
 fn device(g: &mut Graph<F64>, name: &str, k: f64) -> FuncId {
     let mut s = Scope::new(g, name);
     let a = s.param("a", ParamRole::State { id: 0 });
@@ -73,21 +64,10 @@ fn ring() -> (Graph<F64>, Vec<ExprId>, Vec<SymbolId>, Vec<bool>) {
     (g, roots, syms, pure)
 }
 
-fn pool(threads: usize) -> Lent {
-    Lent {
-        pool: Arc::new(parallel::Workers::new(threads)),
-        dispatch: rsdag::parallel::Dispatch::free(threads),
-    }
-}
-
 fn inputs() -> Vec<f64> {
     (0..3 * N)
         .map(|k| 0.2 + 0.013 * k as f64 - (k % 5) as f64 * 0.07)
         .collect()
-}
-
-fn bits(v: &[f64]) -> Vec<u64> {
-    v.iter().map(|x| x.to_bits()).collect()
 }
 
 #[test]
@@ -133,7 +113,6 @@ fn native_calls_without_state_on_a_pool_are_the_serial_ones() {
 
 #[test]
 fn a_stage_across_chunks_is_the_serial_one() {
-    // Chunks of a few ops split the stages of the ring's calls.
     let (g, roots, syms, pure) = ring();
     let tape = Tape::compile_split(&g, &roots, &syms, &pure);
     let x = inputs();

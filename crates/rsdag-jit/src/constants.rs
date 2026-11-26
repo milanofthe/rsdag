@@ -5,52 +5,87 @@
 //! register numbers and ABI frames stay with their encoders (`x86_64.rs`,
 //! `aarch64.rs`).
 
-/// Lanes the lane code runs at most: the four `f64` of an AVX register.
-pub(crate) const MAX_LANES: usize = 4;
+/// The bytes of an AVX register.
+const AVX_REGISTER_BYTES: usize = 32;
 
-/// What a host call costs, in ops, against an op of the code (in lane
-/// code's costs, `lane_costs`); measured on SANE's device bodies.
-pub(crate) const LANE_CALL: usize = 6;
+/// The most lanes that lane code runs, the four `f64` of an AVX register.
+pub(crate) const MAX_LANES: usize = AVX_REGISTER_BYTES / std::mem::size_of::<f64>();
 
-/// What moving a value into or out of the lanes costs, in ops (as
-/// [`LANE_CALL`]).
-pub(crate) const LANE_MOVE: usize = 2;
+/// The cost of a host call in lane code, in ops of the code, as
+/// `lane_costs` counts it. The value was measured on SANE's device bodies.
+pub(crate) const LANE_HOST_CALL_COST_OPS: usize = 6;
 
-/// Calls with this many arguments over all their instances and more have
-/// the host gather them from a table; narrower ones gather in the code,
-/// whose size would otherwise grow with every argument.
-pub(crate) const GATHER_TABLE: usize = 64;
+/// The cost of moving one value into or out of the lanes, in ops, in the
+/// same unit and from the same measurement as [`LANE_HOST_CALL_COST_OPS`].
+pub(crate) const LANE_MOVE_COST_OPS: usize = 2;
 
-/// Integer powers up to this exponent are emitted as their products,
-/// larger ones call the host. The same products either way
-/// (`rsdag::semantics::powi_f64`); independent of rsdag's
+/// A call with this many arguments or more over all its instances has the
+/// host gather them from a table. A call with fewer arguments gathers them
+/// in the code, because the size of that code grows with every argument.
+pub(crate) const HOST_GATHER_MIN_ARGS: usize = 64;
+
+/// Integer powers up to this exponent in magnitude are emitted as their
+/// products, and larger ones call the host. Both compute the same products
+/// (`rsdag::semantics::powi_f64`). The limit is independent of rsdag's
 /// `POWF_AS_POWI_MAX`, which decides what is an integer power at all.
-pub(crate) const POWI_INLINE: u32 = 64;
+pub(crate) const POWI_INLINE_MAX_EXPONENT: u32 = 64;
 
 /// A min or max over at most this many terms is a chain of instructions
-/// where the ISA has one (`Isa::MINMAX`); longer ones go through the host
+/// where the ISA has them (`Isa::MINMAX`). A longer one calls the host
 /// routine, whose call costs about as much as this many terms.
-pub(crate) const INLINE_MINMAX_MAX: usize = 16;
+pub(crate) const INLINE_MINMAX_MAX_TERMS: usize = 16;
 
-/// A product kernel of fewer rows than this runs as its entries' dots,
-/// inline in the code: there the host call costs more than the arithmetic
-/// (measured: a six by six product inline in two thirds of the host's
-/// time, an eight by eight one on the host in two thirds of the inline).
-pub(crate) const INLINE_ROWS: u32 = 8;
+/// A product kernel of fewer rows than this runs inline in the code as the
+/// dots of its entries, and a kernel of this many rows or more calls the
+/// host. Below this size the host call costs more than the arithmetic. In
+/// the measurement, a six by six product ran inline in two thirds of the
+/// time of the host call, and an eight by eight product ran on the host in
+/// two thirds of the time of the inline code.
+pub(crate) const HOST_PRODUCT_MIN_ROWS: u32 = 8;
 
-/// Bytes each emitted chunk is aligned to in the code mapping.
-pub(crate) const CODE_ALIGN: usize = 16;
+/// The bytes to which each emitted chunk is aligned in the code mapping.
+pub(crate) const CODE_ALIGN_BYTES: usize = 16;
 
-/// Register numbers the floating-point registers take, `0..32` (AArch64's
-/// `d0` to `d31`; x86-64's `xmm0` to `xmm15` among them).
-pub(crate) const REG_NUMBERS: usize = 32;
+/// The register numbers of the floating-point registers, `0..32`. These
+/// are AArch64's `d0` to `d31`, and x86-64's `xmm0` to `xmm15` are among
+/// them.
+pub(crate) const FLOAT_REG_NUMBERS: usize = 32;
 
-/// AArch64 code asks for the code ahead every this many bytes emitted
-/// (`prfm plil2keep`): a large program streams through the front end once,
-/// so that is a third off a 7M-op program and nothing on a small one.
+/// The operands whose places a dense kernel's descriptor (`host::KernelDesc`)
+/// holds: `a`, then `x` or `b`, then the accumulator.
+pub(crate) const KERNEL_OPERANDS_A_XB_ACCUMULATOR: usize = 3;
+
+/// The values per lane that the gather area of lane code holds for a host
+/// call: two arguments and the result.
+pub(crate) const LANE_HOST_CALL_VALUES: usize = 3;
+
+/// The cost of the scalar code per instance when the lanes are forced, so
+/// that the scalar code is never the cheaper way. The division leaves
+/// headroom for the multiples of the lane count.
+pub(crate) const FORCED_LANES_SCALAR_COST: usize = usize::MAX / 16;
+
+/// The bit at which the chunk size starts in the options key of a bundle's
+/// native form (`options_key`). The key holds the chunk size, the batch
+/// mode in the low bits, and the lane mode.
+pub(crate) const OPTIONS_KEY_CHUNK_OPS_SHIFT: u32 = 32;
+
+/// The bit at which the lane mode starts in the options key, see
+/// [`OPTIONS_KEY_CHUNK_OPS_SHIFT`].
+pub(crate) const OPTIONS_KEY_LANES_SHIFT: u32 = 62;
+
+/// A bit of the options key that `options_key` leaves free. It holds
+/// whether the work goes to the background, so that the form of a bundle
+/// that the program runs is keyed by its code options and by where its work
+/// goes.
+pub(crate) const OPTIONS_KEY_BACKGROUND_BIT: u32 = 61;
+
+/// AArch64 code prefetches the code ahead (`prfm plil2keep`) every this
+/// many bytes emitted. A large program streams through the front end once,
+/// so the prefetch takes a third off a 7M-op program and nothing off a
+/// small one.
 #[cfg(target_arch = "aarch64")]
-pub(crate) const PREFETCH_EVERY: usize = 128;
+pub(crate) const PREFETCH_EVERY_BYTES: usize = 128;
 
-/// How far ahead [`PREFETCH_EVERY`]'s prefetch reaches, in bytes.
+/// How far ahead the prefetch of [`PREFETCH_EVERY_BYTES`] reaches, in bytes.
 #[cfg(target_arch = "aarch64")]
-pub(crate) const PREFETCH_AHEAD: usize = 2048;
+pub(crate) const PREFETCH_AHEAD_BYTES: usize = 2048;

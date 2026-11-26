@@ -44,9 +44,6 @@ impl<K: Field> Graph<K> {
         new
     }
 
-    /// Expressions of graph `other` rebuilt here: their symbols by name,
-    /// their calls into the functions of `other` imported (see
-    /// [`import`](Self::import)).
     fn import_exprs(
         &mut self,
         other: &Graph<K>,
@@ -57,19 +54,17 @@ impl<K: Field> Graph<K> {
             g: self,
             other,
             imported,
-            contexts: HashMap::default(),
+            imported_contexts: HashMap::default(),
         };
         crate::transform::rewrite(&mut rule, roots)
     }
 }
 
-/// [`Graph::import_exprs`]: `other`'s nodes rebuilt in `g`.
 struct Import<'a, K: Field> {
     g: &'a mut Graph<K>,
     other: &'a Graph<K>,
     imported: &'a mut HashMap<FuncId, FuncId>,
-    /// per context of `other`, the one here, made once
-    contexts: HashMap<u32, u32>,
+    imported_contexts: HashMap<u32, u32>,
 }
 
 impl<K: Field> crate::transform::Rule<K> for Import<'_, K> {
@@ -91,10 +86,9 @@ impl<K: Field> crate::transform::Rule<K> for Import<'_, K> {
         vals: &mut Vec<ExprId>,
     ) {
         let f = self.g.import(self.other, call.f, self.imported);
-        // a bound call: its context over the imported expressions
         let ctx = match call.ctx {
             NO_CONTEXT => NO_CONTEXT,
-            c => *self.contexts.entry(c).or_insert_with(|| {
+            c => *self.imported_contexts.entry(c).or_insert_with(|| {
                 let at = &self.other.contexts[c as usize].at;
                 let pairs: Vec<(u32, ExprId)> =
                     at.iter().copied().zip(call.bound.iter().copied()).collect();

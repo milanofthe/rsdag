@@ -42,14 +42,12 @@ impl Degree {
             Degree::Unbounded => None,
         }
     }
-    /// Degree of a product: degrees add.
     fn times(self, other: Degree) -> Degree {
         match (self.value(), other.value()) {
             (Some(a), Some(b)) => a.checked_add(b).map_or(Degree::Unbounded, Degree::finite),
             _ => Degree::Unbounded,
         }
     }
-    /// Degree of a sum: the larger one.
     fn plus(self, other: Degree) -> Degree {
         match (self.value(), other.value()) {
             (Some(a), Some(b)) => Degree::finite(a.max(b)),
@@ -168,19 +166,14 @@ pub fn nonlinearity_of<K: Field>(
     acc
 }
 
-/// The classes of the calls already classified: by output and argument
-/// classes.
 type CallMemo = HashMap<(crate::func::OutputId, Vec<Nonlinearity>), Nonlinearity>;
 
-/// The classes of `exprs`, a symbol classified by `leaf`.
 fn classify_cone<K: Field>(
     g: &Graph<K>,
     exprs: &[ExprId],
     leaf: &dyn Fn(SymbolId) -> Nonlinearity,
     calls: &mut CallMemo,
 ) -> Vec<Nonlinearity> {
-    // One sweep over the nodes the expressions reach, each after its
-    // operands, each classified from its operands'.
     let cone = g.cone(exprs, false);
     let mut memo: Vec<Nonlinearity> = Vec::with_capacity(cone.nodes.len());
     for &e in cone.nodes.iter() {
@@ -201,8 +194,6 @@ fn classify_cone<K: Field>(
     exprs.iter().map(|&e| memo[cone.pos(e)]).collect()
 }
 
-/// Output `o` called on arguments of classes `args`: its body classified with
-/// each parameter taking its argument's class (opaque for an extern body).
 fn classify_call<K: Field>(
     g: &Graph<K>,
     o: crate::func::OutputId,
@@ -236,24 +227,19 @@ fn classify_call<K: Field>(
                 .copied()
                 .zip(args.iter().copied())
                 .collect();
-            // A symbol of the body that is no parameter (a global the
-            // function reads) is constant: the function's parameters are
-            // its free symbols.
-            let leaf = |s: SymbolId| params.get(&s).copied().unwrap_or_default();
-            classify_cone(g, &[e], &leaf, calls)[0]
+            let param_class_or_constant = |s: SymbolId| params.get(&s).copied().unwrap_or_default();
+            classify_cone(g, &[e], &param_class_or_constant, calls)[0]
         }
     };
     calls.insert(key, c);
     c
 }
 
-/// Node `expr` classified from its operands' classes, `sub`.
 fn classify<K: Field>(
     g: &Graph<K>,
     expr: ExprId,
     sub: impl Fn(ExprId) -> Nonlinearity,
 ) -> Nonlinearity {
-    // Every operand's flags, and whether any moves with the variables.
     let parts = || g.operands(expr).iter().map(|&a| sub(a)).collect::<Vec<_>>();
     let joined = |parts: &[Nonlinearity], mut out: Nonlinearity| {
         for c in parts {
@@ -303,10 +289,7 @@ fn classify<K: Field>(
                 )
             }
         }
-        // A binary function beyond the ring is transcendental in the same
-        // sense as a unary one when either argument moves; there is no
-        // unary op to name it by, so the flag is the piecewise-free
-        // "unbounded" alone.
+        // https://github.com/milanofthe/rsdag/issues/242
         Node::Binary(..) | Node::Cmp(..) | Node::Solve(..) => {
             let parts = parts();
             if parts.iter().all(Nonlinearity::is_constant) {
@@ -314,7 +297,6 @@ fn classify<K: Field>(
             }
             let out = Nonlinearity::unbounded(|o| match g.node(expr) {
                 Node::Cmp(..) => o.piecewise = true,
-                // Rational in the matrix, linear in the right-hand side.
                 Node::Solve(..) => o.rational = true,
                 _ => {}
             });
@@ -323,7 +305,6 @@ fn classify<K: Field>(
         Node::Select(c, t, e) => {
             let (cc, ct, ce) = (sub(c), sub(t), sub(e));
             let out = if cc.is_constant() {
-                // A fixed branch: the degree of whichever arm is taken.
                 Nonlinearity {
                     degree: ct.degree.plus(ce.degree),
                     ..Default::default()

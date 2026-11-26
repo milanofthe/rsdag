@@ -11,8 +11,6 @@ use crate::constants::{INFIX_MAX, INFIX_OP_BYTES};
 /// Good enough for inspection and tests. Pretty/canonical rendering of
 /// `H(s)` as a collected rational function is a job for the rewrite layer.
 pub fn to_string<K: Field>(ctx: &Graph<K>, id: ExprId) -> String {
-    // The nodes under `id`, each after its operands, and the length of each
-    // one's infix form, capped past the limit.
     let cone = ctx.cone(&[id], false);
     let mut len: Vec<usize> = Vec::with_capacity(cone.nodes.len());
     for &e in cone.nodes.iter() {
@@ -37,10 +35,9 @@ pub fn to_string<K: Field>(ctx: &Graph<K>, id: ExprId) -> String {
             out.push_str(&format!("%{}", c.0));
         }
     };
-    // listed in id order
-    let mut nodes = cone.nodes;
-    nodes.sort_unstable();
-    for &e in nodes.iter().filter(|&&e| !ctx.operands(e).is_empty()) {
+    let mut in_id_order = cone.nodes;
+    in_id_order.sort_unstable();
+    for &e in in_id_order.iter().filter(|&&e| !ctx.operands(e).is_empty()) {
         out.push_str(&format!("%{} = ", e.0));
         write_node(ctx, e, &mut out, &mut operand);
         out.push('\n');
@@ -49,7 +46,6 @@ pub fn to_string<K: Field>(ctx: &Graph<K>, id: ExprId) -> String {
     out
 }
 
-/// A leaf's text: a constant's value or a symbol's name.
 fn leaf<K: Field>(ctx: &Graph<K>, e: ExprId) -> String {
     match *ctx.node(e) {
         Node::Const(c) => ctx.const_val(c).render(),
@@ -58,26 +54,23 @@ fn leaf<K: Field>(ctx: &Graph<K>, e: ExprId) -> String {
     }
 }
 
-/// The infix form of `id`, operands written in place.
 fn infix<K: Field>(ctx: &Graph<K>, id: ExprId, out: &mut String) {
     if ctx.operands(id).is_empty() {
         out.push_str(&leaf(ctx, id));
         return;
     }
     write_node(ctx, id, out, &mut |c, factor, out| {
-        // A sum or a negation as a factor is wrapped in parens.
-        let wrap = factor && matches!(ctx.node(c), Node::Add(..) | Node::Neg(..));
-        if wrap {
+        let needs_parens = factor && matches!(ctx.node(c), Node::Add(..) | Node::Neg(..));
+        if needs_parens {
             out.push('(');
         }
         infix(ctx, c, out);
-        if wrap {
+        if needs_parens {
             out.push(')');
         }
     });
 }
 
-/// Node `id` with each operand written by `operand(c, as_factor, out)`.
 fn write_node<K: Field>(
     ctx: &Graph<K>,
     id: ExprId,

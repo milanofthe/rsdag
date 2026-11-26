@@ -16,7 +16,6 @@ fn expr_of(g: &Graph<F64>, f: FuncId, out: usize) -> ExprId {
     }
 }
 
-/// Whether a call survives anywhere under `e`.
 fn contains_call(g: &Graph<F64>, e: ExprId) -> bool {
     let mut stack = vec![e];
     let mut seen = std::collections::HashSet::new();
@@ -32,7 +31,6 @@ fn contains_call(g: &Graph<F64>, e: ExprId) -> bool {
     false
 }
 
-/// A gain block `y = k * u`, as a function with roles.
 fn gain(g: &mut Graph<F64>, name: &str) -> FuncId {
     let mut s = Scope::new(g, name);
     let u = s.param("u", ParamRole::Input { port: 0, elem: 0 });
@@ -41,17 +39,11 @@ fn gain(g: &mut Graph<F64>, name: &str) -> FuncId {
     s.close([(y, OutputRole::Output { port: 0, elem: 0 })])
 }
 
-/// Hierarchy is a call graph: a subsystem is a function whose body calls
-/// other functions, to any depth, and each instance carries its own
-/// parameter values as call arguments.
 #[test]
 fn subsystems_nest_and_instances_keep_their_parameters() {
     let mut g: Graph<F64> = Graph::new();
     let inner = gain(&mut g, "gain");
 
-    // A subsystem with two instances of the same block in series, each with
-    // its own gain: the parameters are arguments, so one definition serves
-    // both instances.
     let mut s = Scope::new(&mut g, "chain");
     let u = s.param("u", ParamRole::Input { port: 0, elem: 0 });
     let k1 = s.param("k1", ParamRole::Param);
@@ -60,7 +52,6 @@ fn subsystems_nest_and_instances_keep_their_parameters() {
     let out = s.call(inner, 0, &[mid, k2]);
     let chain = s.close([(out, OutputRole::Output { port: 0, elem: 0 })]);
 
-    // A third level: the whole subsystem instantiated inside another one.
     let mut s = Scope::new(&mut g, "system");
     let x = s.param("x", ParamRole::Input { port: 0, elem: 0 });
     let a = s.konst_f64(2.0);
@@ -68,8 +59,10 @@ fn subsystems_nest_and_instances_keep_their_parameters() {
     let y = s.call(chain, 0, &[x, a, b]);
     let sys = s.close([(y, OutputRole::Output { port: 0, elem: 0 })]);
 
-    // The hierarchy is intact in the graph: the system's output is a call.
-    assert!(matches!(g.node(expr_of(&g, sys, 0)), Node::Call(..)));
+    assert!(
+        matches!(g.node(expr_of(&g, sys, 0)), Node::Call(..)),
+        "the hierarchy is not intact: the system's output is not a call"
+    );
 
     let params = g.func(sys).params().to_vec();
     let tape = Tape::compile(&g, &[expr_of(&g, sys, 0)], &params);
@@ -77,19 +70,14 @@ fn subsystems_nest_and_instances_keep_their_parameters() {
     tape.eval(&[5.0f64], &mut w, &mut o);
     assert_eq!(o[0], 30.0, "2 * 3 * 5 through two levels of calls");
 
-    // `inline_all` goes to the bottom, which is the static fusion a build
-    // does before compiling: no call survives and the value is the same.
     let flat = g.inline_all(&[expr_of(&g, sys, 0)])[0];
-    assert!(!contains_call(&g, flat), "fully inlined");
+    assert!(!contains_call(&g, flat), "inline_all left a call");
     let tape = Tape::compile(&g, &[flat], &params);
     let (mut w, mut o) = (Vec::new(), Vec::new());
     tape.eval(&[5.0f64], &mut w, &mut o);
     assert_eq!(o[0], 30.0);
 }
 
-/// An incremental change costs the cone it touches and nothing else: the
-/// graph is hash-consed, so everything the change does not reach is shared
-/// with the version before it.
 #[test]
 fn an_incremental_change_costs_only_its_cone() {
     let mut g: Graph<F64> = Graph::new();
@@ -97,8 +85,6 @@ fn an_incremental_change_costs_only_its_cone() {
     let (roots, syms) = build(&mut g, &mut spec);
     let before = g.len();
 
-    // Replace one input by an expression: only the nodes above that input
-    // are rebuilt.
     let extra = g.sym("extra");
     let two = g.konst_f64(2.0);
     let replacement = g.mul(two, extra);
@@ -113,14 +99,10 @@ fn an_incremental_change_costs_only_its_cone() {
         grew < before / 2,
         "a one-symbol substitution rebuilt {grew} nodes of {before}"
     );
-    // The untouched roots are literally the same ids: nothing was copied.
     let again = substitute(&mut g, &[roots[0]], &one)[0];
     assert_eq!(again, changed, "the same substitution is the same node");
 }
 
-/// The interface order is a compile-time choice, not a property of the
-/// graph: the same roots compiled against a permuted symbol list give the
-/// same values through the permuted inputs.
 #[test]
 fn permuting_the_interface_is_free() {
     let mut g: Graph<F64> = Graph::new();
@@ -132,7 +114,6 @@ fn permuting_the_interface_is_free() {
     let (mut w, mut o) = (Vec::new(), Vec::new());
     tape.eval(&row, &mut w, &mut o);
 
-    // Reverse the input order and feed the values in the same order.
     let perm: Vec<SymbolId> = syms.iter().rev().copied().collect();
     let prow: Vec<f64> = row.iter().rev().copied().collect();
     let ptape = Tape::compile(&g, &roots, &perm);
@@ -143,14 +124,15 @@ fn permuting_the_interface_is_free() {
         "a permuted interface changed the values"
     );
 
-    // Outputs permute the same way, and a subset is just a shorter root list.
     let rev_roots: Vec<ExprId> = roots.iter().rev().copied().collect();
     let rtape = Tape::compile(&g, &rev_roots, &syms);
     let (mut rw, mut ro) = (Vec::new(), Vec::new());
     rtape.eval(&row, &mut rw, &mut ro);
-    assert!(o
-        .iter()
-        .rev()
-        .zip(&ro)
-        .all(|(a, b)| a.to_bits() == b.to_bits()));
+    assert!(
+        o.iter()
+            .rev()
+            .zip(&ro)
+            .all(|(a, b)| a.to_bits() == b.to_bits()),
+        "reversed roots did not reverse the outputs"
+    );
 }

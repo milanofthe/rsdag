@@ -2,16 +2,13 @@
 //! in instance order, for any number of instances including none. The
 //! serial `Program::eval_many_into` is the same on either backend.
 
+#[path = "../../rsdag/tests/common/mod.rs"]
+mod common;
+use common::same;
+
 use rsdag::synth::{cases, Spec, Vocabulary};
 use rsdag::Program;
 use rsdag_jit::NativeTape;
-
-fn same(a: &[f64], b: &[f64]) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .zip(b)
-            .all(|(x, y)| x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()))
-}
 
 #[test]
 fn eval_many_is_eval_per_instance() {

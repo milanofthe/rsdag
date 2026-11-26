@@ -32,7 +32,6 @@ pub struct Rng(u64);
 
 impl Rng {
     pub fn new(seed: u64) -> Rng {
-        // A zero state is a fixed point of xorshift; move it off.
         Rng(seed ^ 0x9E37_79B9_7F4A_7C15)
     }
     pub fn next_u64(&mut self) -> u64 {
@@ -97,13 +96,16 @@ pub struct Spec {
     pub list_percent: usize,
     /// How wide the generated programs are.
     ///
-    /// Operands are drawn from the last `width` nodes built, so 1 is a
-    /// chain and a number past the program size is a uniform draw over
-    /// everything so far. This is the knob that decides whether a corpus
-    /// looks like real work: an assembled residual or Jacobian is very
-    /// wide -- 8196 nodes at depth 7, one level per row -- while a uniform
-    /// draw over a growing pool builds deep chains that no consumer
-    /// produces. The fuzzers want both; a benchmark wants the wide end.
+    /// Two operands in three are drawn from the last `width` nodes built
+    /// and the third from everything so far, so 1 is close to a chain and
+    /// a number past the program size is a uniform draw over everything so
+    /// far. This is the knob that decides whether a corpus looks like real
+    /// work: an assembled residual or Jacobian is very wide, 8196 nodes at
+    /// depth 7 with one level per row. A small width builds deep programs
+    /// and a uniform draw builds shallow ones. With 4000 steps over five
+    /// seeds, a width of 12 gave depths of 28 to 265 and a uniform draw
+    /// gave depths of 8 to 23. The fuzzers want both ends, and a benchmark
+    /// wants the wide end.
     pub width: usize,
     /// Percent of drawn ops that are a `Select` over a fresh comparison.
     /// The knob a region or specialization test turns up: those need
@@ -182,21 +184,16 @@ pub fn inputs(rng: &mut Rng, n: usize) -> Vec<f64> {
     (0..n).map(|_| rng.val()).collect()
 }
 
-/// One form a program may draw besides the lists and the guarded selects.
 #[derive(Clone, Copy)]
 enum Form {
-    /// Ring form `k` (see [`ring_op`]).
     Ring(usize),
     Unary(UnaryOp),
     Binary(BinOp),
 }
 
-/// Ring forms (see [`ring_op`]): the smooth ones, then comparisons, selects
-/// and the ordered reductions.
 const RING_SMOOTH: usize = 8;
 const RING_ALL: usize = 12;
 
-/// The unary functions of [`Vocabulary::Elementary`].
 const ELEMENTARY: &[UnaryOp] = &[
     UnaryOp::Exp,
     UnaryOp::Ln,
@@ -211,8 +208,6 @@ const ELEMENTARY: &[UnaryOp] = &[
     UnaryOp::Abs,
 ];
 
-/// Every form `vocab` allows, only the differentiable ones when `smooth`:
-/// the vocabulary tables themselves, so an op added to them is drawn.
 fn forms(vocab: Vocabulary, smooth: bool) -> Vec<Form> {
     let ring = if smooth { RING_SMOOTH } else { RING_ALL };
     let mut forms: Vec<Form> = (0..ring).map(Form::Ring).collect();
@@ -246,10 +241,10 @@ fn forms(vocab: Vocabulary, smooth: bool) -> Vec<Form> {
 /// Build one program: `n_outputs` root expressions over `n_params` free
 /// symbols. Returns the roots and the symbols in input order.
 pub fn build<K: Field>(g: &mut Graph<K>, spec: &mut Spec) -> (Vec<ExprId>, Vec<SymbolId>) {
-    let syms: Vec<ExprId> = (0..spec.n_params)
-        .map(|i| g.sym(&format!("p{i}")))
+    let sym_ids: Vec<SymbolId> = (0..spec.n_params)
+        .map(|i| g.symbol_id(&format!("p{i}")))
         .collect();
-    let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| symbol_of(g, e)).collect();
+    let syms: Vec<ExprId> = sym_ids.iter().map(|&s| g.symbol_expr(s)).collect();
     (build_roots(g, spec, &syms), sym_ids)
 }
 
@@ -262,15 +257,15 @@ pub fn build_over<K: Field>(g: &mut Graph<K>, spec: &mut Spec, syms: &[ExprId]) 
     roots[0]
 }
 
-/// The draw loop shared by both entry points.
 fn build_roots<K: Field>(g: &mut Graph<K>, spec: &mut Spec, syms: &[ExprId]) -> Vec<ExprId> {
     let forms = forms(spec.vocab, spec.smooth);
     let mut pool = syms.to_vec();
-    for _ in 0..2 {
+    let constants = [(); 2].map(|_| {
         let v = spec.rng.val();
-        let k = g.konst_f64(v);
-        pool.push(k);
-    }
+        g.konst_f64(v)
+    });
+    pool.extend(constants);
+    let mut top = constants[1];
     let mut roots = Vec::with_capacity(spec.n_outputs);
     let per_root = spec.steps / spec.n_outputs.max(1);
     for r in 0..spec.n_outputs {
@@ -280,27 +275,14 @@ fn build_roots<K: Field>(g: &mut Graph<K>, spec: &mut Spec, syms: &[ExprId]) -> 
             per_root
         };
         for _ in 0..steps {
-            let e = draw(g, spec, &forms, &pool);
-            pool.push(e);
+            top = draw(g, spec, &forms, &pool);
+            pool.push(top);
         }
-        roots.push(*pool.last().unwrap());
+        roots.push(top);
     }
     roots
 }
 
-/// The symbol behind a symbol node (the generator only ever passes its own).
-fn symbol_of<K: Field>(g: &Graph<K>, e: ExprId) -> SymbolId {
-    g.as_symbol(e).expect("synth passes only symbol nodes")
-}
-
-/// Pick an operand, biased toward the most recently built nodes.
-///
-/// Drawing uniformly from the whole pool builds a soup of small shared
-/// subexpressions that hash-consing collapses, so a program of 4000 draws
-/// ends up a few hundred ops deep in nothing. Real code builds chains: a
-/// value is consumed by what comes right after it. Two thirds of the
-/// operands therefore come from the last [`RECENT`] entries, which makes
-/// the generated programs both larger and deeper for the same draw count.
 const RECENT: usize = 12;
 
 fn pick(rng: &mut Rng, pool: &[ExprId], width: usize) -> ExprId {
@@ -312,7 +294,6 @@ fn pick(rng: &mut Rng, pool: &[ExprId], width: usize) -> ExprId {
     }
 }
 
-/// Every comparison.
 const CMPS: [CmpOp; 6] = [
     CmpOp::Gt,
     CmpOp::Ge,
@@ -322,7 +303,6 @@ const CMPS: [CmpOp; 6] = [
     CmpOp::Ne,
 ];
 
-/// Draw and build one node over the current pool.
 fn draw<K: Field>(g: &mut Graph<K>, spec: &mut Spec, forms: &[Form], pool: &[ExprId]) -> ExprId {
     let spec_width = spec.width;
     let rng = &mut spec.rng;
@@ -330,8 +310,6 @@ fn draw<K: Field>(g: &mut Graph<K>, spec: &mut Spec, forms: &[Form], pool: &[Exp
     let b = pick(rng, pool, spec_width);
     let c = pick(rng, pool, spec_width);
     if !spec.smooth && rng.chance(spec.select_percent) {
-        // A select over a fresh comparison of two pool values: a guard that
-        // moves when the inputs move, which is what a region test needs.
         let cmp = [CmpOp::Gt, CmpOp::Le, CmpOp::Lt][rng.below(3)];
         let cond = g.cmp(cmp, a, b);
         return g.select(cond, b, c);
@@ -364,8 +342,6 @@ fn draw<K: Field>(g: &mut Graph<K>, spec: &mut Spec, forms: &[Form], pool: &[Exp
     }
 }
 
-/// The ring forms: what every backend, generated C included, reproduces bit
-/// for bit. The smooth ones first.
 fn ring_op<K: Field>(
     g: &mut Graph<K>,
     rng: &mut Rng,
@@ -382,11 +358,8 @@ fn ring_op<K: Field>(
         2 => g.mul(a, b),
         3 => g.neg(a),
         4 => {
-            // `0^-n` is undefined over the exact rationals and the smart
-            // constructor rejects it; steer a structural zero to a safe
-            // exponent instead of losing the draw.
-            let n = if pow < 0 && g.is_zero(a) { 2 } else { pow };
-            g.pow_i(a, n)
+            let exponent_defined_over_rationals = if pow < 0 && g.is_zero(a) { 2 } else { pow };
+            g.pow_i(a, exponent_defined_over_rationals)
         }
         5 => {
             let s = g.mul(a, b);
@@ -401,11 +374,6 @@ fn ring_op<K: Field>(
     }
 }
 
-/// `op` of `a`, the argument moved into the function's domain so the value
-/// stays finite over the inputs [`inputs`] draws: at least 1 for the
-/// logarithms, the roots and the gamma family, of magnitude at most 1/2 for
-/// the inverse sines and `atanh`, at least 2 for `acosh`, off the poles for
-/// `tan`.
 fn unary_form<K: Field>(g: &mut Graph<K>, op: UnaryOp, a: ExprId) -> ExprId {
     use UnaryOp::*;
     let arg = match op {
@@ -431,17 +399,16 @@ fn unary_form<K: Field>(g: &mut Graph<K>, op: UnaryOp, a: ExprId) -> ExprId {
     g.unary(op, arg)
 }
 
-/// `op` of `a` and `b`, moved into its domain as [`unary_form`] does.
 fn binary_form<K: Field>(g: &mut Graph<K>, op: BinOp, a: ExprId, b: ExprId) -> ExprId {
     let a2 = g.mul(a, a);
     let one = g.one();
-    let pos = g.add(a2, one); // >= 1
+    let at_least_one = g.add(a2, one);
     match op {
-        BinOp::Atan2 => g.binary(op, a, pos),
-        BinOp::Hypot => g.binary(op, pos, b),
+        BinOp::Atan2 => g.binary(op, a, at_least_one),
+        BinOp::Hypot => g.binary(op, at_least_one, b),
         BinOp::Powf => {
             let t = g.tanh(b);
-            g.binary(op, pos, t)
+            g.binary(op, at_least_one, t)
         }
         BinOp::Mod => {
             let m = g.ratio(3, 2);

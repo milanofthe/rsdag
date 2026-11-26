@@ -51,8 +51,6 @@ pub enum ParamRole {
 }
 
 impl ParamRole {
-    /// Where the role's group sits in a [`Signature`], and the parameter's
-    /// place within it.
     fn place(&self) -> (u8, u32, u32) {
         match *self {
             ParamRole::State { id } => (0, id, 0),
@@ -86,7 +84,6 @@ impl Signature {
     /// The signature of `f`'s parameters.
     pub fn of(f: &crate::func::Function) -> Signature {
         let mut order: Vec<usize> = (0..f.params().len()).collect();
-        // Stable: parameters of one place keep their declaration order.
         order.sort_by_key(|&i| f.param_roles()[i].place());
         Signature {
             syms: order.iter().map(|&i| f.params()[i]).collect(),
@@ -109,9 +106,12 @@ impl Signature {
     /// The signature without the inputs whose role satisfies `role`: those
     /// no program over it reads.
     pub fn without(mut self, role: impl Fn(&ParamRole) -> bool) -> Signature {
-        let keep: Vec<bool> = self.roles.iter().map(|r| !role(r)).collect();
-        let mut k = keep.iter();
-        self.syms.retain(|_| *k.next().expect("one per input"));
+        assert_eq!(self.syms.len(), self.roles.len());
+        let syms = std::mem::take(&mut self.syms);
+        self.syms = (syms.into_iter().zip(&self.roles))
+            .filter(|(_, r)| !role(r))
+            .map(|(s, _)| s)
+            .collect();
         self.roles.retain(|r| !role(r));
         self
     }

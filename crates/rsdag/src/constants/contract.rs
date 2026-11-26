@@ -44,15 +44,14 @@ pub const FOLD_LANES: usize = 4;
 /// is an integer power ([`Graph::pow_i`](crate::Graph::pow_i)): it
 /// evaluates by multiplication ([`powi_f64`](crate::semantics::powi_f64)), not
 /// by `pow`. The native backend's own bound on the powers it multiplies
-/// out inline (`POWI_INLINE`) is a matter of code size, not this.
+/// out inline (`POWI_INLINE_MAX_EXPONENT`) is a matter of code size, not this.
 pub const POWF_AS_POWI_MAX: f64 = 64.0;
 
-// The bits of an `f64` that the exponential and the logarithm take apart
-// (`crate::semantics::exp_core` and `ln_core`), the same in every backend
-// that computes them in its own instructions; their tables and
-// coefficients are in `exp_ln`.
-
 /// The exponent bias of an `f64`: a biased exponent of `1023` is `2^0`.
+/// The exponential and the logarithm (`crate::semantics::exp_core` and
+/// `ln_core`) take the bits of an `f64` apart with it and with
+/// [`F64_FRAC_BITS`], the same in every backend that computes them in its
+/// own instructions. Their tables and coefficients are in `exp_ln`.
 pub const F64_EXP_BIAS: i64 = 1023;
 /// The fraction bits of an `f64`, below its exponent.
 pub const F64_FRAC_BITS: u32 = 52;

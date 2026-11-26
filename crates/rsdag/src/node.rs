@@ -53,7 +53,6 @@ pub enum CmpOp {
 }
 
 impl CmpOp {
-    /// The operator as written, `>`, `>=`, ...
     pub(crate) fn symbol(self) -> &'static str {
         match self {
             CmpOp::Gt => ">",
@@ -105,8 +104,6 @@ pub enum UnaryOp {
     Tanh,
     Atan,
     Floor,
-    // The floating-point extension (reference implementations from `libm`,
-    // so the bits do not depend on the platform's C library).
     Tan,
     Log10,
     Log2,
@@ -157,9 +154,10 @@ pub enum BinOp {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct UnarySpec {
-    /// The variant this row describes; `UNARY_OPS[op as usize].op == op`.
-    pub op: UnaryOp,
+pub struct OpSpec<Op> {
+    /// The variant this row describes; `UNARY_OPS[op as usize].op == op`,
+    /// and the same for `BINARY_OPS`.
+    pub op: Op,
     /// Name in printed expressions and in the Python frontend.
     pub name: &'static str,
     /// Differentiable where it is defined, and differentiated by rsdag.
@@ -169,171 +167,179 @@ pub struct UnarySpec {
     pub smooth: bool,
 }
 
+impl<Op: Copy> OpSpec<Op> {
+    fn named(table: &[OpSpec<Op>], name: &str) -> Option<Op> {
+        table
+            .iter()
+            .find(|spec| spec.name == name)
+            .map(|spec| spec.op)
+    }
+}
+
 /// The unary vocabulary, in the order of the enum: `UNARY_OPS[op as usize]`
 /// is `op`'s row (checked by a test).
-pub const UNARY_OPS: &[UnarySpec] = &[
-    UnarySpec {
+pub const UNARY_OPS: &[OpSpec<UnaryOp>] = &[
+    OpSpec {
         op: UnaryOp::Exp,
         name: "exp",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Ln,
         name: "ln",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Sqrt,
         name: "sqrt",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Sin,
         name: "sin",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Cos,
         name: "cos",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Sinh,
         name: "sinh",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Cosh,
         name: "cosh",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Tanh,
         name: "tanh",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Atan,
         name: "atan",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Floor,
         name: "floor",
         smooth: false,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Tan,
         name: "tan",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Log10,
         name: "log10",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Log2,
         name: "log2",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Log1p,
         name: "log1p",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Expm1,
         name: "expm1",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Cbrt,
         name: "cbrt",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Abs,
         name: "abs",
         smooth: false,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Sign,
         name: "sign",
         smooth: false,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Ceil,
         name: "ceil",
         smooth: false,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Round,
         name: "round",
         smooth: false,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Trunc,
         name: "trunc",
         smooth: false,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Asin,
         name: "asin",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Acos,
         name: "acos",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Asinh,
         name: "asinh",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Acosh,
         name: "acosh",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Atanh,
         name: "atanh",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Erf,
         name: "erf",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Erfc,
         name: "erfc",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Lgamma,
         name: "lgamma",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Tgamma,
         name: "tgamma",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Digamma,
         name: "digamma",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Trigamma,
         name: "trigamma",
-        // Its derivative (polygamma of order 2) is not implemented.
         smooth: false,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::RandUniform,
         name: "rand_uniform",
         smooth: false,
@@ -343,7 +349,7 @@ pub const UNARY_OPS: &[UnarySpec] = &[
 impl UnaryOp {
     /// This op's row of [`UNARY_OPS`].
     #[inline]
-    pub fn spec(self) -> &'static UnarySpec {
+    pub fn spec(self) -> &'static OpSpec<UnaryOp> {
         &UNARY_OPS[self as usize]
     }
     /// Name in printed expressions.
@@ -367,46 +373,35 @@ impl UnaryOp {
     pub fn from_code(code: u32) -> UnaryOp {
         UNARY_OPS[code as usize].op
     }
-    /// The op a frontend's function name denotes, by [`UnarySpec::name`].
+    /// The op a frontend's function name denotes, by [`OpSpec::name`].
     pub fn from_name(name: &str) -> Option<UnaryOp> {
-        UNARY_OPS
-            .iter()
-            .find(|spec| spec.name == name)
-            .map(|spec| spec.op)
+        OpSpec::named(UNARY_OPS, name)
     }
 }
 
-/// As [`UnarySpec`], for the binary ops beyond the ring.
-#[derive(Clone, Copy, Debug)]
-pub struct BinarySpec {
-    pub op: BinOp,
-    pub name: &'static str,
-    pub smooth: bool,
-}
-
 /// The binary vocabulary, in the order of the enum.
-pub const BINARY_OPS: &[BinarySpec] = &[
-    BinarySpec {
+pub const BINARY_OPS: &[OpSpec<BinOp>] = &[
+    OpSpec {
         op: BinOp::Powf,
         name: "powf",
         smooth: true,
     },
-    BinarySpec {
+    OpSpec {
         op: BinOp::Mod,
         name: "mod",
         smooth: false,
     },
-    BinarySpec {
+    OpSpec {
         op: BinOp::Atan2,
         name: "atan2",
         smooth: true,
     },
-    BinarySpec {
+    OpSpec {
         op: BinOp::Hypot,
         name: "hypot",
         smooth: true,
     },
-    BinarySpec {
+    OpSpec {
         op: BinOp::RandStream,
         name: "rand_stream",
         smooth: false,
@@ -415,7 +410,7 @@ pub const BINARY_OPS: &[BinarySpec] = &[
 
 impl BinOp {
     #[inline]
-    pub fn spec(self) -> &'static BinarySpec {
+    pub fn spec(self) -> &'static OpSpec<BinOp> {
         &BINARY_OPS[self as usize]
     }
     #[inline]
@@ -434,12 +429,9 @@ impl BinOp {
     pub fn from_code(code: u32) -> BinOp {
         BINARY_OPS[code as usize].op
     }
-    /// The op a frontend's function name denotes, by [`BinarySpec::name`].
+    /// The op a frontend's function name denotes, by [`OpSpec::name`].
     pub fn from_name(name: &str) -> Option<BinOp> {
-        BINARY_OPS
-            .iter()
-            .find(|spec| spec.name == name)
-            .map(|spec| spec.op)
+        OpSpec::named(BINARY_OPS, name)
     }
 }
 
@@ -478,15 +470,6 @@ impl Elementary {
             Elementary::Binary(op) => op.name(),
             Elementary::Min => ReduceOp::Min.name(),
             Elementary::Max => ReduceOp::Max.name(),
-        }
-    }
-
-    /// The reduction an extremum is, `None` for an op.
-    pub(crate) fn reduction(self) -> Option<ReduceOp> {
-        match self {
-            Elementary::Min => Some(ReduceOp::Min),
-            Elementary::Max => Some(ReduceOp::Max),
-            _ => None,
         }
     }
 
@@ -539,7 +522,7 @@ pub enum Node {
     /// Associative reduction over a flat operand list (KCL sums, products).
     /// One fused node instead of a balanced/again-binary tree.
     Reduce(ReduceOp, ArgList),
-    /// Inner product `Σ_i a[i]*b[i]` over two equal-length operand lists,
+    /// Inner product `sum_i a[i]*b[i]` over two equal-length operand lists,
     /// stored as ONE list `[a_0..a_n, b_0..b_n]` (the halves of
     /// [`crate::Graph::args`]). The fused form of a sum of pairwise
     /// products (matrix-vector rows).
@@ -557,8 +540,7 @@ pub enum Node {
     Call(OutputId, ArgList),
 }
 
-// lit: sixteen bytes a node
-const _: () = assert!(std::mem::size_of::<Node>() == 16);
+const _: () = assert!(std::mem::size_of::<Node>() == crate::constants::NODE_BYTES);
 
 impl Node {
     /// The operands this node reads, its list resolved in `pool` (the
@@ -567,8 +549,10 @@ impl Node {
     pub fn operands<'a>(&self, pool: &'a [ExprId]) -> Operands<'a> {
         let z = ExprId(0);
         match *self {
-            // lit: the inline buffer's three operands
-            Node::Const(_) | Node::Symbol(_) => Operands::Inline { buf: [z; 3], n: 0 },
+            Node::Const(_) | Node::Symbol(_) => Operands::Inline {
+                buf: [z, z, z],
+                n: 0,
+            },
             Node::Add(a, b) | Node::Mul(a, b) | Node::Cmp(_, a, b) | Node::Binary(_, a, b) => {
                 Operands::Inline {
                     buf: [a, b, z],
@@ -579,18 +563,19 @@ impl Node {
                 buf: [a, z, z],
                 n: 1,
             },
-            Node::Select(c, t, e) => Operands::Inline {
-                buf: [c, t, e],
-                n: 3, // lit: a select's three operands
-            },
+            Node::Select(c, t, e) => {
+                let buf = [c, t, e];
+                Operands::Inline {
+                    buf,
+                    n: buf.len() as u8,
+                }
+            }
             Node::Reduce(_, l) | Node::Dot(l) | Node::Call(_, l) | Node::Solve(l, _) => {
                 Operands::Slice(&pool[l.start as usize..(l.start + l.len) as usize])
             }
         }
     }
 
-    /// This node over other operands: `ops` in [`operands`](Self::operands)
-    /// order, a variadic node taking `list` (their interned window) instead.
     pub(crate) fn with_operands(self, ops: &[ExprId], list: ArgList) -> Node {
         match self {
             Node::Const(_) | Node::Symbol(_) => self,
@@ -609,7 +594,6 @@ impl Node {
         }
     }
 
-    /// Whether the operands are an interned list rather than inline.
     #[inline]
     pub(crate) fn is_variadic(&self) -> bool {
         matches!(
@@ -643,14 +627,10 @@ impl std::ops::Deref for Operands<'_> {
     }
 }
 
-/// The arithmetic of structural fingerprints (see `Graph::shape`): a fixed
-/// mixing
-/// function and a fixed byte hasher, so a fingerprint is the same on every
-/// platform, in every run and under every version of the hash crates.
+// https://github.com/milanofthe/rsdag/issues/242
 pub(crate) mod shape {
     use std::hash::{Hash, Hasher};
 
-    /// One tag per node kind, so equal payloads of different kinds differ.
     #[derive(Clone, Copy)]
     pub(crate) enum Tag {
         Const = 1,
@@ -669,7 +649,7 @@ pub(crate) mod shape {
         Call,
     }
 
-    /// Fold `x` into `h` (a splitmix64 finalizer over the sum).
+    // The finalizer of splitmix64, https://prng.di.unimi.it/splitmix64.c
     #[inline]
     pub(crate) fn mix(h: u64, x: u64) -> u64 {
         let mut z = h
@@ -681,7 +661,6 @@ pub(crate) mod shape {
         z ^ (z >> 31)
     }
 
-    /// A value's `Hash` fed through [`mix`], byte for byte.
     pub(crate) fn of_hash<T: Hash + ?Sized>(v: &T) -> u64 {
         let mut h = Stable(0);
         v.hash(&mut h);

@@ -4,18 +4,14 @@
 //! special values (NaN, infinities, signed zeros) and for a batch that does
 //! not fill its last block of lanes; the prolog's states included.
 
+#[path = "../../rsdag/tests/common/mod.rs"]
+mod common;
+use common::{same_bits, sym};
+
 use rsdag::node::{BinOp, CmpOp, ReduceOp, UnaryOp};
 use rsdag::Program;
-use rsdag::{ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
+use rsdag::{ExprId, FuncId, Graph, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
 use rsdag_jit::{Lanes, NativeTape, Options};
-
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    let Node::Symbol(s) = *g.node(e) else {
-        unreachable!()
-    };
-    (e, s)
-}
 
 const UNARY: [UnaryOp; 26] = [
     UnaryOp::Exp,
@@ -61,8 +57,6 @@ const CMP: [CmpOp; 6] = [
     CmpOp::Ne,
 ];
 
-/// A body over two states and two parameters with every kind of op, the
-/// parameters' work (a prolog) feeding the states' (the main phase).
 fn body(g: &mut Graph<F64>) -> FuncId {
     let mut s = Scope::new(g, "every");
     let a = s.param("a", ParamRole::State { id: 0 });
@@ -70,7 +64,6 @@ fn body(g: &mut Graph<F64>) -> FuncId {
     let p = s.param("p", ParamRole::Param);
     let q = s.param("q", ParamRole::Param);
     let mut outs = Vec::new();
-    // parameter-only work: lands in the prolog, read through the state
     let pq = s.mul(p, q);
     let pe = s.exp(pq);
     let ab = s.mul(a, b);
@@ -103,7 +96,6 @@ fn body(g: &mut Graph<F64>) -> FuncId {
     s.close(outs.into_iter().map(|e| (e, OutputRole::Plain)))
 }
 
-/// Values of every kind, so every lane meets them in turn.
 const SPECIAL: [f64; 13] = [
     0.75,
     -1.5,
@@ -120,7 +112,6 @@ const SPECIAL: [f64; 13] = [
     1.0,
 ];
 
-/// Lane code wherever it compiles, whether it pays or not.
 fn native(tape: &Tape) -> NativeTape {
     let opts = Options {
         lanes: Lanes::Always,
@@ -129,11 +120,6 @@ fn native(tape: &Tape) -> NativeTape {
     NativeTape::compile_opts(tape, &opts, &[]).expect("native code")
 }
 
-fn same(a: f64, b: f64) -> bool {
-    a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
-}
-
-/// `n` instances of the body at the top, every output of each a root.
 fn program(n: usize) -> (Graph<F64>, Vec<ExprId>, Vec<SymbolId>, Vec<bool>) {
     let mut g: Graph<F64> = Graph::new();
     let f = body(&mut g);
@@ -175,14 +161,14 @@ fn lanes_are_the_scalar_code_for_every_op_and_value() {
             native.eval_main(&x, &mut wn, &mut on);
             for (k, (a, b)) in o.iter().zip(&on).enumerate() {
                 assert!(
-                    same(*a, *b),
+                    same_bits(*a, *b),
                     "n={n} shift={shift} output {k}: {a:e} vs {b:e}"
                 );
             }
             let s = tape.state_len();
             for (k, (a, b)) in w[..s].iter().zip(&wn[..s]).enumerate() {
                 assert!(
-                    same(*a, *b),
+                    same_bits(*a, *b),
                     "n={n} shift={shift} state {k}: {a:e} vs {b:e}"
                 );
             }
@@ -203,7 +189,10 @@ fn lanes_without_state_are_the_scalar_code() {
         let (mut wn, mut on) = (Vec::new(), Vec::new());
         native.eval(&x, &mut wn, &mut on);
         for (k, (a, b)) in o.iter().zip(&on).enumerate() {
-            assert!(same(*a, *b), "shift={shift} output {k}: {a:e} vs {b:e}");
+            assert!(
+                same_bits(*a, *b),
+                "shift={shift} output {k}: {a:e} vs {b:e}"
+            );
         }
     }
 }
