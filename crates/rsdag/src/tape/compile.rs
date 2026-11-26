@@ -616,6 +616,7 @@ impl Program {
         }
     }
 
+    // https://github.com/milanofthe/rsdag/issues/241
     pub(super) fn merge_calls(&mut self) {
         #[derive(PartialEq, Eq, Hash)]
         struct Key {
@@ -1257,6 +1258,7 @@ impl Forest {
         let bpos = &t.pos;
         let bp = |e: ExprId| bpos[e.0 as usize] as usize;
 
+        // https://github.com/milanofthe/rsdag/issues/241
         let mut pure = vec![false; m];
         if let Some(mask) = pure_inputs {
             let mut pure_list: HashMap<(u32, Site), bool> = HashMap::default();
@@ -1624,6 +1626,7 @@ impl Forest {
         }
     }
 
+    // https://github.com/milanofthe/rsdag/issues/241
     fn merge_solves<K: Field>(
         &self,
         ctx: &Graph<K>,

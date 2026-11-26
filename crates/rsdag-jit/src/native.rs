@@ -684,6 +684,7 @@ impl NativeTape {
         debug_assert!(jobs.iter().all(|r| r.end <= split || r.start >= split));
         let chunk_at =
             |k: u32| (jobs.binary_search_by_key(&(k as usize), |r| r.start)).unwrap_or(jobs.len());
+        // https://github.com/milanofthe/rsdag/issues/240
         let serial = lanes > 1;
         let regions = (tape.regions().iter())
             .filter(|_| !serial)
@@ -1752,6 +1753,7 @@ fn emit_chunk<A: Isa>(
         e.next_host_call = next_host_call_at_or_after[k];
         e.op(i);
     }
+    // https://github.com/milanofthe/rsdag/issues/240
     e.pos = range.end as u32;
     e.flush();
     e.isa.epilogue();

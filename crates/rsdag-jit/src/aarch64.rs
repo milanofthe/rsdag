@@ -516,6 +516,7 @@ impl Isa for A64 {
         self.w(0x1E61_4000 | ((a as u32) << 5) | d as u32);
     }
     const MINMAX: bool = true;
+    // https://github.com/milanofthe/rsdag/issues/240
     fn minmax(&mut self, op: ReduceOp, d: u8, a: u8, b: u8) {
         let opc = match op {
             ReduceOp::Min => FMINNM_D,
