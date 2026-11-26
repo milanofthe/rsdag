@@ -655,56 +655,25 @@ impl<const L: usize> X64<L> {
             self.sse(PFX_66, op, d, b);
         }
     }
-    fn lane_to_gpr(&mut self, g: u8, x: u8) {
+    fn xmm_gpr_w(&mut self, prefix: u8, pp: u8, op: u8, x: u8, v: u8, g: u8) {
         if self.avx {
-            self.vex3(
-                VEX_W1,
-                VEX_PP_66,
-                VEX_MAP_0F,
-                VEX_128,
-                x,
-                NO_VEX_SOURCE,
-                NO_INDEX,
-                g,
-            );
+            self.vex3(VEX_W1, pp, VEX_MAP_0F, VEX_128, x, v, NO_INDEX, g);
         } else {
-            self.b(PFX_66);
+            self.b(prefix);
             self.b(REX_W | ((x >> 3) << 2) | (g >> 3));
             self.b(ESCAPE_0F);
         }
-        self.b(MOVQ_XMM_TO_GPR);
+        self.b(op);
         self.modrm_reg(x, g);
+    }
+    fn lane_to_gpr(&mut self, g: u8, x: u8) {
+        self.xmm_gpr_w(PFX_66, VEX_PP_66, MOVQ_XMM_TO_GPR, x, NO_VEX_SOURCE, g);
     }
     fn gpr_to_lane(&mut self, x: u8, g: u8) {
-        if self.avx {
-            self.vex3(
-                VEX_W1,
-                VEX_PP_66,
-                VEX_MAP_0F,
-                VEX_128,
-                x,
-                NO_VEX_SOURCE,
-                NO_INDEX,
-                g,
-            );
-        } else {
-            self.b(PFX_66);
-            self.b(REX_W | ((x >> 3) << 2) | (g >> 3));
-            self.b(ESCAPE_0F);
-        }
-        self.b(MOVQ_GPR_TO_XMM);
-        self.modrm_reg(x, g);
+        self.xmm_gpr_w(PFX_66, VEX_PP_66, MOVQ_GPR_TO_XMM, x, NO_VEX_SOURCE, g);
     }
     fn int_to_float(&mut self, x: u8, g: u8) {
-        if self.avx {
-            self.vex3(VEX_W1, VEX_PP_F2, VEX_MAP_0F, VEX_128, x, x, NO_INDEX, g);
-        } else {
-            self.b(PFX_F2);
-            self.b(REX_W | ((x >> 3) << 2) | (g >> 3));
-            self.b(ESCAPE_0F);
-        }
-        self.b(CVTSI2SD);
-        self.modrm_reg(x, g);
+        self.xmm_gpr_w(PFX_F2, VEX_PP_F2, CVTSI2SD, x, x, g);
     }
     fn gpr_rr(&mut self, op: u8, d: u8, s: u8) {
         self.rex(true, s, d);

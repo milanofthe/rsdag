@@ -6,7 +6,7 @@
 
 #[path = "../../rsdag/tests/common/mod.rs"]
 mod common;
-use common::{same, sym};
+use common::{circuit, same, sym};
 
 use rsdag::variant::VariantPolicy;
 use rsdag::Program;
@@ -46,20 +46,11 @@ fn device(g: &mut Graph<F64>) -> FuncId {
 }
 
 fn tape(n: usize, choices: bool) -> (Tape, Vec<f64>) {
-    let mut g: Graph<F64> = Graph::new();
-    let f = device(&mut g);
-    let (mut syms, mut roots, mut pure, mut ins) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    for i in 0..n {
-        let (x, xs) = sym(&mut g, &format!("x{i}"));
-        let (p, ps) = sym(&mut g, &format!("p{i}"));
-        syms.extend([xs, ps]);
-        pure.extend([false, true]);
-        ins.extend([0.7 + 0.2 * i as f64 / n as f64, 0.6 + 0.001 * i as f64]);
-        let a = g.call(f, 0, &[x, p]);
-        let b = g.call(f, 1, &[x, p]);
-        roots.push(g.add(a, b));
-    }
-    let mut t = Tape::compile_split(&g, &roots, &syms, &pure);
+    let c = circuit(n, device, &["p"]);
+    let ins = (0..n)
+        .flat_map(|i| [0.7 + 0.2 * i as f64 / n as f64, 0.6 + 0.001 * i as f64])
+        .collect();
+    let mut t = Tape::compile_split(&c.g, &c.roots, &c.syms, &c.pure);
     t.with_backend(&BodyBackend {
         variants: Some(VariantPolicy {
             choices: ChoicePolicy {
