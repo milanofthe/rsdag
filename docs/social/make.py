@@ -23,8 +23,7 @@ from style import BLACK as INK, BLUE as ACCENT, FONT, WHITE as PAPER  # noqa: E4
 
 W, H, DPI = 10.8, 13.5, 100
 L, R = 0.9, W - 0.9
-# The card's own greys, on white: secondary text and rules.
-GREY, RULE = "#6b6b6b", "#d4d4d4"
+SECONDARY_TEXT_GREY_ON_WHITE, RULE_GREY_ON_WHITE = "#6b6b6b", "#d4d4d4"
 LW = 1.4
 
 plt.rcParams["font.family"] = FONT
@@ -89,10 +88,10 @@ def pipeline():
         arrow(ax, (W / 2, y), (W / 2, y - gap))
         y -= h + gap
     box(ax, x, y, w, h, steps[-1])
-    # the tape runs on two backends
     bw = 3.4
-    for bx, label, sx in [(W / 2 - 0.3 - bw, "Interpreter", x + 1.0),
-                          (W / 2 + 0.3, "Native code", x + w - 1.0)]:
+    backends_of_the_tape = [(W / 2 - 0.3 - bw, "Interpreter", x + 1.0),
+                            (W / 2 + 0.3, "Native code", x + w - 1.0)]
+    for bx, label, sx in backends_of_the_tape:
         box(ax, bx, y - h - gap, bw, h, label)
         arrow(ax, (sx, y), (bx + bw / 2, y - gap))
     save(fig, "pipeline.png")
@@ -143,8 +142,8 @@ def split():
     for k in range(n):
         box(ax, L + pw + 0.5 + k * (mw + g), y, mw, h)
     ax.text(L + pw + 0.5, y + h + 0.3, "main", color=INK, fontsize=22, va="bottom")
-    ax.text(L, y - 0.3, "once per parameter set", color=GREY, fontsize=16, va="top")
-    ax.text(L + pw + 0.5, y - 0.3, "every Newton iteration", color=GREY, fontsize=16, va="top")
+    ax.text(L, y - 0.3, "once per parameter set", color=SECONDARY_TEXT_GREY_ON_WHITE, fontsize=16, va="top")
+    ax.text(L + pw + 0.5, y - 0.3, "every Newton iteration", color=SECONDARY_TEXT_GREY_ON_WHITE, fontsize=16, va="top")
     save(fig, "split.png")
 
 
@@ -175,13 +174,13 @@ def circuits():
     top = 9.7
     for block, entries in blocks.items():
         ax.text(L, top, block, color=INK, fontsize=24, va="top")
-        ax.plot([L, R], [top - 0.62, top - 0.62], color=RULE, lw=1)
+        ax.plot([L, R], [top - 0.62, top - 0.62], color=RULE_GREY_ON_WHITE, lw=1)
         y = top - 1.2
         for name, v in entries:
             ours_ = name == "rsdag"
             ax.text(L, y, name, color=ACCENT if ours_ else INK, fontsize=20, va="center")
             if v is None:
-                ax.text(x0, y, "no compile in 1 min", color=GREY, fontsize=18, va="center")
+                ax.text(x0, y, "no compile in 1 min", color=SECONDARY_TEXT_GREY_ON_WHITE, fontsize=18, va="center")
             else:
                 w = max(barw * v / scale, 0.04)
                 ax.add_patch(Rectangle((x0, y - 0.22), w, 0.44, fc=ACCENT if ours_ else INK,

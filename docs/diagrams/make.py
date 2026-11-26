@@ -27,15 +27,17 @@ def run(*cmd, cwd):
         sys.exit(f"{' '.join(cmd)} failed:\n{r.stdout[-3000:]}{r.stderr[-3000:]}")
 
 
-def build(name, tmp):
-    shutil.copy(os.path.join(HERE, f"{name}.tex"), tmp)
-    tex = ("-interaction=nonstopmode", "-halt-on-error")
-    # The SVG from DVI through TikZ's dvisvgm driver: dvisvgm's PDF import
-    # loses the opacity of faded elements.
+def svg_from_dvi_because_the_pdf_import_of_dvisvgm_loses_opacity(name, tmp, tex):
     run("latex", *tex, f"\\PassOptionsToClass{{dvisvgm}}{{standalone}}\\input{{{name}.tex}}",
         cwd=tmp)
     run("dvisvgm", "--no-fonts", "--optimize", "--zoom=1.25", "-o", f"{name}.svg",
         f"{name}.dvi", cwd=tmp)
+
+
+def build(name, tmp):
+    shutil.copy(os.path.join(HERE, f"{name}.tex"), tmp)
+    tex = ("-interaction=nonstopmode", "-halt-on-error")
+    svg_from_dvi_because_the_pdf_import_of_dvisvgm_loses_opacity(name, tmp, tex)
     run("pdflatex", *tex, f"{name}.tex", cwd=tmp)
     run("pdftocairo", "-png", "-r", "200", "-transp", "-singlefile", f"{name}.pdf", name,
         cwd=tmp)
