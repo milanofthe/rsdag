@@ -57,15 +57,9 @@ pub enum Output {
     Zero,
 }
 
-/// A function as something to call: a bundle and which of its slots
-/// carries each output, so a tape or a sweep picks outputs without the
-/// symbolic expressions. An extern function is its bundle; a symbolic one
-/// is its interpreted body.
 #[derive(Clone)]
 pub(crate) struct Body {
     pub(crate) bundle: Arc<dyn ExternBundle>,
-    /// `slot_of[out]` is the bundle slot holding output `out`, `None` when
-    /// the body was compiled without it.
     pub(crate) slot_of: Vec<Option<u32>>,
 }
 
@@ -78,64 +72,28 @@ pub struct Function {
     param_roles: Vec<ParamRole>,
     outputs: Vec<Output>,
     output_roles: Vec<OutputRole>,
-    /// The numeric bundle of an extern function; `None` for a symbolic one.
     extern_body: Option<Arc<dyn ExternBundle>>,
-    /// The interpreted bodies [`body_for`](Function::body_for) built, one per
-    /// set of outputs a program asked for: every later program over the
-    /// graph that calls a subset of one takes it, so a body is compiled once
-    /// per function rather than once per program.
     interpreted: std::sync::Mutex<Vec<Body>>,
-    /// The program the interpreted bodies are views of (see
-    /// [`crate::tape::Lowered`]): the outputs they computed so far lowered
-    /// once, so the bodies of several output sets (a residual; with its
-    /// partials; a charge) share it.
     lowered: std::sync::Mutex<Option<Arc<crate::tape::Lowered>>>,
-    /// Derivative output `d outputs[out] / d params[param]`, by index: the
-    /// outputs whose role is [`OutputRole::Derivative`].
     deriv_index: HashMap<(u32, u32), u32>,
-    /// What each node of the outputs' cone depends on among the parameters
-    /// that are no model parameters, once asked for (see `Graph::derive`).
     pub(crate) deps: std::sync::Mutex<Option<Arc<crate::graph::Deps>>>,
-    /// Per output, its support once asked for (see
-    /// [`Graph::output_support`](crate::Graph::output_support)). An output
-    /// never changes once pushed, so neither does its support.
     support: std::sync::Mutex<Vec<Option<Arc<[u32]>>>>,
-    /// What each output reads, per way through and set of moving
-    /// parameters (see `Graph::reads`).
     reads: std::sync::Mutex<HashMap<ReadsKey, Arc<[Arc<[u32]>]>>>,
-    /// The symbols the body reads that are not its parameters, its calls'
-    /// included, once asked for (see `Graph::globals`).
     pub(crate) globals: std::sync::OnceLock<Globals>,
-    /// Whether the body calls functions, once asked for (see
-    /// [`composite_in`](Self::composite_in)).
     composite: std::sync::OnceLock<bool>,
 }
 
-/// A way through calls and a set of moving parameters (see `Graph::reads`).
 pub(crate) type ReadsKey = (crate::graph::Through, Box<[u32]>);
 
-/// A function body evaluated by the interpreter: the fallback every consumer
-/// can build from the symbolic outputs alone, so a tape or an arena sweep is
-/// total without a solver-registered body (which only upgrades this to native
-/// code and lane batching).
-///
-/// Parameters with [`ParamRole::Param`] are the body's pure arguments: its
-/// tape is split over them, and a caller that has them in its own prolog
-/// keeps the body's prolog result per instance (see
-/// [`ExternBundle::state_len`]).
 pub(crate) struct InterpretedBody {
     pub(crate) tape: crate::tape::Tape,
     n_out: usize,
-    /// One flag per parameter; empty when no parameter is pure.
     pure: Vec<bool>,
-    /// What backends compiled of the tape (see [`ExternBundle::backend_cache`]).
     pub(crate) backends: crate::extern_fn::BackendCache,
     rate: crate::parallel::Rate,
 }
 
 impl InterpretedBody {
-    /// `tape` as a body of `n_out` outputs, split over the inputs `pure`
-    /// flags (empty when none is).
     pub(crate) fn new(tape: crate::tape::Tape, n_out: usize, pure: Vec<bool>) -> InterpretedBody {
         InterpretedBody {
             tape,
@@ -199,7 +157,6 @@ pub(crate) struct Globals {
 }
 
 impl Function {
-    /// A function without outputs over `params` with their `param_roles`.
     pub(crate) fn new(
         name: &str,
         params: Vec<SymbolId>,
@@ -224,11 +181,9 @@ impl Function {
         }
     }
 
-    /// Append an output with its role; returns its index.
     pub(crate) fn push_output(&mut self, output: Output, role: OutputRole) -> u32 {
-        // a derivative reads no symbol its output does not; anything else
-        // may read globals not known yet
-        if !matches!(role, OutputRole::Derivative { .. }) {
+        let may_read_new_globals = !matches!(role, OutputRole::Derivative { .. });
+        if may_read_new_globals {
             self.globals = Default::default();
             self.composite = Default::default();
             self.deps = Default::default();
@@ -242,13 +197,10 @@ impl Function {
         k
     }
 
-    /// The derivative output `d outputs[out] / d params[param]`, if there is one.
     pub(crate) fn derivative(&self, out: u32, param: u32) -> Option<u32> {
         self.deriv_index.get(&(out, param)).copied()
     }
 
-    /// The symbol nodes the body reads that are not its parameters, its
-    /// calls' included, ascending (see `Graph::globals`).
     pub(crate) fn globals_in<K: crate::field::Field>(
         &self,
         ctx: &crate::graph::Graph<K>,
@@ -274,9 +226,6 @@ impl Function {
         })
     }
 
-    /// Whether the body calls functions: a composite function, its calls
-    /// compiled as templates. A derivative calls what its output calls, so
-    /// the outputs that are no derivatives decide.
     pub(crate) fn composite_in<K: crate::field::Field>(
         &self,
         ctx: &crate::graph::Graph<K>,
@@ -321,7 +270,6 @@ impl Function {
         self.reads.lock().unwrap().insert(key, reads);
     }
 
-    /// The outputs that are expressions, in output order.
     pub(crate) fn exprs(&self) -> Vec<ExprId> {
         (self.outputs.iter())
             .filter_map(|o| match *o {
@@ -331,7 +279,6 @@ impl Function {
             .collect()
     }
 
-    /// The outputs with their expressions replaced, in order, by `exprs`.
     pub(crate) fn outputs_over(&self, exprs: Vec<ExprId>) -> Vec<Output> {
         let mut outputs = self.outputs.clone();
         let is_expr = |o: &Output| matches!(o, Output::Expr(_));
@@ -361,24 +308,15 @@ impl Function {
     pub fn output_roles(&self) -> &[OutputRole] {
         &self.output_roles
     }
-    /// The numeric bundle of an extern function; `None` for a symbolic one.
     pub(crate) fn extern_body(&self) -> Option<&Arc<dyn ExternBundle>> {
         self.extern_body.as_ref()
     }
 
-    /// The function as something to call: an extern function is its bundle
-    /// with the slot of each output, a symbolic one is its body compiled to
-    /// a tape and interpreted (see [`InterpretedBody`]), every expression
-    /// output a slot.
     pub(crate) fn body<K: crate::field::Field>(&self, ctx: &crate::graph::Graph<K>) -> Body {
         let all: Vec<u32> = (0..self.outputs.len() as u32).collect();
         self.body_for(ctx, &all)
     }
 
-    /// [`body`](Self::body) for a program that calls the outputs `needed`:
-    /// among the bodies built so far that carry each of them that is an
-    /// expression, the one computing the fewest outputs; else the body of
-    /// exactly those outputs, interpreted.
     pub(crate) fn body_for<K: crate::field::Field>(
         &self,
         ctx: &crate::graph::Graph<K>,
@@ -394,8 +332,6 @@ impl Function {
         self.build_body(ctx, needed)
     }
 
-    /// The body of exactly the outputs `needed`, interpreted and kept (an
-    /// extern function's own).
     fn build_body<K: crate::field::Field>(
         &self,
         ctx: &crate::graph::Graph<K>,
@@ -422,12 +358,8 @@ impl Function {
                 roots.push(e);
             }
         }
-        // The inputs: the parameters, then the globals a call passes after
-        // its arguments. Split over the parameters the roles call pure and
-        // the globals (pure where the caller has them pure, see the tape's
-        // `stateful`), when there are any.
         let globals = &self.globals_in(ctx).symbols;
-        let inputs: Vec<crate::node::SymbolId> = self
+        let params_then_globals: Vec<crate::node::SymbolId> = self
             .params
             .iter()
             .copied()
@@ -444,14 +376,11 @@ impl Function {
         } else {
             Vec::new()
         };
-        let tape = self.view(ctx, &roots, &inputs, &pure);
-        // A body whose selects a binding decides runs each binding's
-        // variant, and one whose main phase selects specializes over the
-        // choices its instances take (see `crate::variant`).
-        let variants =
+        let tape = self.view(ctx, &roots, &params_then_globals, &pure);
+        let specializes =
             (!pure.is_empty() && tape.has_param_selects(&pure)) || tape.n_main_selects() > 0;
         let full = InterpretedBody::new(tape, roots.len(), pure);
-        let bundle: Arc<dyn ExternBundle> = match variants {
+        let bundle: Arc<dyn ExternBundle> = match specializes {
             true => Arc::new(crate::variant::VariantBody::new(full)),
             false => Arc::new(full),
         };
@@ -460,10 +389,6 @@ impl Function {
         body
     }
 
-    /// The tape of `roots` (outputs of this function) over `inputs`, split
-    /// by `pure` when it is not empty: a view of the program lowered for
-    /// the bodies so far, lowered anew over these roots too where it does
-    /// not hold them.
     fn view<K: crate::field::Field>(
         &self,
         ctx: &crate::graph::Graph<K>,
@@ -489,11 +414,6 @@ impl Function {
         lowered.tape(ctx, roots)
     }
 
-    /// [`body_for`](Self::body_for) exactly: a body carrying the outputs
-    /// `needed` that are expressions and no other, built if there is none.
-    /// A program that reads fewer outputs than a body it was given computes
-    /// (a view of a program lowered for more, see [`crate::tape::Lowered`])
-    /// takes this one.
     pub(crate) fn body_exact<K: crate::field::Field>(
         &self,
         ctx: &crate::graph::Graph<K>,
@@ -515,8 +435,6 @@ impl Function {
         self.build_body(ctx, needed)
     }
 
-    /// The function output each slot of `bundle` carries, when it is one of
-    /// this function's interpreted bodies.
     pub(crate) fn slot_outputs(&self, bundle: &Arc<dyn ExternBundle>) -> Option<Vec<u32>> {
         let built = self.interpreted.lock().unwrap();
         let body = built.iter().find(|c| Arc::ptr_eq(&c.bundle, bundle))?;
@@ -529,7 +447,6 @@ impl Function {
         Some(outs)
     }
 
-    /// Whether `body` carries every output of `needed` that is an expression.
     fn covers(&self, body: &Body, needed: &[u32]) -> bool {
         needed.iter().all(|&k| {
             !matches!(self.outputs[k as usize], Output::Expr(_))

@@ -8,11 +8,8 @@ use crate::adaptive::Policy;
 use crate::choices::ChoicePolicy;
 use crate::variant::VariantPolicy;
 
-/// Instances a trace takes of a batch, spread over it: enough to see the
-/// choices most of them take, few enough to cost little next to the batch.
 pub(crate) const TRACED: usize = 16;
 
-/// A share in percent (`min_shrink_pct`) against this whole.
 pub(crate) const PERCENT: usize = 100;
 
 impl ChoicePolicy {
@@ -20,9 +17,6 @@ impl ChoicePolicy {
     pub const DEFAULT: ChoicePolicy = ChoicePolicy {
         enabled: true,
         min_selects: 16,
-        // What a built specialization must remove; compare
-        // `VariantPolicy::min_shrink_pct`, a bound on a body before any
-        // variant is built.
         min_shrink_pct: 15,
         flip_cooldown: 32,
         thrash_flips: 8,
@@ -39,13 +33,12 @@ impl VariantPolicy {
         enabled: true,
         interpreted: true,
         max_variants: 64,
-        // What deciding a body's selects could remove at best, before any
-        // variant is built: lower than `ChoicePolicy::min_shrink_pct`, the
-        // share a built specialization must remove.
         min_shrink_pct: 10,
         choices: ChoicePolicy::DEFAULT,
     };
 }
+
+const _: () = assert!(VariantPolicy::DEFAULT.min_shrink_pct < ChoicePolicy::DEFAULT.min_shrink_pct);
 
 impl Policy {
     /// The defaults ([`Default`] returns them).

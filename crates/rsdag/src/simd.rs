@@ -12,14 +12,12 @@
 //! can be tested on one machine.
 
 use crate::constants::{
-    FOLD_LANES, GEMM_COL_BLOCK, GEMM_ROW_BLOCK, GEMV_ROW_BLOCK, LU_PANEL_LARGE, LU_PANEL_SMALL,
-    LU_TRAILING_ROWS, SOLVE_BATCH_MAX_K, SOLVE_BATCH_MAX_N,
+    for_each_fixed_solve_size, FOLD_LANES, GEMM_COL_BLOCK, GEMM_ROW_BLOCK, GEMV_ROW_BLOCK,
+    LU_PANEL_LARGE, LU_PANEL_SMALL, LU_TRAILING_ROWS, SOLVE_BATCH_MAX_K, SOLVE_BATCH_MAX_N,
 };
 
-/// The lanes of a [`Quad`], one per accumulator of the fold.
 const LANES: usize = FOLD_LANES;
 
-/// Four `f64` lanes, every operation lane by lane and rounded once.
 trait Quad: Copy {
     fn splat(v: f64) -> Self;
     /// # Safety
@@ -59,7 +57,6 @@ trait Quad: Copy {
     }
 }
 
-/// Two `f64` lanes.
 #[derive(Clone, Copy)]
 struct V2(Inner);
 
@@ -70,9 +67,9 @@ type Inner = std::arch::x86_64::__m128d;
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 type Inner = [f64; 2];
 
-// SAFETY (the `unsafe` blocks of both impls): NEON and SSE2 are part of
-// the base architecture; loads and stores are the caller's contract.
 #[cfg(target_arch = "aarch64")]
+// SAFETY: NEON is part of the base architecture, and loads and stores are
+// the caller's contract.
 impl V2 {
     #[inline(always)]
     fn splat(v: f64) -> V2 {
@@ -124,6 +121,8 @@ impl V2 {
 }
 
 #[cfg(target_arch = "x86_64")]
+// SAFETY: SSE2 is part of the base architecture, and loads and stores are
+// the caller's contract.
 impl V2 {
     #[inline(always)]
     fn splat(v: f64) -> V2 {
@@ -236,7 +235,6 @@ impl V2 {
     }
 }
 
-/// A [`Quad`] as two [`V2`], lanes `0, 1` and `2, 3`.
 #[derive(Clone, Copy)]
 struct Pair(V2, V2);
 
@@ -288,16 +286,14 @@ impl Quad for Pair {
     }
 }
 
-/// A [`Quad`] in one AVX register: separate multiplies and adds, never
-/// FMA (the kernels enable `avx` alone).
 #[cfg(target_arch = "x86_64")]
 #[derive(Clone, Copy)]
 struct Avx(std::arch::x86_64::__m256d);
 
-// SAFETY (the `unsafe` blocks): an `Avx` is only made inside the AVX
-// instances of `entry!`, which run after `avx()` found the CPU has AVX;
-// loads and stores are the caller's contract.
 #[cfg(target_arch = "x86_64")]
+// SAFETY: an `Avx` is only made inside the AVX instances of `entry!`, which
+// run after `avx()` found that the CPU has AVX, and loads and stores are the
+// caller's contract.
 impl Quad for Avx {
     #[inline(always)]
     fn splat(v: f64) -> Avx {
@@ -347,6 +343,8 @@ impl Quad for Avx {
 }
 
 #[cfg(target_arch = "x86_64")]
+// SAFETY: an `Avx` is only made inside the AVX instances of `entry!`, which
+// run after `avx()` found that the CPU has AVX.
 impl Avx {
     #[inline(always)]
     fn cmp<const PREDICATE: i32>(self, o: Avx) -> Avx {
@@ -354,8 +352,6 @@ impl Avx {
     }
 }
 
-/// Whether the kernels run on [`Avx`]: the CPU has it and `RSDAG_SSE2` is
-/// not set, decided once.
 #[cfg(target_arch = "x86_64")]
 fn avx() -> bool {
     static AVX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -385,7 +381,9 @@ macro_rules! entry {
                     $imp::<Avx, $($g),*>($($a),*)
                 }
                 // SAFETY: the CPU has AVX.
-                return unsafe { wide($($a),*) };
+                unsafe {
+                    return wide($($a),*);
+                }
             }
             $imp::<Pair, $($g),*>($($a),*)
         }
@@ -420,8 +418,6 @@ entry!(
     fn solve_many<>(a: &[f64], b: &[f64], n: usize, k: usize, out: &mut [f64], scratch: &mut [f64]) = solve_q
 );
 
-/// The merge of the four accumulators and the tail past the last chunk
-/// of four, in the reference order.
 #[inline(always)]
 fn finish<Q: Quad>(acc: Q, a: &[f64], b: &[f64], from: usize) -> f64 {
     let [l0, l1, l2, l3] = acc.lanes();
@@ -477,15 +473,11 @@ fn gemv_q<Q: Quad>(a: &[f64], x: &[f64], m: usize, n: usize, out: &mut [f64]) {
     }
 }
 
-/// [`crate::semantics::gemm`]: four rows of `a` against two
-/// rows of `b` at a time, eight accumulators.
 pub(crate) fn gemm(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, out: &mut [f64]) {
     assert!(a.len() >= m * k && b.len() >= n * k && out.len() >= m * n);
     gemm_with(a, b, m, k, n, |i, v| out[i] = v);
 }
 
-/// [`crate::semantics::gemm_fold`]: the folds against an
-/// operand at the store, the self folds after.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn gemm_fold(
     a: &[f64],
@@ -500,11 +492,9 @@ pub(crate) fn gemm_fold(
     use crate::tape::Fold;
     assert!(a.len() >= m * k && b.len() >= n * k && out.len() >= m * n);
     let codes = &codes[..m * n];
-    // One code for every entry, the common case, without a decode per
-    // store.
-    let uniform = codes.windows(2).all(|w| w[0] == w[1]);
+    let one_code_for_every_entry = codes.windows(2).all(|w| w[0] == w[1]);
     let f = Fold(codes[0]);
-    match (uniform, f.0 & Fold::KIND, f.is_self(), c) {
+    match (one_code_for_every_entry, f.0 & Fold::KIND, f.is_self(), c) {
         (true, 0, _, _) => gemm_with(a, b, m, k, n, |i, v| out[i] = v),
         (true, 3, _, _) => gemm_with(a, b, m, k, n, |i, v| out[i] = -v),
         (true, 1, false, Some(c)) => {
@@ -524,6 +514,8 @@ pub(crate) fn gemm_fold(
         }),
     }
 }
+
+const _: () = assert!(GEMM_COL_BLOCK == 2);
 
 #[inline(always)]
 fn gemm_q<Q: Quad, F: FnMut(usize, f64)>(
@@ -585,8 +577,6 @@ fn gemm_q<Q: Quad, F: FnMut(usize, f64)>(
     }
 }
 
-/// `row_i[j] -= l * row_k[j]` over `j`, four lanes at a time; each element
-/// one product and one difference.
 #[inline(always)]
 fn axpy_sub<Q: Quad>(row_i: &mut [f64], row_k: &[f64], l: f64) {
     let n = row_i.len().min(row_k.len());
@@ -624,8 +614,7 @@ fn solve_q<Q: Quad>(
             }
         };
     }
-    // lit: the sizes the fixed eliminations are instantiated for
-    fixed!(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16);
+    for_each_fixed_solve_size!(fixed);
     match lu_panel(n) {
         0 => solve_unblocked::<Q>(a, b, n, k, out, scratch),
         LU_PANEL_SMALL => solve_blocked::<Q, LU_PANEL_SMALL>(a, b, n, k, out, scratch),
@@ -658,8 +647,7 @@ fn solve_batch_q<Q: Quad>(
                 }
             };
         }
-        // lit: the sizes of a batch, 1 to SOLVE_BATCH_MAX_N
-        lanes!(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16);
+        for_each_fixed_solve_size!(lanes);
     }
     for c in c..count {
         solve_q::<Q>(
@@ -673,19 +661,9 @@ fn solve_batch_q<Q: Quad>(
     }
 }
 
-/// Four systems of `N` unknowns and `k` right-hand sides (at most
-/// [`SOLVE_BATCH_MAX_K`]) side by side, lane `q` system `q`: `a` holds their
-/// matrices back to back, `b` and `out` their right-hand sides and
-/// solutions. Each lane runs [`solve_fixed`] on its own system: its own
-/// pivot, its rows swapped where its pivot says (a lane select), its own
-/// products, differences and quotients in [`solve_fixed`]'s order, so every
-/// solution is bit-identical to its system solved alone. Four independent
-/// eliminations share one chain of latencies.
 #[inline(always)]
 fn solve_lanes<Q: Quad, const N: usize>(a: &[f64], b: &[f64], k: usize, out: &mut [f64]) {
     let (sa, sb) = (N * N, N * k);
-    // `col[j][i]` is entry `(i, j)`, `x[c][i]` entry `i` of right-hand
-    // side `c`, of every lane's system.
     let mut col = [[Q::zero(); N]; N];
     for i in 0..N {
         for (j, cj) in col.iter_mut().enumerate() {
@@ -753,16 +731,8 @@ fn solve_lanes<Q: Quad, const N: usize>(a: &[f64], b: &[f64], k: usize, out: &mu
     }
 }
 
-/// The unblocked elimination of `N` unknowns with the size a constant, so
-/// its loops unroll, the matrix by columns on the stack: the pivot search,
-/// the multipliers and each column's update run down a column, four rows
-/// to a vector. The right-hand sides are eliminated in `out`. Every entry
-/// sees the products and differences of the row-major elimination in its
-/// order (a row update is entry by entry, the right-hand sides' columns
-/// included), so the result is bit-identical.
 #[inline(always)]
 fn solve_fixed<const N: usize>(a: &[f64], b: &[f64], k: usize, out: &mut [f64]) {
-    // `col[j][i]` is entry `(i, j)`.
     let mut col = [[0.0f64; N]; N];
     for i in 0..N {
         for j in 0..N {
@@ -819,7 +789,6 @@ fn solve_fixed<const N: usize>(a: &[f64], b: &[f64], k: usize, out: &mut [f64]) 
     }
 }
 
-/// The right-looking elimination on the augmented matrix, without panels.
 #[inline(always)]
 fn solve_unblocked<Q: Quad>(
     a: &[f64],
@@ -844,8 +813,6 @@ fn solve_unblocked<Q: Quad>(
     back_substitute::<Q>(m, n, k, w, out);
 }
 
-/// The partial pivot of column `kk`: the first row at or below `kk` of the
-/// largest magnitude, swapped into row `kk`; returns the pivot.
 #[inline(always)]
 fn pivot(m: &mut [f64], n: usize, w: usize, kk: usize) -> f64 {
     let mut p = kk;
@@ -865,9 +832,6 @@ fn pivot(m: &mut [f64], n: usize, w: usize, kk: usize) -> f64 {
     m[kk * w + kk]
 }
 
-/// Back substitution over the eliminated augmented matrix, four
-/// right-hand sides per [`Quad`]: each lane is its column's own sequence
-/// of products and differences.
 #[inline(always)]
 fn back_substitute<Q: Quad>(m: &[f64], n: usize, k: usize, w: usize, out: &mut [f64]) {
     let mut c = 0;
@@ -923,7 +887,6 @@ fn solve_blocked<Q: Quad, const NB: usize>(
                 axpy_sub::<Q>(&mut row_i[kk + 1..k1], &row_k[kk + 1..k1], l);
             }
         }
-        // The panel's unit lower triangle against the columns right of it.
         for kk in k0..k1 {
             let (top, rest) = m.split_at_mut((kk + 1) * w);
             let row_k = &top[kk * w..(kk + 1) * w];

@@ -86,33 +86,23 @@ impl Default for Policy {
     }
 }
 
-/// The native form of the full tape, compiled in the background.
 struct Jit {
-    /// `None` until the compile lands; `Some(None)` if it failed.
     compiled: OnceLock<Option<Native>>,
     kicked: AtomicBool,
     evals: AtomicU32,
-    /// The slowest pass before the native code, in nanoseconds.
-    slowest: AtomicU64,
-    /// An interpreted pass and the compile, as expected before either is
-    /// measured, and when the compile was kicked.
+    slowest_interpreted_pass_ns: AtomicU64,
     pass_prior: Duration,
     compile_expected: Duration,
     kicked_at: OnceLock<Instant>,
-    /// Set and notified when the compile lands, for the passes waiting.
     landed: (Mutex<bool>, Condvar),
 }
 
-/// The program's specialization over its choices: the policy's state, and
-/// the shortened tape by the version it was built at, with its native code
-/// once compiled.
 struct Spec {
     learned: Specializer,
     spec: Option<(u64, Arc<SpecializedTape>, Option<Native>)>,
 }
 
 impl Spec {
-    /// The current specialization, its version and its native code.
     fn current(&self) -> Option<(u64, Arc<SpecializedTape>, Option<Native>)> {
         let v = self.learned.current()?;
         self.spec.clone().filter(|(at, ..)| *at == v)
@@ -138,11 +128,13 @@ pub struct Stats {
 /// [`Adaptive::eval_main`]). The full tape and its native code share their
 /// layout, so they are one kind of episode.
 #[derive(Clone)]
-pub struct Episode(Kind, u64);
+pub struct Episode {
+    kind: Kind,
+    forms_epoch: u64,
+}
 
 #[derive(Clone)]
 enum Kind {
-    /// The full tape's layout: the interpreter or the native code.
     Full,
     SpecInterp(Arc<SpecializedTape>, u64),
     SpecNative(Native, Arc<SpecializedTape>, u64),
@@ -190,7 +182,7 @@ impl Adaptive {
                 compiled: OnceLock::new(),
                 kicked: AtomicBool::new(false),
                 evals: AtomicU32::new(0),
-                slowest: AtomicU64::new(0),
+                slowest_interpreted_pass_ns: AtomicU64::new(0),
                 pass_prior,
                 compile_expected,
                 kicked_at: OnceLock::new(),
@@ -224,10 +216,7 @@ impl Adaptive {
         self.jit.compiled.get().and_then(Option::as_deref)
     }
 
-    /// A count that moves whenever a form a prolog would run on lands: the
-    /// native code (its prolog starts the bodies' variants), a body's
-    /// variant (see [`Tape::forms_epoch`]). Both only grow.
-    fn forms(&self) -> u64 {
+    fn forms_epoch(&self) -> u64 {
         let native = self.jit.compiled.get().is_some();
         self.tape.forms_epoch().wrapping_add(u64::from(native))
     }
@@ -235,7 +224,6 @@ impl Adaptive {
     /// The whole program on the best rung: native specialization, native
     /// full tape, interpreted specialization, interpreter.
     pub fn eval(&self, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
-        // Every call feeds the full-tape compile, whichever rung serves it.
         self.maybe_kick();
         self.await_native();
         let clock = self.clock();
@@ -245,8 +233,6 @@ impl Adaptive {
 
     fn eval_rung(&self, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
         if let Some(cache) = &self.spec {
-            // Contention (parallel callers sharing one tape) falls past the
-            // specialized rungs rather than serializing on the cache.
             if let Ok(mut st) = cache.try_lock() {
                 if self.eval_spec(&mut st, cache, inputs, work, out) {
                     return;
@@ -256,7 +242,6 @@ impl Adaptive {
         self.eval_full(inputs, work, out);
     }
 
-    /// The full tape, natively once compiled.
     fn eval_full(&self, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
         match self.native() {
             Some(native) => {
@@ -270,7 +255,6 @@ impl Adaptive {
         }
     }
 
-    /// The specialized rungs; `false` sends the caller to the full tape.
     fn eval_spec(
         &self,
         st: &mut Spec,
@@ -284,7 +268,6 @@ impl Adaptive {
             if !st.learned.due(&self.policy.choices) {
                 return false;
             }
-            // The traced evaluation is this call's correct result.
             self.retrace(st, inputs, work, out);
             return true;
         };
@@ -295,8 +278,6 @@ impl Adaptive {
                 sp.check_outputs(out)
             }
             None if !self.interpreted_serves(&sp) => {
-                // The native full tape serves; the specialization is
-                // compiled where due.
                 self.maybe_compile_spec(st, cache);
                 return false;
             }
@@ -314,8 +295,6 @@ impl Adaptive {
         true
     }
 
-    /// Whether the interpreted specialization `sp` serves next to the full
-    /// tape as it runs now.
     fn interpreted_serves(&self, sp: &SpecializedTape) -> bool {
         let (ops, full) = (sp.n_ops(), self.tape.n_ops());
         Specializer::interpreted_serves(&self.policy.choices, ops, full, self.native().is_some())
@@ -325,7 +304,6 @@ impl Adaptive {
     /// the backend that prepared it, which [`eval_main`](Self::eval_main)
     /// stays compatible with.
     pub fn eval_prolog(&self, inputs: &[f64], work: &mut Vec<f64>) -> Episode {
-        // An episode counts toward the compile as an evaluation does.
         self.maybe_kick();
         self.await_native();
         let clock = self.clock();
@@ -335,21 +313,24 @@ impl Adaptive {
     }
 
     fn prolog_rung(&self, inputs: &[f64], work: &mut Vec<f64>) -> Episode {
-        // Read before the prolog: a form landing while it runs brings the
-        // next main pass back here.
-        let forms = self.forms();
+        let forms_epoch_before_prolog = self.forms_epoch();
         if let Some(cache) = &self.spec {
             if let Ok(mut st) = cache.try_lock() {
                 if let Some(kind) = self.spec_prolog(&mut st, inputs, work) {
-                    return Episode(kind, forms);
+                    return Episode {
+                        kind,
+                        forms_epoch: forms_epoch_before_prolog,
+                    };
                 }
             }
         }
         self.full_prolog(inputs, work);
-        Episode(Kind::Full, forms)
+        Episode {
+            kind: Kind::Full,
+            forms_epoch: forms_epoch_before_prolog,
+        }
     }
 
-    /// The specialized episode starts, `None` for a full one.
     fn spec_prolog(&self, st: &mut Spec, inputs: &[f64], work: &mut Vec<f64>) -> Option<Kind> {
         st.learned.ran(1);
         if st.current().is_none() {
@@ -369,13 +350,10 @@ impl Adaptive {
         } else if sp.eval_prolog_checked(inputs, work) {
             return Some(Kind::SpecInterp(sp, ver));
         }
-        // A parameter change flipped a pinned region.
         self.on_flip(st, ver, inputs, work, &mut Vec::new());
         Some(Kind::Full)
     }
 
-    /// The full tape's prolog, natively when compiled; the state is the
-    /// same either way.
     fn full_prolog(&self, inputs: &[f64], work: &mut Vec<f64>) {
         match self.native() {
             Some(native) => native.eval_prolog(inputs, work),
@@ -405,14 +383,10 @@ impl Adaptive {
     }
 
     fn main_rung(&self, ep: &mut Episode, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
-        // A faster form landed in the background since the prolog (the
-        // native code, a function body's variant for this binding): the
-        // episode runs the prolog again to take it, once per landing,
-        // rather than for its whole length on what was ready when it began.
-        if self.forms() != ep.1 {
+        if self.forms_epoch() != ep.forms_epoch {
             *ep = self.eval_prolog(inputs, work);
         }
-        match &ep.0 {
+        match &ep.kind {
             Kind::SpecNative(native, sp, ver) => {
                 rsprobe::add!("evals specialized", 1);
                 native.eval_main(inputs, work, out);
@@ -420,7 +394,7 @@ impl Adaptive {
                     return;
                 }
                 self.flip_retrace(*ver, inputs, work, out);
-                ep.0 = Kind::Full;
+                ep.kind = Kind::Full;
             }
             Kind::SpecInterp(sp, ver) => {
                 rsprobe::add!("evals specialized", 1);
@@ -435,10 +409,8 @@ impl Adaptive {
                     return;
                 }
                 self.flip_retrace(*ver, inputs, work, out);
-                ep.0 = Kind::Full;
+                ep.kind = Kind::Full;
             }
-            // Mid-episode, the interpreter's state serves the native code
-            // as it is (`main` only lengthens the buffer).
             Kind::Full => match self.native() {
                 Some(native) => {
                     rsprobe::add!("evals native", 1);
@@ -452,10 +424,6 @@ impl Adaptive {
         }
     }
 
-    // --- bookkeeping --------------------------------------------------------
-
-    /// A full traced evaluation, the correct result of this call, and what
-    /// it teaches: a specialization where one is due.
     fn retrace(&self, st: &mut Spec, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
         let mut fresh = Vec::new();
         rsprobe::add!("evals interpreted", 1);
@@ -473,7 +441,6 @@ impl Adaptive {
         }
     }
 
-    /// A main-phase flip under specialization `ver` (see [`on_flip`](Self::on_flip)).
     fn flip_retrace(&self, ver: u64, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
         match self.spec.as_ref().map(|c| c.lock()) {
             Some(Ok(mut st)) => self.on_flip(&mut st, ver, inputs, work, out),
@@ -484,9 +451,6 @@ impl Adaptive {
         }
     }
 
-    /// A guard of specialization `ver` failed: this call's result from the
-    /// full tape, traced where the policy learns from it. Either leaves the
-    /// full tape's state in `work` (an episode continues full).
     fn on_flip(
         &self,
         st: &mut Spec,
@@ -502,8 +466,6 @@ impl Adaptive {
         }
     }
 
-    /// Hand the current specialization to the background compiler where
-    /// the policy says so.
     fn maybe_compile_spec(&self, st: &mut Spec, cache: &Arc<Mutex<Spec>>) {
         let Some(compiler) = self.compiler.clone().filter(|_| self.policy.jit) else {
             return;
@@ -517,10 +479,9 @@ impl Adaptive {
         };
         let (cache, c) = (cache.clone(), compiler.clone());
         compiler.submit(Box::new(move || {
-            // The prolog guards are read from the work buffer after a
-            // prolog, so their slots stay materialized.
-            let guards: Vec<u32> = sp.prolog_guards().iter().map(|&(s, _)| s).collect();
-            let compiled = c.compile(sp.tape(), &guards);
+            let materialized_guard_slots: Vec<u32> =
+                sp.prolog_guards().iter().map(|&(s, _)| s).collect();
+            let compiled = c.compile(sp.tape(), &materialized_guard_slots);
             let mut st = cache.lock().unwrap_or_else(|e| e.into_inner());
             if let (true, Some(compiled)) = (st.learned.landed(ver), compiled) {
                 rsprobe::debug!("specialized tape compiled, native backend active");
@@ -531,17 +492,13 @@ impl Adaptive {
         }));
     }
 
-    /// What an interpreted pass is expected to take: the slowest so far,
-    /// before any the prior (see [`Policy::wait`]).
     fn pass(&self) -> Duration {
-        match self.jit.slowest.load(Ordering::Relaxed) {
+        match self.jit.slowest_interpreted_pass_ns.load(Ordering::Relaxed) {
             0 => self.jit.pass_prior,
             ns => Duration::from_nanos(ns),
         }
     }
 
-    /// The start of a pass to time: one before the native code, where
-    /// waiting for it is weighed against interpreting.
     fn clock(&self) -> Option<Instant> {
         let timed = self.policy.jit
             && self.policy.wait
@@ -550,16 +507,15 @@ impl Adaptive {
         timed.then(Instant::now)
     }
 
-    /// A timed pass ended: keep the slowest.
     fn clocked(&self, clock: Option<Instant>) {
         if let Some(t) = clock {
             let ns = u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            self.jit.slowest.fetch_max(ns, Ordering::Relaxed);
+            self.jit
+                .slowest_interpreted_pass_ns
+                .fetch_max(ns, Ordering::Relaxed);
         }
     }
 
-    /// The compile in flight and expected to land before an interpreted
-    /// pass would end: wait for it, at most as long as that pass.
     fn await_native(&self) {
         let Some(kicked) = self.jit.kicked_at.get() else {
             return;
@@ -574,9 +530,6 @@ impl Adaptive {
         let _ = cv.wait_timeout_while(landed, pass, |landed| !*landed);
     }
 
-    /// Count the call; past the threshold, or at once where a pass is
-    /// expected to cost more than the compile, queue the full-tape compile.
-    /// A failed compile leaves the interpreter in place for good.
     fn maybe_kick(&self) {
         let Some(compiler) = self.compiler.clone() else {
             return;
@@ -672,10 +625,6 @@ impl Session {
     }
 }
 
-/// What an interpreted main pass of `tape` and its compile are expected to
-/// take before either is measured: its ops, a call's as its body's main
-/// ops per instance, at [`INTERPRETED_NS_PER_OP`](crate::constants::INTERPRETED_NS_PER_OP);
-/// its ops and its bodies' at [`COMPILE_NS_PER_OP`](crate::constants::COMPILE_NS_PER_OP).
 fn expected(tape: &Tape) -> (Duration, Duration) {
     let body = |b: u32| tape.bundles()[b as usize].body();
     let pass: usize = (tape.ops()[tape.prolog_len()..].iter())

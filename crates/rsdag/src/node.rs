@@ -53,7 +53,6 @@ pub enum CmpOp {
 }
 
 impl CmpOp {
-    /// The operator as written, `>`, `>=`, ...
     pub(crate) fn symbol(self) -> &'static str {
         match self {
             CmpOp::Gt => ">",
@@ -105,8 +104,6 @@ pub enum UnaryOp {
     Tanh,
     Atan,
     Floor,
-    // The floating-point extension (reference implementations from `libm`,
-    // so the bits do not depend on the platform's C library).
     Tan,
     Log10,
     Log2,
@@ -340,7 +337,6 @@ pub const UNARY_OPS: &[OpSpec<UnaryOp>] = &[
     OpSpec {
         op: UnaryOp::Trigamma,
         name: "trigamma",
-        // Its derivative (polygamma of order 2) is not implemented.
         smooth: false,
     },
     OpSpec {
@@ -526,7 +522,7 @@ pub enum Node {
     /// Associative reduction over a flat operand list (KCL sums, products).
     /// One fused node instead of a balanced/again-binary tree.
     Reduce(ReduceOp, ArgList),
-    /// Inner product `Σ_i a[i]*b[i]` over two equal-length operand lists,
+    /// Inner product `sum_i a[i]*b[i]` over two equal-length operand lists,
     /// stored as ONE list `[a_0..a_n, b_0..b_n]` (the halves of
     /// [`crate::Graph::args`]). The fused form of a sum of pairwise
     /// products (matrix-vector rows).
@@ -544,8 +540,7 @@ pub enum Node {
     Call(OutputId, ArgList),
 }
 
-// lit: sixteen bytes a node
-const _: () = assert!(std::mem::size_of::<Node>() == 16);
+const _: () = assert!(std::mem::size_of::<Node>() == crate::constants::NODE_BYTES);
 
 impl Node {
     /// The operands this node reads, its list resolved in `pool` (the
@@ -554,8 +549,10 @@ impl Node {
     pub fn operands<'a>(&self, pool: &'a [ExprId]) -> Operands<'a> {
         let z = ExprId(0);
         match *self {
-            // lit: the inline buffer's three operands
-            Node::Const(_) | Node::Symbol(_) => Operands::Inline { buf: [z; 3], n: 0 },
+            Node::Const(_) | Node::Symbol(_) => Operands::Inline {
+                buf: [z, z, z],
+                n: 0,
+            },
             Node::Add(a, b) | Node::Mul(a, b) | Node::Cmp(_, a, b) | Node::Binary(_, a, b) => {
                 Operands::Inline {
                     buf: [a, b, z],
@@ -566,18 +563,19 @@ impl Node {
                 buf: [a, z, z],
                 n: 1,
             },
-            Node::Select(c, t, e) => Operands::Inline {
-                buf: [c, t, e],
-                n: 3, // lit: a select's three operands
-            },
+            Node::Select(c, t, e) => {
+                let buf = [c, t, e];
+                Operands::Inline {
+                    buf,
+                    n: buf.len() as u8,
+                }
+            }
             Node::Reduce(_, l) | Node::Dot(l) | Node::Call(_, l) | Node::Solve(l, _) => {
                 Operands::Slice(&pool[l.start as usize..(l.start + l.len) as usize])
             }
         }
     }
 
-    /// This node over other operands: `ops` in [`operands`](Self::operands)
-    /// order, a variadic node taking `list` (their interned window) instead.
     pub(crate) fn with_operands(self, ops: &[ExprId], list: ArgList) -> Node {
         match self {
             Node::Const(_) | Node::Symbol(_) => self,
@@ -596,7 +594,6 @@ impl Node {
         }
     }
 
-    /// Whether the operands are an interned list rather than inline.
     #[inline]
     pub(crate) fn is_variadic(&self) -> bool {
         matches!(
@@ -630,14 +627,9 @@ impl std::ops::Deref for Operands<'_> {
     }
 }
 
-/// The arithmetic of structural fingerprints (see `Graph::shape`): a fixed
-/// mixing
-/// function and a fixed byte hasher, so a fingerprint is the same on every
-/// platform, in every run and under every version of the hash crates.
 pub(crate) mod shape {
     use std::hash::{Hash, Hasher};
 
-    /// One tag per node kind, so equal payloads of different kinds differ.
     #[derive(Clone, Copy)]
     pub(crate) enum Tag {
         Const = 1,
@@ -656,7 +648,7 @@ pub(crate) mod shape {
         Call,
     }
 
-    /// Fold `x` into `h` (a splitmix64 finalizer over the sum).
+    // The finalizer of splitmix64, https://prng.di.unimi.it/splitmix64.c
     #[inline]
     pub(crate) fn mix(h: u64, x: u64) -> u64 {
         let mut z = h
@@ -668,7 +660,6 @@ pub(crate) mod shape {
         z ^ (z >> 31)
     }
 
-    /// A value's `Hash` fed through [`mix`], byte for byte.
     pub(crate) fn of_hash<T: Hash + ?Sized>(v: &T) -> u64 {
         let mut h = Stable(0);
         v.hash(&mut h);
