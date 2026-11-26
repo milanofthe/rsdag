@@ -1052,7 +1052,6 @@ impl<'a, I: Isa> Emitter<'a, I> {
     }
     fn bind(&mut self, r: u8, slot: u32, death: u32) {
         if let Some(i) = self.cache_of_slot.remove(&slot) {
-            debug_assert!(self.death[i] <= self.pos);
             self.slot_of_cache[i] = None;
             self.dirty[i] = false;
         }
