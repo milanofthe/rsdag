@@ -45,14 +45,13 @@ impl BackendCache {
         if let Some(b) = self.get(key) {
             return Ok(b);
         }
-        // Compiled outside the lock: a body's own calls take their bodies'.
-        let b = make()?;
+        let made_before_locking = make()?;
         let mut v = self.0.lock().unwrap();
         if let Some((_, first)) = v.iter().find(|(k, _)| *k == key) {
             return Ok(first.clone());
         }
-        v.push((key, b.clone()));
-        Ok(b)
+        v.push((key, made_before_locking.clone()));
+        Ok(made_before_locking)
     }
 }
 
@@ -127,7 +126,6 @@ impl<'a> Instances<'a> {
         }
     }
 
-    /// These, their state rows `rows`.
     pub(crate) fn with_rows(self, rows: Rows<'a>) -> Self {
         Instances { rows, ..self }
     }
@@ -141,7 +139,6 @@ impl<'a> Instances<'a> {
         }
     }
 
-    /// The instances `index` lists, in the arrays of these.
     pub(crate) fn listed(self, index: &'a [u32]) -> Self {
         Instances {
             n: index.len(),

@@ -27,10 +27,8 @@ mod simd;
 #[cfg(any(test, feature = "synth"))]
 pub mod synth;
 pub mod tape;
-pub mod variant;
-// The rewrite machinery stays internal; substitution is exposed through the
-// `substitute` re-export below, not as a module path.
 pub(crate) mod transform;
+pub mod variant;
 
 pub use adaptive::{Adaptive, Compiler, Episode, Policy, Session, Stats};
 pub use autodiff::{affine_in, differentiate, gradient, sparse_jacobian, vjp, SparseRows};

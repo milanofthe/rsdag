@@ -63,9 +63,7 @@ pub struct Scope<'g, K: Field = F64> {
     name: String,
     params: Vec<SymbolId>,
     roles: Vec<ParamRole>,
-    /// Each parameter's place in `params`.
-    index: HashMap<SymbolId, usize>,
-    /// Symbols the body reads as globals, not parameters.
+    param_index: HashMap<SymbolId, usize>,
     globals: HashSet<SymbolId>,
 }
 
@@ -76,7 +74,7 @@ impl<'g, K: Field> Scope<'g, K> {
             name: name.to_string(),
             params: Vec::new(),
             roles: Vec::new(),
-            index: HashMap::default(),
+            param_index: HashMap::default(),
             globals: HashSet::default(),
         }
     }
@@ -88,10 +86,10 @@ impl<'g, K: Field> Scope<'g, K> {
     /// role asked for last.
     pub fn param(&mut self, formal: impl Formal, role: ParamRole) -> ExprId {
         let s = formal.symbol(self.graph);
-        match self.index.get(&s) {
+        match self.param_index.get(&s) {
             Some(&k) => self.roles[k] = role,
             None => {
-                self.index.insert(s, self.params.len());
+                self.param_index.insert(s, self.params.len());
                 self.params.push(s);
                 self.roles.push(role);
             }
@@ -117,7 +115,7 @@ impl<'g, K: Field> Scope<'g, K> {
     pub fn close(mut self, outputs: impl IntoIterator<Item = (ExprId, OutputRole)>) -> FuncId {
         let (exprs, roles): (Vec<ExprId>, Vec<OutputRole>) = outputs.into_iter().unzip();
         for s in self.graph.mentioned_symbols_in(&exprs) {
-            if !self.index.contains_key(&s) && !self.globals.contains(&s) {
+            if !self.param_index.contains_key(&s) && !self.globals.contains(&s) {
                 self.params.push(s);
                 self.roles.push(ParamRole::Free);
             }
