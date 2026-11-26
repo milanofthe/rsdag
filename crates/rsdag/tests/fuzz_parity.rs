@@ -328,7 +328,7 @@ fn differentiate_matches_finite_differences() {
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
         let steps = 4 + rng.below(10);
-        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, true, true);
+        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, true, false);
 
         let wrt = rng.below(nsym);
         let d = differentiate(&mut ctx, root, sym_ids[wrt]);
