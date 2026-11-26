@@ -441,7 +441,7 @@ impl<K: Field> Graph<K> {
                         }
                     }
                 }
-                _ => self.intern_over(*node, &ops),
+                _ => self.intern_unfolded(*node, &ops),
             };
             map.exprs.push(e);
         }

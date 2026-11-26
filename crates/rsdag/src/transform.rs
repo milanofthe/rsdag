@@ -51,7 +51,7 @@ impl<V: Copy> Call<'_, V> {
 /// outputs share what the rule makes of it.
 pub(crate) fn rewrite<K: Field, R: Rule<K>>(r: &mut R, roots: &[ExprId]) -> Vec<R::V> {
     let cone = r.source().cone(roots, false);
-    let mut scratch: Pooled<Scratch<R::V>> = Pooled::take();
+    let mut scratch: Pooled<Scratch<R::V>> = Pooled::take_uncleared();
     let Scratch {
         index,
         place,

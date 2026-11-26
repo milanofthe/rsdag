@@ -28,93 +28,53 @@ use crate::semantics::{binary_f64, unary_f64};
 /// window (which is what makes `Reduce`/`Dot`/`Solve`/`Call` hash-cons structurally).
 pub struct Graph<K: Field = F64> {
     nodes: Vec<Node>,
-    /// The structural fingerprint of each node, parallel to `nodes`: a hash
-    /// of what it computes (its op, constant value or symbol name, and its
-    /// operands' fingerprints), never of when it was built, so equal
-    /// expressions have equal fingerprints in any graph, built in any order.
-    /// Commutative operand lists are ordered by it, which is what makes a
-    /// sum fold in the same order however the graph grew.
     shape: Vec<u64>,
     dedup: HashMap<Node, ExprId>,
     consts: Vec<K>,
     const_dedup: HashMap<K, ConstId>,
-    /// `f64` bit pattern -> constant node, so a numeric literal that recurs
-    /// (model thresholds, `EXP_LIMIT`, ...) skips the rational conversion.
-    f64_cache: HashMap<u64, ExprId>,
+    const_by_f64_bits: HashMap<u64, ExprId>,
     arg_pool: Vec<ExprId>,
     arg_dedup: HashMap<Box<[ExprId]>, ArgList>,
-    /// The fingerprint of each interned list's operands, once per list and
-    /// context it is called in: a call's fingerprint is its callee's and
-    /// this, so the calls of one instance of a wide body cost its width once.
     list_shape: HashMap<(u32, ArgList), u64>,
-    /// The interned constants `0` and `1` (created in `new`), so identity
-    /// folding is an id compare and `zero()`/`one()` never hash.
     zero: ExprId,
     one: ExprId,
     symbol_names: Vec<String>,
     symbol_ids: HashMap<String, SymbolId>,
-    /// Functions (see [`crate::func`]) and the interned `(function, output)`
-    /// pairs the `Call` nodes name.
     funcs: Vec<Function>,
     outputs: Vec<(FuncId, u32)>,
-    /// Per output id, the context it is called in (see [`bind`](Self::bind));
-    /// `NO_CONTEXT` for none.
     output_ctx: Vec<u32>,
     output_dedup: HashMap<(FuncId, u32, u32), OutputId>,
-    /// The bindings of parameters of functions (see [`bind`](Self::bind)).
     contexts: Vec<Context>,
     context_dedup: HashMap<(FuncId, Box<[u32]>, ArgList), u32>,
-    /// The copies of functions with globals bound (see
-    /// [`rebound`](Self::rebound)), by function and binding.
     rebound: HashMap<(FuncId, Vec<(SymbolId, ExprId)>), FuncId>,
-    /// The vector-Jacobian products of functions (see
-    /// [`vjp_function`](Self::vjp_function)), by function, outputs and
-    /// operands.
     vjps: HashMap<(FuncId, Box<[u32]>, Box<[u32]>), FuncId>,
-    /// The functions defined so far, by what defines them (see
-    /// [`define`](Self::define)).
     defined: HashMap<FuncKey, FuncId>,
-    /// The templates the tape compiler made of composite functions, by
-    /// function, output set and operand purity: shared by every program
-    /// compiled over this graph (see [`Tape::compile`](crate::Tape::compile)).
     pub(crate) templates: std::sync::Mutex<TemplateCache>,
 }
 
-/// The templates of [`Graph::templates`]: what the tape compiler keeps.
 pub(crate) type TemplateCache =
     HashMap<(u32, Vec<u32>, Option<Vec<bool>>), Arc<crate::tape::compile::Program>>;
 
-/// What defines a function: its parameters, their roles, its outputs with
-/// theirs at definition, and its extern body by address.
 #[derive(PartialEq, Eq, Hash)]
 pub(crate) struct FuncKey {
     pub(crate) params: Box<[SymbolId]>,
     pub(crate) roles: Box<[ParamRole]>,
-    pub(crate) outputs: Box<[(Output, OutputRole)]>,
-    pub(crate) body: Option<usize>,
+    pub(crate) outputs_at_definition: Box<[(Output, OutputRole)]>,
+    pub(crate) body_address: Option<usize>,
 }
 
-/// No context: a call passes every parameter.
 pub(crate) const NO_CONTEXT: u32 = u32::MAX;
 
-/// Parameters of a function bound once for every call through it (see
-/// [`Graph::bind`]).
 pub(crate) struct Context {
     pub(crate) f: FuncId,
-    /// The bound parameters, ascending, and their expressions.
     pub(crate) at: Box<[u32]>,
     pub(crate) exprs: ArgList,
-    /// Per parameter: `BOUND | j` for the `j`th bound expression, else the
-    /// index of the call argument that passes it.
     pub(crate) slot: Box<[u32]>,
 }
 
-/// Marks a bound parameter in [`Context::slot`].
 pub(crate) const BOUND: u32 = 1 << 31;
 
 impl Context {
-    /// Parameter `p` of a call in this context: its argument among `args`,
-    /// or where the context binds it its expression among `bound`.
     #[inline]
     pub(crate) fn pick<T: Copy>(&self, p: usize, args: &[T], bound: &[T]) -> T {
         match self.slot[p] {
@@ -140,14 +100,6 @@ pub struct Bound {
     pub(crate) ctx: u32,
 }
 
-/// Per-node data over the arena: dense and cleared in O(1) by bumping an
-/// epoch, so a lookup is an index compare where a hash map measured as the
-/// dominant cost of the traversals a build pass runs by the thousand. The
-/// storage comes from a per-thread pool and goes back there on drop: a
-/// traversal nested in another takes a table of its own, and repeated
-/// traversals allocate none (see [`Pooled`]). Keys are nodes below the arena length at
-/// [`begin`](Self::begin); a node made during the traversal is no key (`set`
-/// ignores it, `get` finds nothing).
 pub(crate) struct NodeTable<T: Slot> {
     stamp: Vec<u32>,
     val: Vec<u32>,
@@ -155,7 +107,6 @@ pub(crate) struct NodeTable<T: Slot> {
     kind: std::marker::PhantomData<T>,
 }
 
-/// A value a [`NodeTable`] holds: 32 bits.
 pub(crate) trait Slot: Copy {
     fn pack(self) -> u32;
     fn unpack(v: u32) -> Self;
@@ -179,13 +130,11 @@ impl Slot for u32 {
     }
 }
 
-/// The storage of a [`NodeTable`]: stamps, values, epoch.
 type TableStore = (Vec<u32>, Vec<u32>, u32);
 
 impl<T: Slot> NodeTable<T> {
-    /// An empty table over an arena of `n` nodes.
     pub(crate) fn new(n: usize) -> Self {
-        let (stamp, val, cur) = Pooled::<TableStore>::take().into_inner();
+        let (stamp, val, cur) = Pooled::<TableStore>::take_uncleared().into_inner();
         let mut t = NodeTable {
             stamp,
             val,
@@ -196,11 +145,9 @@ impl<T: Slot> NodeTable<T> {
         t
     }
 
-    /// Empty the table, over an arena of `n` nodes.
     pub(crate) fn begin(&mut self, n: usize) {
         self.cur = self.cur.wrapping_add(1);
         if self.cur == 0 {
-            // epoch wrapped: invalidate everything explicitly
             self.stamp.iter_mut().for_each(|e| *e = 0);
             self.cur = 1;
         }
@@ -247,14 +194,10 @@ thread_local! {
     static POOL: std::cell::RefCell<Vec<Box<dyn std::any::Any>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Buffers a traversal reuses, taken from a per-thread pool and given back
-/// on drop, with what they hold (the taker clears them): a traversal run
-/// thousands of times allocates its buffers once, and one nested in
-/// another takes buffers of its own.
 pub(crate) struct Pooled<T: Default + 'static>(std::mem::ManuallyDrop<T>);
 
 impl<T: Default + 'static> Pooled<T> {
-    pub(crate) fn take() -> Self {
+    pub(crate) fn take_uncleared() -> Self {
         let found = POOL.with(|p| {
             let mut p = p.borrow_mut();
             let at = p.iter().rposition(|b| b.is::<T>())?;
@@ -265,14 +208,12 @@ impl<T: Default + 'static> Pooled<T> {
         ))
     }
 
-    /// The value, no longer given back on drop.
     pub(crate) fn into_inner(self) -> T {
         let mut held = std::mem::ManuallyDrop::new(self);
         // SAFETY: `held` is never dropped, so its value is taken once.
         unsafe { std::mem::ManuallyDrop::take(&mut held.0) }
     }
 
-    /// Put `t` in the pool.
     pub(crate) fn give(t: T) {
         drop(Pooled(std::mem::ManuallyDrop::new(t)));
     }
@@ -304,7 +245,7 @@ mod compose;
 mod flow;
 
 pub(crate) use calls::Deps;
-pub(crate) use flow::{inert, Join, Set, Through};
+pub(crate) use flow::{leading_operands_without_derivative, Join, Set, Through};
 
 impl<K: Field> Default for Graph<K> {
     fn default() -> Self {
@@ -320,7 +261,7 @@ impl<K: Field> Graph<K> {
             dedup: HashMap::default(),
             consts: Vec::new(),
             const_dedup: HashMap::default(),
-            f64_cache: HashMap::default(),
+            const_by_f64_bits: HashMap::default(),
             arg_pool: Vec::new(),
             arg_dedup: HashMap::default(),
             list_shape: HashMap::default(),
@@ -364,7 +305,6 @@ impl<K: Field> Graph<K> {
         &self.symbol_names[s.0 as usize]
     }
 
-    /// The exact rational behind a constant id.
     #[inline]
     pub(crate) fn const_val(&self, c: ConstId) -> &K {
         &self.consts[c.0 as usize]
@@ -376,9 +316,9 @@ impl<K: Field> Graph<K> {
         &self.arg_pool[l.start as usize..(l.start + l.len) as usize]
     }
 
-    /// The two equal-length halves `(a, b)` of a `Dot` node's operand list.
     #[inline]
     pub(crate) fn dot_args(&self, l: ArgList) -> (&[ExprId], &[ExprId]) {
+        debug_assert_eq!(l.len() % 2, 0, "a dot list holds two equal halves");
         self.args(l).split_at(l.len() / 2)
     }
 
@@ -395,7 +335,6 @@ impl<K: Field> Graph<K> {
         }
     }
 
-    /// Intern a node, reusing an existing id if structurally identical.
     #[inline]
     fn intern(&mut self, node: Node) -> ExprId {
         if let Some(&id) = self.dedup.get(&node) {
@@ -423,7 +362,6 @@ impl<K: Field> Graph<K> {
                 Tag::Symbol as u64,
                 of_hash(self.symbol_names[s.0 as usize].as_str()),
             ),
-            // Commutative: the pair in fingerprint order, not id order.
             Node::Add(a, b) | Node::Mul(a, b) => {
                 let (x, y) = (f(a).min(f(b)), f(a).max(f(b)));
                 let t = if matches!(node, Node::Add(..)) {
@@ -453,7 +391,6 @@ impl<K: Field> Graph<K> {
         }
     }
 
-    /// Intern an operand list by content.
     pub(crate) fn intern_args(&mut self, args: &[ExprId]) -> ArgList {
         if let Some(&l) = self.arg_dedup.get(args) {
             return l;
@@ -471,7 +408,6 @@ impl<K: Field> Graph<K> {
         l
     }
 
-    /// Borrow the rational value if `id` is a constant.
     #[inline]
     pub(crate) fn const_of(&self, id: ExprId) -> Option<&K> {
         match *self.node(id) {
@@ -491,13 +427,10 @@ impl<K: Field> Graph<K> {
         id == self.zero
     }
 
-    /// True if `id` is the constant one.
     #[inline]
     pub(crate) fn is_one(&self, id: ExprId) -> bool {
         id == self.one
     }
-
-    // --- leaf constructors -------------------------------------------------
 
     pub(crate) fn konst(&mut self, r: K) -> ExprId {
         let c = match self.const_dedup.get(&r) {
@@ -527,16 +460,14 @@ impl<K: Field> Graph<K> {
     /// Exact rational constant from an `f64` (e.g. a model parameter threshold).
     /// Non-finite values fall back to zero.
     pub fn konst_f64(&mut self, x: f64) -> ExprId {
-        // Keyed on the bit pattern, so `0.0` and `-0.0` are distinct keys but
-        // both intern to the rational zero (as `from_float` yields for either).
-        if let Some(&id) = self.f64_cache.get(&x.to_bits()) {
+        if let Some(&id) = self.const_by_f64_bits.get(&x.to_bits()) {
             return id;
         }
         let id = match K::from_f64(x) {
             Some(r) => self.konst(r),
             None => self.zero,
         };
-        self.f64_cache.insert(x.to_bits(), id);
+        self.const_by_f64_bits.insert(x.to_bits(), id);
         id
     }
 
@@ -564,8 +495,6 @@ impl<K: Field> Graph<K> {
         }
     }
 
-    /// A symbol of its own: named `prefix` and a number, a name no symbol of
-    /// the graph has.
     pub(crate) fn fresh_symbol(&mut self, prefix: &str) -> SymbolId {
         let mut k = self.symbol_names.len();
         loop {
@@ -613,8 +542,6 @@ impl<K: Field> Graph<K> {
         self.intern(Node::Symbol(sid))
     }
 
-    // --- algebraic constructors -------------------------------------------
-
     pub fn add(&mut self, a: ExprId, b: ExprId) -> ExprId {
         if a == self.zero {
             return b;
@@ -626,7 +553,7 @@ impl<K: Field> Graph<K> {
             let v = x.add(y);
             return self.konst(v);
         }
-        let (a, b) = order(a, b);
+        let (a, b) = commutative_order(a, b);
         self.intern(Node::Add(a, b))
     }
 
@@ -649,7 +576,7 @@ impl<K: Field> Graph<K> {
             let v = x.mul(y);
             return self.konst(v);
         }
-        let (a, b) = order(a, b);
+        let (a, b) = commutative_order(a, b);
         self.intern(Node::Mul(a, b))
     }
 
@@ -682,12 +609,6 @@ impl<K: Field> Graph<K> {
             return self.binary(BinOp::Powf, a, e);
         }
         if let Some(x) = self.const_of(a) {
-            // `0^(negative)` has no exact rational value (it is `inf` numerically).
-            // Don't fold it -- keep the `Pow` node, so the tape evaluates it as
-            // `0.powi(n)` = `inf` (matching the numeric path) instead of panicking
-            // on a division by zero. This makes the constructor total, which the
-            // parameter-fold transform relies on (folding a zero-valued parameter
-            // that sits in a denominator must not crash).
             if let Some(v) = x.powi(n) {
                 return self.konst(v);
             }
@@ -722,26 +643,19 @@ impl<K: Field> Graph<K> {
         self.sub(a, bf)
     }
 
-    // --- elementary functions ---------------------------------------------
-
     /// Apply a unary function, with a few exact-at-special-points identities.
     pub fn unary(&mut self, op: UnaryOp, a: ExprId) -> ExprId {
-        // A floating field folds through the reference math; an exact field
-        // keeps transcendental constants symbolic.
         if !K::is_exact() {
             if let Some(x) = self.const_of(a) {
                 let y = unary_f64(op, x.to_f64());
-                // Outside the domain the op stays (a NaN payload is the
-                // backend's business, not a constant's).
-                if !y.is_nan() {
+                let in_domain = !y.is_nan();
+                if in_domain {
                     if let Some(v) = K::from_f64(y) {
                         return self.konst(v);
                     }
                 }
             }
         }
-        // `abs` of a magnitude or an `abs` is itself; of a negation, of the
-        // operand (exact in IEEE: abs only clears the sign bit).
         if op == UnaryOp::Abs {
             match *self.node(a) {
                 Node::Unary(UnaryOp::Abs | UnaryOp::Sqrt, _) => return a,
@@ -750,8 +664,8 @@ impl<K: Field> Graph<K> {
             }
         }
         match op {
-            UnaryOp::Exp if self.is_zero(a) => self.one, // exp(0) = 1
-            UnaryOp::Ln if self.is_one(a) => self.zero,  // ln(1) = 0
+            UnaryOp::Exp if self.is_zero(a) => self.one,
+            UnaryOp::Ln if self.is_one(a) => self.zero,
             UnaryOp::Sin if self.is_zero(a) => self.zero,
             UnaryOp::Cos if self.is_zero(a) => self.one,
             UnaryOp::Sinh if self.is_zero(a) => self.zero,
@@ -763,9 +677,6 @@ impl<K: Field> Graph<K> {
         }
     }
 
-    /// Binary function node (`Powf`, `Mod`, `Atan2`, `Hypot`): the powers of
-    /// zero and one resolve; a floating field folds constants through the
-    /// reference math.
     /// The elementary function `f` of `args` (as many as its arity).
     pub fn elementary(&mut self, f: Elementary, args: &[ExprId]) -> ExprId {
         debug_assert_eq!(
@@ -783,6 +694,9 @@ impl<K: Field> Graph<K> {
         }
     }
 
+    /// Binary function node (`Powf`, `Mod`, `Atan2`, `Hypot`): the powers of
+    /// zero and one resolve; a floating field folds constants through the
+    /// reference math.
     pub fn binary(&mut self, op: BinOp, a: ExprId, b: ExprId) -> ExprId {
         if op == BinOp::Powf {
             if self.is_zero(b) {
@@ -798,7 +712,8 @@ impl<K: Field> Graph<K> {
         if !K::is_exact() {
             if let (Some(x), Some(y)) = (self.const_of(a), self.const_of(b)) {
                 let z = binary_f64(op, x.to_f64(), y.to_f64());
-                if !z.is_nan() {
+                let in_domain = !z.is_nan();
+                if in_domain {
                     if let Some(v) = K::from_f64(z) {
                         return self.konst(v);
                     }
@@ -836,8 +751,6 @@ impl<K: Field> Graph<K> {
         self.unary(UnaryOp::Tanh, a)
     }
 
-    // --- conditions and selection ----------------------------------------
-
     /// Comparison node (`1.0`/`0.0`); folds when both operands are constant.
     pub fn cmp(&mut self, op: CmpOp, a: ExprId, b: ExprId) -> ExprId {
         if let (Some(x), Some(y)) = (self.const_of(a), self.const_of(b)) {
@@ -862,15 +775,11 @@ impl<K: Field> Graph<K> {
         self.intern(Node::Select(cond, then, else_))
     }
 
-    // --- fused / variadic operators --------------------------------------
-
     /// Associative reduction over `args` (one fused node instead of an
     /// Add/Mul-tree). Commutative operands are sorted to maximise sharing; an
     /// empty/singleton list collapses. Constants are kept (exact) and combined
     /// at evaluation time.
     pub fn reduce(&mut self, op: ReduceOp, args: Vec<ExprId>) -> ExprId {
-        // Combine the constant operands exactly (keeping sparsity exact and the
-        // tape short); a zero factor zeroes a product, matching `mul`.
         let rest = match op {
             ReduceOp::Sum => {
                 let mut acc: Option<K> = None;
@@ -938,22 +847,19 @@ impl<K: Field> Graph<K> {
             0 => match op {
                 ReduceOp::Sum => self.zero,
                 ReduceOp::Product => self.one,
-                // No finite rational identity; empty min/max is not used.
                 ReduceOp::Min | ReduceOp::Max => self.zero,
             },
             1 => args[0],
             _ => {
-                // By fingerprint, so the fold order is the expression's own,
-                // not the order its terms were built in; the id only breaks
-                // a fingerprint collision.
-                args.sort_unstable_by_key(|&a| (self.shape[a.0 as usize], a.0));
+                let fingerprint_then_id = |a: &ExprId| (self.shape[a.0 as usize], a.0);
+                args.sort_unstable_by_key(fingerprint_then_id);
                 let l = self.intern_args(&args);
                 self.intern(Node::Reduce(op, l))
             }
         }
     }
 
-    /// Inner product `Σ_i a[i]*b[i]`. The two lists must be equal length; an
+    /// Inner product `sum_i a[i]*b[i]`. The two lists must be equal length; an
     /// empty product is zero and a single pair is a plain multiply.
     pub fn dot(&mut self, a: Vec<ExprId>, b: Vec<ExprId>) -> ExprId {
         assert_eq!(a.len(), b.len(), "dot: operand lists differ in length");
@@ -994,28 +900,23 @@ impl<K: Field> Graph<K> {
         }
     }
 
-    /// The matrix and the right-hand side of a [`Node::Solve`] list, and `n`.
     pub(crate) fn solve_args(&self, l: ArgList) -> (usize, &[ExprId], &[ExprId]) {
         let n = Self::solve_n(l.len());
         let all = self.args(l);
         (n, &all[..n * n], &all[n * n..])
     }
 
-    /// `n` from the length `n * n + n` of a solve list.
     pub(crate) fn solve_n(len: usize) -> usize {
         let n = ((len as f64).sqrt()) as usize;
         debug_assert_eq!(n * n + n, len, "a solve list is n*n + n long");
         n
     }
 
-    /// Component `i` of a solve over the list `all`, rebuilt.
     fn solve_component(&mut self, all: &[ExprId], i: u32) -> ExprId {
         let n = Self::solve_n(all.len());
         let (a, b) = all.split_at(n * n);
         self.solve_dense(a.to_vec(), b.to_vec())[i as usize]
     }
-
-    // --- module interchange (see `crate::module`) ------------------------
 
     pub(crate) fn nodes_slice(&self) -> &[Node] {
         &self.nodes
@@ -1033,15 +934,22 @@ impl<K: Field> Graph<K> {
         &self.outputs
     }
 
-    /// `node` over the operands `ops` (ids of this graph, in
-    /// [`operands`](Self::operands) order), through the smart constructors:
-    /// folding and canonical operand order run again, so identities that
-    /// only became visible after a transform collapse. A leaf must already
-    /// name a constant or symbol of this graph; a call is rebuilt over its
-    /// instance (see [`calls_over`](Self::calls_over)).
     pub(crate) fn build(&mut self, node: Node, ops: &[ExprId]) -> ExprId {
         match node {
-            Node::Const(_) | Node::Symbol(_) => self.intern(node),
+            Node::Const(c) => {
+                debug_assert!(
+                    (c.0 as usize) < self.consts.len(),
+                    "a constant leaf names a constant of this graph"
+                );
+                self.intern(node)
+            }
+            Node::Symbol(s) => {
+                debug_assert!(
+                    (s.0 as usize) < self.symbol_names.len(),
+                    "a symbol leaf names a symbol of this graph"
+                );
+                self.intern(node)
+            }
             Node::Add(..) => self.add(ops[0], ops[1]),
             Node::Mul(..) => self.mul(ops[0], ops[1]),
             Node::Neg(_) => self.neg(ops[0]),
@@ -1060,10 +968,7 @@ impl<K: Field> Graph<K> {
         }
     }
 
-    /// `node` over the operands `ops` as it stands, without folding: how a
-    /// stored module is reproduced exactly (see [`build`](Self::build) for
-    /// rebuilding).
-    pub(crate) fn intern_over(&mut self, node: Node, ops: &[ExprId]) -> ExprId {
+    pub(crate) fn intern_unfolded(&mut self, node: Node, ops: &[ExprId]) -> ExprId {
         let list = if node.is_variadic() {
             self.intern_args(ops)
         } else {
@@ -1073,8 +978,7 @@ impl<K: Field> Graph<K> {
     }
 }
 
-/// Canonical operand order for commutative ops, to maximise hash-consing.
-fn order(a: ExprId, b: ExprId) -> (ExprId, ExprId) {
+fn commutative_order(a: ExprId, b: ExprId) -> (ExprId, ExprId) {
     if a <= b {
         (a, b)
     } else {
@@ -1082,8 +986,6 @@ fn order(a: ExprId, b: ExprId) -> (ExprId, ExprId) {
     }
 }
 
-/// A comparison of two constants of the field; an unordered pair (NaN in a
-/// floating field) compares false except for `Ne`.
 fn cmp_field<K: Field>(op: CmpOp, x: &K, y: &K) -> bool {
     use std::cmp::Ordering::*;
     match (op, x.partial_cmp(y)) {
@@ -1097,8 +999,6 @@ fn cmp_field<K: Field>(op: CmpOp, x: &K, y: &K) -> bool {
     }
 }
 
-/// A constant that is a small integer, up to [`POWF_AS_POWI_MAX`] (the
-/// exponent of a `Powf` that is really an integer power).
 fn small_integer<K: Field>(k: &K) -> Option<i64> {
     let x = k.to_f64();
     if x.fract() == 0.0 && x.abs() <= POWF_AS_POWI_MAX && K::from_i64(x as i64) == *k {
