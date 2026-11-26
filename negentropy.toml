@@ -1,2 +1,24 @@
 [allow]
 environment = ['^crates/rsdag/src/simd\.rs: .*"RSDAG_SSE2"']
+duplicate = ['^crates/rsdag/src/graph/calls\.rs: .*fn node\(&mut self, _: ExprId, node: Node, ops: &\[ExprId\]\) -> ExprId']
+unwrap = [
+    '^crates/rsdag-jit/src/background\.rs: .*expect\("failed to build the compile pool"\)',
+    '^crates/rsdag-jit/src/background\.rs: .*expect\("spawn the compile queue"\)',
+    '^crates/rsdag-jit/src/host\.rs: .*expect\("a kernel.s first operand"\)',
+    '^crates/rsdag-jit/src/native\.rs: .*expect\("a call of the tape names its operands"\)',
+    '^crates/rsdag-jit/src/native\.rs: .*unreachable!\("an op pins fewer than \{n\} registers"\)',
+    '^crates/rsdag-jit/src/x86_64\.rs: .*expect\("work array offset fits i32"\)',
+    '^crates/rsdag/src/autodiff\.rs: .*expect\("root differentiated"\)',
+    '^crates/rsdag/src/autodiff\.rs: .*expect\("operand differentiated"\)',
+    '^crates/rsdag/src/autodiff\.rs: .*expect\("in the cone"\)',
+    '^crates/rsdag/src/dot\.rs: .*expect\("drawn"\)',
+    '^crates/rsdag/src/dot\.rs: .*expect\("one per body"\)',
+    '^crates/rsdag/src/graph/flow\.rs: .*expect\("a node of the cone"\)',
+    '^crates/rsdag/src/tape/calls\.rs: .*expect\("a prolog names the arguments its instances own"\)',
+    '^crates/rsdag/src/tape/compile\.rs: .*expect\("a lowered root"\)',
+    '^crates/rsdag/src/tape/compile\.rs: .*expect\("a state"\)',
+    '^crates/rsdag/src/tape/compile\.rs: .*expect\("an argument not read is pure"\)',
+    '^crates/rsdag/src/tape/compile\.rs: .*expect\("an operand"\)',
+    '^crates/rsdag/src/tape/compile\.rs: .*expect\("an operand precedes its consumer"\)',
+    '^crates/rsdag/src/tape/compile\.rs: .*expect\("one per expression"\)',
+]
