@@ -22,10 +22,6 @@ fn variants_run_natively() {
         let (mut w, mut want) = (Vec::new(), Vec::new());
         let (mut nw, mut got) = (Vec::new(), Vec::new());
         for binding in [0u32, 0b1010_0101, 0xff, 0] {
-            // The first prolog runs the full body and finds the selects in
-            // the background, the next one builds the pattern's variant
-            // there, the one after has it compiled; an instance runs on the
-            // interpreted variant meanwhile. Each is checked.
             native.eval_prolog(&inputs(n, 0.0, binding), &mut nw);
             for t in [0.0, 0.5] {
                 let ins = inputs(n, t, binding);
@@ -50,10 +46,6 @@ fn variants_run_natively() {
     }
 }
 
-/// An episode takes what lands after its prolog: one prolog, then main
-/// passes only (as a Newton loop runs), and the native code and the
-/// bodies' variants still take over, bit for bit the interpreter all
-/// along.
 #[test]
 fn an_episode_takes_the_variants_that_land_after_its_prolog() {
     let n = 12;
@@ -91,8 +83,6 @@ fn an_episode_takes_the_variants_that_land_after_its_prolog() {
     );
 }
 
-/// Without the background, the native prolog builds and compiles its
-/// instance's variant itself: the first one runs on it.
 #[test]
 fn a_native_prolog_builds_its_variant_without_the_background() {
     let n = 12;
@@ -128,7 +118,6 @@ fn a_prolog_of_one_backend_serves_the_main_phase_of_the_other() {
     for binding in [0x3cu32, 0xc3] {
         let ins = inputs(n, 0.75, binding);
         tape.eval(&ins, &mut w, &mut want);
-        // The interpreter's prolog under the native main phase.
         let mut iw = vec![0.0; tape.work_len()];
         tape.eval_prolog_into(&inputs(n, 0.0, binding), &mut iw);
         let mut nw = Vec::new();
@@ -136,7 +125,6 @@ fn a_prolog_of_one_backend_serves_the_main_phase_of_the_other() {
         nw[..s].copy_from_slice(&iw[..s]);
         native.eval_main(&ins, &mut nw, &mut got);
         assert!(identical(&got, &want), "interpreter prolog, native main");
-        // The native prolog under the interpreter's main phase.
         native.eval_prolog(&inputs(n, 0.0, binding), &mut nw);
         let mut iw2 = vec![f64::NAN; tape.work_len()];
         iw2[..s].copy_from_slice(&nw[..s]);

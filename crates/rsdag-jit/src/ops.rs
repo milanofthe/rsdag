@@ -6,30 +6,22 @@ use rsdag::node::{ReduceOp, UnaryOp};
 use rsdag::tape::{input_index, Op};
 use rsdag::Tape;
 
-use crate::constants::{INLINE_MINMAX_MAX, INLINE_ROWS, POWI_INLINE};
+use crate::constants::{HOST_PRODUCT_MIN_ROWS, INLINE_MINMAX_MAX_TERMS, POWI_INLINE_MAX_EXPONENT};
 use crate::isa::Isa;
 
-/// The magnitude of `n` where `x^n` is emitted inline (as
-/// `semantics::powi_f64` multiplies, product for product) rather than
-/// through the host.
 pub(crate) fn powi_inline(n: i32) -> Option<std::num::NonZeroU32> {
-    std::num::NonZeroU32::new(n.unsigned_abs()).filter(|e| e.get() <= POWI_INLINE)
+    std::num::NonZeroU32::new(n.unsigned_abs()).filter(|e| e.get() <= POWI_INLINE_MAX_EXPONENT)
 }
 
-/// Whether `op` is a product kernel the code computes inline, as the dots
-/// of its entries (see [`INLINE_ROWS`]).
 pub(crate) fn inline_product(op: &Op) -> bool {
-    matches!(*op, Op::Gemv { m, .. } | Op::Gemm { m, .. } if m < INLINE_ROWS)
+    matches!(*op, Op::Gemv { m, .. } | Op::Gemm { m, .. } if m < HOST_PRODUCT_MIN_ROWS)
 }
 
-/// Whether `op` is a min or max the ISA `I` runs as a chain of its
-/// instructions (see [`INLINE_MINMAX_MAX`]), calling no host routine.
 pub(crate) fn minmax_inline<I: Isa>(op: &Op) -> bool {
     matches!(*op, Op::Reduce(ReduceOp::Min | ReduceOp::Max, _, len)
-        if I::MINMAX && len > 0 && len as usize <= INLINE_MINMAX_MAX)
+        if I::MINMAX && len > 0 && len as usize <= INLINE_MINMAX_MAX_TERMS)
 }
 
-/// The host routine `op` calls on the ISA `I`, if any.
 pub(crate) fn routine<I: Isa>(op: &Op) -> Option<*const ()> {
     if minmax_inline::<I>(op) || inline_product(op) {
         return None;
@@ -50,13 +42,6 @@ pub(crate) fn routine<I: Isa>(op: &Op) -> Option<*const ()> {
     })
 }
 
-/// When each value dies: per slot, the ops that read it and the ops that
-/// write it, in tape order, the outputs read after the program. Slots
-/// are reused, so a slot holds many values in turn; the one it holds at an
-/// op dies at its last read before the slot's next write (an op reads its
-/// operands before it writes). The register cache asks this when it takes
-/// a value, so a value is written back only if a later op reads it and
-/// counts as dead as soon as nothing will.
 pub(crate) struct Liveness {
     reads: Vec<u32>,
     read_start: Vec<u32>,
@@ -65,12 +50,9 @@ pub(crate) struct Liveness {
 }
 
 impl Liveness {
-    /// Over the ops of `tape`, the slots `outputs` read at the end.
     pub(crate) fn new(tape: &Tape, outputs: impl Iterator<Item = u32>) -> Liveness {
         let n_work = tape.n_slots();
         let outputs: Vec<u32> = outputs.filter(|&s| input_index(s).is_none()).collect();
-        // Two passes each, counting then filling, in tape order so the
-        // positions of a slot come out sorted.
         let csr = |each: &dyn Fn(&mut dyn FnMut(u32, u32))| -> (Vec<u32>, Vec<u32>) {
             let mut start = vec![0u32; n_work + 1];
             each(&mut |s, _| start[s as usize + 1] += 1);
@@ -83,6 +65,10 @@ impl Liveness {
                 at[fill[s as usize] as usize] = pos;
                 fill[s as usize] += 1;
             });
+            debug_assert!(
+                (0..n_work).all(|s| at[start[s] as usize..start[s + 1] as usize].is_sorted()),
+                "positions per slot in tape order"
+            );
             (at, start)
         };
         let (reads, read_start) = csr(&|f| {
@@ -111,8 +97,6 @@ impl Liveness {
         }
     }
 
-    /// The first op at or after `pos` that reads slot `s` (`u32::MAX` for the
-    /// outputs at the end, or none).
     pub(crate) fn next_read(&self, s: u32, pos: u32) -> u32 {
         let s = s as usize;
         let reads = &self.reads[self.read_start[s] as usize..self.read_start[s + 1] as usize];
@@ -122,22 +106,17 @@ impl Liveness {
             .unwrap_or(u32::MAX)
     }
 
-    /// The last op reading the value slot `s` holds when op `pos` writes it
-    /// (`def`) or reads it; `pos` when nothing reads it after, `u32::MAX`
-    /// when the program's outputs do.
     pub(crate) fn death(&self, s: u32, pos: u32, def: bool) -> u32 {
         let s = s as usize;
         let reads = &self.reads[self.read_start[s] as usize..self.read_start[s + 1] as usize];
         let writes = &self.writes[self.write_start[s] as usize..self.write_start[s + 1] as usize];
-        // The value lives from `lo` to the next write, whose op still reads
-        // it.
-        let lo = if def { pos + 1 } else { pos };
-        let end = writes
-            .get(writes.partition_point(|&w| w < lo))
+        let first_read = if def { pos + 1 } else { pos };
+        let overwriting_op_reads_first = writes
+            .get(writes.partition_point(|&w| w < first_read))
             .copied()
             .unwrap_or(u32::MAX);
-        let from = reads.partition_point(|&r| r < lo);
-        let to = reads.partition_point(|&r| r <= end);
+        let from = reads.partition_point(|&r| r < first_read);
+        let to = reads.partition_point(|&r| r <= overwriting_op_reads_first);
         if to > from {
             reads[to - 1]
         } else {

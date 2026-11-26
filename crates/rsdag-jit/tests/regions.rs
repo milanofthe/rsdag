@@ -19,9 +19,6 @@ use rsdag_jit::NativeTape;
 const N: usize = 12000;
 const ENTRIES: usize = 3000;
 
-/// An assembly: entries summing products, transcendentals and selects of
-/// the inputs, some through a partial sum other entries share, some with
-/// a min (a gather) among their terms.
 fn assembly() -> (Graph<F64>, Vec<ExprId>, Vec<SymbolId>) {
     let mut g: Graph<F64> = Graph::new();
     let (xs, syms): (Vec<ExprId>, Vec<SymbolId>) = (0..N)

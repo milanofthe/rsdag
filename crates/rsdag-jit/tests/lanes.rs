@@ -57,8 +57,6 @@ const CMP: [CmpOp; 6] = [
     CmpOp::Ne,
 ];
 
-/// A body over two states and two parameters with every kind of op, the
-/// parameters' work (a prolog) feeding the states' (the main phase).
 fn body(g: &mut Graph<F64>) -> FuncId {
     let mut s = Scope::new(g, "every");
     let a = s.param("a", ParamRole::State { id: 0 });
@@ -66,7 +64,6 @@ fn body(g: &mut Graph<F64>) -> FuncId {
     let p = s.param("p", ParamRole::Param);
     let q = s.param("q", ParamRole::Param);
     let mut outs = Vec::new();
-    // parameter-only work: lands in the prolog, read through the state
     let pq = s.mul(p, q);
     let pe = s.exp(pq);
     let ab = s.mul(a, b);
@@ -99,7 +96,6 @@ fn body(g: &mut Graph<F64>) -> FuncId {
     s.close(outs.into_iter().map(|e| (e, OutputRole::Plain)))
 }
 
-/// Values of every kind, so every lane meets them in turn.
 const SPECIAL: [f64; 13] = [
     0.75,
     -1.5,
@@ -116,7 +112,6 @@ const SPECIAL: [f64; 13] = [
     1.0,
 ];
 
-/// Lane code wherever it compiles, whether it pays or not.
 fn native(tape: &Tape) -> NativeTape {
     let opts = Options {
         lanes: Lanes::Always,
@@ -125,7 +120,6 @@ fn native(tape: &Tape) -> NativeTape {
     NativeTape::compile_opts(tape, &opts, &[]).expect("native code")
 }
 
-/// `n` instances of the body at the top, every output of each a root.
 fn program(n: usize) -> (Graph<F64>, Vec<ExprId>, Vec<SymbolId>, Vec<bool>) {
     let mut g: Graph<F64> = Graph::new();
     let f = body(&mut g);

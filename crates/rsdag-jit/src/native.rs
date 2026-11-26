@@ -38,16 +38,19 @@ use rsdag::{ExternBundle, Instances, Program, Tape};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
-use crate::constants::{CODE_ALIGN, GATHER_TABLE, LANE_CALL, LANE_MOVE, MAX_LANES, REG_NUMBERS};
+use crate::constants::{
+    CODE_ALIGN_BYTES, FLOAT_REG_NUMBERS, FORCED_LANES_SCALAR_COST_WITHOUT_OVERFLOW,
+    HOST_GATHER_MIN_ARGS, KERNEL_OPERANDS_A_XB_ACCUMULATOR, LANE_HOST_CALL_COST_OPS,
+    LANE_HOST_CALL_TWO_ARGUMENTS_AND_RESULT, LANE_MOVE_COST_OPS, MAX_LANES,
+    OPTIONS_KEY_CHUNK_OPS_SHIFT, OPTIONS_KEY_FREE_BIT_FOR_BACKGROUND, OPTIONS_KEY_LANES_SHIFT,
+};
 use crate::host::{self, Bundles};
 use crate::ops::{inline_product, minmax_inline, powi_inline, routine, Liveness};
 use rsdag::constants::FOLD_LANES;
 
-/// Bytes a value takes in the work array and the inputs.
 const F64_BYTES: usize = std::mem::size_of::<f64>();
 
-/// What an op of a native region costs.
-static REGIONS: rsdag::parallel::Rate =
+static NATIVE_REGION_OP_RATE: rsdag::parallel::Rate =
     rsdag::parallel::Rate::new(rsdag::constants::NATIVE_NS_PER_OP);
 use crate::isa::{Arg, Arith, Base, IArg, Isa, Round};
 use crate::{Batch, JitError, Lanes, Options};
@@ -57,99 +60,56 @@ type Arch = crate::aarch64::A64;
 #[cfg(target_arch = "x86_64")]
 type Arch = crate::x86_64::X64<1>;
 
-/// An emitted chunk: `(work, inputs, layout)`. Unsafe to call: the code
-/// trusts the work array to have the layout's length and the inputs the
-/// ones it reads, which [`NativeTape::run`] checks.
 type ChunkFn = unsafe extern "C" fn(*mut f64, *const f64, *const Layout);
 
 /// A tape compiled to native code. Evaluation mirrors [`Tape`]: a
 /// caller-owned work buffer, inputs padded with NaN, and the prolog/main
 /// split of a specialized tape.
 pub struct NativeTape {
-    /// Every chunk's code in one mapping, held while the chunks point into
-    /// it, and each chunk's entry in it.
-    _code: Mapping,
+    _code_the_chunks_point_into: Mapping,
     chunks: Vec<ChunkFn>,
     prolog_chunks: usize,
-    /// The calls and kernel descriptors the code holds the addresses of.
-    _descs: Vec<(Vec<Call<'static>>, Vec<host::KernelDesc>)>,
-    /// The bundles the calls call, each as this backend runs it; the calls
-    /// hold references to them.
+    _descs_the_code_points_to: Vec<(Vec<Call<'static>>, Vec<host::KernelDesc>)>,
     bundles: Bundles,
-    /// The operand tables of the calls and the kernels' fold codes; the
-    /// calls and the code hold their addresses.
-    _tables: Vec<Box<[u32]>>,
+    _tables_the_code_points_to: Vec<Box<[u32]>>,
     outputs: Vec<u32>,
-    /// Boxed: the code's host calls hold its address.
     layout: Box<Layout>,
     n_ops: usize,
-    /// The tape's state prefix (see [`Program::state_len`](rsdag::Program::state_len)); the slot layout
-    /// is the tape's, so an interpreter's state serves here and back.
     state_len: usize,
-    /// Instances per run: `1`, or the lane code's width (see
-    /// [`compile_lanes`](NativeTape::compile_lanes)).
     lanes: usize,
-    /// The inputs the prolog and the main phase read (a body's main phase
-    /// reads its states' arguments, not the parameters its prolog took).
     reads: [Vec<u32>; 2],
-    /// Per phase (prolog, main): its ops, and those of them that call the
-    /// host (lane code calls it once per lane).
-    phase_ops: [(usize, usize); 2],
-    /// The tape's regions ([`rsdag::Region`]) by chunks: piece `k` is the
-    /// chunks from `starts[k]` to the next piece's, the last one's up to
-    /// `hi`.
+    phase_ops_and_host_calls: [(usize, usize); 2],
     regions: Vec<ChunkRegion>,
 }
 
-/// A region of the tape as chunks (see [`NativeTape::regions`]), with its
-/// ops.
 struct ChunkRegion {
     starts: Vec<usize>,
     hi: usize,
     ops: usize,
 }
 
-/// The gather area lane code on the ISA `I` needs for `op`: a host call's
-/// float arguments and results lane by lane, or a min/max's terms, one
-/// lane's row of them and the results (none where it runs inline).
 fn lane_gather_len<I: Isa>(op: &Op) -> usize {
     let l = I::LANES;
     match *op {
         _ if minmax_inline::<I>(op) => 0,
         Op::Reduce(ReduceOp::Min | ReduceOp::Max, _, n) => n as usize * l + n as usize + l,
-        // lit: two arguments and the result, lane by lane
-        _ if routine::<I>(op).is_some() => 3 * l,
+        _ if routine::<I>(op).is_some() => LANE_HOST_CALL_TWO_ARGUMENTS_AND_RESULT * l,
         _ => 0,
     }
 }
 
-/// A function body compiled natively, behind the bundle interface the
-/// tape calls bodies through: emitted once, called per instance. A batch
-/// of instances runs as its [`Batch`] says; either way the result is the
-/// serial loop's, bit for bit.
 struct NativeBody {
     tape: NativeTape,
-    /// The same body over several instances at once, widest first, each
-    /// where it compiles so and pays for some phase.
-    lanes: Vec<LaneCode>,
-    /// What an instance of the scalar code costs per phase (see
-    /// [`lane_costs`]).
-    scalar: [usize; 3],
+    lanes_widest_first: Vec<LaneCode>,
+    scalar_cost_per_phase: [usize; 3],
     n_out: usize,
-    /// The pure-argument flags of the body it replaces: its prolog runs on
-    /// those, the rest NaN.
     pure: Vec<bool>,
-    /// Per argument, its rank among the pure ones (a prolog's arguments
-    /// are those alone).
-    rank: Vec<Option<usize>>,
+    rank_among_pure: Vec<Option<usize>>,
     batch: Batch,
     rate: rsdag::parallel::Rate,
 }
 
 impl NativeBody {
-    /// The instances `groups` of a batch, one after the other on one work
-    /// buffer: nothing is cleared or resized between them, since a tape
-    /// writes every slot it reads.
     fn run_groups(
         &self,
         work: &mut Vec<f64>,
@@ -162,8 +122,6 @@ impl NativeBody {
         self.run_groups_into(work, args, n_args, out, groups);
     }
 
-    /// [`run_groups`](Self::run_groups) over a buffer the caller sized to
-    /// [`work_len`](ExternBundle::work_len).
     fn run_groups_into(
         &self,
         work: &mut [f64],
@@ -183,15 +141,13 @@ impl NativeBody {
     }
 }
 
-/// The ops `ops` of `tape` in chunks of about `chunk_ops`, each ending
-/// after an op outside a stage or after a stage's last call, and before
-/// every op `cuts` lists (sorted).
 fn chunked(
     tape: &Tape,
     ops: std::ops::Range<usize>,
     chunk_ops: usize,
     cuts: &[usize],
 ) -> Vec<std::ops::Range<usize>> {
+    debug_assert!(cuts.is_sorted());
     let mut out = Vec::new();
     let mut start = ops.start;
     let mut cut = cuts.iter().copied().filter(|&c| c > ops.start).peekable();
@@ -212,7 +168,6 @@ fn chunked(
     out
 }
 
-/// The stage op `i` of `tape` is in, if any.
 fn stage_of(tape: &Tape, i: usize) -> Option<&rsdag::tape::Stage> {
     let stages = tape.stages();
     stages
@@ -220,35 +175,22 @@ fn stage_of(tape: &Tape, i: usize) -> Option<&rsdag::tape::Stage> {
         .filter(|st| st.lo as usize <= i)
 }
 
-/// The phases a body runs, [`Phase`]'s variants.
 const PHASES: usize = Phase::Whole as usize + 1;
 
-/// A body's lane code of one width.
 struct LaneCode {
     tape: NativeTape,
-    /// What a block of it costs per phase (see [`lane_costs`]).
-    block: [usize; PHASES],
-    /// The inputs each phase reads, in the order of [`Phase`]: what moves
-    /// into the lanes.
-    reads: [Vec<u32>; PHASES],
+    block_cost_per_phase: [usize; PHASES],
+    inputs_moved_into_lanes_per_phase: [Vec<u32>; PHASES],
 }
 
 impl LaneCode {
-    /// Whether it pays for `phase` against the scalar code's `one`.
-    fn pays(&self, phase: usize, one: usize) -> bool {
-        self.block[phase] < self.tape.lanes * one
+    fn pays(&self, phase: usize, scalar_instance_cost: usize) -> bool {
+        self.block_cost_per_phase[phase] < self.tape.lanes * scalar_instance_cost
     }
 }
 
-/// What lane code costs per phase (prolog, main phase, whole call): a
-/// block of its width, and an instance of the scalar code, in
-/// op-equivalents measured on SANE's device bodies. A block does its ops'
-/// work once for all its lanes, but moves the values it reads and writes
-/// into and out of the lanes (inputs read, the state, the outputs) and
-/// makes its host calls lane by lane; it costs as much with lanes left
-/// empty.
 fn lane_costs(lt: &NativeTape, n_state: usize, n_out: usize) -> ([usize; 3], [usize; 3]) {
-    let [(o0, h0), (o1, h1)] = lt.phase_ops;
+    let [(o0, h0), (o1, h1)] = lt.phase_ops_and_host_calls;
     let [r0, r1] = [lt.reads[0].len(), lt.reads[1].len()];
     let phases = [
         (o0, h0, r0 + n_state),
@@ -256,41 +198,39 @@ fn lane_costs(lt: &NativeTape, n_state: usize, n_out: usize) -> ([usize; 3], [us
         (o0 + o1, h0 + h1, r0 + r1 + n_out),
     ];
     let block = phases.map(|(ops, host, moved)| {
-        ops - host + lt.lanes * (host * (1 + LANE_CALL) + moved * LANE_MOVE)
+        ops - host + lt.lanes * (host * (1 + LANE_HOST_CALL_COST_OPS) + moved * LANE_MOVE_COST_OPS)
     });
     (block, phases.map(|(ops, _, _)| ops))
 }
 
 impl NativeBody {
-    /// The instances of a batch of `n` that lane code takes, handed to
-    /// `run` as ranges of blocks: the widest lane code that pays
-    /// for `phase` (the cheapest per instance) fills its blocks, and the
-    /// rest goes the cheapest way by [`lane_costs`], in blocks of any width
-    /// (a short one runs with lanes empty) or scalar. Returns the first
-    /// instance left to the scalar code.
-    fn lanes_first(
+    fn lanes_first_returning_scalar_start(
         &self,
         phase: Phase,
         n: usize,
         mut run: impl FnMut(&LaneCode, std::ops::Range<usize>),
     ) -> usize {
-        let (k, one) = (phase as usize, self.scalar[phase as usize]);
+        let (k, one) = (phase as usize, self.scalar_cost_per_phase[phase as usize]);
         let pays = |lc: &&LaneCode| lc.pays(k, one);
-        let Some(widest) = self.lanes.iter().find(pays) else {
+        let Some(widest) = self.lanes_widest_first.iter().find(pays) else {
             return 0;
         };
         let full = n / widest.tape.lanes * widest.tape.lanes;
         if full > 0 {
             run(widest, 0..full);
         }
-        // The rest, fewer than a block: `best[m]` the cheapest way to take
-        // `m` of it, and the lane code it starts with (`None`: scalar).
         let rest = n - full;
-        let mut best = [(0usize, None::<usize>); MAX_LANES];
+        let mut cheapest_cost_and_first_lane_code = [(0usize, None::<usize>); MAX_LANES];
+        let best = &mut cheapest_cost_and_first_lane_code;
         for m in 1..=rest {
             best[m] = (best[m - 1].0 + one, None);
-            for (i, lc) in self.lanes.iter().enumerate().filter(|(_, lc)| pays(lc)) {
-                let c = best[m.saturating_sub(lc.tape.lanes)].0 + lc.block[k];
+            for (i, lc) in self
+                .lanes_widest_first
+                .iter()
+                .enumerate()
+                .filter(|(_, lc)| pays(lc))
+            {
+                let c = best[m.saturating_sub(lc.tape.lanes)].0 + lc.block_cost_per_phase[k];
                 if c < best[m].0 {
                     best[m] = (c, Some(i));
                 }
@@ -300,8 +240,8 @@ impl NativeBody {
         while m > 0 {
             match best[m].1 {
                 Some(i) => {
-                    let w = self.lanes[i].tape.lanes.min(m);
-                    run(&self.lanes[i], g..g + w);
+                    let w = self.lanes_widest_first[i].tape.lanes.min(m);
+                    run(&self.lanes_widest_first[i], g..g + w);
                     g += w;
                     m -= w;
                 }
@@ -311,14 +251,6 @@ impl NativeBody {
         g
     }
 
-    /// The instances `at` lists at positions `block` through the lane
-    /// code `lc`, its width at a time: lane `l` of every slot and input is
-    /// the block's instance `l` (a short last block repeats its last
-    /// instance, whose copies are dropped). A prolog's arguments are the
-    /// pure ones, completed with NaN as
-    /// [`prolog_into`](ExternBundle::prolog_into) completes them, and it
-    /// writes `states`; a main phase reads `states`; a main phase or a
-    /// whole run writes `out`.
     #[allow(clippy::too_many_arguments)]
     fn run_lanes(
         &self,
@@ -335,10 +267,7 @@ impl NativeBody {
         let (l, sl, n_out) = (lt.lanes, self.tape.state_len, self.n_out);
         let (n_args, stride) = (at.n_args, at.stride);
         let n_in = lt.layout.n_inputs.max(n_args).max(self.pure.len());
-        // Only the inputs the phase reads move into the lanes; a prolog's
-        // arguments are the pure ones, input `k` the pure argument of its
-        // rank among them.
-        let moved = &lc.reads[phase as usize];
+        let moved = &lc.inputs_moved_into_lanes_per_phase[phase as usize];
         let range = match phase {
             Phase::Prolog => 0..lt.prolog_chunks,
             Phase::Main => lt.prolog_chunks..lt.chunks.len(),
@@ -347,19 +276,15 @@ impl NativeBody {
         rsdag::scratch::with_len(lt.layout.total, 0.0, |work: &mut [f64]| {
             rsdag::scratch::with_len(n_in * l, f64::NAN, |ins: &mut [f64]| {
                 let end = block.end;
-                // The state rows the lanes hold: a block whose lanes read the
-                // rows of the block before (instances sharing a row, see
-                // `Rows`) finds them in place, as no phase writes the state
-                // a main phase reads.
-                let mut held: Option<[usize; MAX_LANES]> = None;
+                let mut state_rows_in_lanes: Option<[usize; MAX_LANES]> = None;
                 for c in block.step_by(l) {
                     let mut rows = [usize::MAX; MAX_LANES];
                     for (lane, r) in rows.iter_mut().enumerate().take(l) {
                         *r = at.row(at.at((c + lane).min(end - 1)));
                     }
-                    let fresh = phase != Phase::Main || held != Some(rows);
+                    let fresh = phase != Phase::Main || state_rows_in_lanes != Some(rows);
                     if fresh {
-                        held = (phase == Phase::Main).then_some(rows);
+                        state_rows_in_lanes = (phase == Phase::Main).then_some(rows);
                     }
                     for lane in 0..l {
                         let g = at.at((c + lane).min(end - 1));
@@ -367,7 +292,7 @@ impl NativeBody {
                         for &k in moved {
                             let k = k as usize;
                             ins[k * l + lane] = if phase == Phase::Prolog {
-                                self.rank
+                                self.rank_among_pure
                                     .get(k)
                                     .copied()
                                     .flatten()
@@ -418,9 +343,10 @@ impl ExternBundle for NativeBody {
     fn work_len(&self) -> usize {
         self.tape.layout.total + self.pure.len()
     }
-    /// Its widest lane code's width (see `lanes_first`).
     fn batch_lanes(&self) -> usize {
-        self.lanes.first().map_or(1, |lc| lc.tape.lanes)
+        self.lanes_widest_first
+            .first()
+            .map_or(1, |lc| lc.tape.lanes)
     }
     fn call_into(&self, args: &[f64], work: &mut [f64], out: &mut [f64]) {
         let w = &mut work[..self.tape.layout.total];
@@ -451,7 +377,7 @@ impl ExternBundle for NativeBody {
         }
     }
     fn prolog_batch(&self, pure: &[f64], states: &mut [f64], at: &Instances) {
-        let k0 = self.lanes_first(Phase::Prolog, at.len(), |lc, r| {
+        let k0 = self.lanes_first_returning_scalar_start(Phase::Prolog, at.len(), |lc, r| {
             self.run_lanes(
                 lc,
                 Phase::Prolog,
@@ -472,7 +398,7 @@ impl ExternBundle for NativeBody {
         });
     }
     fn main_batch(&self, args: &[f64], states: &[f64], out: &mut [f64], at: &Instances) {
-        let k0 = self.lanes_first(Phase::Main, at.len(), |lc, r| {
+        let k0 = self.lanes_first_returning_scalar_start(Phase::Main, at.len(), |lc, r| {
             self.run_lanes(
                 lc,
                 Phase::Main,
@@ -496,7 +422,7 @@ impl ExternBundle for NativeBody {
     fn call_batch(&self, args: &[f64], n_groups: usize, n_args: usize, out: &mut [f64]) {
         if self.batch == Batch::Serial {
             let at = Instances::first(n_groups, n_args, 0);
-            let g0 = self.lanes_first(Phase::Whole, n_groups, |lc, r| {
+            let g0 = self.lanes_first_returning_scalar_start(Phase::Whole, n_groups, |lc, r| {
                 self.run_lanes(lc, Phase::Whole, args, &at, r, None, None, Some(&mut *out))
             });
             rsdag::scratch::with::<Vec<f64>, _>(|work| {
@@ -514,8 +440,6 @@ impl ExternBundle for NativeBody {
             });
             return;
         }
-        // Ranges of instances the threads claim, each over a work buffer of
-        // its thread's.
         rspool::chunks_mut::<rspool::rayon::Rayon, _>(out, self.n_out, work, |g0, dst| {
             let g1 = g0 + dst.len() / self.n_out;
             let ins = &args[g0 * n_args..g1 * n_args];
@@ -526,8 +450,6 @@ impl ExternBundle for NativeBody {
     }
 }
 
-/// `body` as native code behind the bundle interface ([`NativeBody`]), with
-/// its lane form where that pays.
 fn native_body(
     body: &Tape,
     pure: &[bool],
@@ -538,11 +460,9 @@ fn native_body(
     let sl = body.state_len();
     let lanes = match opts.lanes {
         Lanes::Never => Vec::new(),
-        _ => NativeTape::compile_lanes(body),
+        _ => NativeTape::compile_lanes_widest_first(body),
     };
-    // Forced, the scalar code is never the cheaper way.
-    // lit: headroom for the lane count's multiples
-    let mut scalar = [usize::MAX / 16; PHASES];
+    let mut scalar = [FORCED_LANES_SCALAR_COST_WITHOUT_OVERFLOW; PHASES];
     let lanes: Vec<LaneCode> = lanes
         .into_iter()
         .map(|lt| {
@@ -556,8 +476,8 @@ fn native_body(
             let reads = [lt.reads[0].clone(), lt.reads[1].clone(), whole];
             LaneCode {
                 tape: lt,
-                block,
-                reads,
+                block_cost_per_phase: block,
+                inputs_moved_into_lanes_per_phase: reads,
             }
         })
         .collect();
@@ -565,14 +485,15 @@ fn native_body(
         .into_iter()
         .filter(|lc| (0..PHASES).any(|k| lc.pays(k, scalar[k])))
         .collect::<Vec<_>>();
+    debug_assert!(lanes.windows(2).all(|w| w[0].tape.lanes > w[1].tape.lanes));
     rsprobe::add!("lane forms", lanes.len());
     Ok(Arc::new(NativeBody {
         tape: NativeTape::compile_opts(body, opts, &[])?,
-        lanes,
-        scalar,
+        lanes_widest_first: lanes,
+        scalar_cost_per_phase: scalar,
         n_out: no,
         pure: pure.to_vec(),
-        rank: pure
+        rank_among_pure: pure
             .iter()
             .scan(0, |next, &p| {
                 *next += usize::from(p);
@@ -584,8 +505,6 @@ fn native_body(
     }))
 }
 
-/// The options a native body's code was emitted under, as a key of the
-/// body's backend cache.
 fn options_key(opts: &Options) -> u64 {
     let batch = match opts.batch {
         Batch::Serial => 0,
@@ -597,27 +516,20 @@ fn options_key(opts: &Options) -> u64 {
         Lanes::Always => 1,
         Lanes::Never => 2,
     };
-    // lit: the key's fields, chunk size, batch and lanes
-    ((opts.chunk_ops as u64) << 32) ^ batch ^ (lanes << 62)
+    ((opts.chunk_ops as u64) << OPTIONS_KEY_CHUNK_OPS_SHIFT)
+        ^ batch
+        ^ (lanes << OPTIONS_KEY_LANES_SHIFT)
 }
 
-/// The buffers the code runs over: the work array, the tape's slots, then
-/// the gather area for host calls, then the scratch a called bundle or a
-/// solve gets; and the inputs it reads.
 #[derive(Clone, Copy)]
 pub(crate) struct Layout {
-    /// First element of the gather area (after the slots).
-    pub(crate) gather: usize,
-    /// First element of the scratch, and its length.
-    pub(crate) scratch: usize,
+    pub(crate) gather_start: usize,
+    pub(crate) scratch_start: usize,
     pub(crate) scratch_len: usize,
     total: usize,
-    /// Inputs the code reads (per lane).
     pub(crate) n_inputs: usize,
 }
 
-/// One chunk as emitted: its machine code, and the calls, kernel
-/// descriptors and tables the code holds the addresses of.
 struct Emitted {
     bytes: Vec<u8>,
     calls: Vec<Call<'static>>,
@@ -625,9 +537,10 @@ struct Emitted {
     tables: Vec<Box<[u32]>>,
 }
 
-// The mapping is immutable after `Mapping::new`, so calling the code from
-// any thread is sound.
+// SAFETY: the mapping is immutable after `Mapping::new`, so calling the
+// code from any thread is sound.
 unsafe impl Send for Mapping {}
+// SAFETY: as for `Send`, nothing writes the mapping after `Mapping::new`.
 unsafe impl Sync for Mapping {}
 
 impl NativeTape {
@@ -644,12 +557,7 @@ impl NativeTape {
         Self::compile_isa::<Arch>(tape, opts, live)
     }
 
-    /// The tape as code over several instances at once, each in its lane
-    /// of every register and every slot that many values side by side (see
-    /// [`NativeBody`]'s batches), widest first: four lanes with AVX2, and
-    /// two. None for bodies that call bodies or run dense kernels, nor off
-    /// x86-64.
-    fn compile_lanes(tape: &Tape) -> Vec<NativeTape> {
+    fn compile_lanes_widest_first(tape: &Tape) -> Vec<NativeTape> {
         #[cfg(target_arch = "x86_64")]
         {
             use crate::x86_64::X64;
@@ -691,10 +599,6 @@ impl NativeTape {
         {
             return Err(JitError::Unsupported);
         }
-        // Function bodies that are tapes become native bodies of their own,
-        // emitted once per body and options and shared by every program that
-        // calls it; a body with tapes of its own (per-binding variants) has
-        // them compiled the same way.
         let o = *opts;
         let backend = rsdag::BodyBackend {
             compile: Some(Arc::new(move |t: &Tape, pure: &[bool], n_out: usize| {
@@ -720,10 +624,8 @@ impl NativeTape {
                             None => Ok(b.clone()),
                         }
                     };
-                    // The form of the bundle the program runs: its code by the
-                    // options, and where its work goes.
-                    // lit: a bit of the key options_key leaves free
-                    let key = options_key(opts) ^ (u64::from(opts.background) << 61);
+                    let key = options_key(opts)
+                        ^ (u64::from(opts.background) << OPTIONS_KEY_FREE_BIT_FOR_BACKGROUND);
                     match b.backend_cache() {
                         Some(cache) => cache.get_or_try_insert(key, make),
                         None => make(),
@@ -732,49 +634,42 @@ impl NativeTape {
                 .collect()
         };
         let bundles = bundles?;
-        // The inputs each phase reads; the code reads none past them nor
-        // past an output that is an input.
         let reads = [tape.reads(0..split), tape.reads(split..n)];
         let n_inputs = (reads.iter().flatten().copied())
             .chain(tape.outputs().iter().filter_map(|&o| input_index(o)))
             .map(|i| i as usize + 1)
             .max()
             .unwrap_or(0);
-        let mut phase_ops = [(0usize, 0usize); 2];
+        let mut phase_ops_and_host_calls = [(0usize, 0usize); 2];
         for (k, op) in ops.iter().enumerate() {
-            let p = &mut phase_ops[usize::from(k >= split)];
-            // Lane code computes an exponential or a logarithm for every
-            // lane at once: about a host call's cost per block.
-            let all_lanes = lanes > 1 && matches!(op, Op::Unary(UnaryOp::Exp | UnaryOp::Ln, _));
-            p.0 += if all_lanes { 1 + LANE_CALL } else { 1 };
-            p.1 += usize::from(routine::<A>(op).is_some() && !all_lanes);
+            let p = &mut phase_ops_and_host_calls[usize::from(k >= split)];
+            let exp_ln_on_all_lanes_costs_a_host_call =
+                lanes > 1 && matches!(op, Op::Unary(UnaryOp::Exp | UnaryOp::Ln, _));
+            p.0 += if exp_ln_on_all_lanes_costs_a_host_call {
+                1 + LANE_HOST_CALL_COST_OPS
+            } else {
+                1
+            };
+            p.1 +=
+                usize::from(routine::<A>(op).is_some() && !exp_ln_on_all_lanes_costs_a_host_call);
         }
-        // Scalar code gathers as the tape does; lane code gathers lane by
-        // lane.
         let gather_len = match lanes {
             1 => tape.gather_len(),
             _ => ops.iter().map(lane_gather_len::<A>).max().unwrap_or(0),
         };
         let n_work = tape.n_slots();
-        // When each value dies; the outputs are read after the program.
         let liveness = Liveness::new(tape, tape.outputs().iter().chain(live).copied());
-        // The scratch the tape lends, or more where a native body works in
-        // more.
         let scratch_len = (bundles.iter().map(|b| b.work_len()))
             .chain([tape.lent()])
             .max()
             .unwrap_or(0);
         let layout = Box::new(Layout {
-            gather: n_work * lanes,
-            scratch: n_work * lanes + gather_len,
+            gather_start: n_work * lanes,
+            scratch_start: n_work * lanes + gather_len,
             scratch_len,
             total: (n_work * lanes + gather_len + scratch_len).max(1),
             n_inputs,
         });
-        // Chunk the prolog and main phases separately so no chunk straddles
-        // the split, nor a stage: its last call runs the stage's calls from
-        // its chunk's descriptors. A region's pieces are whole chunks: a
-        // chunk starts with each.
         let mut cuts: Vec<usize> = (tape.regions().iter())
             .flat_map(|r| r.starts.iter().chain([&r.hi]))
             .map(|&k| k as usize)
@@ -786,12 +681,12 @@ impl NativeTape {
             .into_iter()
             .chain(chunked(tape, split..n, chunk_ops, &cuts))
             .collect();
+        debug_assert!(jobs.iter().all(|r| r.end <= split || r.start >= split));
         let chunk_at =
             |k: u32| (jobs.binary_search_by_key(&(k as usize), |r| r.start)).unwrap_or(jobs.len());
-        // Lane code calls the host through the gather area, one for all the
-        // pieces: its regions run serially.
+        let one_gather_area_serialises_lane_regions = lanes > 1;
         let regions = (tape.regions().iter())
-            .filter(|_| lanes == 1)
+            .filter(|_| !one_gather_area_serialises_lane_regions)
             .map(|r| ChunkRegion {
                 starts: r.starts.iter().map(|&k| chunk_at(k)).collect(),
                 hi: chunk_at(r.hi),
@@ -800,7 +695,6 @@ impl NativeTape {
             .collect();
         let emitted: Vec<Emitted> = {
             let _s = rsprobe::scope!("emit");
-            // The chunks' tasks run under this node, on whichever thread.
             let node = rsprobe::current();
             jobs.par_iter()
                 .map(|ops| {
@@ -809,16 +703,16 @@ impl NativeTape {
                 })
                 .collect()
         };
-        // One mapping for all of them: a chunk is position independent (it
-        // reaches host routines, descriptors and tables by absolute
-        // address), so it runs from wherever it lands, 16-byte aligned.
-        let size = emitted.iter().map(|e| e.bytes.len() + CODE_ALIGN - 1).sum();
+        let size = emitted
+            .iter()
+            .map(|e| e.bytes.len() + CODE_ALIGN_BYTES - 1)
+            .sum();
         let mut bytes: Vec<u8> = Vec::with_capacity(size);
         let mut offsets = Vec::with_capacity(emitted.len());
         let mut descs = Vec::with_capacity(emitted.len());
         let mut tables = Vec::new();
         for e in emitted {
-            bytes.resize(bytes.len().next_multiple_of(CODE_ALIGN), 0);
+            bytes.resize(bytes.len().next_multiple_of(CODE_ALIGN_BYTES), 0);
             offsets.push(bytes.len());
             bytes.extend_from_slice(&e.bytes);
             descs.push((e.calls, e.kernels));
@@ -833,29 +727,31 @@ impl NativeTape {
         };
         let chunks = offsets
             .iter()
-            // SAFETY: each offset is the entry of a function emitted for the
-            // `ChunkFn` convention, inside the mapping, which the tape keeps.
-            .map(|&o| unsafe { std::mem::transmute::<*mut u8, ChunkFn>(code.ptr.add(o)) })
+            .map(|&o| {
+                // SAFETY: each offset is the entry of a function emitted for
+                // the `ChunkFn` convention, inside the mapping, which the
+                // tape keeps.
+                unsafe { std::mem::transmute::<*mut u8, ChunkFn>(code.ptr.add(o)) }
+            })
             .collect();
         Ok(NativeTape {
-            _code: code,
+            _code_the_chunks_point_into: code,
             chunks,
-            _descs: descs,
+            _descs_the_code_points_to: descs,
             prolog_chunks,
             bundles,
-            _tables: tables,
+            _tables_the_code_points_to: tables,
             outputs: tape.outputs().to_vec(),
             layout,
             n_ops: n,
             state_len: tape.state_len(),
             lanes,
             reads,
-            phase_ops,
+            phase_ops_and_host_calls,
             regions,
         })
     }
 
-    /// `inputs` with at least `n_inputs` values, the missing ones `NaN`.
     fn padded<R>(&self, inputs: &[f64], f: impl FnOnce(&[f64]) -> R) -> R {
         match inputs.len() < self.layout.n_inputs {
             true => rsdag::scratch::with(|buf: &mut Vec<f64>| {
@@ -868,8 +764,6 @@ impl NativeTape {
         }
     }
 
-    /// Run the chunks in `range`; `inputs` has at least `n_inputs` values
-    /// and `work` the layout's length.
     fn run(&self, range: std::ops::Range<usize>, inputs: &[f64], work: &mut [f64]) {
         assert!(
             work.len() >= self.layout.total && inputs.len() >= self.layout.n_inputs * self.lanes,
@@ -880,13 +774,18 @@ impl NativeTape {
             inputs.as_ptr(),
             &*self.layout as *const Layout,
         );
-        // The pointers, for the pieces of a region on other threads.
-        let (w, i, l) = (wp as usize, ip as usize, lp as usize);
+        let (work_addr_sendable, inputs_addr_sendable, layout_addr_sendable) =
+            (wp as usize, ip as usize, lp as usize);
         let chunk = |c: usize| {
+            let (w, i, l) = (
+                work_addr_sendable as *mut f64,
+                inputs_addr_sendable as *const f64,
+                layout_addr_sendable as *const Layout,
+            );
             // SAFETY: the buffers were checked above, the code and the
             // tables it addresses live as long as `self`; a region's pieces
             // write slots no other piece reads or writes.
-            unsafe { self.chunks[c](w as *mut f64, i as *const f64, l as *const Layout) };
+            unsafe { self.chunks[c](w, i, l) };
             host::resume_panic();
         };
         let mut next = self.regions.partition_point(|r| r.starts[0] < range.start);
@@ -900,7 +799,12 @@ impl NativeTape {
                         let end = r.starts.get(k + 1).copied().unwrap_or(r.hi);
                         (r.starts[k]..end).for_each(chunk);
                     };
-                    rsdag::parallel::run_rated(r.starts.len(), r.ops as f64, &REGIONS, &piece);
+                    rsdag::parallel::run_rated(
+                        r.starts.len(),
+                        r.ops as f64,
+                        &NATIVE_REGION_OP_RATE,
+                        &piece,
+                    );
                     c = r.hi;
                     continue;
                 }
@@ -916,7 +820,6 @@ impl NativeTape {
         &self.bundles
     }
 
-    /// Ops `range` of chunks over `inputs`, then the outputs into `out`.
     fn eval_range(
         &self,
         range: std::ops::Range<usize>,
@@ -955,7 +858,7 @@ impl NativeTape {
             return;
         }
         let n_in = self.layout.n_inputs.max(stride);
-        let work = rspool::Work::of((n * self.n_ops) as f64, &REGIONS);
+        let work = rspool::Work::of((n * self.n_ops) as f64, &NATIVE_REGION_OP_RATE);
         rspool::chunks_mut::<rspool::rayon::Rayon, _>(out, n_out, work, |i, dst| {
             let ins = &inputs[i * stride..(i + dst.len() / n_out) * stride];
             rsdag::scratch::with::<Vec<f64>, _>(|work| {
@@ -974,47 +877,23 @@ impl NativeTape {
     }
 }
 
-// --- the emitter --------------------------------------------------------------
-
-/// The value cache over an architecture's instruction layer: which slot
-/// each cache register holds, whether memory has it yet, and which
-/// registers the current op still needs. Every operand `get` pins its
-/// register and every temporary is pinned by its maker, so an op can never
-/// evict what it is about to use; the pins clear when the op is done.
 struct Emitter<'a, I: Isa> {
     isa: I,
     tape: &'a Tape,
-    /// The bundles the calls call, as this backend runs them.
     bundles: &'a Bundles,
     layout: Layout,
-    /// When each value dies.
     live: &'a Liveness,
-    /// Global index of the op being emitted.
     pos: u32,
-    /// Global index of the next op that calls a host routine (`u32::MAX`
-    /// when the chunk has none left).
-    next_call: u32,
-    /// Slot held by each cache register (by cache index).
-    held: Vec<Option<u32>>,
-    /// Whether the register's value is newer than the slot in memory.
+    next_host_call: u32,
+    slot_of_cache: Vec<Option<u32>>,
     dirty: Vec<bool>,
-    /// The last op reading the register's value (see [`Liveness::death`]).
     death: Vec<u32>,
-    /// Cache index holding each slot.
-    at: FxHashMap<u32, usize>,
-    /// Cache index of each register number.
-    index: [u8; REG_NUMBERS],
+    cache_of_slot: FxHashMap<u32, usize>,
+    cache_of_reg: [u8; FLOAT_REG_NUMBERS],
     pinned: Vec<bool>,
-    /// Per slot the op being emitted reads last, its reads in the op still
-    /// to come: an inline product's operands, dead after their last read
-    /// in it.
-    left: FxHashMap<u32, u32>,
-    /// The chunk's calls and kernel descriptors, allocated for all of them
-    /// before the first is emitted (their addresses go into the code).
+    reads_left_in_op: FxHashMap<u32, u32>,
     calls: Vec<Call<'static>>,
     kernels: Vec<host::KernelDesc>,
-    /// The operand tables of the calls whose arguments the host gathers,
-    /// and the kernels' fold codes.
     tables: Vec<Box<[u32]>>,
 }
 
@@ -1026,7 +905,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
         live: &'a Liveness,
         hot: &[*const ()],
     ) -> Emitter<'a, I> {
-        let mut index = [0u8; REG_NUMBERS];
+        let mut index = [0u8; FLOAT_REG_NUMBERS];
         for (i, &r) in I::CACHE.iter().enumerate() {
             index[r as usize] = i as u8;
         }
@@ -1037,64 +916,49 @@ impl<'a, I: Isa> Emitter<'a, I> {
             layout,
             live,
             pos: 0,
-            next_call: u32::MAX,
-            held: vec![None; I::CACHE.len()],
+            next_host_call: u32::MAX,
+            slot_of_cache: vec![None; I::CACHE.len()],
             dirty: vec![false; I::CACHE.len()],
             death: vec![0; I::CACHE.len()],
-            at: Default::default(),
-            index,
+            cache_of_slot: Default::default(),
+            cache_of_reg: index,
             pinned: vec![false; I::CACHE.len()],
-            left: FxHashMap::default(),
+            reads_left_in_op: FxHashMap::default(),
             calls: Vec::new(),
             kernels: Vec::new(),
             tables: Vec::new(),
         }
     }
 
-    /// Forget what cache index `i` holds, writing it back first if memory
-    /// does not have it and some later op reads it. The current op counts
-    /// as later: an operand it has not fetched yet may be what is evicted
-    /// to make room for another.
     fn drop_index(&mut self, i: usize) {
-        if let Some(s) = self.held[i].take() {
-            if self.dirty[i] && self.death[i] >= self.pos {
+        if let Some(s) = self.slot_of_cache[i].take() {
+            let read_by_current_op_or_later = self.death[i] >= self.pos;
+            if self.dirty[i] && read_by_current_op_or_later {
                 self.isa.store(I::CACHE[i], Base::Work, Self::slot_off(s));
             }
             self.dirty[i] = false;
-            self.at.remove(&s);
+            self.cache_of_slot.remove(&s);
         }
     }
-    /// Write back everything still owed to memory (the chunk's end).
     fn flush(&mut self) {
         for i in 0..I::CACHE.len() {
             self.drop_index(i);
         }
     }
-    /// A register to write a temporary into (see [`fresh_in`](Self::fresh_in)),
-    /// evicting whatever it held; pinned for the rest of the op.
     fn fresh(&mut self) -> u8 {
         self.fresh_in(I::SAVED..I::CACHE.len())
     }
-    /// A register for the value op `pos` writes to `slot`.
     fn fresh_for(&mut self, slot: u32) -> u8 {
         self.fresh_until(self.live.death(slot, self.pos, true))
     }
-    /// A register for a value that dies at `death`: preferably callee-saved
-    /// when a host call comes before, so the call does not cost it a store
-    /// and a reload; preferably caller-saved otherwise.
     fn fresh_until(&mut self, death: u32) -> u8 {
-        let keep = I::SAVED > 0 && self.next_call <= death;
-        if keep {
+        let host_call_before_death = I::SAVED > 0 && self.next_host_call <= death;
+        if host_call_before_death {
             self.fresh_in(0..I::SAVED)
         } else {
             self.fresh_in(I::SAVED..I::CACHE.len())
         }
     }
-    /// A register from the preferred pool: first one that is empty or holds
-    /// a dead value, in either pool; else the one of the preferred pool
-    /// whose value is read again last (Belady's choice: its reload comes
-    /// the latest), a clean one before one that costs a store; else that
-    /// choice over every unpinned register.
     fn fresh_in(&mut self, pool: std::ops::Range<usize>) -> u8 {
         let n = I::CACHE.len();
         let other = if pool.start == 0 {
@@ -1108,49 +972,46 @@ impl<'a, I: Isa> Emitter<'a, I> {
             I::CACHE[i]
         };
         for i in pool.clone().chain(other) {
-            let dead = match self.held[i] {
+            let free = match self.slot_of_cache[i] {
                 None => true,
-                Some(s) => match input_index(s) {
-                    Some(_) => true, // an input reloads from the inputs
-                    None => self.death[i] < self.pos,
-                },
+                Some(s) => {
+                    let input_reloads_from_inputs = input_index(s).is_some();
+                    input_reloads_from_inputs || self.death[i] < self.pos
+                }
             };
-            if !self.pinned[i] && dead {
+            if !self.pinned[i] && free {
                 return take(self, i);
             }
         }
-        let victim = |e: &Self, r: std::ops::Range<usize>| {
+        let belady_victim = |e: &Self, r: std::ops::Range<usize>| {
             r.filter(|&i| !e.pinned[i]).max_by_key(|&i| {
-                let next = e.held[i].map_or(u32::MAX, |s| e.live.next_read(s, e.pos));
-                (next, !e.dirty[i])
+                let next = e.slot_of_cache[i].map_or(u32::MAX, |s| e.live.next_read(s, e.pos));
+                let clean_saves_a_store = !e.dirty[i];
+                (next, clean_saves_a_store)
             })
         };
-        match victim(self, pool).or_else(|| victim(self, 0..n)) {
+        match belady_victim(self, pool).or_else(|| belady_victim(self, 0..n)) {
             Some(i) => take(self, i),
             None => unreachable!("an op pins fewer than {n} registers"),
         }
     }
     fn pin(&mut self, r: u8) {
-        self.pinned[self.index[r as usize] as usize] = true;
+        self.pinned[self.cache_of_reg[r as usize] as usize] = true;
     }
-    /// Unpin every register except `keep`.
     fn release_except(&mut self, keep: &[u8]) {
         self.pinned.iter_mut().for_each(|p| *p = false);
         keep.iter().for_each(|&r| self.pin(r));
     }
-    /// The byte offset of slot (or input) `s`: its `LANES` values side by side.
     fn slot_off(s: u32) -> usize {
         s as usize * F64_BYTES * I::LANES
     }
-    /// The register holding `slot`, loading it if the cache does not have it.
     fn get(&mut self, slot: u32) -> u8 {
-        let r = match (self.at.get(&slot), input_index(slot)) {
+        let r = match (self.cache_of_slot.get(&slot), input_index(slot)) {
             (Some(&i), _) => {
                 self.pinned[i] = true;
                 I::CACHE[i]
             }
             (None, Some(k)) => {
-                // An input: read in place, cached, never written back.
                 let r = self.fresh();
                 self.isa.load(r, Base::Inputs, Self::slot_off(k));
                 self.bind(r, slot, 0);
@@ -1167,68 +1028,57 @@ impl<'a, I: Isa> Emitter<'a, I> {
         self.read_one(slot);
         r
     }
-    /// One of the reads [`left`](Self::left) counts is done; after the last
-    /// one the value is dead, its register free once the op releases it.
     fn read_one(&mut self, slot: u32) {
-        if self.left.is_empty() {
+        if self.reads_left_in_op.is_empty() {
             return;
         }
-        if let Some(n) = self.left.get_mut(&slot) {
+        if let Some(n) = self.reads_left_in_op.get_mut(&slot) {
             *n -= 1;
             if *n == 0 {
-                self.left.remove(&slot);
-                if let Some(i) = self.at.remove(&slot) {
-                    self.held[i] = None;
+                self.reads_left_in_op.remove(&slot);
+                if let Some(i) = self.cache_of_slot.remove(&slot) {
+                    self.slot_of_cache[i] = None;
                     self.dirty[i] = false;
                 }
             }
         }
     }
-    /// A kernel wrote the slots `dst .. dst+n`: whatever the cache held
-    /// for them is stale.
     fn invalidate(&mut self, dst: u32, n: u32) {
         for s in dst..dst + n {
-            if let Some(i) = self.at.remove(&s) {
-                self.held[i] = None;
+            if let Some(i) = self.cache_of_slot.remove(&s) {
+                self.slot_of_cache[i] = None;
                 self.dirty[i] = false;
             }
         }
     }
     fn bind(&mut self, r: u8, slot: u32, death: u32) {
-        // A slot rebound to a new value: the old one is dead by the tape's
-        // construction, so it is dropped without a write-back.
-        if let Some(i) = self.at.remove(&slot) {
-            self.held[i] = None;
+        let old_value_dead_by_tape_construction = self.cache_of_slot.remove(&slot);
+        if let Some(i) = old_value_dead_by_tape_construction {
+            self.slot_of_cache[i] = None;
             self.dirty[i] = false;
         }
-        let i = self.index[r as usize] as usize;
+        let i = self.cache_of_reg[r as usize] as usize;
         self.drop_index(i);
-        self.held[i] = Some(slot);
+        self.slot_of_cache[i] = Some(slot);
         self.death[i] = death;
-        self.at.insert(slot, i);
+        self.cache_of_slot.insert(slot, i);
     }
-    /// `r` is the value of `slot` now; memory will get it when it must.
     fn put(&mut self, slot: u32, r: u8) {
         let death = self.live.death(slot, self.pos, true);
         self.bind(r, slot, death);
-        self.dirty[self.index[r as usize] as usize] = true;
+        self.dirty[self.cache_of_reg[r as usize] as usize] = true;
     }
     fn fconst(&mut self, v: f64) -> u8 {
         let r = self.fresh();
         self.isa.fconst(r, v);
         r
     }
-    /// A host call; the caller-saved part of the cache is written back
-    /// where owed before, and gone afterwards.
     fn call(&mut self, addr: *const (), args: &[Arg]) {
         for i in I::SAVED..I::CACHE.len() {
             self.drop_index(i);
         }
         self.isa.call(addr, args);
     }
-    /// A host call whose result is the value of `dst`. With lanes, one call
-    /// per lane: the float arguments' lanes go to the gather area, each
-    /// call takes its lane's values, and the results come back together.
     fn call_into(&mut self, dst: u32, addr: *const (), args: &[Arg]) {
         if I::LANES == 1 {
             self.call(addr, args);
@@ -1238,7 +1088,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
             return;
         }
         let l = I::LANES;
-        let base = self.layout.gather * F64_BYTES;
+        let base = self.layout.gather_start * F64_BYTES;
         let mut nf = 0;
         for a in args {
             if let Arg::F(r) = *a {
@@ -1263,9 +1113,6 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 .collect()
         });
     }
-    /// Lane code's host call: one call per lane, `lane_args(self, lane)`
-    /// setting up lane `lane`'s and returning its arguments, the results
-    /// collected at byte `res` of the work array, then the value of `dst`.
     fn call_lanes(
         &mut self,
         dst: u32,
@@ -1285,15 +1132,12 @@ impl<'a, I: Isa> Emitter<'a, I> {
         self.isa.load(r, Base::Work, res);
         self.put(dst, r);
     }
-    /// Copy `slots` into the gather area; its byte offset.
     fn gather(&mut self, slots: &[u32]) -> usize {
         self.gather_at(slots, None, 0)
     }
-    /// Copy `slots` into the gather area from element `at` on; the byte
-    /// offset of the copy.
     fn gather_at(&mut self, slots: &[u32], places: Option<&[u32]>, at: usize) -> usize {
         debug_assert_eq!(I::LANES, 1, "lane code gathers lane by lane");
-        let base = (self.layout.gather + at) * F64_BYTES;
+        let base = (self.layout.gather_start + at) * F64_BYTES;
         for (k, &s) in slots.iter().enumerate() {
             let r = self.get(s);
             let to = places.map_or(k, |p| p[k] as usize);
@@ -1303,11 +1147,9 @@ impl<'a, I: Isa> Emitter<'a, I> {
         base
     }
 
-    /// The slots among `slots` whose newest value is only in a register,
-    /// written back, so a host routine reading memory finds them.
     fn publish(&mut self, slots: &[u32]) {
         for s in slots {
-            if let Some(&i) = self.at.get(s) {
+            if let Some(&i) = self.cache_of_slot.get(s) {
                 if self.dirty[i] {
                     self.isa.store(I::CACHE[i], Base::Work, Self::slot_off(*s));
                     self.dirty[i] = false;
@@ -1316,17 +1158,12 @@ impl<'a, I: Isa> Emitter<'a, I> {
         }
     }
 
-    /// Where a kernel's dense operand of `len` values is: in place (inputs,
-    /// a consecutive run of work slots), or gathered into the gather area
-    /// from `*at` on, so the area holds exactly the slots a kernel gathers.
     fn dense_arg(&mut self, o: Operand, len: u32, at: &mut usize) -> host::Place {
         let (base, off) = match o {
             Operand::Inputs(k) => (host::Place::INPUTS, k as usize * F64_BYTES),
             Operand::Run(s) => {
-                // Read in place: whatever of the run the register cache
-                // still owes to memory is written back first.
                 for slot in s..s + len {
-                    if let Some(&i) = self.at.get(&slot) {
+                    if let Some(&i) = self.cache_of_slot.get(&slot) {
                         self.drop_index(i);
                     }
                 }
@@ -1340,11 +1177,10 @@ impl<'a, I: Isa> Emitter<'a, I> {
         };
         host::Place {
             base,
-            off: off as u64,
+            byte_offset: off as u64,
         }
     }
 
-    /// `v` in a table kept as long as the code, which holds its address.
     fn keep(&mut self, v: &[u32]) -> &'static [u32] {
         let t: Box<[u32]> = v.into();
         // SAFETY: the box goes with the code (`NativeTape::_tables`), and
@@ -1354,7 +1190,6 @@ impl<'a, I: Isa> Emitter<'a, I> {
         r
     }
 
-    /// Op `i` of the tape.
     fn op(&mut self, i: usize) {
         self.op_inner(i);
         self.release_except(&[]);
@@ -1372,7 +1207,6 @@ impl<'a, I: Isa> Emitter<'a, I> {
             Op::Sub(a, b) => self.bin2(Arith::Sub, dst, a, b),
             Op::Mul(a, b) => self.bin2(Arith::Mul, dst, a, b),
             Op::MulAdd(a, b, c) => {
-                // Two roundings, like the interpreter.
                 let x = self.get(a);
                 let m = self.fresh();
                 self.arith_rm(Arith::Mul, m, x, b);
@@ -1391,8 +1225,6 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 }
                 (2, _) => self.bin2(Arith::Mul, dst, a, a),
                 (_, Some(magnitude)) => {
-                    // `semantics::powi_f64`'s binary exponentiation, product
-                    // for product, so the result is the reference's bits.
                     let mut base = self.get(a);
                     let low = magnitude.trailing_zeros();
                     for _ in 0..low {
@@ -1483,21 +1315,33 @@ impl<'a, I: Isa> Emitter<'a, I> {
             Op::Gemm { a, b, m, k, n, acc } if inline_product(&op) => {
                 self.product(dst, a, b, (m, k, n), acc)
             }
-            Op::Gemv { a, x, m, n, acc } => {
-                self.kernel(i, 0, (m, 0, n), &[(a, m * n), (x, n)], acc)
-            }
-            Op::Gemm { a, b, m, k, n, acc } => {
-                self.kernel(i, 1, (m, k, n), &[(a, m * k), (b, n * k)], acc)
-            }
+            Op::Gemv { a, x, m, n, acc } => self.kernel(
+                i,
+                host::KernelDesc::GEMV,
+                (m, 0, n),
+                &[(a, m * n), (x, n)],
+                acc,
+            ),
+            Op::Gemm { a, b, m, k, n, acc } => self.kernel(
+                i,
+                host::KernelDesc::GEMM,
+                (m, k, n),
+                &[(a, m * k), (b, n * k)],
+                acc,
+            ),
             Op::Solve { a, b, n, k, count } => {
                 let srcs = [(a, count * n * n), (b, count * n * k)];
-                self.kernel(i, 2, (count, k, n), &srcs, None)
+                self.kernel(
+                    i,
+                    host::KernelDesc::SOLVE_M_SYSTEMS_K_RHS,
+                    (count, k, n),
+                    &srcs,
+                    None,
+                )
             }
         }
     }
 
-    /// A reduction over `args`; a min or max `inline` as a chain of
-    /// instructions.
     fn reduce(&mut self, dst: u32, rop: ReduceOp, args: &[u32], inline: bool) {
         match rop {
             ReduceOp::Sum => {
@@ -1509,7 +1353,6 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 self.put(dst, r);
             }
             ReduceOp::Min | ReduceOp::Max if inline => {
-                // The reference's left fold, one instruction per term.
                 let first = self.get(args[0]);
                 let mut acc = self.fresh();
                 self.isa.mov(acc, first);
@@ -1523,28 +1366,27 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 self.put(dst, acc);
             }
             ReduceOp::Min | ReduceOp::Max if I::LANES > 1 => {
-                // Lane by lane: each term's lanes to the gather area, one
-                // lane's terms side by side for the routine, its result
-                // into its lane.
                 let (l, m) = (I::LANES, args.len());
-                let base = self.layout.gather * F64_BYTES;
+                let base = self.layout.gather_start * F64_BYTES;
                 for (j, &a) in args.iter().enumerate() {
                     let r = self.get(a);
                     self.isa.store(r, Base::Work, base + j * l * F64_BYTES);
                     self.release_except(&[]);
                 }
-                let (row, res) = (base + m * l * F64_BYTES, base + (m * l + m) * F64_BYTES);
-                self.call_lanes(dst, host::h_reduce as *const (), res, |e, lane| {
+                let (one_lane_terms, results) =
+                    (base + m * l * F64_BYTES, base + (m * l + m) * F64_BYTES);
+                self.call_lanes(dst, host::h_reduce as *const (), results, |e, lane| {
                     for j in 0..m {
                         let t = e.fresh();
                         e.isa
                             .load_lane(t, Base::Work, base + (j * l + lane) * F64_BYTES);
-                        e.isa.store_lane(t, Base::Work, row + j * F64_BYTES);
+                        e.isa
+                            .store_lane(t, Base::Work, one_lane_terms + j * F64_BYTES);
                         e.release_except(&[]);
                     }
                     vec![
                         Arg::I(IArg::Imm(host::reduce_code(rop))),
-                        Arg::I(IArg::WorkAddr(row)),
+                        Arg::I(IArg::WorkAddr(one_lane_terms)),
                         Arg::I(IArg::Imm(m as u64)),
                     ]
                 });
@@ -1561,25 +1403,20 @@ impl<'a, I: Isa> Emitter<'a, I> {
         }
     }
 
-    /// Call op `i`, of bundle `bundle`. A call of a stage gathers apart
-    /// from the others of it; the stage's last one hands them all to
-    /// `h_stage`.
     fn call_op(&mut self, i: usize, bundle: u32) {
         let t = self.tape;
         let c = t.call(i);
         let operands = c.operands.expect("a call of the tape names its operands");
-        // A wide call has the host gather its arguments from tables.
-        let table = operands.len() >= GATHER_TABLE;
-        if table {
+        let host_gathers_from_table = operands.len() >= HOST_GATHER_MIN_ARGS;
+        if host_gathers_from_table {
             self.publish(operands);
         } else {
-            // where each operand goes among the instances' arguments
-            let places: Option<Vec<u32>> = c.places.map(|p| {
+            let arg_index_of_operand: Option<Vec<u32>> = c.places.map(|p| {
                 (0..operands.len())
                     .map(|k| ((k / p.len()) * c.n_args) as u32 + p[k % p.len()])
                     .collect()
             });
-            self.gather_at(operands, places.as_deref(), c.args);
+            self.gather_at(operands, arg_index_of_operand.as_deref(), c.args);
         }
         // SAFETY: the bundles go with the code (`NativeTape::bundles`), and
         // what an `Arc` holds never moves.
@@ -1591,8 +1428,11 @@ impl<'a, I: Isa> Emitter<'a, I> {
             n_groups: c.n_groups,
             n_args: c.n_args,
             n_out: c.n_out,
-            operands: table.then(|| self.keep(operands)),
-            places: c.places.filter(|_| table).map(|p| self.keep(p)),
+            operands: host_gathers_from_table.then(|| self.keep(operands)),
+            places: c
+                .places
+                .filter(|_| host_gathers_from_table)
+                .map(|p| self.keep(p)),
             own: c.own.map(|o| self.keep(o)),
             args: c.args,
             out: c.out,
@@ -1601,8 +1441,6 @@ impl<'a, I: Isa> Emitter<'a, I> {
         };
         let d = self.calls.len();
         assert!(d < self.calls.capacity(), "calls counted before emission");
-        // The table was sized up front: pushing never moves it, so the
-        // address baked into the code stays valid.
         self.calls.push(call);
         let at = |e: &Self, k: usize| Arg::I(IArg::Imm(&e.calls[k] as *const Call as u64));
         let (work, inputs) = (Arg::I(IArg::WorkAddr(0)), Arg::I(IArg::InputAddr(0)));
@@ -1631,9 +1469,6 @@ impl<'a, I: Isa> Emitter<'a, I> {
         }
     }
 
-    /// Dense kernel op `i` through `h_kernel` (see [`host::KernelDesc`] for
-    /// `kind` and its dimensions): its operands `srcs`, then the
-    /// accumulator when a fold reads one.
     fn kernel(
         &mut self,
         i: usize,
@@ -1646,8 +1481,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
         let (dst, width) = (t.dst(i), t.width(i));
         let c = acc.and_then(|f| f.c).map(|c| (c, width));
         let mut at = 0usize;
-        // lit: a kernel's three operands (host::KernelDesc)
-        let mut operands = [host::Place::NONE; 3];
+        let mut operands = [host::Place::NONE; KERNEL_OPERANDS_A_XB_ACCUMULATOR];
         for (p, &(src, len)) in operands.iter_mut().zip(srcs.iter().chain(&c)) {
             *p = self.dense_arg(t.operand(src, len), len, &mut at);
         }
@@ -1657,17 +1491,15 @@ impl<'a, I: Isa> Emitter<'a, I> {
             m: m as u64,
             k: k as u64,
             n: n as u64,
-            operands,
-            codes,
-            out: dst as u64 * F64_BYTES as u64,
+            operands_a_xb_accumulator: operands,
+            fold_codes_addr_or_zero: codes,
+            out_byte_offset: dst as u64 * F64_BYTES as u64,
         };
         let d = self.kernels.len();
         assert!(
             d < self.kernels.capacity(),
             "kernel descriptors counted before emission"
         );
-        // Sized up front: pushing never moves the table, so the address
-        // baked into the code stays valid.
         self.kernels.push(desc);
         let ptr = &self.kernels[d] as *const host::KernelDesc as u64;
         let args = [
@@ -1680,11 +1512,6 @@ impl<'a, I: Isa> Emitter<'a, I> {
         self.invalidate(dst, width);
     }
 
-    /// A product kernel of fewer than [`INLINE_ROWS`](crate::constants::INLINE_ROWS) rows, `m` rows of `k`
-    /// in `a` against `n` rows of `k` in `b`, inline: every entry the dot
-    /// of its row and its column (the kernel's own fold, see
-    /// [`rsdag::semantics::gemm`]), then the entries that fold, in entry
-    /// order, against their accumulator operand or another entry's product.
     fn product(
         &mut self,
         dst: u32,
@@ -1698,15 +1525,11 @@ impl<'a, I: Isa> Emitter<'a, I> {
         let (a, b) = (t.operand(a, m * k), t.operand(b, n * k));
         let c = acc.and_then(|f| f.c).map(|c| t.operand(c, width));
         let codes = acc.map_or(&[][..], |f| t.pool(f.codes, width));
-        // Element `e` of a dense operand.
         let elem = |o: Operand, e: u32| match o {
             Operand::Inputs(i) => (i + e) | INPUT,
             Operand::Run(s) => s + e,
             Operand::Slots(v) => v[e as usize],
         };
-        // The operands no later op reads are dead after their last read
-        // here: a row's entries are read once per column, a column's once
-        // per row, an accumulator's by its fold.
         let mut reads: Vec<(u32, u32)> = (0..m * k).map(|e| (elem(a, e), n)).collect();
         reads.extend((0..n * k).map(|e| (elem(b, e), m)));
         if let Some(c) = c {
@@ -1719,7 +1542,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
         }
         for (s, n) in reads {
             if input_index(s).is_none() && self.live.death(s, self.pos, false) == self.pos {
-                *self.left.entry(s).or_default() += n;
+                *self.reads_left_in_op.entry(s).or_default() += n;
             }
         }
         for e in 0..width {
@@ -1745,7 +1568,10 @@ impl<'a, I: Isa> Emitter<'a, I> {
             }
             self.release_except(&[]);
         }
-        debug_assert!(self.left.is_empty(), "every read of a product counted");
+        debug_assert!(
+            self.reads_left_in_op.is_empty(),
+            "every read of a product counted"
+        );
     }
 
     fn neg(&mut self, dst: u32, a: u32) {
@@ -1762,14 +1588,10 @@ impl<'a, I: Isa> Emitter<'a, I> {
         self.put(dst, r);
     }
 
-    /// `d = a op slot`: the second operand from memory when the ISA reads
-    /// memory operands and the cache does not hold a value this op reads
-    /// last (a load would take a register and an instruction for nothing),
-    /// else from its register.
     fn arith_rm(&mut self, op: Arith, d: u8, a: u8, slot: u32) {
         if I::MEM_OPERANDS
             && input_index(slot).is_none()
-            && !self.at.contains_key(&slot)
+            && !self.cache_of_slot.contains_key(&slot)
             && self.live.death(slot, self.pos, false) == self.pos
         {
             self.isa
@@ -1783,11 +1605,8 @@ impl<'a, I: Isa> Emitter<'a, I> {
 
     fn unary(&mut self, dst: u32, uop: UnaryOp, a: u32) {
         let x = self.get(a);
-        // The result register only for an op done inline: a host call
-        // returns its result in its own.
         let inline = match uop {
             UnaryOp::Sqrt => {
-                // x <= 0 ? 0 : sqrt(x), the reference's guard (NaN stays NaN).
                 let r = self.fresh_for(dst);
                 let zero = self.fconst(0.0);
                 let s = self.fresh();
@@ -1832,7 +1651,6 @@ impl<'a, I: Isa> Emitter<'a, I> {
             Some(r) => self.put(dst, r),
             None => {
                 let (addr, code) = host::unary_addr(uop);
-                // The coded routine takes the op first: `h_unary_ext(op, x)`.
                 let args: Vec<Arg> = code
                     .into_iter()
                     .map(|c| Arg::I(IArg::Imm(c as u64)))
@@ -1843,12 +1661,6 @@ impl<'a, I: Isa> Emitter<'a, I> {
         }
     }
 
-    /// A reduction (or, with `b`, a dot) in the reference order: four
-    /// accumulators, merged as `(a0 + a1) + (a2 + a3)`, then the tail.
-    /// Accumulators stay pinned across the terms; a term's registers are
-    /// released once it is folded in, so a long list needs seven registers,
-    /// not one per operand. Under four terms the merged accumulators are
-    /// the identity itself (`+0` or `1`, exactly), so the fold starts there.
     fn fold(&mut self, op: Arith, ident: f64, a: &[u32], b: Option<&[u32]>) -> u8 {
         let n = a.len();
         let ch = n / FOLD_LANES;
@@ -1862,10 +1674,11 @@ impl<'a, I: Isa> Emitter<'a, I> {
                     self.release_except(&acc);
                 }
             }
+            let [a0, a1, a2, a3] = acc;
             let l = self.fresh();
-            self.isa.arith(op, l, acc[0], acc[1]);
+            self.isa.arith(op, l, a0, a1);
             let r = self.fresh();
-            self.isa.arith(op, r, acc[2], acc[3]);
+            self.isa.arith(op, r, a2, a3);
             let s = self.fresh();
             self.isa.arith(op, s, l, r);
             s
@@ -1879,8 +1692,6 @@ impl<'a, I: Isa> Emitter<'a, I> {
         s
     }
 
-    /// `d = acc op term k` of a fold: the term is the operand, or for a dot
-    /// the product.
     fn term(&mut self, op: Arith, d: u8, acc: u8, a: &[u32], b: Option<&[u32]>, k: usize) {
         match b {
             None => self.arith_rm(op, d, acc, a[k]),
@@ -1894,8 +1705,8 @@ impl<'a, I: Isa> Emitter<'a, I> {
     }
 }
 
-/// The host routines `ops` call on the ISA `I`, most frequent first.
-fn hot_routines<I: Isa>(ops: &[Op]) -> Vec<*const ()> {
+fn hot_routines_most_frequent_first<I: Isa>(ops: &[Op]) -> Vec<*const ()> {
+    const MIN_CALLS_WORTH_A_PROLOGUE_LOAD: usize = 2;
     let mut count: Vec<(*const (), usize)> = Vec::new();
     for h in ops.iter().filter_map(routine::<I>) {
         match count.iter_mut().find(|(a, _)| *a == h) {
@@ -1903,13 +1714,11 @@ fn hot_routines<I: Isa>(ops: &[Op]) -> Vec<*const ()> {
             None => count.push((h, 1)),
         }
     }
-    // A routine called once is not worth a register load in the prologue.
-    count.retain(|&(_, n)| n >= 2);
+    count.retain(|&(_, n)| n >= MIN_CALLS_WORTH_A_PROLOGUE_LOAD);
     count.sort_by_key(|a| std::cmp::Reverse(a.1));
     count.into_iter().map(|(a, _)| a).collect()
 }
 
-/// The ops `range` of `tape` as one chunk of code.
 fn emit_chunk<A: Isa>(
     tape: &Tape,
     range: std::ops::Range<usize>,
@@ -1918,13 +1727,12 @@ fn emit_chunk<A: Isa>(
     bundles: &Bundles,
 ) -> Emitted {
     let ops = &tape.ops()[range.clone()];
-    let hot = hot_routines::<A>(ops);
-    // For each op, the next op at or after it that calls out.
-    let mut next_call = vec![u32::MAX; ops.len() + 1];
+    let hot = hot_routines_most_frequent_first::<A>(ops);
+    let mut next_host_call_at_or_after = vec![u32::MAX; ops.len() + 1];
     for k in (0..ops.len()).rev() {
-        next_call[k] = match routine::<A>(&ops[k]) {
+        next_host_call_at_or_after[k] = match routine::<A>(&ops[k]) {
             Some(_) => (range.start + k) as u32,
-            None => next_call[k + 1],
+            None => next_host_call_at_or_after[k + 1],
         };
     }
     let mut e: Emitter<A> = Emitter::new(tape, bundles, *layout, live, &hot);
@@ -1938,11 +1746,11 @@ fn emit_chunk<A: Isa>(
     e.isa.prologue();
     for (k, i) in range.clone().enumerate() {
         e.pos = i as u32;
-        e.next_call = next_call[k];
+        e.next_host_call = next_host_call_at_or_after[k];
         e.op(i);
     }
-    // Past the chunk: what a later chunk reads is written back.
-    e.pos = range.end as u32;
+    let past_chunk_so_later_reads_are_written_back = range.end as u32;
+    e.pos = past_chunk_so_later_reads_are_written_back;
     e.flush();
     e.isa.epilogue();
     Emitted {
@@ -1953,23 +1761,18 @@ fn emit_chunk<A: Isa>(
     }
 }
 
-// --- executable memory -----------------------------------------------------------
-
 struct Mapping {
     ptr: *mut u8,
-    /// `VirtualFree` releases by base address alone; `munmap` wants the length.
     #[cfg(unix)]
     len: usize,
 }
 
 #[cfg(unix)]
 impl Mapping {
-    /// The code is never writable and executable at once: mapped writable,
-    /// filled, then switched to read and execute (macOS toggles its JIT
-    /// write protection per thread instead, `MAP_JIT` requires it).
     fn new(bytes: &[u8]) -> Result<Mapping, JitError> {
         let len = bytes.len().max(1);
         unsafe {
+            // W^X per thread under `MAP_JIT`: https://developer.apple.com/documentation/apple-silicon/porting-just-in-time-compilers-to-apple-silicon
             #[cfg(target_os = "macos")]
             let (flags, prot) = (
                 libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_JIT,
@@ -2043,7 +1846,6 @@ extern "system" {
 
 #[cfg(windows)]
 impl Mapping {
-    /// Committed writable, filled, then switched to read and execute.
     fn new(bytes: &[u8]) -> Result<Mapping, JitError> {
         const MEM_COMMIT_RESERVE: u32 = 0x1000 | 0x2000;
         const PAGE_READWRITE: u32 = 0x04;
@@ -2127,8 +1929,7 @@ mod tests {
 
     const N: usize = 64;
 
-    /// `exp` and `ln` of each of `N` inputs, every one an output.
-    fn tape() -> Tape {
+    fn tape_exp_and_ln_of_each_input() -> Tape {
         let mut g: Graph<F64> = Graph::new();
         let (mut roots, mut syms) = (Vec::new(), Vec::new());
         for k in 0..N {
@@ -2142,9 +1943,7 @@ mod tests {
         Tape::compile(&g, &roots, &syms)
     }
 
-    /// Both functions' ranges and their edges, any bits at all (every
-    /// exponent, subnormals, negatives, NaNs), and the special values.
-    fn arguments() -> Vec<f64> {
+    fn edge_values_and_random_bits() -> Vec<f64> {
         let mut v = vec![
             0.0,
             -0.0,
@@ -2182,15 +1981,13 @@ mod tests {
         v
     }
 
-    /// `A`'s code against the reference, lane by lane, to the bit.
     fn check<A: Isa>() {
-        let t = tape();
+        let t = tape_exp_and_ln_of_each_input();
         let code = NativeTape::compile_isa::<A>(&t, &Options::default(), &[]).expect("native code");
         let l = A::LANES;
         let mut work = vec![0.0; code.layout.total];
         let mut ins = vec![0.0; N * l];
-        for block in arguments().chunks(N * l) {
-            // input k's lane j at k l + j, as the slots
+        for block in edge_values_and_random_bits().chunks(N * l) {
             ins[..block.len()].copy_from_slice(block);
             code.run(0..code.chunks.len(), &ins, &mut work);
             for (i, &x) in block.iter().enumerate() {
@@ -2210,9 +2007,6 @@ mod tests {
         }
     }
 
-    /// Lane code writes nothing past its work array: a rounding that calls
-    /// the host (without SSE4.1, as under `RSDAG_SSE2`) passes its lanes
-    /// through the gather area, which the layout holds.
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn lane_code_stays_in_its_work_array() {

@@ -15,8 +15,6 @@ use common::per_call;
 use rsdag::{ExprId, Graph, SymbolId, Tape, F64};
 use rsdag_jit::NativeTape;
 
-/// The graph of `count` instances of `kind` at size `n`, its roots and its
-/// inputs' values.
 fn build(kind: &str, n: usize, count: usize) -> (Graph<F64>, Vec<ExprId>, Vec<SymbolId>, Vec<f64>) {
     let mut g: Graph<F64> = Graph::new();
     let mut syms = Vec::new();
@@ -28,11 +26,11 @@ fn build(kind: &str, n: usize, count: usize) -> (Graph<F64>, Vec<ExprId>, Vec<Sy
         g.sym(&format!("s{}", syms.len()))
     };
     for c in 0..count {
-        // A diagonally dominant matrix, so the solve is well posed.
+        let dominant_diagonal_for_a_well_posed_solve = 4.0;
         let a: Vec<ExprId> = (0..n * n)
             .map(|k| {
                 let v = if k / n == k % n {
-                    4.0
+                    dominant_diagonal_for_a_well_posed_solve
                 } else {
                     0.1 * (((k + c) % 7) as f64 - 3.0)
                 };
@@ -76,8 +74,6 @@ fn main() {
                 let (g, roots, syms, vals) = build(kind, n, count);
                 let tape = Tape::compile(&g, &roots, &syms);
                 let native = NativeTape::compile(&tape).expect("native code");
-                // the slice forms, over buffers sized once, as a solver
-                // calls them in its loop
                 let (mut w, mut o) = (vec![0.0; tape.work_len()], vec![0.0; tape.out_len()]);
                 tape.eval_into(&vals, &mut w, &mut o);
                 let t_interp = per_call(|| tape.eval_into(&vals, &mut w, &mut o));

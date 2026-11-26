@@ -35,7 +35,6 @@ fn min_and_max_match_the_interpreter_with_nans_and_signed_zeros() {
             let mut g: Graph<F64> = Graph::new();
             let xs: Vec<ExprId> = (0..n).map(|i| g.sym(&format!("x{i}"))).collect();
             let syms: Vec<SymbolId> = (0..n as u32).map(SymbolId).collect();
-            // Through a sine so the terms are slots, and once as inputs.
             let sines: Vec<ExprId> = xs.iter().map(|&x| g.sin(x)).collect();
             let r1 = g.reduce(op, sines);
             let r2 = g.reduce(op, xs);

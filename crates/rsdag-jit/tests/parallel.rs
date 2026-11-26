@@ -14,8 +14,6 @@ use rsdag_jit::{NativeTape, Options};
 
 const N: usize = 96;
 
-/// A two-terminal device with `Param`-role parameters and enough work per
-/// instance for a stage to be worth a pool.
 fn device(g: &mut Graph<F64>, name: &str, k: f64) -> FuncId {
     let mut s = Scope::new(g, name);
     let a = s.param("a", ParamRole::State { id: 0 });
@@ -115,7 +113,6 @@ fn native_calls_without_state_on_a_pool_are_the_serial_ones() {
 
 #[test]
 fn a_stage_across_chunks_is_the_serial_one() {
-    // Chunks of a few ops split the stages of the ring's calls.
     let (g, roots, syms, pure) = ring();
     let tape = Tape::compile_split(&g, &roots, &syms, &pure);
     let x = inputs();

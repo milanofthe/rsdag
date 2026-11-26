@@ -69,7 +69,6 @@ fn stateful_calls_run_natively_and_share_the_state_layout() {
             native.eval_main(&ins(t), &mut nw, &mut got);
             assert!(identical(&got, &want), "{n}: native at t = {t}");
         }
-        // The interpreter's prolog under the native main phase, and back.
         let s = tape.state_len();
         let mut iw = vec![0.0; tape.work_len()];
         tape.eval_prolog_into(&ins(0.0), &mut iw);

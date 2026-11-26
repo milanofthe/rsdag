@@ -27,8 +27,6 @@ fn program(seed: u64) -> (Tape, Vec<f64>, Vec<bool>) {
     (Tape::compile_split(&g, &roots, &syms, &pure), ins, pure)
 }
 
-/// Drift the impure inputs a little (regions flip now and then), and every
-/// `episode_len` calls the pure ones.
 fn drift(rng: &mut Rng, ins: &mut [f64], pure: &[bool], params_too: bool) {
     for (x, &p) in ins.iter_mut().zip(pure) {
         if !p || params_too {
@@ -58,7 +56,6 @@ fn every_rung_is_the_interpreter() {
         for episode in 0..60 {
             drift(&mut rng, &mut ins, &pure, true);
             if episode % 3 == 0 {
-                // Whole calls.
                 a.eval(&ins, &mut w, &mut o);
                 reference.eval(&ins, &mut rw, &mut ro);
                 assert!(same(&o, &ro), "seed {seed} episode {episode}: eval");
@@ -74,7 +71,6 @@ fn every_rung_is_the_interpreter() {
                     "seed {seed} episode {episode} iteration {it}"
                 );
             }
-            // Give the background compiles a moment now and then.
             if episode % 10 == 5 {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
@@ -112,9 +108,6 @@ fn without_the_jit_it_stays_interpreted_and_correct() {
     assert!(same(&o, &ro));
 }
 
-/// One body called on many instances, its calls summed: one interpreted
-/// pass is expected to cost far more than compiling the program, so the
-/// first pass kicks the compile and waits for it.
 #[test]
 fn a_pass_dearer_than_the_compile_waits_for_it() {
     use rsdag::{Node, SymbolId};

@@ -12,12 +12,9 @@
 
 use rsdag::node::{CmpOp, ReduceOp};
 
-/// Which base pointer a memory operand is relative to.
 #[derive(Clone, Copy)]
 pub(crate) enum Base {
-    /// The work array (slots, bundle scratch, gather area).
     Work,
-    /// The input vector.
     Inputs,
 }
 
@@ -30,20 +27,14 @@ impl Base {
     }
 }
 
-/// An integer argument of a host call.
 #[derive(Clone, Copy)]
 pub(crate) enum IArg {
     Imm(u64),
-    /// The address of a byte offset into the work array.
     WorkAddr(usize),
-    /// The address of a byte offset into the input vector.
     InputAddr(usize),
-    /// The layout pointer the chunk received.
     Layout,
 }
 
-/// One argument of a host call, in the routine's signature order: the
-/// conventions differ in whether floats and integers are counted together.
 #[derive(Clone, Copy)]
 pub(crate) enum Arg {
     F(u8),
