@@ -81,7 +81,7 @@ pub(crate) struct Features {
 pub(crate) fn features() -> Features {
     static F: std::sync::OnceLock<Features> = std::sync::OnceLock::new();
     *F.get_or_init(|| {
-        let baseline = std::env::var_os("RSDAG_SSE2").is_some();
+        let baseline = rsdag::semantics::sse2_baseline();
         Features {
             sse41: !baseline && is_x86_feature_detected!("sse4.1"),
             avx: !baseline && is_x86_feature_detected!("avx"),

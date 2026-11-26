@@ -169,6 +169,8 @@ pub fn rand_stream(key: f64, counter: f64) -> f64 {
 }
 
 pub use crate::constants::{EXP_AT_LIMIT, EXP_LIMIT, LN_AT_FLOOR, LN_FLOOR};
+#[cfg(target_arch = "x86_64")]
+pub use crate::simd::sse2_baseline;
 
 /// Whether a multiply-add rounds once on this machine: where the CPU has a
 /// fused multiply-add (x86-64 with AVX and FMA, unless `RSDAG_SSE2` is set;
@@ -179,7 +181,7 @@ pub fn fused() -> bool {
     {
         static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *F.get_or_init(|| {
-            std::env::var_os("RSDAG_SSE2").is_none()
+            !sse2_baseline()
                 && std::is_x86_feature_detected!("avx")
                 && std::is_x86_feature_detected!("fma")
         })

@@ -353,9 +353,13 @@ impl Quad for Avx {
 #[cfg(target_arch = "x86_64")]
 fn avx() -> bool {
     static AVX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *AVX.get_or_init(|| {
-        std::env::var_os("RSDAG_SSE2").is_none() && std::is_x86_feature_detected!("avx")
-    })
+    *AVX.get_or_init(|| !sse2_baseline() && std::is_x86_feature_detected!("avx"))
+}
+
+#[cfg(target_arch = "x86_64")]
+pub fn sse2_baseline() -> bool {
+    static BASELINE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *BASELINE.get_or_init(|| std::env::var_os("RSDAG_SSE2").is_some())
 }
 
 /// `fn $name` running `$imp::<Avx>` compiled for AVX where [`avx`] holds,
