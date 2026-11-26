@@ -120,6 +120,7 @@ pub const TRIGAMMA_ERROR: f64 = 26.0 * (f64::EPSILON / 2.0);
 /// `mp.polygamma(1, x)` at the double x), rounded to the nearest double.
 /// The arguments cover both sides of the recurrence shift 10, the positive
 /// zero of psi, a small argument and a pole approached to within a few ulps.
+/// `psi(1)` is the negative Euler constant, which the standard library has.
 pub const POLYGAMMA_MPMATH: [(f64, f64, f64); 16] = [
     (-99999.7, 9.230426796514083, 15.079403702621997),
     (-28.000000000000004, 281474976710659.4, 7.922816251426434e28),
@@ -131,7 +132,7 @@ pub const POLYGAMMA_MPMATH: [(f64, f64, f64); 16] = [
     (-0.001, 999.4211381978913, 1000001.6473414317),
     (1e-8, -100000000.57721564, 1.0000000000000002e16),
     (0.3, -3.502524222200133, 12.245364546107732),
-    (1.0, -0.5772156649015329, 1.6449340668482264),
+    (1.0, -std::f64::consts::EULER_GAMMA, 1.6449340668482264),
     (
         1.4616321449683622,
         -9.241265521729427e-17,
