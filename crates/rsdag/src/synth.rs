@@ -96,13 +96,16 @@ pub struct Spec {
     pub list_percent: usize,
     /// How wide the generated programs are.
     ///
-    /// Operands are drawn from the last `width` nodes built, so 1 is a
-    /// chain and a number past the program size is a uniform draw over
-    /// everything so far. This is the knob that decides whether a corpus
-    /// looks like real work: an assembled residual or Jacobian is very
-    /// wide -- 8196 nodes at depth 7, one level per row -- while a uniform
-    /// draw over a growing pool builds deep chains that no consumer
-    /// produces. The fuzzers want both; a benchmark wants the wide end.
+    /// Two operands in three are drawn from the last `width` nodes built
+    /// and the third from everything so far, so 1 is close to a chain and
+    /// a number past the program size is a uniform draw over everything so
+    /// far. This is the knob that decides whether a corpus looks like real
+    /// work: an assembled residual or Jacobian is very wide, 8196 nodes at
+    /// depth 7 with one level per row. A small width builds deep programs
+    /// and a uniform draw builds shallow ones. With 4000 steps over five
+    /// seeds, a width of 12 gave depths of 28 to 265 and a uniform draw
+    /// gave depths of 8 to 23. The fuzzers want both ends, and a benchmark
+    /// wants the wide end.
     pub width: usize,
     /// Percent of drawn ops that are a `Select` over a fresh comparison.
     /// The knob a region or specialization test turns up: those need
