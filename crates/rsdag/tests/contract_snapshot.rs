@@ -1,11 +1,15 @@
 //! The contract constants, to the bit: the values every backend
 //! reproduces (the domain guards, the exponential's and the logarithm's
 //! constants and bit fields, the fold order, the integer powers, the
-//! elimination's panels) and the module format. Changing one changes
+//! elimination's panels, the shift and the series of digamma and
+//! trigamma) and the module format. Changing one changes
 //! results, so it takes an edit here in the same commit, where review sees
 //! it.
 
-use rsdag::constants::{LU_PANEL_LARGE, LU_PANEL_SMALL, LU_PANEL_SWITCH, LU_UNBLOCKED_MAX};
+use rsdag::constants::{
+    DIGAMMA_COEFFS, LU_PANEL_LARGE, LU_PANEL_SMALL, LU_PANEL_SWITCH, LU_UNBLOCKED_MAX,
+    POLYGAMMA_SHIFT, TRIGAMMA_COEFFS,
+};
 use rsdag::semantics::exp_ln::*;
 
 fn bits(name: &str, v: f64, want: u64) {
@@ -67,6 +71,100 @@ fn exp_and_ln_coefficients() {
         ("LN_POLY[4]", LN_POLY[4], 0x3fc2_4924_880f_8532),
         ("LN_POLY[5]", LN_POLY[5], 0xbfc0_0167_311e_1591),
         ("LN_POLY[6]", LN_POLY[6], 0x3fbc_7454_3096_1a00),
+    ] {
+        bits(name, v, want);
+    }
+}
+
+#[test]
+fn polygamma_shift_and_series() {
+    bits("POLYGAMMA_SHIFT", POLYGAMMA_SHIFT, 0x4024_0000_0000_0000);
+    for (name, v, want) in [
+        (
+            "DIGAMMA_COEFFS[0]",
+            DIGAMMA_COEFFS[0],
+            0x3fb5_5555_5555_5555,
+        ),
+        (
+            "DIGAMMA_COEFFS[1]",
+            DIGAMMA_COEFFS[1],
+            0xbf81_1111_1111_1111,
+        ),
+        (
+            "DIGAMMA_COEFFS[2]",
+            DIGAMMA_COEFFS[2],
+            0x3f70_4104_1041_0410,
+        ),
+        (
+            "DIGAMMA_COEFFS[3]",
+            DIGAMMA_COEFFS[3],
+            0xbf71_1111_1111_1111,
+        ),
+        (
+            "DIGAMMA_COEFFS[4]",
+            DIGAMMA_COEFFS[4],
+            0x3f7f_07c1_f07c_1f08,
+        ),
+        (
+            "DIGAMMA_COEFFS[5]",
+            DIGAMMA_COEFFS[5],
+            0xbf95_9959_9599_5996,
+        ),
+        (
+            "DIGAMMA_COEFFS[6]",
+            DIGAMMA_COEFFS[6],
+            0x3fb5_5555_5555_5555,
+        ),
+        (
+            "DIGAMMA_COEFFS[7]",
+            DIGAMMA_COEFFS[7],
+            0xbfdc_5e5e_5e5e_5e5e,
+        ),
+        (
+            "TRIGAMMA_COEFFS[0]",
+            TRIGAMMA_COEFFS[0],
+            0x3fc5_5555_5555_5555,
+        ),
+        (
+            "TRIGAMMA_COEFFS[1]",
+            TRIGAMMA_COEFFS[1],
+            0xbfa1_1111_1111_1111,
+        ),
+        (
+            "TRIGAMMA_COEFFS[2]",
+            TRIGAMMA_COEFFS[2],
+            0x3f98_6186_1861_8618,
+        ),
+        (
+            "TRIGAMMA_COEFFS[3]",
+            TRIGAMMA_COEFFS[3],
+            0xbfa1_1111_1111_1111,
+        ),
+        (
+            "TRIGAMMA_COEFFS[4]",
+            TRIGAMMA_COEFFS[4],
+            0x3fb3_64d9_364d_9365,
+        ),
+        (
+            "TRIGAMMA_COEFFS[5]",
+            TRIGAMMA_COEFFS[5],
+            0xbfd0_3303_3033_0330,
+        ),
+        (
+            "TRIGAMMA_COEFFS[6]",
+            TRIGAMMA_COEFFS[6],
+            0x3ff2_aaaa_aaaa_aaab,
+        ),
+        (
+            "TRIGAMMA_COEFFS[7]",
+            TRIGAMMA_COEFFS[7],
+            0xc01c_5e5e_5e5e_5e5e,
+        ),
+        (
+            "TRIGAMMA_COEFFS[8]",
+            TRIGAMMA_COEFFS[8],
+            0x404b_7c4f_8f13_e3c5,
+        ),
     ] {
         bits(name, v, want);
     }

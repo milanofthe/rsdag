@@ -75,36 +75,71 @@ pub fn central_round_off(roundings: usize, fp: f64, fm: f64, step: f64) -> f64 {
     roundings as f64 * (f64::EPSILON / 2.0) * (fp.abs() + fm.abs()) / step
 }
 
-/// Absolute error of `digamma`. The recurrence shifts the argument to x >= 6,
-/// and the asymptotic series ln x - 1 / 2x - sum B_2k / (2k x^2k) stops after
-/// the term in B_6 / x^6 = 1 / (252 x^6). For real x > 0 the remainder has the
-/// sign of the first omitted term and is below it in magnitude (DLMF 5.11(ii)),
-/// so the error is below |B_8| / (8 x^8) = 1 / (240 x^8) <= 1 / (240 * 6^8) =
-/// 2.48e-9. The terms 1 / x of the recurrence and the reflection
-/// pi / tan(pi x) grow like |psi(x)| near a pole and round with relative
-/// errors of a few u, below 1e-13 at the test points, which the bound covers
-/// through its factor 1 + |psi(x)|. The bound is 2.5e-9.
-pub const DIGAMMA_SERIES: f64 = 2.5e-9;
+/// Error of `digamma` in units of the scale `1 + |psi(x)|` for x > 0 and
+/// `1 + |psi(x)| + |psi(1 - x)|` for x <= 0, to first order in u = 2^-53.
+/// The truncation of the asymptotic series is below 0.012 u relative to the
+/// value (`rsdag::constants::POLYGAMMA_SHIFT`) and is neglected. For x > 0 the
+/// value is a sum of at most m = 13 terms: at most ten recurrence terms
+/// 1 / (x + k), ln x_N, 1 / 2x_N and the series at the shifted argument x_N.
+/// The shift adds 1 exactly except where x + k enters a new binade, which
+/// happens at most four times below 10, so x + k carries at most 2u
+/// relative error, 1 / (x + k) at most 2.5u, and ln x_N with its libm error
+/// of one ulp at most 2.9u relative to itself. The recursive summation of m
+/// terms adds at most (m - 1) u times the sum S of their magnitudes (Higham,
+/// Accuracy and Stability of Numerical Algorithms, 2002, eq. 4.4), so the
+/// error is below (12 + 2.9) u S. Let A be the sum of the recurrence terms
+/// and M = ln x_N + 1 / 2x_N + |series| < ln 11 + 0.051 the sum of the
+/// magnitudes of the other terms. Then S = A + M = |A - M| + 2 min(A, M),
+/// and |psi| differs from |A - M| by at most 2 (1 / 2x_N + |series|) <
+/// 0.102, so S < |psi| + 4.898 + 0.102 = |psi| + 5 <= 5 (1 + |psi|), and the
+/// error is below 74.5 u (1 + |psi|). For x <= 0 the reflection
+/// psi(1 - x) - pi / tan(pi r) with the exact r = x - round(x) adds the
+/// rounding of 1 - x (at most 2u,
+/// since y psi'(y) <= 2 for y >= 1), the error of the cotangent term c (at
+/// most 3.11 u |c| + 3.05 u from pi r, the libm tangent and the division)
+/// and the final rounding 0.5 u |psi(x)|. With |c| <= |psi(x)| + |psi(1 - x)|
+/// the sum is below (74.5 + 2 + 3.05) u + (74.5 + 3.11) u |psi(1 - x)| +
+/// 3.61 u |psi(x)| < 80 u (1 + |psi(x)| + |psi(1 - x)|).
+pub const DIGAMMA_ERROR: f64 = 80.0 * (f64::EPSILON / 2.0);
 
-/// Absolute error of `trigamma`. Its asymptotic series is evaluated at
-/// x >= 6 and stops after the term in B_8 / x^9. The series alternates, so
-/// the error is below the first omitted term B_10 / x^11 = (5 / 66) / 6^11 =
-/// 2.09e-10. The recurrence and the reflection round with relative errors
-/// near 1e-14 at the test points, which the bound covers through its factor
-/// 1 + |psi'(x)|.
-pub const TRIGAMMA_SERIES: f64 = 2.1e-10;
+/// Error of `trigamma` in units of the scale `1 + |psi'(x)|` for x > 0 and
+/// `1 + |psi'(x)| + |psi'(1 - x)|` for x <= 0, to first order in u = 2^-53.
+/// The truncation of the asymptotic series is below 0.045 u relative to the
+/// value and is neglected. For x > 0 every term of the sum is positive, so
+/// S = psi'(x). Each recurrence term 1 / (x + k)^2 carries at most 5u (twice
+/// the 2u of x + k and two roundings), and the summation of at most 13 terms
+/// adds 12u, so the error is below 17 u psi'(x). For x <= 0 the reflection
+/// pi^2 / sin^2(pi r) - psi'(1 - x) adds 2u psi'(1 - x) from the rounding of
+/// 1 - x, at most 6.94 u relative to the first term t (pi^2 rounded, the
+/// libm sine of pi r, the square and the division) and the final rounding
+/// 0.5 u psi'(x). With t <= psi'(x) + psi'(1 - x) the sum is below
+/// 26 u (1 + psi'(x) + psi'(1 - x)).
+pub const TRIGAMMA_ERROR: f64 = 26.0 * (f64::EPSILON / 2.0);
 
 /// `(x, psi(x), psi'(x))` from mpmath 1.3.0 at 40 digits (`mp.digamma(x)`,
 /// `mp.polygamma(1, x)` at the double x), rounded to the nearest double.
-pub const POLYGAMMA_MPMATH: [(f64, f64, f64); 9] = [
+/// The arguments cover both sides of the recurrence shift 10, the positive
+/// zero of psi, a small argument and a pole approached to within a few ulps.
+pub const POLYGAMMA_MPMATH: [(f64, f64, f64); 16] = [
+    (-99999.7, 9.230426796514083, 15.079403702621997),
+    (-28.000000000000004, 281474976710659.4, 7.922816251426434e28),
     (-18.7556, -0.2962093295988112, 20.407003394699764),
     (-7.3, 4.33730730551005, 14.951383181433922),
     (-2.5, 1.103156640645243, 9.539246644989124),
     (-0.75, -2.894120200042932, 18.975106932284888),
     (-0.1, 9.245073050052948, 101.92253995947719),
     (-0.001, 999.4211381978913, 1000001.6473414317),
+    (1e-8, -100000000.57721564, 1.0000000000000002e16),
     (0.3, -3.502524222200133, 12.245364546107732),
+    (1.0, -0.5772156649015329, 1.6449340668482264),
+    (
+        1.4616321449683622,
+        -9.241265521729427e-17,
+        0.9676722454476212,
+    ),
     (2.5, 0.7031566406452432, 0.49035775610023485),
+    (9.999999999999998, 2.251752589066721, 0.10516633568168576),
+    (10.0, 2.251752589066721, 0.10516633568168575),
     (11.0, 2.351752589066721, 0.09516633568168574),
 ];
 

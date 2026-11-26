@@ -16,6 +16,7 @@ mod display;
 mod exp_ln;
 mod graph;
 mod parallel;
+mod polygamma;
 mod specialize;
 mod tape;
 
@@ -24,5 +25,6 @@ pub(crate) use display::*;
 pub use exp_ln::*;
 pub use graph::*;
 pub use parallel::*;
+pub use polygamma::*;
 pub(crate) use specialize::*;
 pub use tape::*;

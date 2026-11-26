@@ -3,7 +3,7 @@
 //! with the recurrence it replaces.
 
 mod common;
-use common::constants::{DIGAMMA_SERIES, POLYGAMMA_MPMATH, TRIGAMMA_SERIES};
+use common::constants::{DIGAMMA_ERROR, POLYGAMMA_MPMATH, TRIGAMMA_ERROR};
 use rsdag::semantics::{digamma, trigamma};
 
 #[test]
@@ -18,16 +18,21 @@ fn digamma_and_trigamma_end_everywhere() {
     assert_eq!(trigamma(f64::INFINITY), 0.0);
 }
 
+fn scale(f: fn(f64) -> f64, x: f64, value: f64) -> f64 {
+    let reflected = if x <= 0.0 { f(1.0 - x).abs() } else { 0.0 };
+    1.0 + value.abs() + reflected
+}
+
 #[test]
 fn values_match_the_exact_ones() {
     for (x, psi, psi1) in POLYGAMMA_MPMATH {
         let (a, b) = (digamma(x), trigamma(x));
         assert!(
-            (a - psi).abs() <= DIGAMMA_SERIES * (1.0 + psi.abs()),
+            (a - psi).abs() <= DIGAMMA_ERROR * scale(digamma, x, psi),
             "psi({x}): {a} vs {psi}"
         );
         assert!(
-            (b - psi1).abs() <= TRIGAMMA_SERIES * (1.0 + psi1.abs()),
+            (b - psi1).abs() <= TRIGAMMA_ERROR * scale(trigamma, x, psi1),
             "psi1({x}): {b} vs {psi1}"
         );
     }
