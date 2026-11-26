@@ -1350,15 +1350,6 @@ impl Forest {
             template_consts_by_bits: HashMap::default(),
         };
         let mut bodies = Bodies::default();
-        let mut call_sites: HashMap<(u32, Site), Vec<usize>> = HashMap::default();
-        for (i, &id) in self.base.iter().enumerate() {
-            if let Node::Call(o, l) = *ctx.node(id) {
-                call_sites
-                    .entry((ctx.output(o).0 .0, (ctx.context_of(o), l)))
-                    .or_default()
-                    .push(i);
-            }
-        }
         let mut lowered = vec![false; groups.groups.len()];
         for &i in &order {
             let materialized_in_consuming_add = self.fused_into[i].is_some();
@@ -1375,7 +1366,7 @@ impl Forest {
                 }
                 (None, Node::Call(o, l)) => {
                     let (f, site) = (ctx.output(o).0 .0, (ctx.context_of(o), l));
-                    let members = &call_sites[&(f, site)];
+                    let members = &calls.members[&(f, site)];
                     let set = calls.set_of[&(f, site)];
                     if composite.contains(&f) {
                         let outs = &calls.sets[set as usize];
@@ -1386,17 +1377,13 @@ impl Forest {
                             .then(|| ops.iter().map(|&a| self.pure[self.pos(a)]).collect());
                         let t = templates.get(ctx, f, outs, mask);
                         let values = lw.expand(&mut bodies, &t, &args);
-                        for &mi in members {
-                            let Node::Call(o, _) = *ctx.node(self.base[mi]) else {
-                                unreachable!()
-                            };
-                            let k = ctx.output(o).1;
-                            lw.value[mi] =
-                                Some(values[outs.binary_search(&k).expect("in its set")]);
+                        for &(mi, at) in members {
+                            lw.value[mi] = Some(values[at as usize]);
                         }
                         continue;
                     }
-                    self.lower_calls(ctx, &mut lw, &mut bodies, &calls, f, set, members);
+                    let members: Vec<usize> = members.iter().map(|&(mi, _)| mi).collect();
+                    self.lower_calls(ctx, &mut lw, &mut bodies, &calls, f, set, &members);
                 }
                 (None, _) => self.lower_node(ctx, &mut lw, i),
             }
@@ -1410,26 +1397,35 @@ impl Forest {
     }
 
     fn call_sets<K: Field>(&self, ctx: &Graph<K>) -> CallSets {
-        let mut per_call: HashMap<(u32, Site), Vec<u32>> = HashMap::default();
-        for &id in &self.base {
+        let mut per_call: HashMap<(u32, Site), Vec<(usize, u32)>> = HashMap::default();
+        for (i, &id) in self.base.iter().enumerate() {
             if let Node::Call(o, l) = *ctx.node(id) {
                 let (f, out) = ctx.output(o);
                 per_call
                     .entry((f.0, (ctx.context_of(o), l)))
                     .or_default()
-                    .push(out);
+                    .push((i, out));
             }
         }
         let mut ids: HashMap<(u32, Vec<u32>), u32> = HashMap::default();
         let mut calls = CallSets::default();
-        for ((f, site), mut outs) in per_call {
-            outs.sort_unstable();
-            outs.dedup();
+        for ((f, site), mut calls_of_site) in per_call {
+            calls_of_site.sort_unstable_by_key(|&(i, out)| (out, i));
+            let mut outs: Vec<u32> = Vec::new();
+            let mut members = Vec::with_capacity(calls_of_site.len());
+            for (i, out) in calls_of_site {
+                if outs.last() != Some(&out) {
+                    outs.push(out);
+                }
+                members.push((i, outs.len() as u32 - 1));
+            }
+            members.sort_unstable();
             let id = *ids.entry((f, outs.clone())).or_insert_with(|| {
                 calls.sets.push(outs);
                 calls.sets.len() as u32 - 1
             });
             calls.set_of.insert((f, site), id);
+            calls.members.insert((f, site), members);
         }
         calls
     }
@@ -2095,6 +2091,7 @@ impl Forest {
 struct CallSets {
     set_of: HashMap<(u32, Site), u32>,
     sets: Vec<Vec<u32>>,
+    members: HashMap<(u32, Site), Vec<(usize, u32)>>,
 }
 
 #[derive(PartialEq, Eq, Hash, Clone)]
