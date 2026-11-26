@@ -149,19 +149,6 @@ fn unsupported(other: &Bound<'_, PyAny>) -> PyErr {
     ))
 }
 
-/// Python's `a // b`.
-fn floordiv(g: &mut Graph<F64>, a: ExprId, b: ExprId) -> ExprId {
-    let q = g.div(a, b);
-    g.unary(UnaryOp::Floor, q)
-}
-
-/// Python's floored modulo: `a - b * floor(a / b)`.
-fn floormod(g: &mut Graph<F64>, a: ExprId, b: ExprId) -> ExprId {
-    let f = floordiv(g, a, b);
-    let bf = g.mul(b, f);
-    g.sub(a, bf)
-}
-
 fn powf(g: &mut Graph<F64>, a: ExprId, b: ExprId) -> ExprId {
     g.binary(BinOp::Powf, a, b)
 }
@@ -290,16 +277,16 @@ impl Tracer {
         self.binary(o, true, Graph::div)
     }
     fn __floordiv__(&self, o: &Bound<'_, PyAny>) -> PyResult<BinOut> {
-        self.binary(o, false, floordiv)
+        self.binary(o, false, Graph::floordiv)
     }
     fn __rfloordiv__(&self, o: &Bound<'_, PyAny>) -> PyResult<BinOut> {
-        self.binary(o, true, floordiv)
+        self.binary(o, true, Graph::floordiv)
     }
     fn __mod__(&self, o: &Bound<'_, PyAny>) -> PyResult<BinOut> {
-        self.binary(o, false, floormod)
+        self.binary(o, false, Graph::floormod)
     }
     fn __rmod__(&self, o: &Bound<'_, PyAny>) -> PyResult<BinOut> {
-        self.binary(o, true, floormod)
+        self.binary(o, true, Graph::floormod)
     }
     fn __pow__(
         &self,

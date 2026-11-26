@@ -157,9 +157,10 @@ pub enum BinOp {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct UnarySpec {
-    /// The variant this row describes; `UNARY_OPS[op as usize].op == op`.
-    pub op: UnaryOp,
+pub struct OpSpec<Op> {
+    /// The variant this row describes; `UNARY_OPS[op as usize].op == op`,
+    /// and the same for `BINARY_OPS`.
+    pub op: Op,
     /// Name in printed expressions and in the Python frontend.
     pub name: &'static str,
     /// Differentiable where it is defined, and differentiated by rsdag.
@@ -169,171 +170,180 @@ pub struct UnarySpec {
     pub smooth: bool,
 }
 
+impl<Op: Copy> OpSpec<Op> {
+    fn named(table: &[OpSpec<Op>], name: &str) -> Option<Op> {
+        table
+            .iter()
+            .find(|spec| spec.name == name)
+            .map(|spec| spec.op)
+    }
+}
+
 /// The unary vocabulary, in the order of the enum: `UNARY_OPS[op as usize]`
 /// is `op`'s row (checked by a test).
-pub const UNARY_OPS: &[UnarySpec] = &[
-    UnarySpec {
+pub const UNARY_OPS: &[OpSpec<UnaryOp>] = &[
+    OpSpec {
         op: UnaryOp::Exp,
         name: "exp",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Ln,
         name: "ln",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Sqrt,
         name: "sqrt",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Sin,
         name: "sin",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Cos,
         name: "cos",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Sinh,
         name: "sinh",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Cosh,
         name: "cosh",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Tanh,
         name: "tanh",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Atan,
         name: "atan",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Floor,
         name: "floor",
         smooth: false,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Tan,
         name: "tan",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Log10,
         name: "log10",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Log2,
         name: "log2",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Log1p,
         name: "log1p",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Expm1,
         name: "expm1",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Cbrt,
         name: "cbrt",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Abs,
         name: "abs",
         smooth: false,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Sign,
         name: "sign",
         smooth: false,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Ceil,
         name: "ceil",
         smooth: false,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Round,
         name: "round",
         smooth: false,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Trunc,
         name: "trunc",
         smooth: false,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Asin,
         name: "asin",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Acos,
         name: "acos",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Asinh,
         name: "asinh",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Acosh,
         name: "acosh",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Atanh,
         name: "atanh",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Erf,
         name: "erf",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Erfc,
         name: "erfc",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Lgamma,
         name: "lgamma",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Tgamma,
         name: "tgamma",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Digamma,
         name: "digamma",
         smooth: true,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::Trigamma,
         name: "trigamma",
         // Its derivative (polygamma of order 2) is not implemented.
         smooth: false,
     },
-    UnarySpec {
+    OpSpec {
         op: UnaryOp::RandUniform,
         name: "rand_uniform",
         smooth: false,
@@ -343,7 +353,7 @@ pub const UNARY_OPS: &[UnarySpec] = &[
 impl UnaryOp {
     /// This op's row of [`UNARY_OPS`].
     #[inline]
-    pub fn spec(self) -> &'static UnarySpec {
+    pub fn spec(self) -> &'static OpSpec<UnaryOp> {
         &UNARY_OPS[self as usize]
     }
     /// Name in printed expressions.
@@ -367,46 +377,35 @@ impl UnaryOp {
     pub fn from_code(code: u32) -> UnaryOp {
         UNARY_OPS[code as usize].op
     }
-    /// The op a frontend's function name denotes, by [`UnarySpec::name`].
+    /// The op a frontend's function name denotes, by [`OpSpec::name`].
     pub fn from_name(name: &str) -> Option<UnaryOp> {
-        UNARY_OPS
-            .iter()
-            .find(|spec| spec.name == name)
-            .map(|spec| spec.op)
+        OpSpec::named(UNARY_OPS, name)
     }
 }
 
-/// As [`UnarySpec`], for the binary ops beyond the ring.
-#[derive(Clone, Copy, Debug)]
-pub struct BinarySpec {
-    pub op: BinOp,
-    pub name: &'static str,
-    pub smooth: bool,
-}
-
 /// The binary vocabulary, in the order of the enum.
-pub const BINARY_OPS: &[BinarySpec] = &[
-    BinarySpec {
+pub const BINARY_OPS: &[OpSpec<BinOp>] = &[
+    OpSpec {
         op: BinOp::Powf,
         name: "powf",
         smooth: true,
     },
-    BinarySpec {
+    OpSpec {
         op: BinOp::Mod,
         name: "mod",
         smooth: false,
     },
-    BinarySpec {
+    OpSpec {
         op: BinOp::Atan2,
         name: "atan2",
         smooth: true,
     },
-    BinarySpec {
+    OpSpec {
         op: BinOp::Hypot,
         name: "hypot",
         smooth: true,
     },
-    BinarySpec {
+    OpSpec {
         op: BinOp::RandStream,
         name: "rand_stream",
         smooth: false,
@@ -415,7 +414,7 @@ pub const BINARY_OPS: &[BinarySpec] = &[
 
 impl BinOp {
     #[inline]
-    pub fn spec(self) -> &'static BinarySpec {
+    pub fn spec(self) -> &'static OpSpec<BinOp> {
         &BINARY_OPS[self as usize]
     }
     #[inline]
@@ -434,12 +433,9 @@ impl BinOp {
     pub fn from_code(code: u32) -> BinOp {
         BINARY_OPS[code as usize].op
     }
-    /// The op a frontend's function name denotes, by [`BinarySpec::name`].
+    /// The op a frontend's function name denotes, by [`OpSpec::name`].
     pub fn from_name(name: &str) -> Option<BinOp> {
-        BINARY_OPS
-            .iter()
-            .find(|spec| spec.name == name)
-            .map(|spec| spec.op)
+        OpSpec::named(BINARY_OPS, name)
     }
 }
 

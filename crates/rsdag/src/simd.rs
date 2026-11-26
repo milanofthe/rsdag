@@ -334,17 +334,23 @@ impl Quad for Avx {
     }
     #[inline(always)]
     fn gt(self, o: Avx) -> Avx {
-        use std::arch::x86_64::*;
-        unsafe { Avx(_mm256_cmp_pd::<_CMP_GT_OQ>(self.0, o.0)) }
+        self.cmp::<{ std::arch::x86_64::_CMP_GT_OQ }>(o)
     }
     #[inline(always)]
     fn eq(self, o: Avx) -> Avx {
-        use std::arch::x86_64::*;
-        unsafe { Avx(_mm256_cmp_pd::<_CMP_EQ_OQ>(self.0, o.0)) }
+        self.cmp::<{ std::arch::x86_64::_CMP_EQ_OQ }>(o)
     }
     #[inline(always)]
     fn select(mask: Avx, t: Avx, e: Avx) -> Avx {
         unsafe { Avx(std::arch::x86_64::_mm256_blendv_pd(e.0, t.0, mask.0)) }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+impl Avx {
+    #[inline(always)]
+    fn cmp<const PREDICATE: i32>(self, o: Avx) -> Avx {
+        unsafe { Avx(std::arch::x86_64::_mm256_cmp_pd::<PREDICATE>(self.0, o.0)) }
     }
 }
 

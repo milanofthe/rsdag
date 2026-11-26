@@ -21,6 +21,15 @@ pub(crate) enum Base {
     Inputs,
 }
 
+impl Base {
+    pub(crate) fn register<R>(self, work: R, inputs: R) -> R {
+        match self {
+            Base::Work => work,
+            Base::Inputs => inputs,
+        }
+    }
+}
+
 /// An integer argument of a host call.
 #[derive(Clone, Copy)]
 pub(crate) enum IArg {

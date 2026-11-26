@@ -326,12 +326,6 @@ impl<const L: usize> X64<L> {
             Arith::Div => 0x5E,
         }
     }
-    fn base(b: Base) -> u8 {
-        match b {
-            Base::Work => WORK,
-            Base::Inputs => INPUTS,
-        }
-    }
 
     // The inline exponential and logarithm: VEX where there is AVX (and
     // AVX2 for the integer forms on four lanes), else the legacy SSE2
@@ -921,18 +915,18 @@ impl<const L: usize> Isa for X64<L> {
 
     fn load(&mut self, r: u8, base: Base, off: usize) {
         // movsd, or movupd (the work array is 8-byte aligned)
-        let b = Self::base(base);
+        let b = base.register(WORK, INPUTS);
         self.mov_mem(Self::PFX, Self::PP, Self::VL, 0x10, r, b, off);
     }
     fn store(&mut self, r: u8, base: Base, off: usize) {
-        let b = Self::base(base);
+        let b = base.register(WORK, INPUTS);
         self.mov_mem(Self::PFX, Self::PP, Self::VL, 0x11, r, b, off);
     }
     fn load_lane(&mut self, r: u8, base: Base, off: usize) {
-        self.mov_mem(0xF2, 3, 0, 0x10, r, Self::base(base), off); // movsd
+        self.mov_mem(0xF2, 3, 0, 0x10, r, base.register(WORK, INPUTS), off); // movsd
     }
     fn store_lane(&mut self, r: u8, base: Base, off: usize) {
-        self.mov_mem(0xF2, 3, 0, 0x11, r, Self::base(base), off);
+        self.mov_mem(0xF2, 3, 0, 0x11, r, base.register(WORK, INPUTS), off);
     }
     fn fconst(&mut self, r: u8, v: f64) {
         if v.to_bits() == 0 {
@@ -979,7 +973,7 @@ impl<const L: usize> Isa for X64<L> {
     // lanes are VEX, whose memory operands need no alignment.
     const MEM_OPERANDS: bool = L != 2;
     fn arith_mem(&mut self, op: Arith, d: u8, a: u8, base: Base, off: usize) {
-        let base = Self::base(base);
+        let base = base.register(WORK, INPUTS);
         if self.avx {
             self.vex(Self::PP, 1, d, a, base);
         } else {

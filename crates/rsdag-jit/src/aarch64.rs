@@ -74,12 +74,6 @@ impl A64 {
             self.w(0xD280_0000 | xd);
         }
     }
-    fn base(b: Base) -> u32 {
-        match b {
-            Base::Work => WORK,
-            Base::Inputs => INPUTS,
-        }
-    }
     /// `ldr`/`str Dt, [Xn, #off]` for any offset; for the work array, through
     /// the window in `x9` when the offset is out of immediate reach.
     fn mem(&mut self, opc_imm: u32, opc_reg: u32, dt: u32, xn: u32, off: usize) {
@@ -377,10 +371,22 @@ impl Isa for A64 {
     }
 
     fn load(&mut self, r: u8, base: Base, off: usize) {
-        self.mem(0xFD40_0000, 0xFC60_6800, r as u32, Self::base(base), off);
+        self.mem(
+            0xFD40_0000,
+            0xFC60_6800,
+            r as u32,
+            base.register(WORK, INPUTS),
+            off,
+        );
     }
     fn store(&mut self, r: u8, base: Base, off: usize) {
-        self.mem(0xFD00_0000, 0xFC20_6800, r as u32, Self::base(base), off);
+        self.mem(
+            0xFD00_0000,
+            0xFC20_6800,
+            r as u32,
+            base.register(WORK, INPUTS),
+            off,
+        );
     }
     fn load_lane(&mut self, r: u8, base: Base, off: usize) {
         self.load(r, base, off);

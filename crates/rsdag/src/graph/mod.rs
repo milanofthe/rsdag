@@ -706,6 +706,19 @@ impl<K: Field> Graph<K> {
         self.mul(a, rb)
     }
 
+    /// Python's `a // b`.
+    pub fn floordiv(&mut self, a: ExprId, b: ExprId) -> ExprId {
+        let q = self.div(a, b);
+        self.floor(q)
+    }
+
+    /// Python's floored modulo: `a - b * floor(a / b)`.
+    pub fn floormod(&mut self, a: ExprId, b: ExprId) -> ExprId {
+        let f = self.floordiv(a, b);
+        let bf = self.mul(b, f);
+        self.sub(a, bf)
+    }
+
     // --- elementary functions ---------------------------------------------
 
     /// Apply a unary function, with a few exact-at-special-points identities.
