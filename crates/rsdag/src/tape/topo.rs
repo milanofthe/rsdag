@@ -190,7 +190,7 @@ impl Topo {
         self.seen[a as usize] = sb;
         let backward = loop {
             // One forward edge.
-            let Some(&(w, e)) = self.stack_f.last() else {
+            let Some((w, e)) = self.stack_f.pop() else {
                 break false;
             };
             let (s0, s1) = (self.start[w as usize], self.start[w as usize + 1]);
@@ -203,41 +203,31 @@ impl Topo {
                     .and_then(|v| v.get((e - deg) as usize))
                     .copied()
             };
-            match r {
-                None => {
-                    self.stack_f.pop();
+            if let Some(r) = r {
+                self.stack_f.push((w, e + 1));
+                if r == a {
+                    return false;
                 }
-                Some(r) => {
-                    self.stack_f.last_mut().unwrap().1 += 1;
-                    if r == a {
-                        return false;
-                    }
-                    if self.seen[r as usize] != sf && label[r as usize] < ub {
-                        self.seen[r as usize] = sf;
-                        self.fwd.push(r);
-                        self.stack_f.push((r, 0));
-                    }
+                if self.seen[r as usize] != sf && label[r as usize] < ub {
+                    self.seen[r as usize] = sf;
+                    self.fwd.push(r);
+                    self.stack_f.push((r, 0));
                 }
             }
             // One backward edge.
-            let Some(&(w, e)) = self.stack_b.last() else {
+            let Some((w, e)) = self.stack_b.pop() else {
                 break true;
             };
-            match p.ins(w as usize).get(e as usize) {
-                None => {
-                    self.stack_b.pop();
-                }
-                Some(&r) => {
-                    self.stack_b.last_mut().unwrap().1 += 1;
-                    if let Ref::Value(j, _) = r {
-                        if j == k {
-                            return false;
-                        }
-                        if j < n && self.seen[j as usize] != sb && label[j as usize] > lb {
-                            self.seen[j as usize] = sb;
-                            self.back.push(j);
-                            self.stack_b.push((j, 0));
-                        }
+            if let Some(&r) = p.ins(w as usize).get(e as usize) {
+                self.stack_b.push((w, e + 1));
+                if let Ref::Value(j, _) = r {
+                    if j == k {
+                        return false;
+                    }
+                    if j < n && self.seen[j as usize] != sb && label[j as usize] > lb {
+                        self.seen[j as usize] = sb;
+                        self.back.push(j);
+                        self.stack_b.push((j, 0));
                     }
                 }
             }

@@ -128,7 +128,7 @@ struct Choice {
 
 impl Choice {
     fn new(body: &InterpretedBody) -> Arc<Choice> {
-        let t = body.body().expect("an interpreted body is a tape");
+        let t = &body.tape;
         Arc::new(Choice {
             learned: Mutex::new(Specializer::new(t.n_main_selects())),
             spec: RwLock::new(None),
@@ -144,11 +144,8 @@ fn main_ops(t: &Tape) -> usize {
 /// The backend's form of `body` by `compile`, kept with the body under the
 /// backend's `key`, so every program of the backend shares it.
 fn form(body: &InterpretedBody, key: u64, compile: &BodyCompiler) -> Option<Arc<dyn ExternBundle>> {
-    let cache = body
-        .backend_cache()
-        .expect("an interpreted body keeps its forms");
-    let made = cache.get_or_try_insert(key, || {
-        let t = body.body().expect("an interpreted body is a tape");
+    let made = body.backends.get_or_try_insert(key, || {
+        let t = &body.tape;
         compile(t, body.pure_args(), body.n_outputs()).ok_or(())
     });
     made.ok()
@@ -173,7 +170,7 @@ impl Shared {
 
     fn find(&self) -> Option<Found> {
         let full = self.body(0);
-        let t = full.body().expect("an interpreted body is a tape");
+        let t = &full.tape;
         let selects = t.param_selects(full.pure_args())?;
         let n = selects.n_conds();
         let (all, decided) = t.ops_decided(&selects, &[vec![true; n], vec![false; n]]);
@@ -210,7 +207,7 @@ impl Shared {
             return 0;
         }
         let full = self.body(0);
-        let t = full.body().expect("an interpreted body is a tape");
+        let t = &full.tape;
         let decided = t.decide(ps, pattern);
         if decided.n_ops() >= self.ops || decided.state_len() > self.state_len {
             return 0;
@@ -226,7 +223,7 @@ impl Shared {
         let choice = self.choice(v);
         let mut learned = choice.learned.lock().unwrap();
         let body = self.body(v as u32);
-        let t = body.body().expect("an interpreted body is a tape");
+        let t = &body.tape;
         let traces = traces.iter().map(Vec::as_slice);
         let built = learned.learn(policy, traces, main_ops(t), |trace, pin| {
             let spec = t.specialize_main(trace, pin, Guards::Count);
@@ -258,11 +255,8 @@ impl Shared {
         // The conditions read the pure arguments only; the others are NaN.
         crate::scratch::with(|args: &mut Vec<f64>| {
             args.clear();
-            let mut p = pure.iter();
-            args.extend(mask.iter().map(|&is_pure| match is_pure {
-                true => *p.next().expect("one value per pure argument"),
-                false => f64::NAN,
-            }));
+            args.resize(mask.len(), f64::NAN);
+            crate::extern_fn::spread_pure(mask, pure, args);
             crate::scratch::with(|o: &mut Vec<f64>| match conds {
                 Some(b) => {
                     o.resize(ps.n_conds(), 0.0);
@@ -393,9 +387,9 @@ impl Form {
     /// Whether the interpreted shortened main phase `body` of variant `v`
     /// serves in this form (see [`Specializer::interpreted_serves`]).
     fn serves(&self, v: usize, body: &InterpretedBody) -> bool {
-        let ops = main_ops(body.body().expect("an interpreted body is a tape"));
+        let ops = main_ops(&body.tape);
         let full = self.shared.body(v as u32);
-        let full = main_ops(full.body().expect("an interpreted body is a tape"));
+        let full = main_ops(&full.tape);
         let compiled = self.compile.is_some();
         Specializer::interpreted_serves(&self.policy.choices, ops, full, compiled)
     }
@@ -403,7 +397,7 @@ impl Form {
     /// This form's form of the shortened main phase `body`, once made.
     fn compiled(&self, body: &InterpretedBody) -> Option<Arc<dyn ExternBundle>> {
         self.compile.as_ref()?;
-        body.backend_cache()?.get(self.key)
+        body.backends.get(self.key)
     }
 
     /// This form's compile of variant `v`'s shortened main phase, where the
@@ -480,7 +474,7 @@ impl VariantBody {
     /// [`Tape::has_param_selects`]): interpreted under the default policy,
     /// everything done in the evaluations that ask.
     pub(crate) fn new(full: InterpretedBody) -> VariantBody {
-        let t = full.body().expect("an interpreted body is a tape");
+        let t = &full.tape;
         let choice = Choice::new(&full);
         let shared = Arc::new(Shared {
             found: OnceLock::new(),
@@ -498,7 +492,7 @@ impl VariantBody {
 
     fn over(shared: Arc<Shared>, backend: BodyBackend, policy: VariantPolicy) -> VariantBody {
         let full = shared.body(0);
-        let t = full.body().expect("an interpreted body is a tape");
+        let t = &full.tape;
         let reads = t.main_reads();
         let n = policy.max_variants.max(1);
         let form = Arc::new(Form {
@@ -747,7 +741,7 @@ impl VariantBody {
         let form = self.form.clone();
         // Nothing a prolog runs on changes: no epoch to move.
         self.later(move || {
-            let t = body.body().expect("an interpreted body is a tape");
+            let t = &body.tape;
             let mut w = vec![0.0; t.work_len()];
             let mut o = vec![0.0; t.out_len()];
             let traces: Vec<Vec<u8>> = rows

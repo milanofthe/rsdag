@@ -477,15 +477,6 @@ impl Elementary {
         }
     }
 
-    /// The reduction an extremum is, `None` for an op.
-    pub(crate) fn reduction(self) -> Option<ReduceOp> {
-        match self {
-            Elementary::Min => Some(ReduceOp::Min),
-            Elementary::Max => Some(ReduceOp::Max),
-            _ => None,
-        }
-    }
-
     /// How many arguments it takes.
     pub fn arity(self) -> usize {
         match self {

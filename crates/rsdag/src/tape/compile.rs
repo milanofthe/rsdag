@@ -430,7 +430,7 @@ pub(super) const NO_FUNC: u32 = u32::MAX;
 /// The lowered program: instructions in a dependency order, the bundle
 /// table, and which value each root is.
 #[derive(Clone)]
-pub(super) struct Program {
+pub(crate) struct Program {
     pub(super) insts: Vec<Inst>,
     /// The operand pool of every instruction (see [`Inst::ins`]).
     pub(super) pool: Vec<Ref>,
@@ -766,7 +766,7 @@ impl Program {
         let mut dead = vec![false; m];
         // per merged-away call: the merged call, and per group of it the
         // group it is in the merged one
-        let mut moved: HashMap<u32, (u32, Vec<u32>)> = HashMap::default();
+        let mut moved: HashMap<u32, (u32, Vec<u32>, u32)> = HashMap::default();
         for members in groups.iter().filter(|g| g.len() >= 2) {
             let first = &self.insts[members[0] as usize];
             let Kind::Call {
@@ -841,6 +841,7 @@ impl Program {
             };
             let mut out_g = 0u32;
             let mut from = 0;
+            let mut maps = Vec::with_capacity(members.len());
             for &c in members {
                 let ng = n_groups_of(c);
                 out_g = self.insts[c as usize].n_out / ng as u32;
@@ -848,7 +849,7 @@ impl Program {
                     dead[prolog_of(c) as usize] = true;
                 }
                 dead[c as usize] = true;
-                moved.insert(c, (0, at[from..from + ng].to_vec()));
+                maps.push((c, at[from..from + ng].to_vec()));
                 from += ng;
             }
             if stateful {
@@ -879,20 +880,14 @@ impl Program {
                 stateful,
             };
             let at = self.push(kind, ins, n_groups * out_g, pure);
-            for &c in members {
-                let (to, map) = moved.get_mut(&c).expect("just moved");
-                *to = at;
-                // the outputs per group, for the resolution below
-                map.push(out_g);
+            for (c, map) in maps {
+                moved.insert(c, (at, map, out_g));
             }
         }
         dead.resize(self.insts.len(), false);
         self.compact(&dead, |r| match r {
             Ref::Value(i, o) => match moved.get(&i) {
-                Some((at, map)) => {
-                    let w = *map.last().expect("the width last");
-                    Ref::Value(*at, map[(o / w) as usize] * w + o % w)
-                }
+                Some(&(at, ref map, w)) => Ref::Value(at, map[(o / w) as usize] * w + o % w),
                 None => r,
             },
             r => r,
@@ -2404,15 +2399,11 @@ impl Templates {
         // kept by the graph, built outside its lock (a template expands others)
         let cached = ctx.templates.lock().unwrap().get(&key).cloned();
         if let Some(t) = cached {
-            return t.downcast().expect("a template is a program");
+            return t;
         }
         let func = ctx.func(FuncId(f));
         let mut syms: Vec<SymbolId> = func.params().to_vec();
-        syms.extend(
-            ctx.globals_of(FuncId(f))
-                .iter()
-                .map(|&e| ctx.as_symbol(e).expect("a global is a symbol")),
-        );
+        syms.extend_from_slice(&func.globals_in(ctx).symbols);
         let exprs: Vec<ExprId> = outs
             .iter()
             .filter_map(|&k| match func.outputs()[k as usize] {

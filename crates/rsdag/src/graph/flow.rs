@@ -291,7 +291,7 @@ impl<K: Field> Graph<K> {
     /// besides its arguments. A call's operand `p` is its argument `p`, and
     /// past the arguments global `p - arity`.
     pub fn globals(&self, f: FuncId) -> Arc<[ExprId]> {
-        self.funcs[f.0 as usize].globals_in(self)
+        self.funcs[f.0 as usize].globals_in(self).exprs.clone()
     }
 
     /// The symbol a call of `f` binds by its operand `p`: parameter `p`, or
@@ -300,8 +300,7 @@ impl<K: Field> Graph<K> {
         let params = self.funcs[f.0 as usize].params();
         match params.get(p as usize) {
             Some(&s) => s,
-            None => (self.as_symbol(self.globals(f)[p as usize - params.len()]))
-                .expect("a global is a symbol"),
+            None => self.funcs[f.0 as usize].globals_in(self).symbols[p as usize - params.len()],
         }
     }
 
@@ -326,11 +325,7 @@ impl<K: Field> Graph<K> {
 
     /// [`globals`](Self::globals), borrowed.
     pub(crate) fn globals_of(&self, f: FuncId) -> &[ExprId] {
-        let func = &self.funcs[f.0 as usize];
-        if func.globals.get().is_none() {
-            func.globals_in(self);
-        }
-        func.globals.get().expect("just found")
+        &self.funcs[f.0 as usize].globals_in(self).exprs
     }
 
     /// Values over the cone of `roots`: a constant's and a symbol's from
@@ -401,8 +396,8 @@ impl<K: Field> Graph<K> {
         // outputs are only ever appended (derivatives): the known ones stay
         let known = func.cached_reads(&key);
         let done = known.as_ref().map_or(0, |r| r.len());
-        if done == outputs.len() {
-            return known.expect("all outputs known");
+        if let Some(all) = known.as_ref().filter(|r| r.len() == outputs.len()) {
+            return all.clone();
         }
         let index: HashMap<SymbolId, u32> = moving
             .iter()

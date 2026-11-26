@@ -403,7 +403,7 @@ impl<K: Field> Graph<K> {
             // the original put it, and a fresh graph then reproduces the
             // module's id layout exactly.
             symbols: vec![SymbolId(u32::MAX); module.symbols.len()],
-            funcs: vec![None; module.funcs.len()],
+            funcs: Vec::with_capacity(module.funcs.len()),
         };
         let mut ops: Vec<ExprId> = Vec::new();
         for node in &module.nodes {
@@ -451,11 +451,7 @@ impl<K: Field> Graph<K> {
         Ok(IdMap {
             exprs: map.exprs,
             symbols: map.symbols,
-            funcs: map
-                .funcs
-                .into_iter()
-                .map(|f| f.expect("every function defined"))
-                .collect(),
+            funcs: map.funcs,
         })
     }
 
@@ -471,9 +467,23 @@ impl<K: Field> Graph<K> {
         map: &mut LoadMap,
         bodies: &[Option<Arc<dyn ExternBundle>>],
     ) -> FuncId {
-        for g in 0..=f.0 as usize {
-            let data = &module.funcs[g];
-            let id = *map.funcs[g].get_or_insert_with(|| {
+        for g in 0..f.0 as usize {
+            self.sync_one(module, g, map, bodies);
+        }
+        self.sync_one(module, f.0 as usize, map, bodies)
+    }
+
+    fn sync_one(
+        &mut self,
+        module: &Module<K>,
+        g: usize,
+        map: &mut LoadMap,
+        bodies: &[Option<Arc<dyn ExternBundle>>],
+    ) -> FuncId {
+        let data = &module.funcs[g];
+        let id = match map.funcs.get(g) {
+            Some(&id) => id,
+            None => {
                 let params = data
                     .params
                     .iter()
@@ -482,33 +492,35 @@ impl<K: Field> Graph<K> {
                 // not interned: its outputs come as the sweep meets them
                 let roles = data.param_roles.clone();
                 let func = crate::func::Function::new(&data.name, params, roles, bodies[g].clone());
-                self.push_function(func)
-            });
-            let func = self.func(id);
-            for k in func.outputs().len()..data.outputs.len() {
-                let o = match data.outputs[k] {
-                    Output::Expr(e) => match map.exprs.get(e.0 as usize) {
-                        Some(&e) => Output::Expr(e),
-                        None => break,
-                    },
-                    other => other,
-                };
-                let role = data
-                    .output_roles
-                    .get(k)
-                    .copied()
-                    .unwrap_or(OutputRole::Plain);
-                self.push_output(id, o, role);
+                let id = self.push_function(func);
+                map.funcs.push(id);
+                id
             }
+        };
+        let start = self.func(id).outputs().len();
+        for k in start..data.outputs.len() {
+            let o = match data.outputs[k] {
+                Output::Expr(e) => match map.exprs.get(e.0 as usize) {
+                    Some(&e) => Output::Expr(e),
+                    None => break,
+                },
+                other => other,
+            };
+            let role = data
+                .output_roles
+                .get(k)
+                .copied()
+                .unwrap_or(OutputRole::Plain);
+            self.push_output(id, o, role);
         }
-        map.funcs[f.0 as usize].expect("defined above")
+        id
     }
 }
 
 /// The id map while a load is in progress: functions are defined on
-/// demand, so their entries are optional until the end.
+/// demand and in order, so the ones defined so far are a prefix.
 struct LoadMap {
     exprs: Vec<ExprId>,
     symbols: Vec<SymbolId>,
-    funcs: Vec<Option<FuncId>>,
+    funcs: Vec<FuncId>,
 }

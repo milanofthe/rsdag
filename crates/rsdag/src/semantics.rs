@@ -69,9 +69,8 @@ pub fn elementary_f64(f: Elementary, args: &[f64]) -> f64 {
     match f {
         Elementary::Unary(op) => unary_f64(op, args[0]),
         Elementary::Binary(op) => binary_f64(op, args[0], args[1]),
-        Elementary::Min | Elementary::Max => {
-            reduce_slice(f.reduction().expect("an extremum"), &args[..2])
-        }
+        Elementary::Min => reduce_slice(ReduceOp::Min, &args[..2]),
+        Elementary::Max => reduce_slice(ReduceOp::Max, &args[..2]),
     }
 }
 

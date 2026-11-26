@@ -109,9 +109,11 @@ impl Signature {
     /// The signature without the inputs whose role satisfies `role`: those
     /// no program over it reads.
     pub fn without(mut self, role: impl Fn(&ParamRole) -> bool) -> Signature {
-        let keep: Vec<bool> = self.roles.iter().map(|r| !role(r)).collect();
-        let mut k = keep.iter();
-        self.syms.retain(|_| *k.next().expect("one per input"));
+        let syms = std::mem::take(&mut self.syms);
+        self.syms = (syms.into_iter().zip(&self.roles))
+            .filter(|(_, r)| !role(r))
+            .map(|(s, _)| s)
+            .collect();
         self.roles.retain(|r| !role(r));
         self
     }

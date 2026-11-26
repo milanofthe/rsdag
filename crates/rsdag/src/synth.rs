@@ -246,10 +246,10 @@ fn forms(vocab: Vocabulary, smooth: bool) -> Vec<Form> {
 /// Build one program: `n_outputs` root expressions over `n_params` free
 /// symbols. Returns the roots and the symbols in input order.
 pub fn build<K: Field>(g: &mut Graph<K>, spec: &mut Spec) -> (Vec<ExprId>, Vec<SymbolId>) {
-    let syms: Vec<ExprId> = (0..spec.n_params)
-        .map(|i| g.sym(&format!("p{i}")))
+    let sym_ids: Vec<SymbolId> = (0..spec.n_params)
+        .map(|i| g.symbol_id(&format!("p{i}")))
         .collect();
-    let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| symbol_of(g, e)).collect();
+    let syms: Vec<ExprId> = sym_ids.iter().map(|&s| g.symbol_expr(s)).collect();
     (build_roots(g, spec, &syms), sym_ids)
 }
 
@@ -266,11 +266,12 @@ pub fn build_over<K: Field>(g: &mut Graph<K>, spec: &mut Spec, syms: &[ExprId]) 
 fn build_roots<K: Field>(g: &mut Graph<K>, spec: &mut Spec, syms: &[ExprId]) -> Vec<ExprId> {
     let forms = forms(spec.vocab, spec.smooth);
     let mut pool = syms.to_vec();
-    for _ in 0..2 {
+    let constants = [(); 2].map(|_| {
         let v = spec.rng.val();
-        let k = g.konst_f64(v);
-        pool.push(k);
-    }
+        g.konst_f64(v)
+    });
+    pool.extend(constants);
+    let mut top = constants[1];
     let mut roots = Vec::with_capacity(spec.n_outputs);
     let per_root = spec.steps / spec.n_outputs.max(1);
     for r in 0..spec.n_outputs {
@@ -280,17 +281,12 @@ fn build_roots<K: Field>(g: &mut Graph<K>, spec: &mut Spec, syms: &[ExprId]) -> 
             per_root
         };
         for _ in 0..steps {
-            let e = draw(g, spec, &forms, &pool);
-            pool.push(e);
+            top = draw(g, spec, &forms, &pool);
+            pool.push(top);
         }
-        roots.push(*pool.last().unwrap());
+        roots.push(top);
     }
     roots
-}
-
-/// The symbol behind a symbol node (the generator only ever passes its own).
-fn symbol_of<K: Field>(g: &Graph<K>, e: ExprId) -> SymbolId {
-    g.as_symbol(e).expect("synth passes only symbol nodes")
 }
 
 /// Pick an operand, biased toward the most recently built nodes.

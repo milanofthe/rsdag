@@ -80,10 +80,9 @@ pub struct Graph<K: Field = F64> {
     pub(crate) templates: std::sync::Mutex<TemplateCache>,
 }
 
-/// The templates of [`Graph::templates`]: what the tape compiler keeps,
-/// its type its own.
+/// The templates of [`Graph::templates`]: what the tape compiler keeps.
 pub(crate) type TemplateCache =
-    HashMap<(u32, Vec<u32>, Option<Vec<bool>>), Arc<dyn std::any::Any + Send + Sync>>;
+    HashMap<(u32, Vec<u32>, Option<Vec<bool>>), Arc<crate::tape::compile::Program>>;
 
 /// What defines a function: its parameters, their roles, its outputs with
 /// theirs at definition, and its extern body by address.
@@ -252,7 +251,7 @@ thread_local! {
 /// on drop, with what they hold (the taker clears them): a traversal run
 /// thousands of times allocates its buffers once, and one nested in
 /// another takes buffers of its own.
-pub(crate) struct Pooled<T: Default + 'static>(Option<T>);
+pub(crate) struct Pooled<T: Default + 'static>(std::mem::ManuallyDrop<T>);
 
 impl<T: Default + 'static> Pooled<T> {
     pub(crate) fn take() -> Self {
@@ -261,38 +260,42 @@ impl<T: Default + 'static> Pooled<T> {
             let at = p.iter().rposition(|b| b.is::<T>())?;
             p.swap_remove(at).downcast::<T>().ok()
         });
-        Pooled(Some(found.map_or_else(T::default, |b| *b)))
+        Pooled(std::mem::ManuallyDrop::new(
+            found.map_or_else(T::default, |b| *b),
+        ))
     }
 
     /// The value, no longer given back on drop.
-    pub(crate) fn into_inner(mut self) -> T {
-        self.0.take().expect("held until drop")
+    pub(crate) fn into_inner(self) -> T {
+        let mut held = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `held` is never dropped, so its value is taken once.
+        unsafe { std::mem::ManuallyDrop::take(&mut held.0) }
     }
 
     /// Put `t` in the pool.
     pub(crate) fn give(t: T) {
-        drop(Pooled(Some(t)));
+        drop(Pooled(std::mem::ManuallyDrop::new(t)));
     }
 }
 
 impl<T: Default + 'static> std::ops::Deref for Pooled<T> {
     type Target = T;
     fn deref(&self) -> &T {
-        self.0.as_ref().expect("held until drop")
+        &self.0
     }
 }
 
 impl<T: Default + 'static> std::ops::DerefMut for Pooled<T> {
     fn deref_mut(&mut self) -> &mut T {
-        self.0.as_mut().expect("held until drop")
+        &mut self.0
     }
 }
 
 impl<T: Default + 'static> Drop for Pooled<T> {
     fn drop(&mut self) {
-        if let Some(t) = self.0.take() {
-            POOL.with(|p| p.borrow_mut().push(Box::new(t)));
-        }
+        // SAFETY: `drop` runs once and `self.0` is not used after it.
+        let t = unsafe { std::mem::ManuallyDrop::take(&mut self.0) };
+        POOL.with(|p| p.borrow_mut().push(Box::new(t)));
     }
 }
 
@@ -775,9 +778,8 @@ impl<K: Field> Graph<K> {
         match f {
             Elementary::Unary(op) => self.unary(op, args[0]),
             Elementary::Binary(op) => self.binary(op, args[0], args[1]),
-            Elementary::Min | Elementary::Max => {
-                self.reduce(f.reduction().expect("an extremum"), args[..2].to_vec())
-            }
+            Elementary::Min => self.reduce(ReduceOp::Min, args[..2].to_vec()),
+            Elementary::Max => self.reduce(ReduceOp::Max, args[..2].to_vec()),
         }
     }
 

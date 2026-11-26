@@ -9,10 +9,11 @@ use rsdag::Tape;
 use crate::constants::{INLINE_MINMAX_MAX, INLINE_ROWS, POWI_INLINE};
 use crate::isa::Isa;
 
-/// Whether `x^n` is emitted inline (as `semantics::powi_f64` multiplies,
-/// product for product) rather than through the host.
-pub(crate) fn powi_inline(n: i32) -> bool {
-    n != 0 && n.unsigned_abs() <= POWI_INLINE
+/// The magnitude of `n` where `x^n` is emitted inline (as
+/// `semantics::powi_f64` multiplies, product for product) rather than
+/// through the host.
+pub(crate) fn powi_inline(n: i32) -> Option<std::num::NonZeroU32> {
+    std::num::NonZeroU32::new(n.unsigned_abs()).filter(|e| e.get() <= POWI_INLINE)
 }
 
 /// Whether `op` is a product kernel the code computes inline, as the dots
@@ -41,7 +42,7 @@ pub(crate) fn routine<I: Isa>(op: &Op) -> Option<*const ()> {
             _ => crate::host::unary_addr(op).0,
         },
         Op::Binary(..) => crate::host::h_binary as *const (),
-        Op::Powi(_, n) if !powi_inline(n) => crate::host::h_powi as *const (),
+        Op::Powi(_, n) if powi_inline(n).is_none() => crate::host::h_powi as *const (),
         Op::Reduce(ReduceOp::Min | ReduceOp::Max, ..) => crate::host::h_reduce as *const (),
         Op::Call { .. } | Op::CallProlog { .. } => crate::host::h_call as *const (),
         Op::Gemv { .. } | Op::Gemm { .. } | Op::Solve { .. } => crate::host::h_kernel as *const (),

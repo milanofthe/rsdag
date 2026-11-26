@@ -77,6 +77,12 @@ pub(crate) struct Features {
     pub avx2: bool,
 }
 
+const LN_ROW_MASK: u32 = {
+    let mask = LN_INDEX_MASK << LN_ROW_SHIFT;
+    assert!(mask <= u32::MAX as u64);
+    mask as u32
+};
+
 /// What this CPU has, or the SSE2 baseline when `RSDAG_SSE2` is set.
 pub(crate) fn features() -> Features {
     static F: std::sync::OnceLock<Features> = std::sync::OnceLock::new();
@@ -600,8 +606,7 @@ impl<const L: usize> X64<L> {
         self.b(n as u8);
     }
     /// `and d, imm32` on a 64-bit general register.
-    fn gpr_and(&mut self, d: u8, v: u64) {
-        let v = u32::try_from(v).expect("a mask of 32 bits");
+    fn gpr_and(&mut self, d: u8, v: u32) {
         self.rex(true, 0, d);
         self.b(0x81);
         self.modrm_reg(4, d);
@@ -728,7 +733,7 @@ impl<const L: usize> X64<L> {
             self.gpr_rr(GPR_SUB, ix, k);
             self.gpr_to_lane(e, ix); // z
             self.gpr_shift(GPR_SHR, t, LN_SHIFT - LN_ROW_SHIFT);
-            self.gpr_and(t, LN_INDEX_MASK << LN_ROW_SHIFT);
+            self.gpr_and(t, LN_ROW_MASK);
             self.rows_from(table, &[a, c, f, d], s); // invc, c, logc
         } else {
             self.int_c(Int::Sub, a, x, LN_OFF); // tmp

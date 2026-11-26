@@ -11,6 +11,17 @@
 //! compiled body survives `Graph` mutation and crosses thread boundaries with
 //! the per-thread tapes the solver clones.
 
+pub fn spread_pure(mask: &[bool], pure: &[f64], args: &mut [f64]) {
+    args.fill(f64::NAN);
+    let slots = args
+        .iter_mut()
+        .zip(mask)
+        .filter_map(|(a, &m)| m.then_some(a));
+    for (a, &v) in slots.zip(pure) {
+        *a = v;
+    }
+}
+
 /// The forms a backend compiled of a bundle, kept with the bundle so every
 /// program that calls it shares them (a native body is emitted once, not
 /// once per calling program). Keyed by the backend's options.

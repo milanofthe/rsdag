@@ -105,7 +105,7 @@ pub struct Function {
     reads: std::sync::Mutex<HashMap<ReadsKey, Arc<[Arc<[u32]>]>>>,
     /// The symbols the body reads that are not its parameters, its calls'
     /// included, once asked for (see `Graph::globals`).
-    pub(crate) globals: std::sync::OnceLock<Arc<[ExprId]>>,
+    pub(crate) globals: std::sync::OnceLock<Globals>,
     /// Whether the body calls functions, once asked for (see
     /// [`composite_in`](Self::composite_in)).
     composite: std::sync::OnceLock<bool>,
@@ -124,12 +124,12 @@ pub(crate) type ReadsKey = (crate::graph::Through, Box<[u32]>);
 /// keeps the body's prolog result per instance (see
 /// [`ExternBundle::state_len`]).
 pub(crate) struct InterpretedBody {
-    tape: crate::tape::Tape,
+    pub(crate) tape: crate::tape::Tape,
     n_out: usize,
     /// One flag per parameter; empty when no parameter is pure.
     pure: Vec<bool>,
     /// What backends compiled of the tape (see [`ExternBundle::backend_cache`]).
-    backends: crate::extern_fn::BackendCache,
+    pub(crate) backends: crate::extern_fn::BackendCache,
     rate: crate::parallel::Rate,
 }
 
@@ -193,6 +193,11 @@ impl ExternBundle for InterpretedBody {
     }
 }
 
+pub(crate) struct Globals {
+    pub(crate) exprs: Arc<[ExprId]>,
+    pub(crate) symbols: Arc<[SymbolId]>,
+}
+
 impl Function {
     /// A function without outputs over `params` with their `param_roles`.
     pub(crate) fn new(
@@ -247,23 +252,26 @@ impl Function {
     pub(crate) fn globals_in<K: crate::field::Field>(
         &self,
         ctx: &crate::graph::Graph<K>,
-    ) -> Arc<[ExprId]> {
+    ) -> &Globals {
         if let Some(g) = self.globals.get() {
-            return g.clone();
+            return g;
         }
         let exprs = self.exprs();
         let params: rustc_hash::FxHashSet<SymbolId> = self.params.iter().copied().collect();
-        let mut globals: Vec<ExprId> = ctx
+        let mut globals: Vec<(ExprId, SymbolId)> = ctx
             .cone(&exprs, true)
             .nodes
             .iter()
-            .copied()
-            .filter(
-                |&e| matches!(*ctx.node(e), crate::node::Node::Symbol(s) if !params.contains(&s)),
-            )
+            .filter_map(|&e| match *ctx.node(e) {
+                crate::node::Node::Symbol(s) if !params.contains(&s) => Some((e, s)),
+                _ => None,
+            })
             .collect();
         globals.sort_unstable();
-        self.globals.get_or_init(|| globals.into()).clone()
+        self.globals.get_or_init(|| Globals {
+            exprs: globals.iter().map(|&(e, _)| e).collect(),
+            symbols: globals.iter().map(|&(_, s)| s).collect(),
+        })
     }
 
     /// Whether the body calls functions: a composite function, its calls
@@ -325,13 +333,12 @@ impl Function {
 
     /// The outputs with their expressions replaced, in order, by `exprs`.
     pub(crate) fn outputs_over(&self, exprs: Vec<ExprId>) -> Vec<Output> {
-        let mut exprs = exprs.into_iter();
-        (self.outputs.iter())
-            .map(|o| match o {
-                Output::Expr(_) => Output::Expr(exprs.next().expect("one per expression")),
-                &other => other,
-            })
-            .collect()
+        let mut outputs = self.outputs.clone();
+        let slots = outputs.iter_mut().filter(|o| matches!(o, Output::Expr(_)));
+        for (o, e) in slots.zip(exprs) {
+            *o = Output::Expr(e);
+        }
+        outputs
     }
 
     pub fn name(&self) -> &str {
@@ -417,11 +424,7 @@ impl Function {
         // its arguments. Split over the parameters the roles call pure and
         // the globals (pure where the caller has them pure, see the tape's
         // `stateful`), when there are any.
-        let globals: Vec<crate::node::SymbolId> = self
-            .globals_in(ctx)
-            .iter()
-            .map(|&g| ctx.as_symbol(g).expect("a global is a symbol"))
-            .collect();
+        let globals = &self.globals_in(ctx).symbols;
         let inputs: Vec<crate::node::SymbolId> = self
             .params
             .iter()

@@ -435,14 +435,7 @@ impl ExternBundle for NativeBody {
     fn prolog_into(&self, pure: &[f64], work: &mut [f64], state: &mut [f64]) {
         let (w, a) = work.split_at_mut(self.tape.layout.total);
         let a = &mut a[..self.pure.len()];
-        let mut p = pure.iter();
-        for (x, &is_pure) in a.iter_mut().zip(&self.pure) {
-            *x = if is_pure {
-                *p.next().expect("one value per pure argument")
-            } else {
-                f64::NAN
-            };
-        }
+        rsdag::extern_fn::spread_pure(&self.pure, pure, a);
         self.tape.run(0..self.tape.prolog_chunks, a, w);
         let sl = self.tape.state_len;
         state[..sl].copy_from_slice(&w[..sl]);
@@ -1388,41 +1381,46 @@ impl<'a, I: Isa> Emitter<'a, I> {
                 self.put(dst, r);
             }
             Op::Neg(a) => self.neg(dst, a),
-            Op::Powi(a, n) => match n {
-                -1 => {
+            Op::Powi(a, n) => match (n, powi_inline(n)) {
+                (-1, _) => {
                     let x = self.get(a);
                     let one = self.fconst(1.0);
                     let r = self.fresh_for(dst);
                     self.isa.arith(Arith::Div, r, one, x);
                     self.put(dst, r);
                 }
-                2 => self.bin2(Arith::Mul, dst, a, a),
-                n if powi_inline(n) => {
+                (2, _) => self.bin2(Arith::Mul, dst, a, a),
+                (_, Some(magnitude)) => {
                     // `semantics::powi_f64`'s binary exponentiation, product
                     // for product, so the result is the reference's bits.
-                    let x = self.get(a);
-                    let (mut base, mut acc, mut e) = (x, None::<u8>, n.unsigned_abs());
-                    while e > 0 {
-                        if e & 1 == 1 {
-                            acc = Some(match acc {
-                                None => base,
-                                Some(p) => {
-                                    let r = self.fresh();
-                                    self.isa.arith(Arith::Mul, r, p, base);
-                                    r
-                                }
-                            });
-                        }
+                    let mut base = self.get(a);
+                    let low = magnitude.trailing_zeros();
+                    for _ in 0..low {
+                        let r = self.fresh();
+                        self.isa.arith(Arith::Mul, r, base, base);
+                        base = r;
+                        self.release_except(&[base]);
+                    }
+                    let mut acc = base;
+                    let mut e = magnitude.get() >> low;
+                    loop {
                         e >>= 1;
                         if e > 0 {
                             let r = self.fresh();
                             self.isa.arith(Arith::Mul, r, base, base);
                             base = r;
                         }
-                        let keep: Vec<u8> = [Some(base), acc].into_iter().flatten().collect();
-                        self.release_except(&keep);
+                        self.release_except(&[base, acc]);
+                        if e == 0 {
+                            break;
+                        }
+                        if e & 1 == 1 {
+                            let r = self.fresh();
+                            self.isa.arith(Arith::Mul, r, acc, base);
+                            acc = r;
+                        }
                     }
-                    let p = acc.expect("a nonzero exponent");
+                    let p = acc;
                     let r = self.fresh_for(dst);
                     if n < 0 {
                         let one = self.fconst(1.0);
@@ -1432,7 +1430,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
                     }
                     self.put(dst, r);
                 }
-                _ => {
+                (_, None) => {
                     let x = self.get(a);
                     self.call_into(
                         dst,

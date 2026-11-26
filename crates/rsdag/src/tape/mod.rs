@@ -393,7 +393,7 @@ impl Lane<'_> {
 }
 
 pub mod calls;
-mod compile;
+pub(crate) mod compile;
 mod specialize;
 mod topo;
 

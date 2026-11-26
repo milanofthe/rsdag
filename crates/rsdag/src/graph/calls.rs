@@ -192,7 +192,7 @@ impl<K: Field> Graph<K> {
         for (k, r) in reads.iter().enumerate() {
             func.cache_support(k as u32, r.clone());
         }
-        func.cached_support(out).expect("just found")
+        reads[out as usize].clone()
     }
 
     /// Per root, whether its value reads any of `syms`, a comparison's
@@ -931,11 +931,11 @@ impl<K: Field> Rule<K> for Inline<'_, K> {
                 bodies: &mut *self.bodies,
                 contexts: Contexts::default(),
             };
-            let mut inlined = crate::transform::rewrite(&mut inner, &exprs).into_iter();
+            let inlined = crate::transform::rewrite(&mut inner, &exprs);
             let zero = self.g.zero();
-            let outputs = (self.g.func(f).outputs().iter())
+            let outputs = (self.g.func(f).outputs_over(inlined).into_iter())
                 .map(|o| match o {
-                    Output::Expr(_) => inlined.next().expect("one per expression"),
+                    Output::Expr(e) => e,
                     _ => zero,
                 })
                 .collect();
