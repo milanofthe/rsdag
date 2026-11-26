@@ -3,7 +3,7 @@
 //! with the recurrence it replaces.
 
 mod common;
-use common::constants::{POLYGAMMA_MPMATH, TRIGAMMA_SERIES};
+use common::constants::{DIGAMMA_SERIES, POLYGAMMA_MPMATH, TRIGAMMA_SERIES};
 use rsdag::semantics::{digamma, trigamma};
 
 #[test]
@@ -23,7 +23,7 @@ fn values_match_the_exact_ones() {
     for (x, psi, psi1) in POLYGAMMA_MPMATH {
         let (a, b) = (digamma(x), trigamma(x));
         assert!(
-            (a - psi).abs() <= 1e-9 * (1.0 + psi.abs()),
+            (a - psi).abs() <= DIGAMMA_SERIES * (1.0 + psi.abs()),
             "psi({x}): {a} vs {psi}"
         );
         assert!(

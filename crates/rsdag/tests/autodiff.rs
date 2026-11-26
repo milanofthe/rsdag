@@ -1,5 +1,5 @@
 mod common;
-use common::constants::{FINITE_DIFFERENCE, REORDERED};
+use common::constants::{CENTRAL_DIFFERENCE_STEP, FINITE_DIFFERENCE, REORDERED};
 use rsdag::eval::eval;
 use rsdag::BigRational;
 use rsdag::*;
@@ -40,7 +40,7 @@ fn derivative_matches_finite_difference() {
     env.insert(is_id, 1e-12);
     env.insert(g_id, 0.3);
 
-    let h = 1e-6;
+    let h = CENTRAL_DIFFERENCE_STEP;
     for &x0 in &[-0.1, 0.0, 0.1, 0.3] {
         env.insert(v_id, x0);
         let analytic = eval(&ctx, &[df], &env)[0];
@@ -568,15 +568,15 @@ fn a_jacobian_through_wide_calls_makes_only_its_entries() {
         want.sort_unstable();
         assert_eq!(cols, want, "row {k}");
     }
-    let outputs_and_two_derivative_outputs_each = 3 * N;
+    let n_out = 3 * N;
     assert_eq!(
         g.func(f).outputs().len(),
-        outputs_and_two_derivative_outputs_each,
+        n_out,
         "f has more than one derivative output per structural nonzero"
     );
     assert_eq!(
         g.func(h).outputs().len(),
-        outputs_and_two_derivative_outputs_each,
+        n_out,
         "h has more than one derivative output per structural nonzero"
     );
 

@@ -19,8 +19,12 @@ pub const REORDERED: f64 = 2.0 * 40.0 * 10.0 * (f64::EPSILON / 2.0);
 /// adds 0.5 ulp. The sum of 2.51 ulp is below 3 eps of the value.
 pub const AGAINST_LIBM: f64 = 3.0 * f64::EPSILON;
 
-/// Error of a central difference (f(x + h) - f(x - h)) / 2h with h = 1e-6
-/// against f'(x), relative to 1 + |f'(x)|, for functions with |f| < 5,
+/// Step h of the central differences (f(x + h) - f(x - h)) / 2h against which
+/// the tests check derivatives.
+pub const CENTRAL_DIFFERENCE_STEP: f64 = 1e-6;
+
+/// Error of a central difference with the step h = 1e-6 of
+/// [`CENTRAL_DIFFERENCE_STEP`] against f'(x), relative to 1 + |f'(x)|, for functions with |f| < 5,
 /// |f'''| < 10 and |x| < 8 that take at most 300 operations (the largest is
 /// the squared norm of a dense solve of order 6, |f| = 4.6). The truncation
 /// error is h^2 |f'''| / 6 < 1.7e-11. Each evaluation is within 300 u |f| =
@@ -28,6 +32,36 @@ pub const AGAINST_LIBM: f64 = 3.0 * f64::EPSILON;
 /// x + h and x - h move the step by at most ulp(8) / 2h = 8.9e-10 of itself.
 /// The sum is below 1.8e-7, and the bound is 2e-7.
 pub const FINITE_DIFFERENCE: f64 = 2e-7;
+
+/// Factor from the difference of two central differences to the truncation
+/// error of the coarser one. The truncation error of a central difference
+/// D(h) is c h^2 + O(h^4), so D(h) - D(h / 2) = 3/4 c h^2 to leading order,
+/// and the error of D(h) is 4/3 |D(h) - D(h / 2)| (Richardson extrapolation of
+/// order 2, 2^2 / (2^2 - 1)).
+pub const RICHARDSON_CENTRAL: f64 = 4.0 / 3.0;
+
+/// Multiple of the estimate [`RICHARDSON_CENTRAL`] |D(h) - D(h / 2)| within
+/// which a derivative of a random expression must agree with D(h), where no
+/// bound on f''' is known in advance. The estimate holds to leading order in
+/// h, and the terms in h^4 and the round-off of both differences move it, so
+/// the bound allows the truncation error to exceed the estimate by this
+/// factor. To it adds the round-off floor of D(h): each evaluation of f is
+/// within a few u |f| of the exact value, and the step is taken exactly as the
+/// difference of the two rounded arguments, so the quotient is within about
+/// eps |f| / h of the exact difference quotient, with |f| the larger magnitude
+/// of f(x + h) and f(x - h).
+pub const TRUNCATION_ESTIMATE_MULTIPLE: f64 = 4.0;
+
+/// Absolute error of `digamma`. The recurrence shifts the argument to x >= 6,
+/// and the asymptotic series ln x - 1 / 2x - sum B_2k / (2k x^2k) stops after
+/// the term in B_6 / x^6 = 1 / (252 x^6). For real x > 0 the remainder has the
+/// sign of the first omitted term and is below it in magnitude (DLMF 5.11(ii)),
+/// so the error is below |B_8| / (8 x^8) = 1 / (240 x^8) <= 1 / (240 * 6^8) =
+/// 2.48e-9. The terms 1 / x of the recurrence and the reflection
+/// pi / tan(pi x) grow like |psi(x)| near a pole and round with relative
+/// errors of a few u, below 1e-13 at the test points, which the bound covers
+/// through its factor 1 + |psi(x)|. The bound is 2.5e-9.
+pub const DIGAMMA_SERIES: f64 = 2.5e-9;
 
 /// Absolute error of `trigamma`. Its asymptotic series is evaluated at
 /// x >= 6 and stops after the term in B_8 / x^9. The series alternates, so

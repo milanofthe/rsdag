@@ -8,6 +8,9 @@
 //! is drawable there.
 
 mod common;
+use common::constants::{
+    CENTRAL_DIFFERENCE_STEP, RICHARDSON_CENTRAL, TRUNCATION_ESTIMATE_MULTIPLE,
+};
 use common::same_bits;
 
 use rsdag::Program;
@@ -50,11 +53,11 @@ fn build_branchy(
     syms: &[ExprId],
     steps: usize,
 ) -> ExprId {
-    let selects_dense_enough_for_a_walk_to_cross_regions_often = 25;
+    let selects = 25;
     let mut spec = Spec::new(rng.next_u64())
         .steps(steps)
         .vocab(Vocabulary::Elementary)
-        .selects(selects_dense_enough_for_a_walk_to_cross_regions_often);
+        .selects(selects);
     build_over(ctx, &mut spec, syms)
 }
 
@@ -280,8 +283,7 @@ fn specialized_tape_matches_full_bit_exact_and_its_guards_catch_every_live_flip(
 
         for _ in 0..30 {
             for v in inputs.iter_mut() {
-                let step_large_enough_to_cross_comparisons = rng.val();
-                *v += step_large_enough_to_cross_comparisons;
+                *v += rng.val();
             }
             choices.clear();
             tape.eval_with(&inputs, &mut w, &mut of, &mut choices);
@@ -331,28 +333,35 @@ fn differentiate_matches_finite_differences() {
         let wrt = rng.below(nsym);
         let d = differentiate(&mut ctx, root, sym_ids[wrt]);
 
-        let point_mostly_in_ln_and_sqrt_domains: Vec<f64> = (0..nsym).map(|_| rng.pos()).collect();
-        let point = point_mostly_in_ln_and_sqrt_domains;
+        let point: Vec<f64> = (0..nsym).map(|_| rng.pos()).collect();
         let mut env: HashMap<SymbolId, f64> =
             sym_ids.iter().copied().zip(point.iter().copied()).collect();
 
         let ad = eval(&ctx, &[d], &env)[0];
 
-        let h = 1e-6;
-        env.insert(sym_ids[wrt], point[wrt] + h);
-        let fp = eval(&ctx, &[root], &env)[0];
-        env.insert(sym_ids[wrt], point[wrt] - h);
-        let fm = eval(&ctx, &[root], &env)[0];
-        let fd = (fp - fm) / (2.0 * h);
+        let x = point[wrt];
+        let mut central = |h: f64| {
+            let (xp, xm) = (x + h, x - h);
+            env.insert(sym_ids[wrt], xp);
+            let fp = eval(&ctx, &[root], &env)[0];
+            env.insert(sym_ids[wrt], xm);
+            let fm = eval(&ctx, &[root], &env)[0];
+            ((fp - fm) / (xp - xm), fp.abs().max(fm.abs()))
+        };
+        let h = CENTRAL_DIFFERENCE_STEP;
+        let (fd, f) = central(h);
+        let (fine, _) = central(h / 2.0);
 
-        let on_a_domain_edge_or_blown_up = !ad.is_finite() || !fd.is_finite() || fd.abs() > 1e8;
+        let on_a_domain_edge_or_blown_up =
+            !ad.is_finite() || !fd.is_finite() || !fine.is_finite() || fd.abs() > 1e8;
         if on_a_domain_edge_or_blown_up {
             continue;
         }
-        let rel = (ad - fd).abs() / (fd.abs() + 1e-6);
+        let truncation = RICHARDSON_CENTRAL * (fd - fine).abs();
+        let bound = TRUNCATION_ESTIMATE_MULTIPLE * truncation + f64::EPSILON * f / h;
         assert!(
-            rel < 1e-3,
-            "seed {seed}: d/dx{wrt} AD={ad:e} FD={fd:e} rel={rel:e}"
+            (ad - fd).abs() <= bound,
+            "seed {seed}: d/dx{wrt} AD={ad:e} FD(h)={fd:e} FD(h/2)={fine:e} |f|={f:e} bound={bound:e}"
         );
         checked += 1;
     }

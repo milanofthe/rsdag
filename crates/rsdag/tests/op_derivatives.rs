@@ -1,5 +1,5 @@
 mod common;
-use common::constants::FINITE_DIFFERENCE;
+use common::constants::{CENTRAL_DIFFERENCE_STEP, FINITE_DIFFERENCE};
 use rsdag::eval::eval;
 use rsdag::node::UNARY_OPS;
 use rsdag::*;
@@ -17,7 +17,7 @@ fn domain_point(op: UnaryOp) -> f64 {
     }
 }
 
-fn assert_derivatives_match_central_difference(
+fn check_derivatives(
     name: &str,
     ctx: &mut Graph<BigRational>,
     f: ExprId,
@@ -27,7 +27,7 @@ fn assert_derivatives_match_central_difference(
     let reverse = gradient(ctx, f, &wrt);
     let forward: Vec<ExprId> = wrt.iter().map(|&s| differentiate(ctx, f, s)).collect();
     let mut env: HashMap<SymbolId, f64> = point.iter().copied().collect();
-    let h = 1e-6;
+    let h = CENTRAL_DIFFERENCE_STEP;
     for (k, &(s, x)) in point.iter().enumerate() {
         env.insert(s, x + h);
         let up = eval(ctx, &[f], &env)[0];
@@ -57,7 +57,7 @@ fn every_smooth_unary_op_derivative_matches_a_central_difference() {
         let f = ctx.unary(op, x);
         let xs = ctx.symbol_id("x");
         let name = format!("{op:?}");
-        assert_derivatives_match_central_difference(&name, &mut ctx, f, &[(xs, domain_point(op))]);
+        check_derivatives(&name, &mut ctx, f, &[(xs, domain_point(op))]);
     }
 }
 
@@ -69,11 +69,11 @@ fn binary_op_and_power_partials_match_a_central_difference() {
         let b = ctx.sym("b");
         let f = ctx.binary(op, a, b);
         let point = [(ctx.symbol_id("a"), 1.5), (ctx.symbol_id("b"), 0.7)];
-        assert_derivatives_match_central_difference(&format!("{op:?}"), &mut ctx, f, &point);
+        check_derivatives(&format!("{op:?}"), &mut ctx, f, &point);
     }
     let mut ctx: Graph<BigRational> = Graph::new();
     let x = ctx.sym("x");
     let f = ctx.pow_i(x, 3);
     let point = [(ctx.symbol_id("x"), 1.5)];
-    assert_derivatives_match_central_difference("pow_i", &mut ctx, f, &point);
+    check_derivatives("pow_i", &mut ctx, f, &point);
 }
