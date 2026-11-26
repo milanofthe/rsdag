@@ -57,8 +57,6 @@ fn a_gemv_folds_the_subtractions_of_its_rows() {
     }
 }
 
-/// `m` rows against `x`, each consumed as `neg(dot)`: the fold gives the
-/// negation's bits, `-0.0` for a zero product included.
 #[test]
 fn a_negated_gemv_keeps_the_sign_of_zero() {
     let (m, n) = (9usize, 3usize);
@@ -79,19 +77,20 @@ fn a_negated_gemv_keeps_the_sign_of_zero() {
     let d = tape.dump();
     assert!(d.contains("neg"), "{d}");
     assert!(!d.contains("Neg("), "{d}");
-    let mut vals = vec![0.0; names.len()]; // every product is +0.0
+    let mut vals = vec![0.0; names.len()];
     vals[0] = 1.0;
     let (mut w, mut o): (Vec<f64>, Vec<f64>) = (Vec::new(), Vec::new());
     tape.eval(&vals, &mut w, &mut o);
     for v in &o {
-        assert!(v.is_sign_negative() && *v == 0.0, "{v}");
+        assert!(
+            v.is_sign_negative() && *v == 0.0,
+            "the negation of a +0.0 product is {v}, not -0.0"
+        );
     }
 }
 
-/// The complex product pattern: rows `ar`, `ai` against `br`, `bi` in one
-/// kernel, `re = rr - ii` and `im = ri + ir` folded from its own outputs.
 #[test]
-fn a_kernel_folds_its_own_outputs() {
+fn a_complex_product_kernel_folds_its_own_outputs() {
     let (m, n) = (6usize, 4usize);
     let mut g: Graph<F64> = Graph::new();
     let names: Vec<String> = (0..2 * m * n)

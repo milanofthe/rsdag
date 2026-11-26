@@ -2,8 +2,6 @@ use rsdag::synth::{build, inputs, Spec, Vocabulary};
 use rsdag::*;
 use rsdag::{Tape, F64};
 
-/// A module is the program: reloading one and evaluating it must give
-/// the same bits, over programs nobody wrote by hand.
 #[test]
 fn a_module_round_trips_bit_exactly() {
     for seed in 0..24u64 {
@@ -36,8 +34,6 @@ fn a_module_round_trips_bit_exactly() {
                 .all(|(a, b)| a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())),
             "seed {seed}: {o:?} vs {o2:?}"
         );
-        // A module of the reloaded graph is the module it was built
-        // from: loading is not lossy and not order-dependent.
         assert_eq!(
             loaded.to_module(),
             module,
@@ -46,8 +42,6 @@ fn a_module_round_trips_bit_exactly() {
     }
 }
 
-/// Loading into a graph that already holds the same subexpressions
-/// shares them instead of duplicating: the ids move, the values do not.
 #[test]
 fn loading_into_a_populated_graph_shares_nodes() {
     let mut a: Graph<F64> = Graph::new();
@@ -57,11 +51,9 @@ fn loading_into_a_populated_graph_shares_nodes() {
 
     let (mut b, first) = Graph::from_module(&module).unwrap();
     let before = b.len();
-    // Loading the same module a second time must not add a node: every
-    // one of them is already interned, so the ids come back unchanged.
     let map = b.load_module(&module).unwrap();
     assert_eq!(b.len(), before, "reloading a module added nodes");
-    assert_eq!(map.exprs, first.exprs);
+    assert_eq!(map.exprs, first.exprs, "reloading a module moved the ids");
     for (k, r) in roots.iter().enumerate() {
         assert_eq!(map.exprs[r.0 as usize], *r, "root {k} moved");
     }
@@ -71,24 +63,20 @@ fn loading_into_a_populated_graph_shares_nodes() {
     let _ = &a;
 }
 
-/// A text format loses `f64` bits unless the constants are written as
-/// bit patterns, and cannot hold an infinity at all; both are checked
-/// here because a module that comes back one ulp away is a different
-/// program.
 #[cfg(feature = "serde")]
 #[test]
-fn a_module_survives_json() {
+fn a_module_survives_json_with_its_constants_bit_exact() {
     let mut g: Graph<F64> = Graph::new();
     let mut spec = Spec::new(3).steps(120).params(4).vocab(Vocabulary::Full);
     let (mut roots, syms) = build(&mut g, &mut spec);
-    // Values a text format mangles: an infinity, a NaN, and a double
-    // whose shortest decimal parses back to its neighbour.
-    for v in [
+    let shortest_decimal_parses_back_to_its_neighbour = 1.106704f64.next_up();
+    let values_a_text_format_mangles = [
         f64::INFINITY,
         f64::NEG_INFINITY,
         f64::NAN,
-        1.106704f64.next_up(),
-    ] {
+        shortest_decimal_parses_back_to_its_neighbour,
+    ];
+    for v in values_a_text_format_mangles {
         let k = g.konst_f64(v);
         roots.push(k);
     }
@@ -109,9 +97,6 @@ fn a_module_survives_json() {
     assert!(o.iter().zip(&o2).all(|(a, b)| a.to_bits() == b.to_bits()));
 }
 
-/// A module with functions and calls to them, nested: the loader has to
-/// define a function before it rebuilds the first call to it, and the
-/// function's outputs are nodes it has already rebuilt by then.
 #[test]
 fn calls_and_nested_functions_round_trip() {
     let mut g: Graph<F64> = Graph::new();
@@ -153,7 +138,6 @@ fn calls_and_nested_functions_round_trip() {
     assert_eq!(loaded.to_module(), module);
 }
 
-/// A body of `[a + b, a * b]` over `[a, b]`.
 struct Pair;
 impl rsdag::ExternBundle for Pair {
     fn n_outputs(&self) -> usize {
@@ -165,8 +149,6 @@ impl rsdag::ExternBundle for Pair {
     }
 }
 
-/// An extern function keeps its name and its slot layout in the module; the
-/// body comes back through the loader's resolver.
 #[test]
 fn an_extern_function_round_trips_with_its_body_resolved_by_name() {
     use std::sync::Arc;
@@ -217,9 +199,6 @@ fn an_extern_function_round_trips_with_its_body_resolved_by_name() {
     assert_eq!(loaded.to_module(), module);
 }
 
-/// Differentiating through a call appends a derivative output to the callee
-/// after the call was made; the module keeps that order, reloads, and the
-/// reloaded function knows its derivative instead of deriving it again.
 #[test]
 fn derivatives_demanded_after_a_call_round_trip() {
     let mut g: Graph<F64> = Graph::new();
@@ -258,8 +237,6 @@ fn derivatives_demanded_after_a_call_round_trip() {
     assert_eq!(o, o2);
 }
 
-/// The derivative an extern function declares is found again after a
-/// reload: the Jacobian through its calls is the declared slot, not zero.
 #[test]
 fn a_declared_extern_derivative_survives_a_reload() {
     use std::sync::Arc;
@@ -272,8 +249,8 @@ fn a_declared_extern_derivative_survives_a_reload() {
         Arc::new(Pair),
         [(rsdag::Output::Slot(0), OutputRole::Plain)],
     );
-    // Declared as the slot `a * b` (a stand-in: the test reads the index).
-    let k = g.declare_derivative(f, 0, 0, rsdag::Output::Slot(1));
+    let slot_a_times_b_as_a_stand_in = rsdag::Output::Slot(1);
+    let k = g.declare_derivative(f, 0, 0, slot_a_times_b_as_a_stand_in);
     let sum = g.call(f, 0, &[x, y]);
 
     let module = g.to_module();
@@ -310,8 +287,6 @@ fn loading_a_module_with_externs_without_bodies_says_so() {
     assert_eq!(err, Some(rsdag::ModuleError::MissingExtern("pair".into())));
 }
 
-/// A module is outside data: every way of breaking one is reported, none
-/// panics, and the graph it was loaded into is left as it was.
 #[test]
 fn a_broken_module_is_refused_not_panicked_on() {
     use rsdag::{ModuleError, Node};

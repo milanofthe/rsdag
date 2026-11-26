@@ -16,19 +16,17 @@ use rsdag::{
     SymbolId, Tape, F64,
 };
 
-/// `f(v, p)`, `p` a parameter: a sum of regions of `v`, each a select
-/// between a heavy arm (above its threshold) and a light one. The
-/// instances start between 0.7 and 0.9: most thresholds lie above them,
-/// every instance on the light arm, four among them, the instances on
-/// either side.
+const REGIONS: usize = 24;
+const REGIONS_ABOVE_THE_STARTING_STATES: usize = 20;
+
 fn device(g: &mut Graph<F64>) -> FuncId {
     let (v, vs) = sym(g, "dev.v");
     let (p, ps) = sym(g, "dev.p");
     let mut y = g.zero();
-    for k in 0..24 {
+    for k in 0..REGIONS {
         let th = match k {
-            0..20 => 1.0 + 0.1 * k as f64,
-            _ => 0.78 + 0.02 * (k - 20) as f64,
+            0..REGIONS_ABOVE_THE_STARTING_STATES => 1.0 + 0.1 * k as f64,
+            _ => 0.78 + 0.02 * (k - REGIONS_ABOVE_THE_STARTING_STATES) as f64,
         };
         let th = g.konst_f64(th);
         let c = g.cmp(CmpOp::Gt, v, th);
@@ -79,13 +77,12 @@ fn circuit(n: usize) -> Circuit {
     }
 }
 
-/// The circuit's tape, its bodies specializing over their choices or not.
-fn tape(c: &Circuit, choices: bool) -> Tape {
+fn tape(c: &Circuit, specialize_over_choices: bool) -> Tape {
     let mut t = Tape::compile_split(&c.g, &c.roots, &c.syms, &c.pure);
     t.with_backend(&BodyBackend {
         variants: Some(VariantPolicy {
             choices: ChoicePolicy {
-                enabled: choices,
+                enabled: specialize_over_choices,
                 ..ChoicePolicy::default()
             },
             ..VariantPolicy::default()
@@ -95,11 +92,7 @@ fn tape(c: &Circuit, choices: bool) -> Tape {
     t
 }
 
-/// `f` under an rsprobe context: the specializations the bodies built
-/// and how often specialization went off (the choices thrash, or so many
-/// selects flipped that pinning the rest does not pay), as measures of
-/// the record; `None` where nothing records (without `rsprobe/on`).
-fn counted(f: impl FnOnce()) -> Option<[u64; 2]> {
+fn specializations_built_and_off_where_rsprobe_records(f: impl FnOnce()) -> Option<[u64; 2]> {
     let ctx = rsprobe::Context::new();
     {
         let _on = ctx.enter();
@@ -119,10 +112,11 @@ fn rng(s: &mut u64) -> f64 {
     (*s >> 11) as f64 / (1u64 << 53) as f64
 }
 
-/// `steps` main phases at one binding, each instance's state moved by
-/// `step(i, k)`, on the specializing tape and on the plain one: the same
-/// outputs at every step.
-fn run(n: usize, steps: usize, step: impl Fn(usize, usize) -> f64) {
+fn run_and_match_the_plain_tape_at_every_step(
+    n: usize,
+    steps: usize,
+    step: impl Fn(usize, usize) -> f64,
+) {
     let c = circuit(n);
     let (spec, plain) = (tape(&c, true), tape(&c, false));
     let mut ins: Vec<f64> = (0..n)
@@ -144,21 +138,17 @@ fn run(n: usize, steps: usize, step: impl Fn(usize, usize) -> f64) {
 
 #[test]
 fn bodies_specialize_over_their_choices_and_stay_the_full_bodies() {
-    // Instances drifting slowly, half of them up across the lowest
-    // thresholds above them: most hold their regions from one step to the
-    // next, a few cross and run again full, and the selects they flip are
-    // unpinned in a rebuild.
-    let drift = counted(|| run(64, 60, |i, _| 0.004 * if i % 2 == 0 { 1.0 } else { -1.0 }));
-    // Every instance crossing its regions in one step early in the run,
-    // then holding: one region change, the specialization rebuilt, not
-    // thrash however many instances flipped together.
-    let change = counted(|| run(64, 30, |_, k| if k == 4 { 1.2 } else { 0.0 }));
-    // Instances holding their regions, then jumping across every region at
-    // every step: the selects flip until pinning the rest does not pay,
-    // and the specialization goes off.
+    let drift = specializations_built_and_off_where_rsprobe_records(|| {
+        run_and_match_the_plain_tape_at_every_step(64, 60, |i, _| {
+            0.004 * if i % 2 == 0 { 1.0 } else { -1.0 }
+        })
+    });
+    let change = specializations_built_and_off_where_rsprobe_records(|| {
+        run_and_match_the_plain_tape_at_every_step(64, 30, |_, k| if k == 4 { 1.2 } else { 0.0 })
+    });
     let seed = std::cell::Cell::new(11u64);
-    let jumps = counted(|| {
-        run(64, 40, |_, k| {
+    let jumps = specializations_built_and_off_where_rsprobe_records(|| {
+        run_and_match_the_plain_tape_at_every_step(64, 40, |_, k| {
             if k < 3 {
                 return 0.0;
             }
@@ -168,7 +158,6 @@ fn bodies_specialize_over_their_choices_and_stay_the_full_bodies() {
             d
         })
     });
-    // The policy's counts, where a record holds them.
     if let (Some(drift), Some(change), Some(jumps)) = (drift, change, jumps) {
         let [built, off] = drift;
         assert!(

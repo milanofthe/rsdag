@@ -13,8 +13,7 @@ use rsdag::{
     BodyBackend, CmpOp, ExprId, FuncId, Graph, OutputRole, ParamRole, Scope, SymbolId, Tape, F64,
 };
 
-/// A chain of `n` transcendental steps over `x`: an arm worth removing.
-fn chain(g: &mut Graph<F64>, x: ExprId, n: usize, c: f64) -> ExprId {
+fn transcendental_chain(g: &mut Graph<F64>, x: ExprId, n: usize, c: f64) -> ExprId {
     let mut y = x;
     for i in 0..n {
         let k = g.konst_f64(c + 0.01 * i as f64);
@@ -34,8 +33,8 @@ pub fn device(g: &mut Graph<F64>) -> FuncId {
     let zero = g.zero();
     let one = g.one();
     let pos = g.cmp(CmpOp::Gt, p, zero);
-    let a = chain(g, v, 30, 0.9);
-    let b = chain(g, v, 30, 1.1);
+    let a = transcendental_chain(g, v, 30, 0.9);
+    let b = transcendental_chain(g, v, 30, 1.1);
     let pa = g.mul(p, a);
     let arm = g.select(pos, pa, b);
     let lvl = g.cmp(CmpOp::Gt, q, one);
@@ -141,9 +140,6 @@ fn a_parameter_branching_body_runs_its_variants() {
     }
 }
 
-/// Without a place for background work a prolog builds its instance's
-/// variant itself, and the instance runs on it at once; off by policy,
-/// every instance runs the full body.
 #[test]
 fn a_prolog_builds_its_variant_where_nothing_runs_in_the_background() {
     let c = circuit(1);
@@ -158,10 +154,17 @@ fn a_prolog_builds_its_variant_where_nothing_runs_in_the_background() {
             ..BodyBackend::default()
         })
         .expect("a body with variants");
-    // `p` and `q`, the pure arguments of `f(v, p, q)`.
-    for pure in [[0.4, 2.0], [-0.7, 0.5]] {
-        assert_ne!(variant_of(body.as_ref(), &pure), 0.0, "built at once");
-        assert_eq!(variant_of(off.as_ref(), &pure), 0.0, "off, the full body");
+    for pure_p_and_q in [[0.4, 2.0], [-0.7, 0.5]] {
+        assert_ne!(
+            variant_of(body.as_ref(), &pure_p_and_q),
+            0.0,
+            "built at once"
+        );
+        assert_eq!(
+            variant_of(off.as_ref(), &pure_p_and_q),
+            0.0,
+            "off, the full body"
+        );
     }
 }
 
@@ -185,9 +188,6 @@ fn derivatives_through_the_variants_are_the_full_bodys() {
     }
 }
 
-/// A select of the prolog between parameters stays the prolog's for the
-/// main phase: its value in the state, the parameters read once per
-/// binding, not passed on every evaluation.
 #[test]
 fn a_decided_prolog_select_stays_in_the_state() {
     let mut g: Graph<F64> = Graph::new();
@@ -197,7 +197,7 @@ fn a_decided_prolog_select_stays_in_the_state() {
     let zero = g.zero();
     let pos = g.cmp(CmpOp::Gt, p, zero);
     let s = g.select(pos, q, p);
-    let heavy = chain(&mut g, v, 40, 0.9);
+    let heavy = transcendental_chain(&mut g, v, 40, 0.9);
     let o = g.mul(heavy, s);
     let mut s = Scope::new(&mut g, "dev");
     s.param(vs, ParamRole::State { id: 0 });
@@ -215,10 +215,12 @@ fn a_decided_prolog_select_stays_in_the_state() {
     }
     let split = Tape::compile_split(&g, &roots, &syms, &pure);
     let whole = Tape::compile(&g, &roots, &syms);
-    // The body asks for the state `v` alone per evaluation, its variants
-    // too: neither `p` nor `q` (arguments 1, 2).
     let reads = split.bundles()[0].main_reads().expect("reads some");
-    assert_eq!(reads, vec![0]);
+    assert_eq!(
+        reads,
+        vec![0],
+        "the body reads the state v alone per evaluation, not p or q"
+    );
     let body = split.bundles()[0].body().expect("a tape body");
     let ps = body
         .param_selects(&[false, true, true])

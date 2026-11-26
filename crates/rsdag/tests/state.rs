@@ -36,14 +36,12 @@ fn the_state_prefix_carries_the_prolog() {
         assert!(s <= n, "seed {seed}");
         let mut a = vec![0.0; n];
         tape.eval_prolog_into(&ins, &mut a);
-        // Another buffer: garbage everywhere but the state.
-        let mut b = vec![f64::NAN; n];
-        b[..s].copy_from_slice(&a[..s]);
+        let mut garbage_but_the_state = vec![f64::NAN; n];
+        garbage_but_the_state[..s].copy_from_slice(&a[..s]);
         let mut got = vec![0.0; tape.out_len()];
-        tape.eval_main_into(&ins, &mut b, &mut got);
+        tape.eval_main_into(&ins, &mut garbage_but_the_state, &mut got);
         assert!(same(&got, &want), "seed {seed}: state {s} of {n}");
 
-        // The same for its specialization, whose layout is its own.
         let mut trace: Vec<u8> = Vec::new();
         let (mut w2, mut o2) = (Vec::new(), Vec::new());
         tape.eval_with(&ins, &mut w2, &mut o2, &mut trace);

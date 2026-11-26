@@ -18,8 +18,11 @@ fn syms(g: &mut Graph<F64>, n: usize) -> (Vec<ExprId>, Vec<SymbolId>) {
     (xs, ss)
 }
 
-/// Terms whose sum rounds differently in different orders.
-fn terms(g: &mut Graph<F64>, xs: &[ExprId], order: &[usize]) -> Vec<ExprId> {
+fn terms_whose_sum_rounds_by_order(
+    g: &mut Graph<F64>,
+    xs: &[ExprId],
+    order: &[usize],
+) -> Vec<ExprId> {
     order
         .iter()
         .map(|&k| {
@@ -46,11 +49,9 @@ fn a_sum_evaluates_the_same_whatever_was_built_before() {
 
     let mut a: Graph<F64> = Graph::new();
     let (xa, sa) = syms(&mut a, n);
-    let ta = terms(&mut a, &xa, &forward);
+    let ta = terms_whose_sum_rounds_by_order(&mut a, &xa, &forward);
     let ra = a.reduce(ReduceOp::Sum, ta);
 
-    // Another graph: unrelated nodes first, symbols in another order, the
-    // terms built backwards.
     let mut b: Graph<F64> = Graph::new();
     for k in 0..500 {
         let q = b.sym(&format!("noise{k}"));
@@ -65,7 +66,7 @@ fn a_sum_evaluates_the_same_whatever_was_built_before() {
             _ => unreachable!(),
         })
         .collect();
-    let tb = terms(&mut b, &xb, &backward);
+    let tb = terms_whose_sum_rounds_by_order(&mut b, &xb, &backward);
     let rb = b.reduce(ReduceOp::Sum, tb);
 
     assert_eq!(value(&a, ra, &sa, &ins), value(&b, rb, &sb, &ins));
@@ -73,8 +74,6 @@ fn a_sum_evaluates_the_same_whatever_was_built_before() {
 
 #[test]
 fn jacobian_bits_do_not_depend_on_how_it_was_taken() {
-    // sparse_jacobian (column sweeps, reverse rows) against one
-    // differentiate per entry in a fresh graph: the same bits.
     for seed in 0..12u64 {
         let spec = || {
             Spec::new(seed)

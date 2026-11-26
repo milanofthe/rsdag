@@ -14,7 +14,6 @@ fn gemvs_in(tape: &Tape) -> usize {
     tape.dump().matches("Gemv").count()
 }
 
-/// `A x + B u` over inputs, `n` states, `m` inputs of `u`.
 fn statespace(g: &mut Graph<F64>, n: usize, m: usize) -> (Vec<ExprId>, Vec<SymbolId>) {
     let a: Vec<ExprId> = (0..n * n).map(|k| g.sym(&format!("a{k}"))).collect();
     let x: Vec<ExprId> = (0..n).map(|i| g.sym(&format!("x{i}"))).collect();
@@ -38,11 +37,9 @@ fn a_state_space_block_is_two_kernels_over_inputs_in_place() {
     let (roots, syms) = statespace(&mut g, n, m);
     let tape = Tape::compile(&g, &roots, &syms);
     assert_eq!(gemvs_in(&tape), 2, "{}", tape.dump());
-    // No input is materialised for the kernels: the tape is the kernels,
-    // their picks and the adds.
     assert!(
         tape.n_ops() <= 2 + 2 * n + n,
-        "{} ops for {n} rows:\n{}",
+        "{} ops for {n} rows, more than the kernels, their picks and the adds:\n{}",
         tape.n_ops(),
         tape.dump()
     );
@@ -58,7 +55,6 @@ fn computed_entries_are_gathered_and_short_inputs_read_as_nan() {
     let mut g: Graph<F64> = Graph::new();
     let xs: Vec<ExprId> = (0..n).map(|i| g.sym(&format!("x{i}"))).collect();
     let syms: Vec<SymbolId> = (0..n as u32).map(SymbolId).collect();
-    // A(i, j) = x_i * x_j + 1, a computed matrix; x reversed, not a run.
     let one = g.one();
     let a: Vec<ExprId> = (0..n * n)
         .map(|k| {
@@ -66,20 +62,19 @@ fn computed_entries_are_gathered_and_short_inputs_read_as_nan() {
             g.add(p, one)
         })
         .collect();
-    let xr: Vec<ExprId> = xs.iter().rev().copied().collect();
+    let x_reversed_not_a_run: Vec<ExprId> = xs.iter().rev().copied().collect();
     let roots: Vec<ExprId> = (0..n)
-        .map(|i| g.dot(a[i * n..(i + 1) * n].to_vec(), xr.clone()))
+        .map(|i| g.dot(a[i * n..(i + 1) * n].to_vec(), x_reversed_not_a_run.clone()))
         .collect();
     let tape = Tape::compile(&g, &roots, &syms);
     assert_eq!(gemvs_in(&tape), 1, "{}", tape.dump());
     let inputs: Vec<f64> = (0..n).map(|k| 0.1 + 0.07 * k as f64).collect();
     assert_matches_eval(&g, &roots, &syms, &tape, &inputs);
-    // A run of inputs read in place, with fewer inputs than the run: NaN.
     let (roots2, syms2) = statespace(&mut g, 8, 1);
     let tape2 = Tape::compile(&g, &roots2, &syms2);
-    let short: Vec<f64> = vec![0.5; 20];
+    let fewer_inputs_than_the_run_reads_in_place: Vec<f64> = vec![0.5; 20];
     let (mut w, mut o) = (Vec::new(), Vec::new());
-    tape2.eval(&short, &mut w, &mut o);
+    tape2.eval(&fewer_inputs_than_the_run_reads_in_place, &mut w, &mut o);
     assert!(o.iter().all(|v| v.is_nan()));
 }
 
@@ -88,7 +83,6 @@ fn a_kernel_survives_specialization() {
     let (n, m) = (12, 2);
     let mut g: Graph<F64> = Graph::new();
     let (rows, syms) = statespace(&mut g, n, m);
-    // A select per row, so there is something to specialize.
     let zero = g.zero();
     let roots: Vec<ExprId> = rows
         .iter()

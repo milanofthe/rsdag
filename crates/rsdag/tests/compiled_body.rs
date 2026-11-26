@@ -9,8 +9,6 @@ use rsdag::{ExprId, Graph, Node, OutputRole, ParamRole, Scope, Tape, F64};
 
 #[test]
 fn an_interpreted_body_computes_only_the_outputs_called() {
-    // A function of five outputs, a program calling two of them: the body
-    // the tape builds carries those two, the others are not computed.
     let mut g: Graph<F64> = Graph::new();
     let x = g.sym("x");
     let outs: Vec<ExprId> = (1..=5)
@@ -45,9 +43,6 @@ fn an_interpreted_body_computes_only_the_outputs_called() {
 
 #[test]
 fn calls_with_constant_arguments_run_a_specialized_copy() {
-    // f(x, c) = [c exp(x) + sin(c), c x]; calls pass c = 0 twice and c = 2
-    // once. The two calls with c = 0 share one copy over x alone, the
-    // values and the derivatives stay.
     let mut g: Graph<F64> = Graph::new();
     let sym = |g: &mut Graph<F64>, n: &str| {
         let e = g.sym(n);
@@ -96,9 +91,6 @@ fn calls_with_constant_arguments_run_a_specialized_copy() {
 
 #[test]
 fn constant_parameters_stay_arguments() {
-    // f(x, c) with c a `Param`: calls passing c = 1 and c = 2 keep calling
-    // f itself (one body for both), while a constant state argument is
-    // still specialized away.
     let mut g: Graph<F64> = Graph::new();
     let mut s = rsdag::Scope::new(&mut g, "f");
     let x = s.param("x", rsdag::ParamRole::State { id: 0 });
@@ -133,8 +125,6 @@ fn constant_parameters_stay_arguments() {
 
 #[test]
 fn programs_over_one_graph_share_a_body() {
-    // Two tapes calling the same output of f take the same interpreted
-    // body: it is built once per function and output set, not per tape.
     let mut g: Graph<F64> = Graph::new();
     let mut s = rsdag::Scope::new(&mut g, "f");
     let x = s.param("x", ParamRole::Free);

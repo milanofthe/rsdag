@@ -12,8 +12,6 @@ fn kernels_in(tape: &Tape, name: &str) -> usize {
     tape.dump().matches(name).count()
 }
 
-/// `A` (`m` by `k`) times `B` (`k` by `n`) over inputs, entry by entry,
-/// row-major; `B` given by columns so a column is one vector.
 fn matmul(
     g: &mut Graph<F64>,
     m: usize,
