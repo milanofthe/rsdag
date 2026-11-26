@@ -3,6 +3,7 @@
 //! on the list once per instance. The results are the inlined graph's.
 
 mod common;
+use common::constants::REORDERED;
 use common::sym;
 
 use rsdag::Program;
@@ -129,7 +130,7 @@ fn two_instances_rewrite_differentiate_and_compile_as_inlined() {
     Tape::compile(&g, &spec, &wrt).eval(&ins, &mut w, &mut b);
     Tape::compile(&g, &flat, &wrt).eval(&ins, &mut w, &mut c);
     for k in 0..a.len() {
-        let tol = 1e-13 * (1.0 + c[k].abs());
+        let tol = REORDERED * (1.0 + c[k].abs());
         assert!(
             (a[k] - c[k]).abs() <= tol,
             "entry {k}: {} vs {}",
@@ -194,11 +195,11 @@ fn composite_functions_inline_and_leaves_stay_calls() {
     Tape::compile(&g, &all, &ins).eval(&x, &mut w, &mut r2);
     for k in 0..N {
         assert!(
-            (r0[k] - r1[k]).abs() <= 1e-13 * (1.0 + r0[k].abs()),
+            (r0[k] - r1[k]).abs() <= REORDERED * (1.0 + r0[k].abs()),
             "row {k}"
         );
         assert!(
-            (r0[k] - r2[k]).abs() <= 1e-13 * (1.0 + r0[k].abs()),
+            (r0[k] - r2[k]).abs() <= REORDERED * (1.0 + r0[k].abs()),
             "row {k}"
         );
     }
@@ -257,6 +258,6 @@ fn leaf_calls_with_the_same_operands_merge_into_one_instance() {
     tape.eval_main(&x, &mut w, &mut a);
     flat.eval(&x, &mut w, &mut b);
     for (k, (a, b)) in a.iter().zip(&b).enumerate() {
-        assert!((a - b).abs() <= 1e-13 * (1.0 + b.abs()), "root {k}");
+        assert!((a - b).abs() <= REORDERED * (1.0 + b.abs()), "root {k}");
     }
 }

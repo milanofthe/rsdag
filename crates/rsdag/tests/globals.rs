@@ -7,6 +7,7 @@
 //! program with every call inlined, where the globals are plain symbols.
 
 mod common;
+use common::constants::REORDERED;
 use common::sym;
 
 use rsdag::Program;
@@ -107,7 +108,7 @@ fn close(a: &[f64], b: &[f64]) {
     assert_eq!(a.len(), b.len());
     for (k, (x, y)) in a.iter().zip(b).enumerate() {
         assert!(
-            (x - y).abs() <= 1e-13 * (1.0 + x.abs()),
+            (x - y).abs() <= REORDERED * (1.0 + x.abs()),
             "value {k}: {x:e} vs {y:e}"
         );
     }

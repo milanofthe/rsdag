@@ -87,7 +87,7 @@ fn a_module_survives_json() {
         f64::INFINITY,
         f64::NEG_INFINITY,
         f64::NAN,
-        1.1067040000000001,
+        1.106704f64.next_up(),
     ] {
         let k = g.konst_f64(v);
         roots.push(k);

@@ -84,14 +84,16 @@ fn a_composed_program_runs_as_the_functions_do() {
     let (p, q, r, s) = (x[0], x[1], x[2], x[3]);
     let want = [p * q + q.sin(), q * r, q * r + r.sin(), r * s];
     for k in 0..4 {
-        assert!(
-            (a[k] - want[k]).abs() < 1e-15,
+        assert_eq!(
+            a[k].to_bits(),
+            want[k].to_bits(),
             "{k}: {} vs {}",
             a[k],
             want[k]
         );
-        assert!(
-            (c[k] - want[k]).abs() < 1e-15,
+        assert_eq!(
+            c[k].to_bits(),
+            want[k].to_bits(),
             "{k}: {} vs {}",
             c[k],
             want[k]

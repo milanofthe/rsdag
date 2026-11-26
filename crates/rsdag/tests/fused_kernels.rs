@@ -1,6 +1,8 @@
 //! Product kernels fold their consumers' subtraction or addition in: the
 //! program shrinks and stays bit-identical to the arena.
 
+mod common;
+use common::constants::REORDERED;
 use rsdag::Program;
 use rsdag::{Graph, Node, SymbolId, Tape, F64};
 
@@ -47,7 +49,11 @@ fn a_gemv_folds_the_subtractions_of_its_rows() {
             acc += vals[i * n + j] * vals[m * n + j];
         }
         let want = vals[m * n + n + i] - acc;
-        assert!((o[i] - want).abs() < 1e-12, "{} vs {want}", o[i]);
+        assert!(
+            (o[i] - want).abs() <= REORDERED * want.abs().max(1.0),
+            "{} vs {want}",
+            o[i]
+        );
     }
 }
 
@@ -120,6 +126,7 @@ fn a_kernel_folds_its_own_outputs() {
         let ai = &vals[(m + i) * n..(m + i + 1) * n];
         let re = dot(ar, brv) - dot(ai, biv);
         let im = dot(ar, biv) + dot(ai, brv);
-        assert!((o[2 * i] - re).abs() < 1e-12 && (o[2 * i + 1] - im).abs() < 1e-12);
+        assert!((o[2 * i] - re).abs() <= REORDERED * re.abs().max(1.0));
+        assert!((o[2 * i + 1] - im).abs() <= REORDERED * im.abs().max(1.0));
     }
 }

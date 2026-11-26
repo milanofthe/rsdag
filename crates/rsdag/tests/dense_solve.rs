@@ -2,6 +2,7 @@
 //! exact against the reference routine and differentiable in both modes.
 
 mod common;
+use common::constants::FINITE_DIFFERENCE;
 use common::symbol_of;
 
 use rsdag::Program;
@@ -98,12 +99,12 @@ fn forward_and_reverse_derivatives_agree_with_finite_differences() {
         let fm = o[0];
         let fd = (fp - fm) / (2.0 * h);
         assert!(
-            (g_rev[k] - fd).abs() <= 1e-5 * (1.0 + fd.abs()),
+            (g_rev[k] - fd).abs() <= FINITE_DIFFERENCE * (1.0 + fd.abs()),
             "reverse d/d{k}: {} vs fd {fd}",
             g_rev[k]
         );
         assert!(
-            (g_fwd[k] - fd).abs() <= 1e-5 * (1.0 + fd.abs()),
+            (g_fwd[k] - fd).abs() <= FINITE_DIFFERENCE * (1.0 + fd.abs()),
             "forward d/d{k}: {} vs fd {fd}",
             g_fwd[k]
         );

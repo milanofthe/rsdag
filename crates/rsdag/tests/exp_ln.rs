@@ -4,6 +4,8 @@
 //! (`rsdag::constants::exp_ln`), with the multiply-adds fused and not; and
 //! their special values.
 
+mod common;
+use common::constants::LN2_LO;
 use rsdag::semantics::{
     exp_core, exp_guarded, exp_with, ln_core, ln_guarded, ln_with, MulAdd, Split, EXP_AT_LIMIT,
     EXP_LIMIT, LN_AT_FLOOR, LN_FLOOR,
@@ -42,8 +44,7 @@ fn neg(a: Dd) -> Dd {
     Dd(-a.0, -a.1)
 }
 
-/// `ln 2` to 107 bits.
-const LN2: Dd = Dd(std::f64::consts::LN_2, 2.319_046_813_846_299_6e-17);
+const LN2: Dd = Dd(std::f64::consts::LN_2, LN2_LO);
 
 /// `exp(r)` for `|r| <= 0.36` by its series.
 fn exp_small(r: Dd) -> Dd {

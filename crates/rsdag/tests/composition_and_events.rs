@@ -105,7 +105,7 @@ fn separate_blocks_compose_into_one_graph() {
         .collect();
     let (mut w, mut o) = (Vec::new(), Vec::new());
     tape.eval(&row, &mut w, &mut o);
-    assert!((o[0] - 0.25).abs() < 1e-15, "dx/dt = {}", o[0]);
+    assert_eq!(o[0], 0.25, "dx/dt");
 
     // And the composition differentiates like anything else: below the cap
     // the chain rule carries the gain through.
@@ -114,7 +114,7 @@ fn separate_blocks_compose_into_one_graph() {
     let tape = Tape::compile(&sys, &[ddx], &order);
     let (mut w, mut o) = (Vec::new(), Vec::new());
     tape.eval(&row, &mut w, &mut o);
-    assert!((o[0] + 0.5).abs() < 1e-15, "d(dx/dt)/dx = {}", o[0]);
+    assert_eq!(o[0], -0.5, "d(dx/dt)/dx");
 }
 
 /// An event needs no mechanism of its own: the crossing function is a
@@ -181,7 +181,7 @@ fn an_event_is_a_guard_output_and_a_state_write() {
     assert_eq!(o[0], 0.25, "guard value");
     assert_eq!(o[1], -3.0, "guard rate is v");
     assert_eq!(o[2], -9.81, "gravity");
-    assert!((o[3] - 2.4).abs() < 1e-15, "reflected velocity {}", o[3]);
+    assert_eq!(o[3], -0.8 * -3.0, "reflected velocity");
 }
 
 /// A `Select` is a discontinuity the tape can watch on its own: specializing

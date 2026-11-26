@@ -1,3 +1,5 @@
+mod common;
+use common::constants::{FINITE_DIFFERENCE, REORDERED};
 use rsdag::eval::eval;
 use rsdag::BigRational;
 use rsdag::*;
@@ -47,7 +49,7 @@ fn derivative_matches_finite_difference() {
         let fm = eval(&ctx, &[f], &env)[0];
         let numeric = (fp - fm) / (2.0 * h);
         assert!(
-            (analytic - numeric).abs() <= 1e-4 * (1.0 + analytic.abs()),
+            (analytic - numeric).abs() <= FINITE_DIFFERENCE * (1.0 + analytic.abs()),
             "x0={x0}: analytic={analytic} numeric={numeric}"
         );
     }
@@ -137,8 +139,8 @@ fn select_and_opaque_autodiff() {
         env.insert(xid, xv);
         eval(ctx, &[e], &env)[0]
     };
-    assert!((eval_at(&ctx, df, 3.0) - 6.0).abs() < 1e-9); // 2*3
-    assert!((eval_at(&ctx, df, -2.0) + 1.0).abs() < 1e-9); // -1
+    assert_eq!(eval_at(&ctx, df, 3.0), 2.0 * 3.0);
+    assert_eq!(eval_at(&ctx, df, -2.0), -1.0);
 
     // Chain rule through a call: g = f(2*x) with f(p) = p^3; dg/dx must
     // reference the derivative output of f (3p^2, a call) times 2:
@@ -155,7 +157,7 @@ fn select_and_opaque_autodiff() {
     let dg = differentiate(&mut ctx, g, xid);
     assert!(!ctx.is_zero(dg));
     assert!(rsdag::to_string(&ctx, dg).contains("cube#1"));
-    assert!((eval_at(&ctx, dg, 1.0) - 24.0).abs() < 1e-9);
+    assert_eq!(eval_at(&ctx, dg, 1.0), 24.0);
 }
 
 #[test]
@@ -204,7 +206,7 @@ fn gradient_matches_forward_mode() {
             let gv = eval(&ctx, &[*g], &env)[0];
             let dv = eval(&ctx, &[*d], &env)[0];
             assert!(
-                (gv - dv).abs() <= 1e-12 * (1.0 + dv.abs()),
+                (gv - dv).abs() <= REORDERED * (1.0 + dv.abs()),
                 "at ({xv},{yv},{zv}): reverse={gv} forward={dv}"
             );
         }
@@ -466,7 +468,7 @@ fn many_moving_call_arguments_take_one_vector_jacobian_call() {
     let vr: Vec<f64> = eval(&rg, &rev, &env(&rs));
     let vf: Vec<f64> = eval(&fg, &fwd, &env(&fs));
     for (a, b) in vr.iter().zip(&vf) {
-        assert!((a - b).abs() <= 1e-13 * b.abs().max(1.0), "{a} vs {b}");
+        assert!((a - b).abs() <= REORDERED * b.abs().max(1.0), "{a} vs {b}");
     }
 }
 
@@ -589,7 +591,7 @@ fn a_jacobian_through_wide_calls_makes_only_its_entries() {
     Tape::compile(&g, &b, &wrt).eval(&ins, &mut work, &mut vb);
     for (k, (p, q)) in va.iter().zip(&vb).enumerate() {
         assert!(
-            (p - q).abs() <= 1e-12 * (1.0 + q.abs()),
+            (p - q).abs() <= REORDERED * (1.0 + q.abs()),
             "entry {k}: {p} vs {q}"
         );
     }
@@ -664,7 +666,7 @@ fn a_call_site_with_several_outputs_and_their_derivatives_takes_one_vjp() {
     let vr: Vec<f64> = eval(&rg, &rev, &env(&rs));
     let vf: Vec<f64> = eval(&fg, &fwd, &env(&fs));
     for (a, b) in vr.iter().zip(&vf) {
-        assert!((a - b).abs() <= 1e-12 * b.abs().max(1.0), "{a} vs {b}");
+        assert!((a - b).abs() <= REORDERED * b.abs().max(1.0), "{a} vs {b}");
     }
     // one vector-Jacobian product of dev made, none of the forward kind
     let vjps = (0..rg.n_funcs())
@@ -691,7 +693,7 @@ fn vjp_is_the_weighted_gradient() {
         .collect();
     let got = eval(&ctx, &g, &env);
     let want = [1.5 * 2.0 - 0.5 * 0.3f64.cos(), 1.5 * 0.3];
-    assert!((got[0] - want[0]).abs() < 1e-15 && (got[1] - want[1]).abs() < 1e-15);
+    assert_eq!(got, want);
 }
 
 /// An affine split: the rest at the symbols zero and their coefficients;
@@ -777,7 +779,7 @@ fn a_jacobian_through_calls_by_some_operands_is_the_inlined_ones() {
         Tape::compile(&g, &b, &all).eval(&ins, &mut work, &mut vb);
         for (k, (p, q)) in va.iter().zip(&vb).enumerate() {
             assert!(
-                (p - q).abs() <= 1e-12 * (1.0 + q.abs()),
+                (p - q).abs() <= REORDERED * (1.0 + q.abs()),
                 "entry {k}: {p} vs {q}"
             );
         }

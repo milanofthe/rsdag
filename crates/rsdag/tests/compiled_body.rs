@@ -2,6 +2,8 @@
 //! per set of outputs a program calls, shared by the programs over one
 //! graph, and specialized to the constants a call passes.
 
+mod common;
+use common::constants::AGAINST_LIBM;
 use rsdag::Program;
 use rsdag::{ExprId, Graph, Node, OutputRole, ParamRole, Scope, Tape, F64};
 
@@ -37,7 +39,8 @@ fn an_interpreted_body_computes_only_the_outputs_called() {
     assert_eq!(body.n_outputs(), 2);
     let (mut w, mut o) = (Vec::new(), Vec::new());
     tape.eval(&[0.5], &mut w, &mut o);
-    assert!((o[0] - 6.0 * 0.5f64.exp()).abs() < 1e-12);
+    let want = 6.0 * 0.5f64.exp();
+    assert!((o[0] - want).abs() <= AGAINST_LIBM * want);
 }
 
 #[test]
@@ -87,7 +90,7 @@ fn calls_with_constant_arguments_run_a_specialized_copy() {
     let jr = rsdag::sparse_jacobian(&mut g, &[root], &vars);
     let js = rsdag::sparse_jacobian(&mut g, &[spec], &vars);
     for ((_, a), (_, b)) in jr[0].iter().zip(&js[0]) {
-        assert!((eval(&g, *a) - eval(&g, *b)).abs() < 1e-15);
+        assert_eq!(eval(&g, *a).to_bits(), eval(&g, *b).to_bits());
     }
 }
 

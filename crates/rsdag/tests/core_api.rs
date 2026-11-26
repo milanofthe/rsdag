@@ -1,3 +1,5 @@
+mod common;
+use common::constants::AGAINST_LIBM;
 use rsdag::*;
 
 #[test]
@@ -104,7 +106,7 @@ fn unary_folding_and_eval() {
         [(sym(v), 0.5), (sym(vt), 0.025)].into_iter().collect();
     let got = eval(&ctx, &[e], &env)[0];
     let want = (0.5_f64 / 0.025).exp();
-    assert!((got - want).abs() <= want * 1e-12);
+    assert!((got - want).abs() <= AGAINST_LIBM * want);
 }
 
 /// Printing is linear in the graph: a small expression is infix, a large

@@ -3,6 +3,7 @@ import pytest
 
 import rsdag
 from rsdag import grad, gt, jacobian, jit, trace, where
+from constants import FINITE_DIFFERENCE, LIBM, LINEAR_ALGEBRA, ROUND_OFF
 
 
 def lorenz(x, t):
@@ -13,7 +14,7 @@ def lorenz(x, t):
 def test_scalar_and_numpy_ufuncs():
     f = jit(lambda x: np.sin(x) * np.exp(-x) + x**3 / 2)
     x = 0.7
-    assert f(x) == pytest.approx(np.sin(x) * np.exp(-x) + x**3 / 2, rel=1e-15)
+    assert f(x) == pytest.approx(np.sin(x) * np.exp(-x) + x**3 / 2, rel=LIBM, abs=LIBM)
 
 
 def test_array_function_matches_numpy():
@@ -21,7 +22,7 @@ def test_array_function_matches_numpy():
     x = np.array([1.0, 2.0, 3.0])
     y = f(x, 0.0)
     assert y.shape == (3,)
-    assert np.allclose(y, lorenz(x, 0.0), rtol=1e-15)
+    assert np.array_equal(y, lorenz(x, 0.0))
 
 
 def test_jacobian_matches_finite_differences():
@@ -35,7 +36,7 @@ def test_jacobian_matches_finite_differences():
         e = np.zeros(3)
         e[j] = h
         fd[:, j] = (np.asarray(lorenz(x + e, 0.0)) - np.asarray(lorenz(x - e, 0.0))) / (2 * h)
-    assert np.allclose(got, fd, atol=1e-6)
+    assert np.allclose(got, fd, rtol=FINITE_DIFFERENCE, atol=FINITE_DIFFERENCE)
 
 
 def test_gradient_reverse_mode():
@@ -46,7 +47,7 @@ def test_gradient_reverse_mode():
     c = 1 - np.tanh(x[0] * x[1]) ** 2
     expect[0] += c * x[1]
     expect[1] += c * x[0]
-    assert np.allclose(got, expect, rtol=1e-12)
+    assert np.allclose(got, expect, rtol=LIBM, atol=LIBM)
 
 
 def test_where_and_comparisons():
@@ -60,7 +61,7 @@ def test_where_and_comparisons():
 def test_native_matches_the_interpreter():
     f = jit(lorenz, native=True)
     x = np.array([1.0, 2.0, 3.0])
-    assert np.allclose(f(x, 0.0), lorenz(x, 0.0), rtol=1e-15)
+    assert np.array_equal(f(x, 0.0), lorenz(x, 0.0))
 
 
 def test_control_flow_is_rejected():
@@ -98,16 +99,16 @@ def test_numpy_linear_algebra_patterns_trace():
     x = np.array([0.3, -1.2])
     got = jit(f)(x)
     y = A @ x
-    assert np.allclose(got, [np.linalg.norm(x), np.dot(x, y), np.sum(y * y)], rtol=1e-14)
+    want = [np.linalg.norm(x), np.dot(x, y), np.sum(y * y)]
+    assert np.allclose(got, want, rtol=ROUND_OFF, atol=ROUND_OFF)
     J = jacobian(f)(x)
     assert J.shape == (3, 2)
-    assert np.allclose(J[0], x / np.linalg.norm(x), rtol=1e-12)
+    assert np.allclose(J[0], x / np.linalg.norm(x), rtol=ROUND_OFF, atol=ROUND_OFF)
 
 
 def test_program_reports_ops_and_dump():
     f = trace(lambda x: np.exp(x) * x, 1.0)
     p = f.program(1.0)
-    # An input is read where it is used, not copied: two ops here.
     assert p.n_inputs == 1 and p.n_outputs == 1 and p.n_ops >= 2
     assert "i0" in p.dump()
 
@@ -141,15 +142,15 @@ def test_numpy_ufuncs_by_name_and_reflected_operators():
              np.tanh, np.arcsinh, np.arctanh, np.exp, np.expm1, np.log, np.log10, np.log2,
              np.log1p, np.sqrt, np.cbrt, np.fabs, np.absolute, np.floor, np.ceil, np.rint,
              np.trunc]
-    x = np.array([0.3, 0.45])  # inside every domain: rsdag guards log and sqrt
+    x = np.array([0.3, 0.45])
     f = jit(lambda x: [u(x) for u in unary])
-    assert np.allclose(f(x), [u(x) for u in unary], rtol=1e-14)
+    assert np.allclose(f(x), [u(x) for u in unary], rtol=LIBM, atol=LIBM)
     y = np.array([1.7, 0.6])
     g = jit(lambda x, y: [np.arctan2(x, y), np.hypot(x, y), np.fmod(x, y), np.power(y, x),
                           np.power(x, 3), 2.0 // y, 2.0 % y, x // 0.2, x % 0.2, 2.0 ** x])
     want = [np.arctan2(x, y), np.hypot(x, y), np.fmod(x, y), np.power(y, x), np.power(x, 3),
             2.0 // y, 2.0 % y, x // 0.2, x % 0.2, 2.0 ** x]
-    assert np.allclose(g(x, y), want, rtol=1e-14)
+    assert np.allclose(g(x, y), want, rtol=LIBM, atol=LIBM)
     t = rsdag.Scope().input()
     with pytest.raises(AttributeError):
         t.no_such_function
@@ -163,7 +164,7 @@ def test_matmul_shapes():
     for f, args in [(lambda v, A: matmul(v, A), (v0, A0)),
                     (lambda A, x: matmul(A, x), (A0, v0[[0, 1, 0]])),
                     (lambda a, b: matmul(a, b), (A0[0], A0[1]))]:
-        assert np.allclose(jit(f)(*args), np.matmul(*args), rtol=1e-15)
+        assert np.array_equal(jit(f)(*args), np.matmul(*args))
 
 
 def test_arguments_by_buffer_sequence_or_conversion():
@@ -190,7 +191,6 @@ def test_arguments_by_buffer_sequence_or_conversion():
         p.eval(x, 0.5, out=ro)
     with pytest.raises(TypeError):
         p.eval(x, 0.5, out=np.empty(3, dtype=">f8"))
-    # Shapes of one size trace apart: the function sees the shape.
     g = jit(lambda a: a[0] * 2.0)
     assert g(np.array([1.0, 2.0])) == 2.0
     assert np.array_equal(g(np.array([[1.0, 2.0]])), [2.0, 4.0])
@@ -219,8 +219,7 @@ def test_matvec_and_solve_trace_to_kernels():
     d = p.dump()
     assert "Gemv" in d and "Solve" in d
     got = np.asarray(p.eval(np.concatenate([A0.ravel(), x0])))
-    assert np.allclose(got, x0, rtol=1e-12)
-    # The Jacobian of A x with respect to x is A itself.
+    assert np.allclose(got, x0, rtol=LINEAR_ALGEBRA, atol=LINEAR_ALGEBRA)
     J = jacobian(lambda A, x: matmul(A, x), wrt=1)(A0, x0)
     assert np.allclose(J, A0)
     assert np.isclose(trace(lambda a, b: dot(a, b), x0, x0)(x0, x0), np.dot(x0, x0))
@@ -234,7 +233,7 @@ def test_matmul_traces_to_one_gemm():
     d = p.dump()
     assert d.count("Gemm(8x6") == 1 and "Gemv" not in d
     got = np.asarray(p.eval(np.concatenate([A0.ravel(), B0.ravel()]))).reshape(8, 3)
-    assert np.allclose(got, A0 @ B0, rtol=1e-12)
+    assert np.allclose(got, A0 @ B0, rtol=LINEAR_ALGEBRA, atol=LINEAR_ALGEBRA)
 
 
 def test_a_program_runs_many_inputs_and_from_many_threads():
@@ -246,7 +245,7 @@ def test_a_program_runs_many_inputs_and_from_many_threads():
         xs = np.random.default_rng(0).standard_normal((64, 3))
         flat = np.concatenate([np.append(x, 0.0) for x in xs]).tolist()
         many = np.array(program.eval_many(flat)).reshape(64, 3)
-        assert np.allclose(many, np.array([lorenz(x, 0.0) for x in xs]), rtol=1e-15)
+        assert np.array_equal(many, np.array([lorenz(x, 0.0) for x in xs]))
         with ThreadPoolExecutor(4) as pool:
             got = list(pool.map(lambda x: f(x, 0.0), xs))
         assert np.array_equal(np.array(got), many)
@@ -269,7 +268,7 @@ def test_sparse_jacobian_matches_the_dense_one():
         J = jacobian(chain, sparse=True, native=native)
         vals = J(x)
         rows, cols = J.pattern(x)
-        assert len(vals) == 10  # two nonzeros per row
+        assert len(vals) == 10
         got = np.zeros_like(dense)
         got[rows, cols] = vals
         assert np.array_equal(got, dense)
