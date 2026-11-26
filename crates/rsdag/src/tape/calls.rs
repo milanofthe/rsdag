@@ -311,9 +311,9 @@ unsafe fn run_part(
 
 /// A stage of `n` independent calls, the `k`th of them `call(k)`: on as
 /// many threads of the installed pool as its work is worth
-/// ([`crate::parallel::width`]; each call's ops at its bundle's
-/// [`rate`](ExternBundle::rate)), every block of instances over scratch of
-/// its thread's, else one call after the other. Either way the results are
+/// ([`crate::parallel::ranges`]; each call's ops at its bundle's
+/// [`rate`](ExternBundle::rate)), every range of instances a thread claims
+/// over scratch of its thread's, else one call after the other. Either way the results are
 /// the serial ones, and nothing is allocated.
 ///
 /// # Safety
@@ -341,33 +341,27 @@ pub unsafe fn run_stage<'a>(
             run_part(c, slots, gather, inputs, groups, s)
         })
     };
-    let width = crate::parallel::width(work, groups);
-    if width < 2 {
-        for k in 0..n {
-            let c = call(k);
-            run_groups(&c, 0..c.n_groups);
-        }
-        return;
-    }
-    // Pieces of `bs` instances, call after call; the `it`th found by
-    // counting through the calls (a stage has few).
-    let bs = crate::parallel::piece_len(groups, width);
-    let pieces = |c: &Call| c.n_groups.div_ceil(bs);
-    let run = |mut it: usize| {
-        let mut k = 0;
-        let c = loop {
-            let c = call(k);
-            if it < pieces(&c) {
-                break c;
+    // The instances of all calls, call after call, in ranges the threads
+    // claim; a range's part in each call found by counting through the
+    // calls (a stage has few).
+    crate::parallel::ranges::<crate::parallel::Here>(
+        groups,
+        crate::parallel::Work::ns(work),
+        |r| {
+            let mut g0 = 0;
+            for k in 0..n {
+                let c = call(k);
+                let (a, b) = (r.start.max(g0), r.end.min(g0 + c.n_groups));
+                if a < b {
+                    run_groups(&c, a - g0..b - g0);
+                }
+                g0 += c.n_groups;
+                if g0 >= r.end {
+                    break;
+                }
             }
-            it -= pieces(&c);
-            k += 1;
-        };
-        let g0 = it * bs;
-        run_groups(&c, g0..(g0 + bs).min(c.n_groups));
-    };
-    let total = (0..n).map(|k| pieces(&call(k))).sum();
-    <crate::parallel::Here as crate::parallel::Place>::run_width(total, width, &run);
+        },
+    );
 }
 
 #[cfg(test)]

@@ -38,9 +38,7 @@ use rsdag::{ExternBundle, Instances, Program, Tape};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
-use crate::constants::{
-    CODE_ALIGN, GATHER_TABLE, LANE_CALL, LANE_MOVE, MAX_LANES, REG_NUMBERS, TASK_MAX_INSTANCES,
-};
+use crate::constants::{CODE_ALIGN, GATHER_TABLE, LANE_CALL, LANE_MOVE, MAX_LANES, REG_NUMBERS};
 use crate::host::{self, Bundles};
 use crate::ops::{inline_product, minmax_inline, powi_inline, routine, Liveness};
 use rsdag::constants::FOLD_LANES;
@@ -509,35 +507,25 @@ impl ExternBundle for NativeBody {
             });
             return;
         }
-        let ops = (n_groups * self.tape.n_ops) as f64;
-        let parallel = n_groups >= 2
-            && self.n_out > 0
-            && match self.batch {
-                Batch::Serial => false,
-                Batch::Always => true,
-                Batch::Parallel => rspool::rayon::width(ops * self.rate.ns_per_op(), n_groups) > 1,
-            };
-        if !parallel {
+        let work = match self.batch {
+            Batch::Always => rspool::Work::ns(f64::INFINITY),
+            _ => rspool::Work::of((n_groups * self.tape.n_ops) as f64, &self.rate),
+        };
+        if self.n_out == 0 {
             rsdag::scratch::with::<Vec<f64>, _>(|work| {
                 self.run_groups(work, args, n_args, out, 0..n_groups)
             });
             return;
         }
-        // Blocks of instances per task, so a thread amortises the
-        // scheduler's hand-offs over many bodies.
-        let block = blocks(n_groups);
-        let node = rsprobe::current();
-        out.par_chunks_mut(block * self.n_out)
-            .enumerate()
-            .for_each(|(b, dst)| {
-                let _node = node.enter();
-                let g0 = b * block;
-                let g1 = (g0 + block).min(n_groups);
-                let ins = &args[g0 * n_args..g1 * n_args];
-                rsdag::scratch::with::<Vec<f64>, _>(|work| {
-                    self.run_groups(work, ins, n_args, dst, 0..g1 - g0)
-                });
+        // Ranges of instances the threads claim, each over a work buffer of
+        // its thread's.
+        rspool::chunks_mut::<rspool::rayon::Rayon, _>(out, self.n_out, work, |g0, dst| {
+            let g1 = g0 + dst.len() / self.n_out;
+            let ins = &args[g0 * n_args..g1 * n_args];
+            rsdag::scratch::with::<Vec<f64>, _>(|work| {
+                self.run_groups(work, ins, n_args, dst, 0..g1 - g0)
             });
+        });
     }
 }
 
@@ -614,13 +602,6 @@ fn options_key(opts: &Options) -> u64 {
     };
     // lit: the key's fields, chunk size, batch and lanes
     ((opts.chunk_ops as u64) << 32) ^ batch ^ (lanes << 62)
-}
-
-/// Instances per parallel task: about
-/// [`PIECES_PER_WORKER`](rsdag::parallel::PIECES_PER_WORKER) tasks per
-/// thread of the current pool, at most [`TASK_MAX_INSTANCES`].
-fn blocks(n: usize) -> usize {
-    rsdag::parallel::piece_len(n, rayon::current_num_threads()).min(TASK_MAX_INSTANCES)
 }
 
 /// The buffers the code runs over: the work array, the tape's slots, then
@@ -962,7 +943,8 @@ impl NativeTape {
     /// Evaluate many instances in parallel: `inputs` holds `n` input
     /// vectors of `stride` values back to back (NaN-padded when shorter
     /// than the program's), `out` receives the `n` output vectors back to
-    /// back. Instances share nothing, so blocks of them run on the current
+    /// back. Instances share nothing, so ranges of them run on as many
+    /// threads as their ops are worth, of the lent pool or else the current
     /// rayon pool (the caller's `install`, else the global one), each over
     /// a work buffer of its thread's; this is what a batch of identical
     /// devices, a parameter sweep or an ensemble amounts to. The serial
@@ -975,26 +957,23 @@ impl NativeTape {
         if n == 0 || n_out == 0 {
             return;
         }
-        let block = blocks(n);
         let n_in = self.layout.n_inputs.max(stride);
-        let node = rsprobe::current();
-        out.par_chunks_mut(block * n_out)
-            .zip(inputs.par_chunks(block * stride))
-            .for_each(|(dst, ins)| {
-                let _node = node.enter();
-                rsdag::scratch::with::<Vec<f64>, _>(|work| {
-                    work.resize(self.layout.total, 0.0);
-                    if n_in == stride {
-                        self.eval_many_into(ins, stride, work, dst);
-                        return;
-                    }
-                    let mut padded = vec![f64::NAN; ins.len() / stride * n_in];
-                    for (p, i) in padded.chunks_exact_mut(n_in).zip(ins.chunks_exact(stride)) {
-                        p[..stride].copy_from_slice(i);
-                    }
-                    self.eval_many_into(&padded, n_in, work, dst);
-                });
+        let work = rspool::Work::of((n * self.n_ops) as f64, &REGIONS);
+        rspool::chunks_mut::<rspool::rayon::Rayon, _>(out, n_out, work, |i, dst| {
+            let ins = &inputs[i * stride..(i + dst.len() / n_out) * stride];
+            rsdag::scratch::with::<Vec<f64>, _>(|work| {
+                work.resize(self.layout.total, 0.0);
+                if n_in == stride {
+                    self.eval_many_into(ins, stride, work, dst);
+                    return;
+                }
+                let mut padded = vec![f64::NAN; ins.len() / stride * n_in];
+                for (p, i) in padded.chunks_exact_mut(n_in).zip(ins.chunks_exact(stride)) {
+                    p[..stride].copy_from_slice(i);
+                }
+                self.eval_many_into(&padded, n_in, work, dst);
             });
+        });
     }
 }
 
