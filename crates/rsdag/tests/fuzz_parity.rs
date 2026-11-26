@@ -9,14 +9,15 @@
 
 mod common;
 use common::constants::{
-    CENTRAL_DIFFERENCE_STEP, RICHARDSON_CENTRAL, TRUNCATION_ESTIMATE_MULTIPLE,
+    central_round_off, CENTRAL_DIFFERENCE_STEP, RICHARDSON_CENTRAL, TRUNCATION_ESTIMATE_MULTIPLE,
 };
 use common::same_bits;
 
 use rsdag::Program;
 use std::collections::HashMap;
 
-use rsdag::node::Node;
+use rsdag::dot::reachable;
+use rsdag::node::{Node, UnaryOp};
 use rsdag::synth::{build_over, Rng, Spec, Vocabulary};
 use rsdag::BigRational;
 use rsdag::{differentiate, eval, ExprId, Graph, ReduceOp, SymbolId, Tape};
@@ -28,19 +29,34 @@ fn sym_id(ctx: &Graph<BigRational>, e: ExprId) -> SymbolId {
     }
 }
 
+fn operations(ctx: &Graph<BigRational>, root: ExprId) -> Vec<Node> {
+    reachable(ctx, &[root])
+        .into_iter()
+        .map(|e| *ctx.node(e))
+        .filter(|n| !matches!(n, Node::Const(_) | Node::Symbol(_)))
+        .collect()
+}
+
+// https://github.com/milanofthe/rsdag/issues/243
+fn has_gamma(ops: &[Node]) -> bool {
+    ops.iter().any(|n| {
+        matches!(
+            n,
+            Node::Unary(UnaryOp::Tgamma | UnaryOp::Lgamma | UnaryOp::Digamma, _)
+        )
+    })
+}
+
 fn build_with_syms(
     ctx: &mut Graph<BigRational>,
     rng: &mut Rng,
     syms: &[ExprId],
     steps: usize,
     smooth: bool,
-    extended: bool,
 ) -> ExprId {
-    let mut spec = Spec::new(rng.next_u64()).steps(steps).vocab(if extended {
-        Vocabulary::Full
-    } else {
-        Vocabulary::Elementary
-    });
+    let mut spec = Spec::new(rng.next_u64())
+        .steps(steps)
+        .vocab(Vocabulary::Full);
     if smooth {
         spec = spec.smooth();
     }
@@ -71,7 +87,7 @@ fn tape_matches_arena_sweep_bit_exact() {
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
         let steps = 6 + rng.below(20);
-        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, false, true);
+        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, false);
 
         let inputs: Vec<f64> = (0..nsym).map(|_| rng.val()).collect();
         let env: HashMap<SymbolId, f64> = sym_ids
@@ -105,7 +121,7 @@ fn split_tape_matches_unsplit_bit_exact_over_main_passes_of_one_prolog() {
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
         let steps = 6 + rng.below(24);
-        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, false, true);
+        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, false);
 
         let mut pure: Vec<bool> = (0..nsym).map(|_| rng.below(2) == 0).collect();
         let at_least_one_impure = rng.below(nsym);
@@ -328,7 +344,11 @@ fn differentiate_matches_finite_differences() {
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
         let steps = 4 + rng.below(10);
-        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, true, false);
+        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, true);
+        let ops = operations(&ctx, root);
+        if has_gamma(&ops) {
+            continue;
+        }
 
         let wrt = rng.below(nsym);
         let d = differentiate(&mut ctx, root, sym_ids[wrt]);
@@ -346,10 +366,11 @@ fn differentiate_matches_finite_differences() {
             let fp = eval(&ctx, &[root], &env)[0];
             env.insert(sym_ids[wrt], xm);
             let fm = eval(&ctx, &[root], &env)[0];
-            ((fp - fm) / (xp - xm), fp.abs().max(fm.abs()))
+            let step = xp - xm;
+            ((fp - fm) / step, central_round_off(ops.len(), fp, fm, step))
         };
         let h = CENTRAL_DIFFERENCE_STEP;
-        let (fd, f) = central(h);
+        let (fd, round_off) = central(h);
         let (fine, _) = central(h / 2.0);
 
         let on_a_domain_edge_or_blown_up =
@@ -358,10 +379,11 @@ fn differentiate_matches_finite_differences() {
             continue;
         }
         let truncation = RICHARDSON_CENTRAL * (fd - fine).abs();
-        let bound = TRUNCATION_ESTIMATE_MULTIPLE * truncation + f64::EPSILON * f / h;
+        let bound = TRUNCATION_ESTIMATE_MULTIPLE * truncation + round_off;
         assert!(
             (ad - fd).abs() <= bound,
-            "seed {seed}: d/dx{wrt} AD={ad:e} FD(h)={fd:e} FD(h/2)={fine:e} |f|={f:e} bound={bound:e}"
+            "seed {seed}: d/dx{wrt} AD={ad:e} FD(h)={fd:e} FD(h/2)={fine:e} ops={} bound={bound:e}",
+            ops.len()
         );
         checked += 1;
     }
@@ -378,7 +400,7 @@ fn partial_specialization_checked_evals_bit_exact_while_unpinned_selects_flip() 
         let syms: Vec<ExprId> = (0..nsym).map(|i| ctx.sym(&format!("x{i}"))).collect();
         let sym_ids: Vec<SymbolId> = syms.iter().map(|&e| sym_id(&ctx, e)).collect();
         let steps = 8 + rng.below(24);
-        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, true, true);
+        let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, true);
         let tape = Tape::compile(&ctx, &[root], &sym_ids);
         if tape.n_selects() == 0 {
             continue;

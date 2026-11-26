@@ -43,14 +43,31 @@ pub const RICHARDSON_CENTRAL: f64 = 4.0 / 3.0;
 /// Multiple of the estimate [`RICHARDSON_CENTRAL`] |D(h) - D(h / 2)| within
 /// which a derivative of a random expression must agree with D(h), where no
 /// bound on f''' is known in advance. The estimate holds to leading order in
-/// h, and the terms in h^4 and the round-off of both differences move it, so
-/// the bound allows the truncation error to exceed the estimate by this
-/// factor. To it adds the round-off floor of D(h): each evaluation of f is
-/// within a few u |f| of the exact value, and the step is taken exactly as the
-/// difference of the two rounded arguments, so the quotient is within about
-/// eps |f| / h of the exact difference quotient, with |f| the larger magnitude
-/// of f(x + h) and f(x - h).
+/// h, and the terms in h^4 and the round-off of both differences move it.
+/// The factor 4 is a chosen safety factor on the estimate and not a derived
+/// number. The round-off of D(h) is bounded separately by
+/// [`central_round_off`].
 pub const TRUNCATION_ESTIMATE_MULTIPLE: f64 = 4.0;
+
+/// Bound on the round-off of the central difference (f(x+) - f(x-)) / (x+ -
+/// x-) of an expression of `ops` operations, where `fp` and `fm` are the
+/// computed values f(x+) and f(x-) at the rounded arguments x+ = x + h and
+/// x- = x - h, and `step` is their difference x+ - x-, which is exact. The
+/// model is of first order in the unit round-off u = 2^-53. Each operation
+/// that produces a floating-point result contributes a relative error of at
+/// most u, which is at most one ulp of its result, and the errors of the
+/// operations add up in the function value, so an expression of n
+/// operations is computed within n u |f| of its exact value. The difference
+/// of the two values then carries at most n u (|f(x+)| + |f(x-)|), and the
+/// division by the step carries it into the quotient. The model assumes that
+/// no operation amplifies the relative error of its operand strongly, which
+/// excludes for example a sum that cancels or a logarithm of an argument near
+/// 1, whose condition numbers are large. The roundings of the subtraction and
+/// the division add at most 2u relative to the quotient, which the truncation
+/// term covers.
+pub fn central_round_off(ops: usize, fp: f64, fm: f64, step: f64) -> f64 {
+    ops as f64 * (f64::EPSILON / 2.0) * (fp.abs() + fm.abs()) / step
+}
 
 /// Absolute error of `digamma`. The recurrence shifts the argument to x >= 6,
 /// and the asymptotic series ln x - 1 / 2x - sum B_2k / (2k x^2k) stops after
