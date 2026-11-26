@@ -289,6 +289,7 @@ fn classify<K: Field>(
                 )
             }
         }
+        // https://github.com/milanofthe/rsdag/issues/242
         Node::Binary(..) | Node::Cmp(..) | Node::Solve(..) => {
             let parts = parts();
             if parts.iter().all(Nonlinearity::is_constant) {

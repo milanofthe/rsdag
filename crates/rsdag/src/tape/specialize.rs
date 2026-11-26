@@ -137,6 +137,7 @@ impl Tape {
                 None => stack.extend_from_slice(p.ins(i as usize)),
             }
         }
+        // https://github.com/milanofthe/rsdag/issues/241
         let mut distinct_guard_conds: FxHashSet<Ref> = FxHashSet::default();
         let mut guards: Vec<Ref> = Vec::new();
         let mut expected: Vec<u8> = Vec::new();
@@ -177,6 +178,7 @@ impl Tape {
         } else {
             0
         };
+        // https://github.com/milanofthe/rsdag/issues/241
         let prolog_guards: Vec<(u32, u8)> = (0..n_individual_guards)
             .filter(|&g| match p.roots[n_real + g] {
                 Ref::Input(_) => true,
@@ -205,6 +207,7 @@ impl Tape {
     }
 }
 
+// https://github.com/milanofthe/rsdag/issues/241
 fn count_unexpected_conds(p: &mut Program, conds: &[Ref], expected: &[u8]) -> Ref {
     let push = |p: &mut Program, kind: Kind, ins: &[Ref]| -> Ref {
         let start = p.pool.len() as u32;
@@ -516,6 +519,7 @@ impl Tape {
     }
 }
 
+// https://github.com/milanofthe/rsdag/issues/241
 fn decided(p: &Program, arm: &[Option<Ref>], r: Ref, read_by_main: bool) -> Ref {
     let mut r = r;
     while let Ref::Value(i, _) = r {

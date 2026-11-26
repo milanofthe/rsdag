@@ -39,6 +39,7 @@ const D5: u32 = 5;
 const D6: u32 = 6;
 const D7: u32 = 7;
 
+// https://github.com/milanofthe/rsdag/issues/240
 const COND_EQ: u32 = 0x0;
 const COND_NE_TRUE_ON_NAN: u32 = 0x1;
 const COND_MI_LT: u32 = 0x4;

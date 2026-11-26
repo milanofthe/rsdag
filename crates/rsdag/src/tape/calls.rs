@@ -327,6 +327,7 @@ pub unsafe fn run_stage<'a>(
             run_part(c, slots, gather, inputs, groups, s)
         })
     };
+    // https://github.com/milanofthe/rsdag/issues/241
     let lanes = |c: &Call| c.bundle.batch_lanes().max(1);
     let n_lane_groups: usize = (0..n)
         .map(|k| {

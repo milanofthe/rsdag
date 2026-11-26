@@ -74,6 +74,7 @@ const CALL_ALIGN_PAD_BYTES: i32 = 8;
 const FIRST_WIN_SAVED_XMM: u8 = 6;
 const WIN_SAVED_XMMS: u8 = 10;
 const XMM_SAVE_BYTES: i32 = 16;
+// https://github.com/milanofthe/rsdag/issues/240
 const WIN_FRAME: i32 = WIN_SAVED_XMMS as i32 * XMM_SAVE_BYTES + CALL_ALIGN_PAD_BYTES;
 const _: () = assert!((RETURN_ADDRESS_AND_SIX_PUSHES + WIN_FRAME) % STACK_ALIGN == 0);
 const _: () = assert!((RETURN_ADDRESS_AND_SIX_PUSHES + CALL_ALIGN_PAD_BYTES) % STACK_ALIGN == 0);
@@ -967,6 +968,7 @@ const EXP_ROW_VALUES: usize = 2;
 const LN_ROW_VALUES: usize = 4;
 const EXP_ROW_SHIFT: u32 = (EXP_ROW_VALUES * F64_BYTES).trailing_zeros();
 const LN_ROW_SHIFT: u32 = (LN_ROW_VALUES * F64_BYTES).trailing_zeros();
+// https://github.com/milanofthe/rsdag/issues/240
 const LN_K_OFFSET: u64 = 1 << (u64::BITS - 1 - F64_FRAC_BITS);
 const LN_K_MAGIC: f64 = MAGIC + LN_K_OFFSET as f64;
 
@@ -1159,6 +1161,7 @@ impl<const L: usize> Isa for X64<L> {
         self.modrm_mem(d, base, off);
     }
     const MINMAX: bool = true;
+    // https://github.com/milanofthe/rsdag/issues/240
     fn minmax(&mut self, op: ReduceOp, d: u8, a: u8, b: u8) {
         let opc = match op {
             ReduceOp::Min => MIN,

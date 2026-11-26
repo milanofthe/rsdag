@@ -231,6 +231,7 @@ impl Adaptive {
         self.clocked(clock);
     }
 
+    // https://github.com/milanofthe/rsdag/issues/242
     fn eval_rung(&self, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
         if let Some(cache) = &self.spec {
             if let Ok(mut st) = cache.try_lock() {
@@ -382,6 +383,7 @@ impl Adaptive {
         self.clocked(clock);
     }
 
+    // https://github.com/milanofthe/rsdag/issues/242
     fn main_rung(&self, ep: &mut Episode, inputs: &[f64], work: &mut Vec<f64>, out: &mut Vec<f64>) {
         if self.forms_epoch() != ep.forms_epoch {
             *ep = self.eval_prolog(inputs, work);

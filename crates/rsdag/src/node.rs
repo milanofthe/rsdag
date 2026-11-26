@@ -627,6 +627,7 @@ impl std::ops::Deref for Operands<'_> {
     }
 }
 
+// https://github.com/milanofthe/rsdag/issues/242
 pub(crate) mod shape {
     use std::hash::{Hash, Hasher};
 

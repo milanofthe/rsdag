@@ -109,6 +109,7 @@ impl Field for BigRational {
             format!("{}/{}", self.numer(), self.denom())
         }
     }
+    // https://github.com/milanofthe/rsdag/issues/242
     fn stable_hash(&self) -> u64 {
         let n = crate::node::shape::of_hash(&self.numer().to_signed_bytes_le()[..]);
         let d = crate::node::shape::of_hash(&self.denom().to_signed_bytes_le()[..]);

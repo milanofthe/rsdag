@@ -372,6 +372,7 @@ impl<K: Field> Graph<K> {
         let _s = rsprobe::scope!("load module");
         rsprobe::add!("nodes", module.nodes.len());
         module.validate()?;
+        // https://github.com/milanofthe/rsdag/issues/242
         let mut bodies: Vec<Option<Arc<dyn ExternBundle>>> = Vec::with_capacity(module.funcs.len());
         for data in &module.funcs {
             bodies.push(match &data.extern_body {

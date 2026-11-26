@@ -19,6 +19,7 @@ pub fn differentiate<K: Field>(ctx: &mut Graph<K>, expr: ExprId, wrt: SymbolId) 
     forward(ctx, &[expr], wrt, &mut memo, &|_| true, &mut calls)[0]
 }
 
+// https://github.com/milanofthe/rsdag/issues/242
 fn unary_factor<K: Field>(ctx: &mut Graph<K>, op: UnaryOp, a: ExprId) -> ExprId {
     match op {
         UnaryOp::Exp => {
@@ -756,6 +757,7 @@ fn carry<K: Field>(
             crate::func::Output::Slot(_)
         )
     });
+    // https://github.com/milanofthe/rsdag/issues/242
     let any_adjoint_gated = calls.iter().any(|c| c.gated);
     if symbolic && !any_adjoint_gated && moving.len() >= REVERSE_MIN_TOUCHED {
         calls.sort_unstable_by_key(|c| c.out);
@@ -975,6 +977,7 @@ fn sweep_node<K: Field>(
                     }
                 }
             }
+            // https://github.com/milanofthe/rsdag/issues/242
             Node::Solve(l, _) => {
                 let (n, a, b) = ctx.solve_args(l);
                 let (a, b) = (a.to_vec(), b.to_vec());

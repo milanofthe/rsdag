@@ -500,6 +500,7 @@ impl<K: Field> Graph<K> {
             .collect()
     }
 
+    // https://github.com/milanofthe/rsdag/issues/242
     pub(crate) fn vjp_function(&mut self, f: FuncId, outs: &[u32], params: &[u32]) -> FuncId {
         let key = (f, Box::<[u32]>::from(outs), Box::<[u32]>::from(params));
         if let Some(&g) = self.vjps.get(&key) {
@@ -551,6 +552,7 @@ impl<K: Field> Graph<K> {
         }
     }
 
+    // https://github.com/milanofthe/rsdag/issues/242
     fn derive_every_dependent_output(&mut self, f: FuncId, out: u32, param: u32) {
         let func = &self.funcs[f.0 as usize];
         let second_derivative = matches!(

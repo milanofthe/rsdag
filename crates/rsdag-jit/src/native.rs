@@ -122,6 +122,7 @@ impl NativeBody {
         self.run_groups_into(work, args, n_args, out, groups);
     }
 
+    // https://github.com/milanofthe/rsdag/issues/240
     fn run_groups_into(
         &self,
         work: &mut [f64],
@@ -275,6 +276,7 @@ impl NativeBody {
         rsdag::scratch::with_len(lt.layout.total, 0.0, |work: &mut [f64]| {
             rsdag::scratch::with_len(n_in * l, f64::NAN, |ins: &mut [f64]| {
                 let end = block.end;
+                // https://github.com/milanofthe/rsdag/issues/240
                 let mut state_rows_in_lanes: Option<[usize; MAX_LANES]> = None;
                 for c in block.step_by(l) {
                     let mut rows = [usize::MAX; MAX_LANES];
@@ -702,6 +704,7 @@ impl NativeTape {
                 .collect()
         };
         let emitted = emitted?;
+        // https://github.com/milanofthe/rsdag/issues/240
         let size = emitted
             .iter()
             .map(|e| e.bytes.len() + CODE_ALIGN_BYTES - 1)
@@ -950,6 +953,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
     fn fresh_for(&mut self, slot: u32) -> u8 {
         self.fresh_until(self.live.death(slot, self.pos, true))
     }
+    // https://github.com/milanofthe/rsdag/issues/240
     fn fresh_until(&mut self, death: u32) -> u8 {
         let host_call_before_death = I::SAVED > 0 && self.next_host_call <= death;
         if host_call_before_death {
@@ -1659,6 +1663,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
         }
     }
 
+    // https://github.com/milanofthe/rsdag/issues/240
     fn fold(&mut self, op: Arith, ident: f64, a: &[u32], b: Option<&[u32]>) -> u8 {
         let n = a.len();
         let ch = n / FOLD_LANES;

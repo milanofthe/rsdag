@@ -722,6 +722,7 @@ impl ExternBundle for VariantBody {
     fn pure_args(&self) -> &[bool] {
         self.full.pure_args()
     }
+    // https://github.com/milanofthe/rsdag/issues/242
     fn prolog_into(&self, pure: &[f64], _work: &mut [f64], state: &mut [f64]) {
         let v = self.variant(pure) as usize;
         let b = self.bundle(v);

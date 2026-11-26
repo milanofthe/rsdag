@@ -61,6 +61,7 @@ pub(crate) extern "C" fn h_reduce(op: u64, ptr: *const f64, len: usize) -> f64 {
     reduce_slice(op, xs)
 }
 
+// https://github.com/milanofthe/rsdag/issues/240
 // Unwinding out of `extern "C"` aborts: https://doc.rust-lang.org/nomicon/ffi.html#ffi-and-unwinding
 std::thread_local! {
     static FIRST_PANIC_HELD_PAST_EMITTED_FRAMES: std::cell::Cell<Option<Box<dyn std::any::Any + Send>>> =

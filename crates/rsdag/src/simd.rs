@@ -661,6 +661,7 @@ fn solve_batch_q<Q: Quad>(
     }
 }
 
+// https://github.com/milanofthe/rsdag/issues/242
 #[inline(always)]
 fn solve_lanes<Q: Quad, const N: usize>(a: &[f64], b: &[f64], k: usize, out: &mut [f64]) {
     let (sa, sb) = (N * N, N * k);

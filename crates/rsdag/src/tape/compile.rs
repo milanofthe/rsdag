@@ -248,6 +248,7 @@ impl Lowered {
     }
 }
 
+// https://github.com/milanofthe/rsdag/issues/241
 #[derive(Default)]
 struct Scratch {
     generation: u32,
@@ -323,6 +324,7 @@ struct Forest {
 #[derive(Clone)]
 pub(super) struct Inst {
     pub(super) kind: Kind,
+    // https://github.com/milanofthe/rsdag/issues/241
     pub(super) ins: (u32, u32),
     pub(super) n_out: u32,
     pub(super) pure: bool,
@@ -1038,6 +1040,7 @@ fn own_last(p: &Program, i: u32) -> Ref {
 }
 
 impl Tape {
+    // https://github.com/milanofthe/rsdag/issues/241
     pub(super) fn lift(&self) -> Program {
         let m = self.ops.len();
         let mut op_holding_slot = vec![u32::MAX; self.n_work];
@@ -1290,6 +1293,7 @@ impl Forest {
                 uses[bp(*a)] += 1;
             }
         }
+        // https://github.com/milanofthe/rsdag/issues/241
         let mut fused_into: Vec<Option<usize>> = vec![None; m];
         for (i, id) in base.iter().enumerate() {
             if let Node::Add(a, b) = ctx.node(*id) {
@@ -1551,6 +1555,7 @@ impl Forest {
         Groups { groups, kernel_of }
     }
 
+    // https://github.com/milanofthe/rsdag/issues/241
     fn merge_gemm<K: Field>(&self, ctx: &Graph<K>, groups: &mut [(GroupKey, Vec<usize>)]) {
         let row_of = |mi: usize| -> &[ExprId] {
             let Node::Dot(l) = *ctx.node(self.base[mi]) else {
@@ -1755,6 +1760,7 @@ impl Forest {
                 }
             }
         };
+        // https://github.com/milanofthe/rsdag/issues/241
         let mut last_unit_listing: Vec<usize> = vec![usize::MAX; m];
         let mut instances_listed: HashSet<Site> = HashSet::default();
         let mut raw: Vec<usize> = Vec::new();
@@ -1975,6 +1981,7 @@ impl Forest {
         let (n_groups, n_args) = (lists.len() as u32, args[0].len() as u32);
         let pure = members.iter().all(|&mi| self.pure[mi]);
         let stateful = !pure && self.stateful(&*b, &args);
+        // https://github.com/milanofthe/rsdag/issues/241
         let main_phase_reads: Option<Arc<[u32]>> = stateful
             .then(|| b.main_reads())
             .flatten()
@@ -2089,6 +2096,7 @@ struct CallSets {
     members: HashMap<(u32, Site), Vec<(usize, u32)>>,
 }
 
+// https://github.com/milanofthe/rsdag/issues/241
 #[derive(PartialEq, Eq, Hash, Clone)]
 enum GroupKey {
     Call {
@@ -2221,6 +2229,7 @@ impl Templates {
     ) -> Arc<Program> {
         self.expanded_leaf_calls_apart = true;
         let key = (f, outs.to_vec(), mask);
+        // https://github.com/milanofthe/rsdag/issues/241
         let cached = ctx.templates.lock().unwrap().get(&key).cloned();
         if let Some(t) = cached {
             return t;
@@ -2300,6 +2309,7 @@ impl Bodies {
 }
 
 impl Program {
+    // https://github.com/milanofthe/rsdag/issues/241
     pub(super) fn schedule(&self) -> Vec<u32> {
         let m = self.insts.len();
         let held_by_kept_state =
@@ -2365,6 +2375,7 @@ impl Program {
             let mut i = iu as usize;
             if let (Some(lo), Some(iu2)) = (last, ready.peek_same(pure, kills)) {
                 let i2 = iu2 as usize;
+                // https://github.com/milanofthe/rsdag/issues/241
                 let overlaps_independent_chain =
                     deps(i).contains(&(lo as u32)) && !deps(i2).contains(&(lo as u32));
                 if overlaps_independent_chain {
@@ -2861,6 +2872,7 @@ impl Program {
                         arg_pool.extend_from_slice(codes);
                         super::Accum { c, codes: start }
                     });
+                    // https://github.com/milanofthe/rsdag/issues/241
                     let scratch_holds_every_operand = (rows * n + n + rows) as usize;
                     max_args = max_args.max(scratch_holds_every_operand);
                     Op::Gemv {
@@ -2965,6 +2977,7 @@ impl Program {
     }
 }
 
+// https://github.com/milanofthe/rsdag/issues/241
 #[derive(Default)]
 struct Ready {
     buckets: [Vec<Vec<u32>>; 2],

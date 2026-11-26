@@ -36,6 +36,7 @@ impl BackendCache {
         v.iter().find(|(k, _)| *k == key).map(|(_, b)| b.clone())
     }
 
+    // https://github.com/milanofthe/rsdag/issues/242
     /// The form compiled under `key`, compiled by `make` on its first use.
     pub fn get_or_try_insert<E>(
         &self,

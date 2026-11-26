@@ -26,6 +26,7 @@ pub(super) struct Topo {
 }
 
 impl Topo {
+    // https://github.com/milanofthe/rsdag/issues/241
     pub(super) fn new(
         p: &Program,
         hints: &[(u32, u32)],
@@ -151,6 +152,7 @@ impl Topo {
         }
     }
 
+    // https://github.com/milanofthe/rsdag/issues/241
     pub(super) fn read(&mut self, p: &Program, k: u32, a: u32) -> bool {
         let n = self.seen.len() as u32;
         let a_is_constant_added_after_order = a >= n;

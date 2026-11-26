@@ -28,6 +28,7 @@ use crate::semantics::{binary_f64, unary_f64};
 /// window (which is what makes `Reduce`/`Dot`/`Solve`/`Call` hash-cons structurally).
 pub struct Graph<K: Field = F64> {
     nodes: Vec<Node>,
+    // https://github.com/milanofthe/rsdag/issues/242
     shape: Vec<u64>,
     dedup: HashMap<Node, ExprId>,
     consts: Vec<K>,
@@ -35,6 +36,7 @@ pub struct Graph<K: Field = F64> {
     const_by_f64_bits: HashMap<u64, ExprId>,
     arg_pool: Vec<ExprId>,
     arg_dedup: HashMap<Box<[ExprId]>, ArgList>,
+    // https://github.com/milanofthe/rsdag/issues/242
     list_shape: HashMap<(u32, ArgList), u64>,
     zero: ExprId,
     one: ExprId,
@@ -100,6 +102,7 @@ pub struct Bound {
     pub(crate) ctx: u32,
 }
 
+// https://github.com/milanofthe/rsdag/issues/242
 pub(crate) struct NodeTable<T: Slot> {
     stamp: Vec<u32>,
     val: Vec<u32>,
@@ -609,6 +612,7 @@ impl<K: Field> Graph<K> {
             return self.binary(BinOp::Powf, a, e);
         }
         if let Some(x) = self.const_of(a) {
+            // https://github.com/milanofthe/rsdag/issues/242
             if let Some(v) = x.powi(n) {
                 return self.konst(v);
             }
@@ -847,6 +851,7 @@ impl<K: Field> Graph<K> {
             0 => match op {
                 ReduceOp::Sum => self.zero,
                 ReduceOp::Product => self.one,
+                // https://github.com/milanofthe/rsdag/issues/242
                 ReduceOp::Min | ReduceOp::Max => self.zero,
             },
             1 => args[0],

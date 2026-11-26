@@ -1132,6 +1132,7 @@ impl Tape {
                 }
                 Code::Neg => get(x.a).map(|a| -a),
                 Code::Powi => get(x.a).map(|a| powi_f64(a, x.b as i32)),
+                // https://github.com/milanofthe/rsdag/issues/241
                 Code::Unary(UnaryOp::Exp) => get(x.a).map(|a| unary_f64(UnaryOp::Exp, a)),
                 Code::Unary(UnaryOp::Ln) => get(x.a).map(|a| unary_f64(UnaryOp::Ln, a)),
                 Code::Unary(f) => get(x.a).map(|a| unary_f64(f, a)),
@@ -1308,6 +1309,7 @@ impl Tape {
         fill: &impl Fn(usize, &mut Lane),
         drain: &mut impl FnMut(usize, &Lane),
     ) -> usize {
+        // https://github.com/milanofthe/rsdag/issues/241
         let (n_slots, n_inputs) = match B {
             1 => (
                 self.work_len(),
