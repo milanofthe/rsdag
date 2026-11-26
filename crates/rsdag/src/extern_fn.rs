@@ -12,6 +12,7 @@
 //! the per-thread tapes the solver clones.
 
 pub fn spread_pure(mask: &[bool], pure: &[f64], args: &mut [f64]) {
+    debug_assert_eq!(mask.iter().filter(|&&is_pure| is_pure).count(), pure.len());
     args.fill(f64::NAN);
     let slots = args
         .iter_mut()

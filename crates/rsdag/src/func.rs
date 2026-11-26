@@ -334,7 +334,9 @@ impl Function {
     /// The outputs with their expressions replaced, in order, by `exprs`.
     pub(crate) fn outputs_over(&self, exprs: Vec<ExprId>) -> Vec<Output> {
         let mut outputs = self.outputs.clone();
-        let slots = outputs.iter_mut().filter(|o| matches!(o, Output::Expr(_)));
+        let is_expr = |o: &Output| matches!(o, Output::Expr(_));
+        assert_eq!(outputs.iter().filter(|o| is_expr(o)).count(), exprs.len());
+        let slots = outputs.iter_mut().filter(|o| is_expr(o));
         for (o, e) in slots.zip(exprs) {
             *o = Output::Expr(e);
         }
