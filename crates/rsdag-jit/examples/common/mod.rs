@@ -5,11 +5,10 @@ use std::time::Instant;
 #[path = "../../../rsdag/tests/common/mod.rs"]
 pub mod graph;
 
-/// The shortest batch of calls a timing takes, in seconds.
-const BATCH_S: f64 = 0.05;
+const MIN_TIMED_BATCH_SECONDS: f64 = 0.05;
 
 /// Seconds per call of `f`: the best of five batches of at least
-/// [`BATCH_S`]. Every call adds to the measure `evaluations` at the current
+/// [`MIN_TIMED_BATCH_SECONDS`]. Every call adds to the measure `evaluations` at the current
 /// rsprobe node.
 pub fn per_call(mut f: impl FnMut()) -> f64 {
     let mut reps = 1usize;
@@ -21,7 +20,7 @@ pub fn per_call(mut f: impl FnMut()) -> f64 {
         }
         dt = t.elapsed().as_secs_f64();
         rsprobe::add!("evaluations", reps);
-        if dt > BATCH_S {
+        if dt > MIN_TIMED_BATCH_SECONDS {
             break;
         }
         reps *= 4;
@@ -72,8 +71,8 @@ impl std::ops::Deref for Run {
 
 impl Drop for Run {
     fn drop(&mut self) {
-        // the root's span is in the record once its guard has dropped
-        self.on.take();
+        let root_span_guard_dropped_before_the_record = self.on.take();
+        drop(root_span_guard_dropped_before_the_record);
         let Some(path) = std::env::var_os("RSPROBE_RECORD") else {
             return;
         };

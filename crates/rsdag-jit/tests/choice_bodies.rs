@@ -15,9 +15,6 @@ use rsdag::{
 };
 use rsdag_jit::{Lanes, NativeTape, Options};
 
-/// `f(v, p)`: a sum of regions of `v`, a heavy arm above each threshold
-/// and a light one below; the instances start between 0.7 and 0.9, most
-/// thresholds above them, four among them.
 fn device(g: &mut Graph<F64>) -> FuncId {
     let (v, vs) = sym(g, "dev.v");
     let (p, ps) = sym(g, "dev.p");
@@ -48,8 +45,6 @@ fn device(g: &mut Graph<F64>) -> FuncId {
     s.close([(y, OutputRole::Plain), (o1, OutputRole::Plain)])
 }
 
-/// `n` instances, each `f(x_i, p_i)`, both outputs summed; specializing
-/// over the choices or not.
 fn tape(n: usize, choices: bool) -> (Tape, Vec<f64>) {
     let mut g: Graph<F64> = Graph::new();
     let f = device(&mut g);
@@ -93,7 +88,6 @@ fn run(n: usize, background: bool, lanes: Lanes) {
     plain.eval_prolog(&ins, &mut wp);
     for k in 0..80 {
         for i in 0..n {
-            // drift, half of them up across the thresholds above
             ins[2 * i] += 0.004 * if i % 2 == 0 { 1.0 } else { -1.0 };
         }
         native.eval_main(&ins, &mut wn, &mut got);
@@ -103,7 +97,6 @@ fn run(n: usize, background: bool, lanes: Lanes) {
             "{n} instances, step {k}, {lanes:?}, background {background}"
         );
         if background && k % 20 == 0 {
-            // let the background compiles land now and then
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }

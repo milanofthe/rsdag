@@ -75,7 +75,6 @@ fn native_calls_read_their_globals() {
 
 #[test]
 fn native_bound_calls_are_the_full_ones() {
-    // the same ring, its card passed by every call or bound once per card
     let build = |bound: bool| {
         let mut g: Graph<F64> = Graph::new();
         let d = {

@@ -30,8 +30,8 @@ fn main() {
                 .smooth();
             let (roots, syms) = build(&mut g, &mut spec);
             let tape = Tape::compile(&g, &roots, &syms);
-            // The tape compile itself, best of five.
-            let t_t = (0..5)
+            let best_of = 5;
+            let t_t = (0..best_of)
                 .map(|_| {
                     let t = Instant::now();
                     let _ = Tape::compile(&g, &roots, &syms);

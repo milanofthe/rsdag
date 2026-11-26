@@ -60,14 +60,13 @@ fn row(name: &str, tape: &Tape, ins: &[f64]) {
     let (mut nw, mut no) = (Vec::new(), Vec::new());
     let t_n = per_call(|| native.eval(ins, &mut nw, &mut no)) * 1e9 / n as f64;
     tape.eval(ins, &mut w, &mut o);
-    // A NaN's payload is no part of any guarantee.
-    let same = o
+    let same_bits_or_both_nan_any_payload = o
         .iter()
         .zip(&no)
         .all(|(a, b)| a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()));
     println!(
         "{name:<22} {n:>8} ops  interp {t_i:>6.2} ns/op  native {t_n:>6.2} ns/op  compile {t_c:>7.1} ns/op  {}",
-        if same { "bits equal" } else { "MISMATCH" }
+        if same_bits_or_both_nan_any_payload { "bits equal" } else { "MISMATCH" }
     );
 }
 

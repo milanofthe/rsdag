@@ -11,7 +11,6 @@ use rsdag::Program;
 use rsdag::{ExprId, Graph, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
 use rsdag_jit::{Batch, NativeTape, Options};
 
-/// `cell(l, c, r) = exp(c - l) - exp(r - c) + 2c - 1`, as a function.
 fn cell(g: &mut Graph<F64>) -> rsdag::FuncId {
     let mut s = Scope::new(g, "cell");
     let [l, c, r] = ["l", "c", "r"].map(|n| s.param(n, ParamRole::Free));
@@ -35,7 +34,6 @@ fn batched_instances_of_a_body_match_the_interpreter() {
         let f = cell(&mut g);
         let xs: Vec<ExprId> = (0..n).map(|i| g.sym(&format!("x{i}"))).collect();
         let syms: Vec<SymbolId> = xs.iter().map(|&e| symbol_of(&g, e)).collect();
-        // Leaf arguments: the calls batch into one call over n groups.
         let roots: Vec<ExprId> = (0..n)
             .map(|i| g.call(f, 0, &[xs[(i + n - 1) % n], xs[i], xs[(i + 1) % n]]))
             .collect();
@@ -78,7 +76,6 @@ fn a_parallel_batch_is_the_serial_loop() {
 fn a_body_called_on_expressions_and_a_body_calling_a_body() {
     let mut g: Graph<F64> = Graph::new();
     let f = cell(&mut g);
-    // A function whose body calls `cell` twice on transformed arguments.
     let (a, b) = (g.sym("a"), g.sym("b"));
     let ab = g.mul(a, b);
     let c1 = g.call(f, 0, &[a, ab, b]);
