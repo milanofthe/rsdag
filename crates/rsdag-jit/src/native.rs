@@ -693,7 +693,7 @@ impl NativeTape {
                 ops: r.ops() as usize,
             })
             .collect();
-        let emitted: Vec<Emitted> = {
+        let emitted: Result<Vec<Emitted>, JitError> = {
             let _s = rsprobe::scope!("emit");
             let node = rsprobe::current();
             jobs.par_iter()
@@ -703,6 +703,7 @@ impl NativeTape {
                 })
                 .collect()
         };
+        let emitted = emitted?;
         let size = emitted
             .iter()
             .map(|e| e.bytes.len() + CODE_ALIGN_BYTES - 1)
@@ -1725,7 +1726,7 @@ fn emit_chunk<A: Isa>(
     layout: &Layout,
     live: &Liveness,
     bundles: &Bundles,
-) -> Emitted {
+) -> Result<Emitted, JitError> {
     let ops = &tape.ops()[range.clone()];
     let hot = hot_routines_most_frequent_first::<A>(ops);
     let mut next_host_call_at_or_after = vec![u32::MAX; ops.len() + 1];
@@ -1753,12 +1754,12 @@ fn emit_chunk<A: Isa>(
     e.pos = past_chunk_so_later_reads_are_written_back;
     e.flush();
     e.isa.epilogue();
-    Emitted {
+    Ok(Emitted {
         calls: std::mem::take(&mut e.calls),
         kernels: std::mem::take(&mut e.kernels),
         tables: std::mem::take(&mut e.tables),
-        bytes: e.isa.finish(),
-    }
+        bytes: e.isa.finish()?,
+    })
 }
 
 struct Mapping {

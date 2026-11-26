@@ -430,8 +430,8 @@ impl Isa for A64 {
             hot: hot.iter().copied().take(HOT_REGS).collect(),
         }
     }
-    fn finish(self) -> Vec<u8> {
-        self.code.iter().flat_map(|w| w.to_le_bytes()).collect()
+    fn finish(self) -> Result<Vec<u8>, crate::JitError> {
+        Ok(self.code.iter().flat_map(|w| w.to_le_bytes()).collect())
     }
 
     fn prologue(&mut self) {

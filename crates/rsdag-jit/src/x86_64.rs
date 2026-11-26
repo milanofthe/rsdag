@@ -1016,7 +1016,7 @@ impl<const L: usize> Isa for X64<L> {
             fixups: Vec::new(),
         }
     }
-    fn finish(mut self) -> Vec<u8> {
+    fn finish(mut self) -> Result<Vec<u8>, crate::JitError> {
         const { assert!(Self::POOL_ENTRY_BYTES.is_multiple_of(LEGACY_MEM_OPERAND_ALIGN)) };
         if !self.pool.is_empty() {
             self.code.resize(
@@ -1032,12 +1032,16 @@ impl<const L: usize> Isa for X64<L> {
             for fix in &self.fixups {
                 let disp =
                     (base + Self::POOL_ENTRY_BYTES * fix.constant) as i64 - fix.insn_end as i64;
-                let disp = i32::try_from(disp).expect("a chunk is smaller than 2 GB");
+                let disp = i32::try_from(disp).map_err(|_| {
+                    crate::JitError::Codegen(
+                        "a constant of a chunk lies beyond a 32-bit displacement".into(),
+                    )
+                })?;
                 self.code[fix.disp_at..fix.disp_at + DISP32_BYTES]
                     .copy_from_slice(&disp.to_le_bytes());
             }
         }
-        self.code
+        Ok(self.code)
     }
 
     fn prologue(&mut self) {

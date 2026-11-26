@@ -72,7 +72,7 @@ pub(crate) trait Isa {
     /// an architecture keeps as many of them in callee-saved registers as it
     /// has to spare, so those calls need no address immediate.
     fn new(hot: &[*const ()]) -> Self;
-    fn finish(self) -> Vec<u8>;
+    fn finish(self) -> Result<Vec<u8>, crate::JitError>;
 
     /// Function entry: `fn(work: *mut f64, inputs: *const f64, layout: *const _)`
     /// in the platform's C convention, the three pointers kept in callee-saved
