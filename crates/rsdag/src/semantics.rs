@@ -9,10 +9,10 @@
 //! backend that reproduces these bit for bit reproduces every program.
 
 use crate::constants::{
-    EXP_INV_LN2_N, EXP_LN2_HI_N, EXP_LN2_LO_N, EXP_POLY, EXP_SCALE_BIAS, EXP_TABLE, EXP_TABLE_BITS,
-    EXP_UNDERFLOW, F64_EXP_BIAS, F64_FRAC_BITS, LN_LN2_HI, LN_LN2_LO, LN_OFF, LN_POLY, LN_TABLE,
-    LN_TABLE_BITS, LU_PANEL_LARGE, LU_PANEL_SMALL, LU_PANEL_SWITCH, LU_TRAILING_ROWS,
-    LU_UNBLOCKED_MAX, MAGIC,
+    DIGAMMA_COEFFS, EXP_INV_LN2_N, EXP_LN2_HI_N, EXP_LN2_LO_N, EXP_POLY, EXP_SCALE_BIAS, EXP_TABLE,
+    EXP_TABLE_BITS, EXP_UNDERFLOW, F64_EXP_BIAS, F64_FRAC_BITS, LN_LN2_HI, LN_LN2_LO, LN_OFF,
+    LN_POLY, LN_TABLE, LN_TABLE_BITS, LU_PANEL_LARGE, LU_PANEL_SMALL, LU_PANEL_SWITCH,
+    LU_TRAILING_ROWS, LU_UNBLOCKED_MAX, MAGIC, POLYGAMMA_SHIFT, TRIGAMMA_COEFFS,
 };
 use crate::node::{BinOp, CmpOp, Elementary, ReduceOp, UnaryOp};
 use crate::tape::Fold;
@@ -83,7 +83,13 @@ pub fn binary_f64(op: BinOp, x: f64, y: f64) -> f64 {
     }
 }
 
-/// Digamma `psi(x)`: recurrence into the asymptotic zone, then the series.
+/// Digamma `psi(x)`: the recurrence `psi(x) = psi(x + 1) - 1 / x` up to
+/// [`POLYGAMMA_SHIFT`], then the asymptotic expansion with the coefficients
+/// [`DIGAMMA_COEFFS`]; for `x <= 0` the reflection
+/// `psi(x) = psi(1 - x) - pi / tan(pi x)`, where `tan(pi x)` is evaluated as
+/// `tan(pi (x - round(x)))`. The difference `x - round(x)` is exact, so the
+/// argument of `tan` carries one rounding relative to itself and the term
+/// keeps its relative accuracy near the poles and for large `|x|`.
 pub fn digamma(x: f64) -> f64 {
     if x.is_nan() || x == f64::INFINITY {
         return x;
@@ -92,22 +98,23 @@ pub fn digamma(x: f64) -> f64 {
         if x == x.floor() {
             return f64::NAN;
         }
-        return digamma(1.0 - x) - std::f64::consts::PI / libm::tan(std::f64::consts::PI * x);
+        return digamma(1.0 - x) - std::f64::consts::PI / libm::tan(pi_x_reduced(x));
     }
     let (mut x, mut result) = (x, 0.0);
-    while x < 6.0 {
+    while x < POLYGAMMA_SHIFT {
         result -= 1.0 / x;
         x += 1.0;
     }
     let inv = 1.0 / x;
     let inv2 = inv * inv;
-    result + libm::log(x)
-        - 0.5 * inv
-        - inv2 * (1.0 / 12.0 - inv2 * (1.0 / 120.0 - inv2 * (1.0 / 252.0)))
+    result + libm::log(x) - 0.5 * inv - inv2 * horner(&DIGAMMA_COEFFS, inv2)
 }
 
-/// Trigamma `psi'(x)`: recurrence into the asymptotic zone, then the series;
-/// for `x <= 0` the reflection `psi'(x) = pi^2 / sin^2(pi x) - psi'(1 - x)`.
+/// Trigamma `psi'(x)`: the recurrence `psi'(x) = psi'(x + 1) + 1 / x^2` up
+/// to [`POLYGAMMA_SHIFT`], then the asymptotic expansion with the
+/// coefficients [`TRIGAMMA_COEFFS`]; for `x <= 0` the reflection
+/// `psi'(x) = pi^2 / sin^2(pi x) - psi'(1 - x)`, with `sin(pi x)` evaluated
+/// at the exactly reduced argument as in [`digamma`].
 pub fn trigamma(x: f64) -> f64 {
     if x.is_nan() || x == f64::INFINITY {
         return if x.is_nan() { x } else { 0.0 };
@@ -116,21 +123,26 @@ pub fn trigamma(x: f64) -> f64 {
         if x == x.floor() {
             return f64::INFINITY;
         }
-        let s = libm::sin(std::f64::consts::PI * x);
+        let s = libm::sin(pi_x_reduced(x));
         let pi2 = std::f64::consts::PI * std::f64::consts::PI;
         return pi2 / (s * s) - trigamma(1.0 - x);
     }
     let (mut x, mut result) = (x, 0.0);
-    while x < 6.0 {
+    while x < POLYGAMMA_SHIFT {
         result += 1.0 / (x * x);
         x += 1.0;
     }
     let inv = 1.0 / x;
     let inv2 = inv * inv;
-    result
-        + inv
-        + 0.5 * inv2
-        + inv * inv2 * (1.0 / 6.0 - inv2 * (1.0 / 30.0 - inv2 * (1.0 / 42.0 - inv2 / 30.0)))
+    result + inv + 0.5 * inv2 + inv * inv2 * horner(&TRIGAMMA_COEFFS, inv2)
+}
+
+fn pi_x_reduced(x: f64) -> f64 {
+    std::f64::consts::PI * (x - x.round())
+}
+
+fn horner(coeffs: &[f64], t: f64) -> f64 {
+    coeffs.iter().rev().fold(0.0, |p, &c| p * t + c)
 }
 
 // https://prng.di.unimi.it/splitmix64.c

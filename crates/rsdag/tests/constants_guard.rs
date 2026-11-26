@@ -67,12 +67,6 @@ const EXEMPT: &[Exempt] = &[
     },
     Exempt {
         file: "rsdag/src/semantics.rs",
-        item_paths: &["digamma", "trigamma"],
-        not_exempt: &[],
-        reason: "the recurrence threshold and Bernoulli coefficients of the asymptotic series",
-    },
-    Exempt {
-        file: "rsdag/src/semantics.rs",
         item_paths: &["splitmix64", "unit", "rand_stream"],
         not_exempt: &[],
         reason: "splitmix64's constants, and the 53 bits of a double's mantissa",
