@@ -26,92 +26,95 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Items whose literals are definitions rather than knobs, by file and
-/// item path (`Type::method`, a `mod`, a `const`; `*` the whole file),
-/// with the items of such a file that are held to the rule all the same.
-const EXEMPT: &[(&str, &[&str], &[&str], &str)] = &[
-    (
-        "rsdag-jit/src/x86_64.rs",
-        &["*"],
-        &["X64::exp_inline", "X64::ln_inline"],
-        "x86-64 instruction encodings, registers and ABI frame sizes",
-    ),
-    (
-        "rsdag-jit/src/aarch64.rs",
-        &["*"],
-        &[],
-        "AArch64 instruction encodings, registers and ABI",
-    ),
-    (
-        "rsdag-jit/src/native.rs",
-        &[
+struct Exempt {
+    file: &'static str,
+    item_paths: &'static [&'static str],
+    item_paths_held_to_the_rule_all_the_same: &'static [&'static str],
+    reason: &'static str,
+}
+
+const WHOLE_FILE: &str = "*";
+
+const EXEMPT: &[Exempt] = &[
+    Exempt {
+        file: "rsdag-jit/src/x86_64.rs",
+        item_paths: &[WHOLE_FILE],
+        item_paths_held_to_the_rule_all_the_same: &["X64::exp_inline", "X64::ln_inline"],
+        reason: "x86-64 instruction encodings, registers and ABI frame sizes",
+    },
+    Exempt {
+        file: "rsdag-jit/src/aarch64.rs",
+        item_paths: &[WHOLE_FILE],
+        item_paths_held_to_the_rule_all_the_same: &[],
+        reason: "AArch64 instruction encodings, registers and ABI",
+    },
+    Exempt {
+        file: "rsdag-jit/src/native.rs",
+        item_paths: &[
             "Mapping::new::MEM_COMMIT_RESERVE",
             "Mapping::new::PAGE_READWRITE",
             "Mapping::new::PAGE_EXECUTE_READ",
             "Mapping::drop::MEM_RELEASE",
         ],
-        &[],
-        "Win32's memory allocation and protection flags",
-    ),
-    (
-        "rsdag-jit/src/host.rs",
-        &["reduce_code"],
-        &[],
-        "the op codes of the host's reduce routine, an ABI with the emitted code",
-    ),
-    (
-        "rsdag/src/semantics.rs",
-        &["digamma", "trigamma"],
-        &[],
-        "the recurrence threshold and Bernoulli coefficients of the asymptotic series",
-    ),
-    (
-        "rsdag/src/semantics.rs",
-        &["splitmix64", "unit", "rand_stream"],
-        &[],
-        "splitmix64's constants, and the 53 bits of a double's mantissa",
-    ),
-    (
-        "rsdag/src/node.rs",
-        &["shape"],
-        &[],
-        "splitmix64's constants of the structural hash",
-    ),
-    (
-        "rsdag/src/tape/mod.rs",
-        &[
+        item_paths_held_to_the_rule_all_the_same: &[],
+        reason: "Win32's memory allocation and protection flags",
+    },
+    Exempt {
+        file: "rsdag-jit/src/host.rs",
+        item_paths: &["reduce_code"],
+        item_paths_held_to_the_rule_all_the_same: &[],
+        reason: "the op codes of the host's reduce routine, an ABI with the emitted code",
+    },
+    Exempt {
+        file: "rsdag/src/semantics.rs",
+        item_paths: &["digamma", "trigamma"],
+        item_paths_held_to_the_rule_all_the_same: &[],
+        reason: "the recurrence threshold and Bernoulli coefficients of the asymptotic series",
+    },
+    Exempt {
+        file: "rsdag/src/semantics.rs",
+        item_paths: &["splitmix64", "unit", "rand_stream"],
+        item_paths_held_to_the_rule_all_the_same: &[],
+        reason: "splitmix64's constants, and the 53 bits of a double's mantissa",
+    },
+    Exempt {
+        file: "rsdag/src/node.rs",
+        item_paths: &["shape"],
+        item_paths_held_to_the_rule_all_the_same: &[],
+        reason: "splitmix64's constants of the structural hash",
+    },
+    Exempt {
+        file: "rsdag/src/tape/mod.rs",
+        item_paths: &[
             "INPUT",
             "Fold::NEG",
             "Fold::KIND",
             "Fold::SELF",
             "Fold::SELF_SHIFT",
         ],
-        &[],
-        "tag bits: an operand's input bit, a fold code's fields",
-    ),
-    (
-        "rsdag/src/graph/mod.rs",
-        &["BOUND"],
-        &[],
-        "the tag bit of a bound symbol",
-    ),
-    (
-        "rsdag/src/role.rs",
-        &["ParamRole::place"],
-        &[],
-        "the rank of each role's group in a signature, an enumeration",
-    ),
-    (
-        "rsdag/src/synth.rs",
-        &["*"],
-        &[],
-        "the synthetic program generator (test support behind feature synth)",
-    ),
+        item_paths_held_to_the_rule_all_the_same: &[],
+        reason: "tag bits: an operand's input bit, a fold code's fields",
+    },
+    Exempt {
+        file: "rsdag/src/graph/mod.rs",
+        item_paths: &["BOUND"],
+        item_paths_held_to_the_rule_all_the_same: &[],
+        reason: "the tag bit of a bound symbol",
+    },
+    Exempt {
+        file: "rsdag/src/role.rs",
+        item_paths: &["ParamRole::place"],
+        item_paths_held_to_the_rule_all_the_same: &[],
+        reason: "the rank of each role's group in a signature, an enumeration",
+    },
+    Exempt {
+        file: "rsdag/src/synth.rs",
+        item_paths: &[WHOLE_FILE],
+        item_paths_held_to_the_rule_all_the_same: &[],
+        reason: "the synthetic program generator (test support behind feature synth)",
+    },
 ];
 
-/// The contract values: the semantics every backend reproduces to the bit
-/// (`rsdag::constants::contract`). No literal of one of these values
-/// appears outside the constants files.
 const CONTRACT: &[(&str, Contract)] = &[
     ("EXP_LIMIT", Contract::Float(80.0)),
     ("LN_FLOOR", Contract::Float(1e-30)),
@@ -119,8 +122,6 @@ const CONTRACT: &[(&str, Contract)] = &[
     ("F64_EXP_BIAS", Contract::Int(1023)),
 ];
 
-/// A contract value: a float matches float literals, an integer integer
-/// ones, either sign.
 #[derive(Clone, Copy)]
 enum Contract {
     Float(f64),
@@ -137,7 +138,6 @@ impl Contract {
     }
 }
 
-/// Whether a literal is a float: a fraction, an exponent or a float suffix.
 fn is_float(text: &str) -> bool {
     let hex = text.starts_with("0x") || text.starts_with("0b") || text.starts_with("0o");
     !hex && (text.contains(['.', 'e', 'E']) || text.ends_with("f64") || text.ends_with("f32"))
@@ -147,7 +147,6 @@ fn crates_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
-/// Every source file of every crate, as `crate/src/...`.
 fn sources() -> Vec<(String, PathBuf)> {
     fn walk(dir: &Path, rel: &str, out: &mut Vec<(String, PathBuf)>) {
         let mut entries: Vec<_> = std::fs::read_dir(dir)
@@ -186,11 +185,9 @@ fn is_constants_file(rel: &str) -> bool {
 #[derive(Clone, Debug, PartialEq)]
 enum Tok {
     Ident(String),
-    /// A numeric literal: its text, and whether it is a tuple field.
-    Num(String, bool),
+    Num { text: String, tuple_field: bool },
     Punct(&'static str),
-    /// A string, a character or a lifetime: nothing to look into.
-    Other,
+    StringCharOrLifetime,
 }
 
 #[derive(Clone, Debug)]
@@ -205,7 +202,6 @@ const PUNCTS: &[&str] = &[
     "!", "<", ">", ":", "=", "+", "-", "*", "/", "%", "^", "&", "|", "?", "@", "$", "~",
 ];
 
-/// The tokens of `src`, and the lines whose comment says `lit:`.
 fn lex(src: &str) -> (Vec<Token>, Vec<usize>) {
     let b = src.as_bytes();
     let (mut i, mut line) = (0, 1);
@@ -229,9 +225,13 @@ fn lex(src: &str) -> (Vec<Token>, Vec<usize>) {
                     .trim()
                     .is_empty()
             {
-                // On a line of its own, the comment covers the next one.
-                let own_line = src[..i].rsplit('\n').next().unwrap_or("").trim().is_empty();
-                lit_lines.push(if own_line { line + 1 } else { line });
+                let on_own_line_covers_the_next =
+                    src[..i].rsplit('\n').next().unwrap_or("").trim().is_empty();
+                lit_lines.push(if on_own_line_covers_the_next {
+                    line + 1
+                } else {
+                    line
+                });
             }
             i = end;
         } else if src[i..].starts_with("/*") {
@@ -254,7 +254,6 @@ fn lex(src: &str) -> (Vec<Token>, Vec<usize>) {
                 }
             }
         } else if let Some(n) = raw_string_start(&src[i..]) {
-            // r"..", r#".."#, br"..", cr".."
             let hashes = &src[i + n - 1 - count_hashes(&src[i..i + n - 1])..i + n - 1];
             let close = format!("\"{hashes}");
             let end = src[i + n..]
@@ -263,7 +262,7 @@ fn lex(src: &str) -> (Vec<Token>, Vec<usize>) {
             line += src[i..end].matches('\n').count();
             i = end;
             out.push(Token {
-                tok: Tok::Other,
+                tok: Tok::StringCharOrLifetime,
                 line,
             });
         } else if c == b'"' || ((c == b'b' || c == b'c') && b.get(i + 1) == Some(&b'"')) {
@@ -279,11 +278,10 @@ fn lex(src: &str) -> (Vec<Token>, Vec<usize>) {
             }
             i += 1;
             out.push(Token {
-                tok: Tok::Other,
+                tok: Tok::StringCharOrLifetime,
                 line,
             });
         } else if c == b'\'' {
-            // A character ('a', '\n', '\u{..}') or a lifetime ('a, 'static).
             if b.get(i + 1) == Some(&b'\\') {
                 i += 2;
                 while i < b.len() && b[i] != b'\'' {
@@ -302,7 +300,7 @@ fn lex(src: &str) -> (Vec<Token>, Vec<usize>) {
                 }
             }
             out.push(Token {
-                tok: Tok::Other,
+                tok: Tok::StringCharOrLifetime,
                 line,
             });
         } else if c.is_ascii_digit() {
@@ -315,7 +313,6 @@ fn lex(src: &str) -> (Vec<Token>, Vec<usize>) {
             );
             let start = i;
             if after_dot {
-                // A tuple field: digits only (`x.0.1` is two fields).
                 while i < b.len() && b[i].is_ascii_digit() {
                     i += 1;
                 }
@@ -331,14 +328,12 @@ fn lex(src: &str) -> (Vec<Token>, Vec<usize>) {
                 while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'_') {
                     i += 1;
                 }
-                // A fraction: `.` then a digit, or `.` then nothing of a
-                // range, a field or a method (`2.` is a float).
-                if b.get(i) == Some(&b'.')
+                let fraction_not_range_field_or_method = b.get(i) == Some(&b'.')
                     && b.get(i + 1) != Some(&b'.')
                     && !b
                         .get(i + 1)
-                        .is_some_and(|&d| d.is_ascii_alphabetic() || d == b'_')
-                {
+                        .is_some_and(|&d| d.is_ascii_alphabetic() || d == b'_');
+                if fraction_not_range_field_or_method {
                     i += 1;
                     while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'_') {
                         i += 1;
@@ -358,7 +353,10 @@ fn lex(src: &str) -> (Vec<Token>, Vec<usize>) {
                 }
             }
             out.push(Token {
-                tok: Tok::Num(src[start..i].to_string(), after_dot),
+                tok: Tok::Num {
+                    text: src[start..i].to_string(),
+                    tuple_field: after_dot,
+                },
                 line,
             });
         } else if ident_char(c) || c >= 0x80 {
@@ -389,12 +387,10 @@ fn lex(src: &str) -> (Vec<Token>, Vec<usize>) {
     (out, lit_lines)
 }
 
-/// The `#`s of a raw string's prefix.
 fn count_hashes(prefix: &str) -> usize {
     prefix.bytes().rev().take_while(|&c| c == b'#').count()
 }
 
-/// The length of a raw string's opening (`r#"` is 3), if one starts here.
 fn raw_string_start(s: &str) -> Option<usize> {
     let rest = s
         .strip_prefix("br")
@@ -404,7 +400,6 @@ fn raw_string_start(s: &str) -> Option<usize> {
     (rest.as_bytes().get(hashes) == Some(&b'"')).then(|| s.len() - rest.len() + hashes + 1)
 }
 
-/// The value of a numeric literal, its suffix and separators dropped.
 fn value(text: &str) -> f64 {
     let t = text.replace('_', "");
     let (radix, digits) = match t.get(..2) {
@@ -425,9 +420,8 @@ fn value(text: &str) -> f64 {
     }
     let end = digits.find(|c: char| c.is_ascii_alphabetic() && c != 'e' && c != 'E');
     let mut core = &digits[..end.unwrap_or(digits.len())];
-    // `1e5f64`: the suffix starts at the `f`, after the exponent.
-    if let Some(f) = digits.find(['f', 'u', 'i']) {
-        core = &digits[..f];
+    if let Some(suffix_after_exponent) = digits.find(['f', 'u', 'i']) {
+        core = &digits[..suffix_after_exponent];
     }
     core.trim_end_matches('.')
         .parse::<f64>()
@@ -449,13 +443,12 @@ const PRIMITIVES: &[&str] = &[
     "usize", "bool", "char", "str", "mut", "const", "dyn", "Self",
 ];
 
-/// Whether the tokens of `[ .. ;` (the part before the length) name a type
-/// (`[f64; 4]`, `[Vec<u32>; 3]`) rather than a value (`[x; 4]`).
-fn is_type(toks: &[Token]) -> bool {
+fn is_array_element_type(toks_before_semicolon: &[Token]) -> bool {
+    let toks = toks_before_semicolon;
     let mut depth = 0i32;
     for (k, t) in toks.iter().enumerate() {
         match &t.tok {
-            Tok::Num(..) if depth == 0 => return false,
+            Tok::Num { .. } if depth == 0 => return false,
             Tok::Ident(id) => {
                 if toks
                     .get(k + 1)
@@ -486,7 +479,6 @@ fn is_type(toks: &[Token]) -> bool {
     true
 }
 
-/// A literal found where it does not belong.
 #[derive(Debug)]
 struct Hit {
     line: usize,
@@ -495,17 +487,20 @@ struct Hit {
     contract: Option<&'static str>,
 }
 
-/// The scope a token is in: an item (fn, const, impl, mod ...) and the
-/// bracket depth of its keyword.
-struct Scope {
+struct ItemScope {
     name: String,
-    depth: i32,
+    keyword_depth: i32,
     body: bool,
 }
 
-/// What a bracket was opened for.
+struct PatternScope {
+    depth_inside: i32,
+    in_pattern: bool,
+    matches_macro: bool,
+}
+
 #[derive(Clone, Copy, PartialEq)]
-enum Bracket {
+enum BracketOpenedFor {
     Index,
     ArrayType,
     Other,
@@ -515,10 +510,9 @@ fn scan(rel: &str, src: &str) -> (Vec<Hit>, usize) {
     let (toks, lit_lines) = lex(src);
     let mut hits = Vec::new();
     let mut hatches = 0;
-    let mut scopes: Vec<Scope> = Vec::new();
-    let mut brackets: Vec<(Bracket, usize)> = Vec::new();
-    // Match bodies and `matches!` arguments: (depth inside, in a pattern).
-    let mut matches: Vec<(i32, bool, bool)> = Vec::new();
+    let mut scopes: Vec<ItemScope> = Vec::new();
+    let mut brackets: Vec<(BracketOpenedFor, usize)> = Vec::new();
+    let mut match_bodies_and_matches_macros: Vec<PatternScope> = Vec::new();
     let mut pending_match: Option<i32> = None;
     let mut depth = 0i32;
     let mut i = 0;
@@ -526,7 +520,6 @@ fn scan(rel: &str, src: &str) -> (Vec<Hit>, usize) {
     while i < toks.len() {
         let t = &toks[i];
         let prev = i.checked_sub(1).map(|k| &toks[k].tok);
-        // Attributes: skipped, test items with them.
         if t.tok == Tok::Punct("#") && (is(i + 1, "[") || (is(i + 1, "!") && is(i + 2, "["))) {
             let open = if is(i + 1, "[") { i + 1 } else { i + 2 };
             let close = matching(&toks, open);
@@ -537,7 +530,7 @@ fn scan(rel: &str, src: &str) -> (Vec<Hit>, usize) {
             };
             if name(0) == "pyo3" {
                 for t in inner {
-                    if let Tok::Num(text, _) = &t.tok {
+                    if let Tok::Num { text, .. } = &t.tok {
                         if !allowed_value(value(text)) {
                             hits.push(Hit {
                                 line: t.line,
@@ -562,12 +555,16 @@ fn scan(rel: &str, src: &str) -> (Vec<Hit>, usize) {
             Tok::Punct(p @ ("(" | "[" | "{")) => {
                 if *p == "{" {
                     if let Some(s) = scopes.last_mut() {
-                        if !s.body && s.depth == depth {
+                        if !s.body && s.keyword_depth == depth {
                             s.body = true;
                         }
                     }
                     if pending_match == Some(depth) {
-                        matches.push((depth + 1, true, false));
+                        match_bodies_and_matches_macros.push(PatternScope {
+                            depth_inside: depth + 1,
+                            in_pattern: true,
+                            matches_macro: false,
+                        });
                         pending_match = None;
                     }
                 }
@@ -579,11 +576,11 @@ fn scan(rel: &str, src: &str) -> (Vec<Hit>, usize) {
                     };
                     let semi = top_level_semi(&toks, i);
                     let kind = if index {
-                        Bracket::Index
-                    } else if semi.is_some_and(|s| is_type(&toks[i + 1..s])) {
-                        Bracket::ArrayType
+                        BracketOpenedFor::Index
+                    } else if semi.is_some_and(|s| is_array_element_type(&toks[i + 1..s])) {
+                        BracketOpenedFor::ArrayType
                     } else {
-                        Bracket::Other
+                        BracketOpenedFor::Other
                     };
                     brackets.push((kind, i));
                 }
@@ -591,7 +588,11 @@ fn scan(rel: &str, src: &str) -> (Vec<Hit>, usize) {
                     && matches!(prev, Some(Tok::Punct("!")))
                     && matches!(toks.get(i.wrapping_sub(2)).map(|t| &t.tok), Some(Tok::Ident(m)) if m == "matches")
                 {
-                    matches.push((depth + 1, false, true));
+                    match_bodies_and_matches_macros.push(PatternScope {
+                        depth_inside: depth + 1,
+                        in_pattern: false,
+                        matches_macro: true,
+                    });
                 }
                 depth += 1;
             }
@@ -600,44 +601,51 @@ fn scan(rel: &str, src: &str) -> (Vec<Hit>, usize) {
                 if *p == "]" {
                     brackets.pop();
                 }
-                while matches.last().is_some_and(|m| m.0 > depth) {
-                    matches.pop();
+                while match_bodies_and_matches_macros
+                    .last()
+                    .is_some_and(|m| m.depth_inside > depth)
+                {
+                    match_bodies_and_matches_macros.pop();
                 }
-                // A block that ends an arm (not one an `else` or a method
-                // call continues): the next arm's pattern follows.
-                let continued = match toks.get(i + 1).map(|t| &t.tok) {
+                let continued_by_else_or_method = match toks.get(i + 1).map(|t| &t.tok) {
                     Some(Tok::Ident(w)) => w == "else",
                     Some(Tok::Punct(q)) => [".", "?"].contains(q),
                     _ => false,
                 };
-                if let Some(m) = matches.last_mut() {
-                    if *p == "}" && m.0 == depth && !m.2 && !continued {
-                        m.1 = true;
+                if let Some(m) = match_bodies_and_matches_macros.last_mut() {
+                    let block_ends_an_arm = *p == "}"
+                        && m.depth_inside == depth
+                        && !m.matches_macro
+                        && !continued_by_else_or_method;
+                    if block_ends_an_arm {
+                        m.in_pattern = true;
                     }
                 }
-                while scopes
-                    .last()
-                    .is_some_and(|s| s.depth > depth || (s.depth == depth && s.body && *p == "}"))
-                {
+                while scopes.last().is_some_and(|s| {
+                    s.keyword_depth > depth || (s.keyword_depth == depth && s.body && *p == "}")
+                }) {
                     scopes.pop();
                 }
             }
             Tok::Punct(";") => {
-                while scopes.last().is_some_and(|s| s.depth == depth && !s.body) {
+                while scopes
+                    .last()
+                    .is_some_and(|s| s.keyword_depth == depth && !s.body)
+                {
                     scopes.pop();
                 }
             }
             Tok::Punct(",") => {
-                if let Some(m) = matches.last_mut() {
-                    if m.0 == depth {
-                        m.1 = true;
+                if let Some(m) = match_bodies_and_matches_macros.last_mut() {
+                    if m.depth_inside == depth {
+                        m.in_pattern = true;
                     }
                 }
             }
             Tok::Punct("=>") => {
-                if let Some(m) = matches.last_mut() {
-                    if m.0 == depth && !m.2 {
-                        m.1 = false;
+                if let Some(m) = match_bodies_and_matches_macros.last_mut() {
+                    if m.depth_inside == depth && !m.matches_macro {
+                        m.in_pattern = false;
                     }
                 }
             }
@@ -646,21 +654,21 @@ fn scan(rel: &str, src: &str) -> (Vec<Hit>, usize) {
                     pending_match = Some(depth);
                 }
                 if id == "if" {
-                    if let Some(m) = matches.last_mut() {
-                        if m.0 == depth && m.1 && !m.2 {
-                            m.1 = false;
+                    if let Some(m) = match_bodies_and_matches_macros.last_mut() {
+                        if m.depth_inside == depth && m.in_pattern && !m.matches_macro {
+                            m.in_pattern = false;
                         }
                     }
                 }
                 if let Some(name) = item_name(&toks, i) {
-                    scopes.push(Scope {
+                    scopes.push(ItemScope {
                         name,
-                        depth,
+                        keyword_depth: depth,
                         body: false,
                     });
                 }
             }
-            Tok::Num(text, field) => {
+            Tok::Num { text, tuple_field } => {
                 let v = value(text);
                 let item = scopes
                     .iter()
@@ -671,10 +679,10 @@ fn scan(rel: &str, src: &str) -> (Vec<Hit>, usize) {
                     .iter()
                     .find(|(_, c)| c.matches(text))
                     .map(|(n, _)| *n);
-                let structural = *field
-                    || in_pattern(&matches, depth)
+                let structural = *tuple_field
+                    || in_pattern(&match_bodies_and_matches_macros, depth)
                     || match brackets.last() {
-                        Some(&(Bracket::Index, open)) => {
+                        Some(&(BracketOpenedFor::Index, open)) => {
                             let before = &toks[i - 1].tok;
                             let after = toks.get(i + 1).map(|t| &t.tok);
                             let lo = i - 1 == open
@@ -683,7 +691,7 @@ fn scan(rel: &str, src: &str) -> (Vec<Hit>, usize) {
                                 || matches!(after, Some(Tok::Punct(".." | "..=")));
                             (i - 1 == open && hi) || (lo && matches!(after, Some(Tok::Punct("]"))))
                         }
-                        Some(&(Bracket::ArrayType, _)) => {
+                        Some(&(BracketOpenedFor::ArrayType, _)) => {
                             matches!(prev, Some(Tok::Punct(";")))
                                 && matches!(toks.get(i + 1).map(|t| &t.tok), Some(Tok::Punct("]")))
                         }
@@ -726,18 +734,25 @@ fn leak(p: &str) -> &'static str {
         .expect("a known punctuation")
 }
 
-fn in_pattern(matches: &[(i32, bool, bool)], depth: i32) -> bool {
-    matches.last().is_some_and(|m| m.1 && depth >= m.0)
+fn in_pattern(match_bodies_and_matches_macros: &[PatternScope], depth: i32) -> bool {
+    match_bodies_and_matches_macros
+        .last()
+        .is_some_and(|m| m.in_pattern && depth >= m.depth_inside)
 }
 
 fn exempt(rel: &str, item: &str) -> bool {
-    let under = |pat: &str| pat == "*" || item == pat || item.starts_with(&format!("{pat}::"));
-    EXEMPT.iter().any(|(file, items, except, _)| {
-        rel.ends_with(file) && items.iter().any(|p| under(p)) && !except.iter().any(|p| under(p))
+    let under =
+        |pat: &str| pat == WHOLE_FILE || item == pat || item.starts_with(&format!("{pat}::"));
+    EXEMPT.iter().any(|e| {
+        rel.ends_with(e.file)
+            && e.item_paths.iter().any(|p| under(p))
+            && !e
+                .item_paths_held_to_the_rule_all_the_same
+                .iter()
+                .any(|p| under(p))
     })
 }
 
-/// The index of the bracket closing the one at `open`.
 fn matching(toks: &[Token], open: usize) -> usize {
     let mut depth = 0;
     for (k, t) in toks.iter().enumerate().skip(open) {
@@ -755,7 +770,6 @@ fn matching(toks: &[Token], open: usize) -> usize {
     toks.len() - 1
 }
 
-/// The `;` at the top level of the bracket opened at `open`, if any.
 fn top_level_semi(toks: &[Token], open: usize) -> Option<usize> {
     let close = matching(toks, open);
     let mut depth = 0;
@@ -770,8 +784,6 @@ fn top_level_semi(toks: &[Token], open: usize) -> Option<usize> {
     None
 }
 
-/// The first token after the item starting at `from` (its attributes,
-/// then up to its `;` or its body's closing brace).
 fn item_end(toks: &[Token], mut from: usize) -> usize {
     while toks.get(from).is_some_and(|t| t.tok == Tok::Punct("#")) {
         let open = if toks[from + 1].tok == Tok::Punct("[") {
@@ -796,9 +808,6 @@ fn item_end(toks: &[Token], mut from: usize) -> usize {
     k
 }
 
-/// The name of the item whose keyword is at `k`, if one is: `fn f`,
-/// `const X`, `static X`, `mod m`, `trait T`, `struct S`, `enum E`, `impl
-/// .. T` (the implementing type), `macro_rules! m`.
 fn item_name(toks: &[Token], k: usize) -> Option<String> {
     let Tok::Ident(kw) = &toks[k].tok else {
         return None;
@@ -814,7 +823,7 @@ fn item_name(toks: &[Token], k: usize) -> Option<String> {
         Some(Tok::Ident(p)) => {
             ["pub", "unsafe", "extern", "async", "default", "const"].contains(&p.as_str())
         }
-        Some(Tok::Other) => true,
+        Some(Tok::StringCharOrLifetime) => true,
         _ => false,
     };
     match kw.as_str() {
@@ -839,8 +848,7 @@ fn item_name(toks: &[Token], k: usize) -> Option<String> {
             ident(k + 2)
         }
         "impl" if item_position => {
-            // The last name at the top level before the body or `where`.
-            let (mut angle, mut name) = (0, None);
+            let (mut angle, mut last_top_level_name_before_body_or_where) = (0, None);
             for t in &toks[k + 1..] {
                 match &t.tok {
                     Tok::Punct("<") => angle += 1,
@@ -849,19 +857,17 @@ fn item_name(toks: &[Token], k: usize) -> Option<String> {
                     Tok::Punct("{") | Tok::Punct(";") => break,
                     Tok::Ident(w) if w == "where" => break,
                     Tok::Ident(s) if angle == 0 && s != "for" && s != "dyn" => {
-                        name = Some(s.clone())
+                        last_top_level_name_before_body_or_where = Some(s.clone())
                     }
                     _ => {}
                 }
             }
-            name
+            last_top_level_name_before_body_or_where
         }
         _ => None,
     }
 }
 
-/// Every hit of the workspace, as `file:line` messages, and the count of
-/// literals under `// lit:` per file.
 fn hits() -> (Vec<String>, BTreeMap<String, usize>) {
     let mut all = Vec::new();
     let mut hatches = BTreeMap::new();
@@ -892,6 +898,9 @@ fn every_number_has_a_name() {
     for (file, n) in &hatches {
         println!("{file}: {n} literal(s) under `// lit:`");
     }
+    for e in EXEMPT {
+        println!("{}: {:?} exempt, {}", e.file, e.item_paths, e.reason);
+    }
     assert!(
         all.is_empty(),
         "{} unnamed literal(s):
@@ -904,9 +913,8 @@ fn every_number_has_a_name() {
     );
 }
 
-/// The lexer and the rules on a sample of everything they tell apart.
 #[test]
-fn the_guard_reads_rust() {
+fn the_guard_tells_apart_every_kind_of_literal_in_a_sample() {
     let src = r##"
         // 77 in a comment, /* 78 */ and "79" and r#"80"# and '9' are no numbers.
         /* nested /* 81 */ */

@@ -9,7 +9,6 @@ use std::sync::Arc;
 use rsdag::BigRational;
 use rsdag::{ExternBundle, Graph, Output, OutputRole, ParamRole, Tape};
 
-/// Outputs `[a+b, a*b, a-b]` from `[a, b]`, counting how often it runs.
 struct TriBundle {
     calls: Arc<AtomicUsize>,
 }
@@ -50,16 +49,18 @@ fn bundle_scatters_and_runs_once() {
         }),
         [Output::Slot(0), Output::Slot(1), Output::Slot(2)].map(|o| (o, OutputRole::Plain)),
     );
-    // Three outputs of the same function over the same arguments.
     let o_sum = ctx.call(f, 0, &[x, y]);
     let o_prod = ctx.call(f, 1, &[x, y]);
     let o_diff = ctx.call(f, 2, &[x, y]);
 
-    // Combine all three so the root depends on every slot.
     let s1 = ctx.add(o_sum, o_prod);
-    let root = ctx.add(s1, o_diff);
+    let root_reading_every_output = ctx.add(s1, o_diff);
 
-    let tape = Tape::compile(&ctx, &[o_sum, o_prod, o_diff, root], &[xs, ys]);
+    let tape = Tape::compile(
+        &ctx,
+        &[o_sum, o_prod, o_diff, root_reading_every_output],
+        &[xs, ys],
+    );
     let mut work = Vec::new();
     let mut out = Vec::new();
     tape.eval(&[3.0f64, 4.0], &mut work, &mut out);
@@ -68,11 +69,13 @@ fn bundle_scatters_and_runs_once() {
     assert_eq!(out[1], 12.0, "a*b");
     assert_eq!(out[2], -1.0, "a-b");
     assert_eq!(out[3], 7.0 + 12.0 - 1.0, "root");
-    // One eval over a single (bundle, args) group: the body runs exactly once.
     assert_eq!(calls.load(Ordering::Relaxed), 1, "bundle ran once per eval");
 
-    // Second eval reuses the compiled tape; one more call, fresh values.
     tape.eval(&[1.0f64, 2.0], &mut work, &mut out);
     assert_eq!(out[1], 2.0);
-    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        2,
+        "the second eval of the compiled tape runs the bundle once more"
+    );
 }

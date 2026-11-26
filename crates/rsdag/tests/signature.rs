@@ -39,11 +39,10 @@ fn the_signature_orders_by_role_and_index() {
     let f = sc.close([(x, OutputRole::Plain)]);
     let sig = Signature::of(g.func(f));
     let order: Vec<&str> = sig.syms.iter().map(|&s| g.symbol_name(s)).collect();
-    // States by id, derivatives, inputs, parameters in declaration order,
-    // time, histories, noise generators by id, the rest.
     assert_eq!(
         order,
-        ["x0", "x1", "xd0", "u", "p1", "p0", "t", "h0", "n0", "n1", "f"]
+        ["x0", "x1", "xd0", "u", "p1", "p0", "t", "h0", "n0", "n1", "f"],
+        "states by id, derivatives, inputs, parameters as declared, time, histories, noise by id, the rest"
     );
     assert_eq!(sig.range(|r| matches!(r, ParamRole::Noise { .. })), 8..10);
     assert_eq!(sig.range(|r| matches!(r, ParamRole::State { .. })), 0..2);

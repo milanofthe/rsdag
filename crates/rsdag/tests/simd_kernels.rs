@@ -20,8 +20,9 @@ fn values(rng: &mut rsdag::synth::Rng, len: usize) -> Vec<f64> {
     (0..len)
         .map(|_| {
             let v = rng.val() - 0.5;
-            // Spread magnitudes so that fold order matters.
-            v * 10f64.powi((rng.val() * 8.0) as i32 - 4)
+            let magnitude_spread_so_that_fold_order_matters =
+                10f64.powi((rng.val() * 8.0) as i32 - 4);
+            v * magnitude_spread_so_that_fold_order_matters
         })
         .collect()
 }
@@ -87,8 +88,6 @@ fn each_right_hand_side_is_solved_as_alone() {
     let shapes = (1..30usize)
         .flat_map(|n| [2usize, 5, 9].into_iter().map(move |k| (n, k)))
         .chain([(37, 4), (100, 7), (520, 5)]);
-    // Dominant diagonals and plain random matrices, whose elimination swaps
-    // rows.
     for ((n, k), dominant) in shapes.flat_map(|s| [(s, true), (s, false)]) {
         let mut a = values(&mut rng, n * n);
         for i in (0..n).filter(|_| dominant) {
@@ -115,15 +114,16 @@ fn a_batch_of_solves_matches_each_solve_alone() {
         for k in [1usize, 2, 5] {
             for count in [1usize, 3, 4, 7, 9] {
                 let mut a = values(&mut rng, count * n * n);
-                // Instance by instance: dominant, plain random (rows swap),
-                // singular (a zero column), one NaN entry.
+                const DOMINANT: usize = 0;
+                const SINGULAR_BY_A_ZERO_COLUMN: usize = 2;
+                const ONE_NAN_ENTRY: usize = 3;
                 for c in 0..count {
                     let m = &mut a[c * n * n..(c + 1) * n * n];
                     match c % 4 {
-                        0 => (0..n).for_each(|i| m[i * n + i] += 4.0 * n as f64),
-                        2 => (0..n).for_each(|i| m[i * n + n / 2] = 0.0),
-                        3 => m[(n * n) / 3] = f64::NAN,
-                        _ => {}
+                        DOMINANT => (0..n).for_each(|i| m[i * n + i] += 4.0 * n as f64),
+                        SINGULAR_BY_A_ZERO_COLUMN => (0..n).for_each(|i| m[i * n + n / 2] = 0.0),
+                        ONE_NAN_ENTRY => m[(n * n) / 3] = f64::NAN,
+                        _plain_random_whose_rows_swap => {}
                     }
                 }
                 let b = values(&mut rng, count * n * k);

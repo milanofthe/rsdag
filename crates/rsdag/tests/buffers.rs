@@ -25,7 +25,6 @@ fn a_larger_buffer_from_another_tape_serves_prolog_and_main() {
     let (mut fresh_w, mut fresh_o) = (Vec::new(), Vec::new());
     small_tape.eval(&inputs, &mut fresh_w, &mut fresh_o);
     assert_eq!(out[0].to_bits(), fresh_o[0].to_bits());
-    // And a buffer full of NaN changes nothing either.
     let mut poisoned = vec![f64::NAN; stale];
     small_tape.eval_prolog(&inputs, &mut poisoned);
     small_tape.eval_main(&inputs, &mut poisoned, &mut out);

@@ -58,8 +58,6 @@ fn specialization_alone_is_the_interpreter() {
     assert!(flips > 0, "some region flipped");
 }
 
-/// A session binds the pure inputs once and evaluates as the program does
-/// at every point: alone, and point by point into an output-major block.
 #[test]
 fn a_session_evaluates_as_the_program() {
     use rsdag::Session;
@@ -97,11 +95,9 @@ fn a_session_evaluates_as_the_program() {
     }
 }
 
-/// Native code for the test: the interpreter on a copy of the tape (the
-/// tape emitted again, nothing pinned), compiled on a thread of its own.
-struct Copying;
+struct InterpreterOnACopyOfTheTape;
 
-impl rsdag::Compiler for Copying {
+impl rsdag::Compiler for InterpreterOnACopyOfTheTape {
     fn compile(&self, tape: &Tape, _live: &[u32]) -> Option<Box<dyn rsdag::Program>> {
         let n = tape.n_selects();
         Some(Box::new(
@@ -113,10 +109,8 @@ impl rsdag::Compiler for Copying {
     }
 }
 
-/// Sixteen regions of `x` above and below their thresholds, a heavy arm
-/// and a light one each, and as much again that no region decides: the
-/// specialization at a point removes about half of the tape.
-fn regions() -> (Graph<F64>, Vec<rsdag::ExprId>, Vec<rsdag::SymbolId>) {
+fn regions_that_decide_half_of_the_tape() -> (Graph<F64>, Vec<rsdag::ExprId>, Vec<rsdag::SymbolId>)
+{
     let mut g: Graph<F64> = Graph::new();
     let x = g.sym("x");
     let rsdag::Node::Symbol(xs) = *g.node(x) else {
@@ -144,23 +138,22 @@ fn regions() -> (Graph<F64>, Vec<rsdag::ExprId>, Vec<rsdag::SymbolId>) {
     (g, roots, vec![xs])
 }
 
-/// Once the full tape's native code serves, an interpreted specialization
-/// that is not several times shorter does not run, so it holds no guards
-/// to wait for: it is compiled, and its native code serves.
 #[test]
 fn a_specialization_is_compiled_where_the_interpreted_one_does_not_serve() {
-    let (g, roots, syms) = regions();
+    let (g, roots, syms) = regions_that_decide_half_of_the_tape();
     let tape = Tape::compile(&g, &roots, &syms);
     let full = tape.n_ops();
-    let a = Adaptive::new(tape, Policy::default(), Some(std::sync::Arc::new(Copying)));
+    let a = Adaptive::new(
+        tape,
+        Policy::default(),
+        Some(std::sync::Arc::new(InterpreterOnACopyOfTheTape)),
+    );
     let (mut w, mut o, mut rw, mut ro) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for k in 0..400 {
         let x = 0.01 * (k % 7) as f64;
         a.eval(&[x], &mut w, &mut o);
         a.tape().eval(&[x], &mut rw, &mut ro);
         assert!(same(&o, &ro), "call {k}");
-        // The full tape's native code lands well before the probation of
-        // an interpreted specialization would end.
         while k == 3 && a.native().is_none() {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }

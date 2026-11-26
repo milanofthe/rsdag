@@ -103,10 +103,7 @@ def where(cond, a, b):
     return np.where(cond, a, b)
 
 
-def _compare(ufunc, a, b):
-    """Elementwise comparison yielding tracers (0.0/1.0) instead of bools:
-    numpy's comparison ufuncs coerce object results to bool, which a traced
-    value cannot be."""
+def _compare_as_objects(ufunc, a, b):
     if _is_traced(a) or _is_traced(b):
         out = ufunc(np.asarray(a, dtype=object), np.asarray(b, dtype=object), dtype=object)
         return out if np.ndim(out) else out[()]
@@ -114,27 +111,27 @@ def _compare(ufunc, a, b):
 
 
 def gt(a, b):
-    return _compare(np.greater, a, b)
+    return _compare_as_objects(np.greater, a, b)
 
 
 def ge(a, b):
-    return _compare(np.greater_equal, a, b)
+    return _compare_as_objects(np.greater_equal, a, b)
 
 
 def lt(a, b):
-    return _compare(np.less, a, b)
+    return _compare_as_objects(np.less, a, b)
 
 
 def le(a, b):
-    return _compare(np.less_equal, a, b)
+    return _compare_as_objects(np.less_equal, a, b)
 
 
 def eq(a, b):
-    return _compare(np.equal, a, b)
+    return _compare_as_objects(np.equal, a, b)
 
 
 def ne(a, b):
-    return _compare(np.not_equal, a, b)
+    return _compare_as_objects(np.not_equal, a, b)
 
 
 def clip(x, lo, hi):
@@ -153,14 +150,12 @@ def _is_traced(v):
 
 
 def _shape_of(v):
-    """The shape of an argument as `_trace` keys it: None for a scalar."""
     if isinstance(v, Tracer) or np.isscalar(v):
         return None
     return np.asarray(v, dtype=object).shape
 
 
 def _elements(v):
-    """An argument's values in C order: tracers or numbers."""
     if isinstance(v, Tracer) or np.isscalar(v):
         return [v]
     return list(np.asarray(v, dtype=object).reshape(-1))
@@ -170,8 +165,7 @@ def _size(shape):
     return 1 if shape is None else math.prod(shape)
 
 
-def _inputs(scope, shape):
-    """Fresh inputs for an argument of `shape`: a tracer or an array of them."""
+def _fresh_inputs(scope, shape):
     if shape is None:
         return scope.input()
     arr = np.empty(_size(shape), dtype=object)
@@ -181,8 +175,6 @@ def _inputs(scope, shape):
 
 
 def _flatten_outputs(result):
-    """Flatten a scalar, list or array result into tracers and record its
-    shape (None for a scalar)."""
     if isinstance(result, Tracer) or np.isscalar(result):
         return [result], None
     arr = np.asarray(result, dtype=object)
@@ -200,16 +192,14 @@ class Compiled(Dispatch):
         self.native = native
         self.wrt = wrt
 
-    def _trace(self, key):
-        """The program for argument shapes `key` (None for a scalar) and
-        the shape of its result."""
+    def _trace(self, arg_shapes):
         scope = Scope()
-        outputs, shape = _flatten_outputs(self.func(*(_inputs(scope, s) for s in key)))
+        outputs, shape = _flatten_outputs(self.func(*(_fresh_inputs(scope, s) for s in arg_shapes)))
         if self.mode == "value":
             program = scope.compile(outputs)
         else:
-            start = builtins.sum(map(_size, key[:self.wrt]))
-            wrt = list(range(start, start + _size(key[self.wrt])))
+            start = builtins.sum(map(_size, arg_shapes[:self.wrt]))
+            wrt = list(range(start, start + _size(arg_shapes[self.wrt])))
             if self.mode == "jacobian":
                 program = scope.jacobian(outputs, wrt)
                 shape = (len(outputs), len(wrt))
@@ -231,9 +221,6 @@ class Compiled(Dispatch):
         return _is_traced(args)
 
     def _compose(self, *args):
-        """Called with tracers inside another trace: the program for the
-        arguments' shapes as one instance there (see `Program.compose`),
-        the result shaped as a call returns it."""
         key = tuple(_shape_of(a) for a in args)
         found = self.__dict__.setdefault("_composed", {}).get(key)
         if found is None:

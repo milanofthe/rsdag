@@ -33,9 +33,9 @@ fn parameters_do_not_raise_the_degree() {
     let mut g: Graph<BigRational> = Graph::new();
     let (x, a) = (g.sym("x"), g.sym("a"));
     let ea = g.exp(a);
-    let expr = g.mul(ea, x); // exp(a) * x is linear in x
-    let nl = nonlinearity_of(&g, &[expr], &vars(&g, &[x]));
-    assert_eq!(nl.degree, Degree::Finite(1));
+    let exp_a_times_x = g.mul(ea, x);
+    let nl = nonlinearity_of(&g, &[exp_a_times_x], &vars(&g, &[x]));
+    assert_eq!(nl.degree, Degree::Finite(1), "exp(a) x is linear in x");
     assert!(nl.transcendental.is_empty());
 }
 
@@ -74,14 +74,12 @@ fn a_variable_branch_is_piecewise_and_a_fixed_one_is_not() {
     assert!(nl.piecewise);
     assert_eq!(nl.degree, Degree::Unbounded);
 
-    // The same select on a parameter is a fixed choice between two
-    // polynomials: degree is the larger arm's.
     let on_p = g.cmp(CmpOp::Gt, p, zero);
     let x2 = g.pow_i(x, 2);
     let fixed = g.select(on_p, x2, x);
     let nl = nonlinearity_of(&g, &[fixed], &vars(&g, &[x]));
-    assert!(!nl.piecewise);
-    assert_eq!(nl.degree, Degree::Finite(2));
+    assert!(!nl.piecewise, "a select on a parameter is a fixed choice");
+    assert_eq!(nl.degree, Degree::Finite(2), "the degree of the larger arm");
 }
 
 #[test]
@@ -93,9 +91,11 @@ fn reductions_and_dots_follow_sum_and_product_rules() {
     assert_eq!(nonlinearity_of(&g, &[prod], &v).degree, Degree::Finite(2));
     let sum = g.reduce(rsdag::ReduceOp::Sum, vec![x, prod]);
     assert_eq!(nonlinearity_of(&g, &[sum], &v).degree, Degree::Finite(2));
-    // x*x + y*a: degree 2 from the first term.
-    let dot = g.dot(vec![x, y], vec![x, a]);
-    assert_eq!(nonlinearity_of(&g, &[dot], &v).degree, Degree::Finite(2));
+    let x_x_plus_y_a = g.dot(vec![x, y], vec![x, a]);
+    assert_eq!(
+        nonlinearity_of(&g, &[x_x_plus_y_a], &v).degree,
+        Degree::Finite(2)
+    );
     let m = g.reduce(rsdag::ReduceOp::Max, vec![x, a]);
     let nl = nonlinearity_of(&g, &[m], &v);
     assert!(nl.piecewise && nl.degree == Degree::Unbounded);
@@ -135,9 +135,6 @@ fn a_system_takes_the_worst_case() {
     assert!(nl.transcendental.contains(&UnaryOp::Exp));
 }
 
-/// A call is classified through its function's body: a cubic device behind
-/// two levels of calls classifies like its inlined expression, a parameter
-/// argument does not raise the degree, and an extern body stays opaque.
 #[test]
 fn calls_classify_like_their_inlined_bodies() {
     let mut g: Graph<BigRational> = Graph::new();

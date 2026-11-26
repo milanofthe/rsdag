@@ -16,29 +16,23 @@ import mpmath as mp
 
 mp.mp.prec = 256
 
-# exp: x = k ln2 / N + r, exp(x) = 2^(k / N) exp(r); 2^(j / N) from a table.
-EXP_BITS = 7
-EXP_N = 1 << EXP_BITS
-# The scale is built 2^EXP_BIAS too large and the result multiplied back
-# once, so the scale stays normal down to the subnormal results.
-EXP_BIAS = 64
-EXP_DEGREE = 5  # exp(r) - 1 - r = r^2 (c2 + c3 r + c4 r^2 + c5 r^3)
-
-# ln: x = 2^k z, z in [LN_OFF, 2 LN_OFF), log z = -log(invc) + log1p(r) with
-# r = (z - c) invc, c and invc = 1/c from a table of LN_N subintervals.
-LN_BITS = 7
-LN_N = 1 << LN_BITS
-LN_OFF = 0x3FE6_0000_0000_0000  # 0.6875
-# Subintervals at 1 take c = 1 (r = z - 1, exact) from 1 - 2^-6 to 1 + 2^-6:
-# the result there is about r, and r's rounding elsewhere is small against it.
-LN_CENTER = mp.mpf(2) ** -6
-LN_DEGREE = 9  # log1p(r) = r - r^2/2 + r^3 (a3 + a4 r + ... + a9 r^6)
-# |c invc - 1| below this, so that r = (z - c) invc misses no term.
-LN_CINV_EPS = mp.mpf(2) ** -72
-
 
 def bits(x):
     return struct.unpack("<Q", struct.pack("<d", x))[0]
+
+
+EXP_BITS = 7
+EXP_N = 1 << EXP_BITS
+EXP_SCALE_BIAS = 64
+EXP_POLY_DEGREE = 5
+EXP_LN2_HI_N_SIGNIFICANT_BITS = 35
+
+LN_BITS = 7
+LN_N = 1 << LN_BITS
+LN_OFF = bits(0.6875)
+LN_HALF_WIDTH_WHERE_C_IS_1 = mp.mpf(2) ** -6
+LN_POLY_DEGREE = 9
+LN_C_INVC_MINUS_1_BOUND = mp.mpf(2) ** -72
 
 
 def dbl(x):
@@ -82,15 +76,14 @@ def exp_constants():
     ln2 = mp.log(2)
     out = {}
     out["EXP_INV_LN2_N"] = dbl(EXP_N / ln2)
-    # k ln2/N exact for |k| < 2^18 (|x| < 745.2 gives |k| < 137700): 35 bits.
     step = ln2 / EXP_N
     e = int(mp.floor(mp.log(step, 2)))
-    hi = round_to(step, e - 34)
+    hi = round_to(step, e - (EXP_LN2_HI_N_SIGNIFICANT_BITS - 1))
     out["EXP_LN2_HI_N"] = hi
     out["EXP_LN2_LO_N"] = dbl(step - hi)
     R = step / 2 * (1 + mp.mpf(2) ** -10)
     g = lambda t: (mp.exp(t) - 1 - t) / t**2 if abs(t) > 1e-30 else mp.mpf(1) / 2 + t / 6
-    c = chebfit(g, R, EXP_DEGREE - 2)
+    c = chebfit(g, R, EXP_POLY_DEGREE - 2)
     cd = [dbl(v) for v in c]
     rel = max(
         abs(1 + t + t**2 * sum(cj * t**j for j, cj in enumerate(cd)) - mp.exp(t)) / mp.exp(t)
@@ -101,7 +94,7 @@ def exp_constants():
         v = mp.mpf(2) ** (mp.mpf(j) / EXP_N)
         s = dbl(v)
         tail = dbl((v - s) / s)
-        sb = bits(s * 2.0**EXP_BIAS) - (j << (52 - EXP_BITS))
+        sb = bits(s * 2.0**EXP_SCALE_BIAS) - (j << (52 - EXP_BITS))
         table += [bits(tail), sb]
     return out, cd, rel, R, table
 
@@ -109,7 +102,6 @@ def exp_constants():
 def ln_constants():
     ln2 = mp.log(2)
     out = {}
-    # k ln2 exact for |k| <= 1075, and a multiple of 2^-43 as logc_hi.
     hi = round_to(ln2, -42)
     out["LN_LN2_HI"] = hi
     out["LN_LN2_LO"] = dbl(ln2 - hi)
@@ -120,25 +112,24 @@ def ln_constants():
         hi_b = LN_OFF + ((i + 1) << (52 - LN_BITS))
         zlo = mp.mpf(struct.unpack("<d", struct.pack("<Q", lo_b))[0])
         zhi = mp.mpf(struct.unpack("<d", struct.pack("<Q", hi_b))[0])
-        if zlo >= 1 - LN_CENTER and zhi <= 1 + LN_CENTER:
+        if zlo >= 1 - LN_HALF_WIDTH_WHERE_C_IS_1 and zhi <= 1 + LN_HALF_WIDTH_WHERE_C_IS_1:
             rows.append((1.0, 1.0, 0.0, 0.0))
             rmax = max(rmax, abs(zlo - 1), abs(zhi - 1))
             continue
-        m = (zlo + zhi) / 2
-        # c near the middle with invc = RN(1/c) and c invc = 1 within
-        # LN_CINV_EPS, checked exactly: c = cm 2^(e - 52), invc = im 2^(-e - 53)
-        # with im = RN(2^105 / cm), c invc - 1 = (cm im - 2^105) / 2^105.
-        c0 = bits(dbl(m))
-        e = ((c0 >> 52) & 0x7FF) - 1023
+        middle = (zlo + zhi) / 2
+        middle_bits = bits(dbl(middle))
+        e = ((middle_bits >> 52) & 0x7FF) - 1023
+        one_as_product_of_significands = 1 << 105
         found = None
         for d in range(1 << 24):
             for s in (1, -1):
-                cb = c0 + s * d
-                cm = (cb & ((1 << 52) - 1)) | (1 << 52)
-                im = ((1 << 106) // cm + 1) // 2
-                if abs(cm * im - (1 << 105)) < (1 << 105) * LN_CINV_EPS:
-                    c = struct.unpack("<d", struct.pack("<Q", cb))[0]
-                    inv = float(mp.mpf(im) * mp.mpf(2) ** (-e - 53))
+                c_bits = middle_bits + s * d
+                c_significand = (c_bits & ((1 << 52) - 1)) | (1 << 52)
+                nearest_invc_significand = ((1 << 106) // c_significand + 1) // 2
+                c_invc_minus_1_times_2_105 = c_significand * nearest_invc_significand - one_as_product_of_significands
+                if abs(c_invc_minus_1_times_2_105) < one_as_product_of_significands * LN_C_INVC_MINUS_1_BOUND:
+                    c = struct.unpack("<d", struct.pack("<Q", c_bits))[0]
+                    inv = float(mp.mpf(nearest_invc_significand) * mp.mpf(2) ** (-e - 53))
                     found = (c, inv)
                     break
             if found:
@@ -151,7 +142,7 @@ def ln_constants():
         rmax = max(rmax, abs((zlo - c) * inv), abs((zhi - c) * inv))
     R = rmax * (1 + mp.mpf(2) ** -10)
     g = lambda t: (mp.log1p(t) - t + t**2 / 2) / t**3 if abs(t) > 1e-30 else mp.mpf(1) / 3 - t / 4
-    a = chebfit(g, R, LN_DEGREE - 3)
+    a = chebfit(g, R, LN_POLY_DEGREE - 3)
     ad = [dbl(v) for v in a]
     rel = max(
         abs(t - t**2 / 2 + t**3 * sum(aj * t**j for j, aj in enumerate(ad)) - mp.log1p(t))
@@ -197,9 +188,9 @@ def main():
     w(f"pub const MAGIC: f64 = {lit(1.5 * 2.0**52)};\n\n")
     w(f"/// `exp`'s table: `N = 2^{EXP_BITS}` subintervals.\n")
     w(f"pub const EXP_TABLE_BITS: u32 = {EXP_BITS};\n")
-    w(f"/// `exp`'s scale is built `2^{EXP_BIAS}` too large, so it stays normal down\n")
+    w(f"/// `exp`'s scale is built `2^{EXP_SCALE_BIAS}` too large, so it stays normal down\n")
     w("/// to the subnormal results, and the result multiplied back once.\n")
-    w(f"pub const EXP_SCALE_BIAS: i64 = {EXP_BIAS};\n")
+    w(f"pub const EXP_SCALE_BIAS: i64 = {EXP_SCALE_BIAS};\n")
     w("/// `N / ln 2`.\n")
     w(f"pub const EXP_INV_LN2_N: f64 = {lit(eo['EXP_INV_LN2_N'])};\n")
     w("/// `ln 2 / N` in two parts, the high one of 35 significant bits, so `k\n")

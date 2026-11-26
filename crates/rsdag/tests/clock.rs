@@ -11,13 +11,11 @@ use rsprobe::{Context, Level};
 
 static READS: AtomicU64 = AtomicU64::new(0);
 
-/// A clock that counts its reads.
-fn counting() -> u64 {
+fn clock_counting_its_reads() -> u64 {
     READS.fetch_add(1, Relaxed);
     0
 }
 
-/// `x * x` compiled and evaluated at 3.
 fn compile_and_eval() {
     let mut g: Graph<F64> = Graph::new();
     let x = g.sym("x");
@@ -33,23 +31,20 @@ fn compile_and_eval() {
 
 #[test]
 fn a_compile_nothing_records_reads_no_clock() {
-    // Every site active, but the context entered on no thread.
-    let all = Context::builder()
+    let every_site_active_entered_on_no_thread = Context::builder()
         .threshold(Level::TRACE)
-        .clock(counting)
+        .clock(clock_counting_its_reads)
         .build();
-    // The build reads the clock once, for the origin of its event times.
-    let built = READS.load(Relaxed);
+    let reads_after_the_build_took_its_origin = READS.load(Relaxed);
     compile_and_eval();
-    assert_eq!(READS.load(Relaxed), built);
-    drop(all);
-    // Entered, below every site of rsdag: the entry's own read alone.
-    let errors = Context::builder()
+    assert_eq!(READS.load(Relaxed), reads_after_the_build_took_its_origin);
+    drop(every_site_active_entered_on_no_thread);
+    let entered_below_every_site_of_rsdag = Context::builder()
         .threshold(Level::ERROR)
-        .clock(counting)
+        .clock(clock_counting_its_reads)
         .build();
-    let _on = errors.enter();
-    let entry = READS.load(Relaxed);
+    let _on = entered_below_every_site_of_rsdag.enter();
+    let reads_after_the_entry = READS.load(Relaxed);
     compile_and_eval();
-    assert_eq!(READS.load(Relaxed), entry);
+    assert_eq!(READS.load(Relaxed), reads_after_the_entry);
 }

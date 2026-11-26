@@ -4,8 +4,6 @@ use rsdag::*;
 
 #[test]
 fn charge_form_rows_select_by_role() {
-    // One row in charge form: i(x) = x/r, q(x) = c x (an RC node), so
-    // dF/dx' = dq/dx is the derivative of the charge output.
     let mut g: Graph<F64> = Graph::new();
     let mut s = Scope::new(&mut g, "rc");
     let x = s.param("x", ParamRole::State { id: 0 });
@@ -26,7 +24,11 @@ fn charge_form_rows_select_by_role() {
         Node::Symbol(s) => *s,
         _ => unreachable!(),
     };
-    assert_eq!(differentiate(&mut g, q, x), c);
+    assert_eq!(
+        differentiate(&mut g, q, x),
+        c,
+        "dF/dx' of the RC row is not the derivative of its charge output"
+    );
 }
 
 #[test]
@@ -35,8 +37,12 @@ fn f64_field_builds_folds_and_evaluates() {
     let x = g.sym("x");
     let half = g.konst_f64(0.5);
     let quarter = g.konst_f64(0.25);
-    let c = g.mul(half, quarter); // folds in f64
-    assert_eq!(g.const_f64(c), Some(0.125));
+    let c = g.mul(half, quarter);
+    assert_eq!(
+        g.const_f64(c),
+        Some(0.125),
+        "0.5 * 0.25 does not fold in f64"
+    );
     let e = g.add(x, c);
     let tape = Tape::compile(&g, &[e], &[SymbolId(0)]);
     let (mut work, mut out) = (Vec::new(), Vec::new());
@@ -53,14 +59,16 @@ fn hash_consing_shares_identical_subexpressions() {
     let a = ctx.sym("a");
     let b = ctx.sym("b");
     let s1 = ctx.add(a, b);
-    let s2 = ctx.add(b, a); // commutative -> same node after ordering
-    assert_eq!(s1, s2);
+    let s2 = ctx.add(b, a);
+    assert_eq!(s1, s2, "a + b and b + a are not one node");
 
-    // (a+b)*(a+b): the inner sum is interned exactly once.
     let before = ctx.len();
     let _prod = ctx.mul(s1, s2);
-    // Only the product node is new.
-    assert_eq!(ctx.len(), before + 1);
+    assert_eq!(
+        ctx.len(),
+        before + 1,
+        "(a + b) * (a + b) added more than the product node"
+    );
 }
 
 #[test]
@@ -85,15 +93,13 @@ fn folds_constants_and_identities() {
 #[test]
 fn unary_folding_and_eval() {
     let mut ctx: Graph<BigRational> = Graph::new();
-    // exp(0) = 1, ln(1) = 0 fold structurally.
     let z = ctx.zero();
     let o = ctx.one();
     let e0 = ctx.exp(z);
     let l1 = ctx.ln(o);
-    assert_eq!(e0, ctx.one());
-    assert!(ctx.is_zero(l1));
+    assert_eq!(e0, ctx.one(), "exp(0) does not fold to 1");
+    assert!(ctx.is_zero(l1), "ln(1) does not fold to 0");
 
-    // exp(ln(x)) evaluates to x; diode-like exp(v/Vt) evaluates correctly.
     let v = ctx.sym("v");
     let vt = ctx.sym("Vt");
     let arg = ctx.div(v, vt);
@@ -109,8 +115,6 @@ fn unary_folding_and_eval() {
     assert!((got - want).abs() <= AGAINST_LIBM * want);
 }
 
-/// Printing is linear in the graph: a small expression is infix, a large
-/// or deeply shared one a listing of its nodes, however deep.
 #[test]
 fn printing_a_shared_or_deep_dag_stays_linear() {
     let mut g: Graph<F64> = Graph::new();
@@ -138,8 +142,6 @@ fn printing_a_shared_or_deep_dag_stays_linear() {
         .unwrap();
 }
 
-/// A rule substitution renames every free symbol it maps and keeps the
-/// rest; a pin substitutes and specializes the calls it makes constant.
 #[test]
 fn substitute_with_a_rule_and_pin_to_constants() {
     let mut g: Graph<F64> = Graph::new();
@@ -151,7 +153,6 @@ fn substitute_with_a_rule_and_pin_to_constants() {
     });
     let xa = g.sym("X.a");
     assert_eq!(out[0], g.mul(xa, b));
-    // a function of (p, q) called with q pinned to 2
     let mut s = Scope::new(&mut g, "f");
     let pe = s.param("p", ParamRole::Free);
     let qe = s.param("q", ParamRole::Free);
@@ -168,8 +169,6 @@ fn substitute_with_a_rule_and_pin_to_constants() {
     assert!(!g.free_symbols(pinned).contains(&sb));
 }
 
-/// A signature without some roles keeps the others in order; a function
-/// lists its expression outputs of a role.
 #[test]
 fn signature_without_and_outputs_of_a_role() {
     let mut g: Graph<F64> = Graph::new();
@@ -188,9 +187,6 @@ fn signature_without_and_outputs_of_a_role() {
     assert_eq!(rows[0].0, i);
 }
 
-/// A function's parameters: the ones asked for, in order, with their roles,
-/// then the other symbols its outputs read by symbol, `Free`; a global is
-/// none of them.
 #[test]
 fn params_in_order_then_the_rest_and_no_globals() {
     let mut g: Graph<F64> = Graph::new();
@@ -211,8 +207,6 @@ fn params_in_order_then_the_rest_and_no_globals() {
     );
 }
 
-/// A partial application binds what the rule binds and passes the rest in
-/// order: a call through it is the call with every argument.
 #[test]
 fn partial_binds_and_passes_in_order() {
     let mut g: Graph<F64> = Graph::new();
@@ -243,7 +237,6 @@ fn partial_binds_and_passes_in_order() {
     assert_eq!(eval(&g, &[call], &env), vec![5.0]);
 }
 
-/// A call of an output no argument moves is the output's value.
 #[test]
 fn a_constant_output_calls_as_its_value() {
     let mut g: Graph<F64> = Graph::new();
@@ -257,8 +250,6 @@ fn a_constant_output_calls_as_its_value() {
     assert_eq!(calls[1], three);
 }
 
-/// A symbol only a called function reads is that function's: no parameter
-/// of a function over the call.
 #[test]
 fn a_called_bodys_symbols_are_not_the_callers_params() {
     let mut g: Graph<F64> = Graph::new();
@@ -274,7 +265,6 @@ fn a_called_bodys_symbols_are_not_the_callers_params() {
     assert_eq!(g.func(outer).params(), &[sx]);
 }
 
-/// Symbols by name and by node, and the terms of a sum.
 #[test]
 fn symbols_and_summands() {
     let mut g: Graph<F64> = Graph::new();
@@ -291,8 +281,6 @@ fn symbols_and_summands() {
     assert_eq!(g.as_symbol(ea), Some(a));
 }
 
-/// `Tape::reads` lists the inputs the ops of a range read, each once and
-/// ascending: those of every operand, the calls' per instance included.
 #[test]
 fn reads_are_the_inputs_the_operands_name() {
     let mut g: Graph<F64> = Graph::new();
@@ -312,13 +300,12 @@ fn reads_are_the_inputs_the_operands_name() {
         pure.push(is_pure);
         e
     };
-    // the instances' inputs listed out of order, a parameter two share
-    let shared = input(&mut g, "p_shared", true);
+    let shared_by_the_even_instances = input(&mut g, "p_shared", true);
     let mut roots = Vec::new();
     for i in (0..5).rev() {
         let x = input(&mut g, &format!("x{i}"), false);
         let q = match i % 2 {
-            0 => shared,
+            0 => shared_by_the_even_instances,
             _ => input(&mut g, &format!("p{i}"), true),
         };
         roots.push(g.call(f, 0, &[x, q]));

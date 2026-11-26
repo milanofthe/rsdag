@@ -1,9 +1,6 @@
 use rsdag::node::{BINARY_OPS, UNARY_OPS};
 use rsdag::*;
 
-/// The tables are indexed by the enum's discriminant, and `unary_f64`'s
-/// match is exhaustive, so a new variant without a row makes this fail
-/// rather than silently reading the wrong row.
 #[test]
 fn tables_line_up_with_the_enums() {
     for (i, spec) in UNARY_OPS.iter().enumerate() {
@@ -16,25 +13,31 @@ fn tables_line_up_with_the_enums() {
         assert_eq!(spec.op as usize, i);
         assert_eq!(BinOp::from_code(spec.op.code()), spec.op);
     }
-    // Every variant has a row: the count is asserted against the last
-    // variant's discriminant, which only holds if the table is complete.
-    assert_eq!(UNARY_OPS.len(), UnaryOp::RandUniform as usize + 1);
-    assert_eq!(BINARY_OPS.len(), BinOp::RandStream as usize + 1);
+    assert_eq!(
+        UNARY_OPS.len(),
+        UnaryOp::RandUniform as usize + 1,
+        "a unary variant has no row"
+    );
+    assert_eq!(
+        BINARY_OPS.len(),
+        BinOp::RandStream as usize + 1,
+        "a binary variant has no row"
+    );
 }
 
-/// Names are what the printer emits and what a frontend parses back, so
-/// two ops must not share one.
 #[test]
 fn names_are_unique() {
     let mut names: Vec<&str> = UNARY_OPS.iter().map(|s| s.name).collect();
     names.sort_unstable();
     let n = names.len();
     names.dedup();
-    assert_eq!(names.len(), n);
+    assert_eq!(
+        names.len(),
+        n,
+        "two ops share the name that the printer emits"
+    );
 }
 
-/// `smooth` is the property the generator and the derivative checks rely
-/// on: a rough op must not claim to be differentiable.
 #[test]
 fn roughness_is_recorded() {
     for op in [
@@ -54,8 +57,6 @@ fn roughness_is_recorded() {
     }
 }
 
-/// An elementary function by name builds the op it names and evaluates as
-/// the graph does: every op name, `pow`, `min` and `max`.
 #[test]
 fn elementary_functions_by_name() {
     use rsdag::semantics::elementary_f64;
@@ -90,8 +91,6 @@ fn elementary_functions_by_name() {
     assert_eq!(Elementary::from_name("nope"), None);
 }
 
-/// A stream's draws are a pure function of (stream, counter): repeatable,
-/// uniform, and independent across streams and counters.
 #[test]
 fn rand_stream_draws_independent_uniforms() {
     use rsdag::semantics::rand_stream;
@@ -111,12 +110,15 @@ fn rand_stream_draws_independent_uniforms() {
         .map(|w| (w[0] - ma) * (w[1] - ma))
         .sum::<f64>()
         / n as f64;
-    // 5 sigma bounds of the sample statistics of n uniforms
-    let s = 5.0 / (n as f64).sqrt();
+    let five_sigma_per_unit_deviation = 5.0 / (n as f64).sqrt();
+    let s = five_sigma_per_unit_deviation;
     assert!((ma - 0.5).abs() < 0.29 * s, "mean {ma}");
     assert!((var - 1.0 / 12.0).abs() < 0.075 * s, "variance {var}");
     assert!(cov.abs() < s / 12.0, "streams correlate: {cov}");
     assert!(lag.abs() < s / 12.0, "counters correlate: {lag}");
-    // the pair is the key: swapping key and counter is another draw
-    assert_ne!(rand_stream(3.0, 5.0), rand_stream(5.0, 3.0));
+    assert_ne!(
+        rand_stream(3.0, 5.0),
+        rand_stream(5.0, 3.0),
+        "swapping key and counter gave the same draw"
+    );
 }
