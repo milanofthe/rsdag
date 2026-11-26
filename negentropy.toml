@@ -1,0 +1,2 @@
+[allow]
+environment = ['^crates/rsdag/src/simd\.rs: .*"RSDAG_SSE2"']
