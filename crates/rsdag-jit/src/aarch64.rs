@@ -43,7 +43,7 @@ pub(crate) struct A64 {
 }
 
 const WINDOW: usize = 4096 * 8;
-use crate::constants::{PREFETCH_AHEAD, PREFETCH_EVERY};
+use crate::constants::{PREFETCH_AHEAD_BYTES, PREFETCH_EVERY_BYTES};
 const HOT_LO: u32 = 22;
 const HOT_N: usize = 6;
 
@@ -53,8 +53,8 @@ impl A64 {
         // A large program streams through the front end once, so every
         // 128 bytes a `prfm plil2keep` asks for the code 2 KB ahead; that
         // is a third off a 7M-op program and nothing on a small one.
-        if self.code.len().is_multiple_of(PREFETCH_EVERY / 4) {
-            let imm19 = (PREFETCH_AHEAD / 4) as u32;
+        if self.code.len().is_multiple_of(PREFETCH_EVERY_BYTES / 4) {
+            let imm19 = (PREFETCH_AHEAD_BYTES / 4) as u32;
             self.code.push(0xD800_0000 | (imm19 << 5) | 0b01010);
         }
     }
