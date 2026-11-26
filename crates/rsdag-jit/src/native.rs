@@ -1960,7 +1960,7 @@ fn emit_chunk<A: Isa>(
 struct Mapping {
     ptr: *mut u8,
     /// `VirtualFree` releases by base address alone; `munmap` wants the length.
-    #[cfg_attr(windows, allow(dead_code))]
+    #[cfg(unix)]
     len: usize,
 }
 
@@ -2063,7 +2063,7 @@ impl Mapping {
                     "VirtualAlloc of executable memory failed".into(),
                 ));
             }
-            let map = Mapping { ptr, len };
+            let map = Mapping { ptr };
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
             let mut old = 0u32;
             if VirtualProtect(ptr, len, PAGE_EXECUTE_READ, &mut old) == 0 {
