@@ -15,10 +15,6 @@
 //! through the buffer protocol and evaluates on per-thread buffers without
 //! leaving Rust.
 
-// pyo3's method expansion trips clippy's `useless_conversion` on every
-// `PyResult` method; the conversions are the macro's, not ours.
-#![allow(clippy::useless_conversion)]
-
 use rsdag::Program as _;
 mod constants;
 
@@ -39,11 +35,9 @@ use rsdag::{
     Tape, UnaryOp, F64,
 };
 
-/// A trace's graph, and the programs called in it by program id, as the
-/// functions of the graph they were imported as.
 struct Traced {
     graph: RefCell<Graph<F64>>,
-    imported: RefCell<HashMap<u64, FuncId>>,
+    func_by_program_id: RefCell<HashMap<u64, FuncId>>,
 }
 
 type Shared = Rc<Traced>;
@@ -63,12 +57,6 @@ pub struct Tracer {
     id: ExprId,
 }
 
-/// The result of a binary operator on a tracer: a traced value, or Python's
-/// `NotImplemented` when the other operand is neither a tracer nor a number.
-/// Returning `NotImplemented` instead of raising is what lets the
-/// interpreter try the other operand's reflected method, so a numpy array of
-/// tracers on the right of a tracer (`k * np.exp(x)`) broadcasts elementwise
-/// instead of failing.
 enum BinOut {
     Value(Tracer),
     NotImplemented,
@@ -93,9 +81,6 @@ impl Tracer {
             id,
         }
     }
-    /// Coerce a Python operand (tracer, int, float) into an expression;
-    /// `None` when it is neither, so a binary operator can hand the pair
-    /// back to Python (see [`BinOut`]).
     fn operand_opt(&self, other: &Bound<'_, PyAny>) -> PyResult<Option<ExprId>> {
         if let Ok(t) = other.cast::<Tracer>() {
             let t = t.borrow();
@@ -109,8 +94,6 @@ impl Tracer {
         }
         Ok(None)
     }
-    /// As [`Self::operand_opt`], raising for an operand that cannot be
-    /// traced.
     fn operand(&self, other: &Bound<'_, PyAny>) -> PyResult<ExprId> {
         self.operand_opt(other)?.ok_or_else(|| unsupported(other))
     }
@@ -118,7 +101,6 @@ impl Tracer {
         let id = self.g.graph.borrow_mut().unary(op, self.id);
         self.wrap(id)
     }
-    /// `f(self, other)`, or `f(other, self)` when `reflected`.
     fn binary(
         &self,
         other: &Bound<'_, PyAny>,
@@ -153,21 +135,17 @@ fn powf(g: &mut Graph<F64>, a: ExprId, b: ExprId) -> ExprId {
     g.binary(BinOp::Powf, a, b)
 }
 
-/// Whether the expression under `id` written out as a tree has at most
-/// `budget` nodes; stops counting once over, so the cost is the budget.
-fn fits(g: &Graph<F64>, id: ExprId, budget: &mut usize) -> bool {
+fn tree_fits_budget(g: &Graph<F64>, id: ExprId, budget: &mut usize) -> bool {
     if *budget == 0 {
         return false;
     }
     *budget -= 1;
-    g.operands(id).iter().all(|&c| fits(g, c, budget))
+    g.operands(id)
+        .iter()
+        .all(|&c| tree_fits_budget(g, c, budget))
 }
 
-/// numpy's names of the elementwise functions a tracer answers to, where
-/// they differ from rsdag's ([`Elementary::from_name`]): numpy's ufuncs
-/// call them on each element of an object array (`np.sin(a)` calls
-/// `a[i].sin()`, `np.arctan2(a, b)` calls `a[i].arctan2(b[i])`).
-const NUMPY_NAMES: &[(&str, Elementary)] = &[
+const NUMPY_NAMES_DIFFERING_FROM_RSDAG: &[(&str, Elementary)] = &[
     ("arcsin", Elementary::Unary(UnaryOp::Asin)),
     ("arccos", Elementary::Unary(UnaryOp::Acos)),
     ("arctan", Elementary::Unary(UnaryOp::Atan)),
@@ -187,17 +165,16 @@ const NUMPY_NAMES: &[(&str, Elementary)] = &[
     ("minimum", Elementary::Min),
 ];
 
-fn ufunc(name: &str) -> Option<Elementary> {
-    NUMPY_NAMES
+fn elementary_by_numpy_or_rsdag_name(name: &str) -> Option<Elementary> {
+    NUMPY_NAMES_DIFFERING_FROM_RSDAG
         .iter()
         .find(|(n, _)| *n == name)
         .map(|&(_, f)| f)
         .or_else(|| Elementary::from_name(name))
 }
 
-/// A tracer's elementwise function, bound to it (`t.sin`, `t.arctan2`).
 #[pyclass(unsendable)]
-struct Method {
+pub struct Method {
     t: Tracer,
     f: Elementary,
 }
@@ -233,9 +210,9 @@ impl Method {
 
 #[pymethods]
 impl Tracer {
-    /// The elementwise functions by name (see [`NUMPY_NAMES`]).
-    fn __getattr__(&self, name: &str) -> PyResult<Method> {
-        let f = ufunc(name).ok_or_else(|| {
+    /// The elementwise functions by name, under rsdag's and numpy's names.
+    pub fn __getattr__(&self, name: &str) -> PyResult<Method> {
+        let f = elementary_by_numpy_or_rsdag_name(name).ok_or_else(|| {
             PyAttributeError::new_err(format!("'Tracer' object has no attribute '{name}'"))
         })?;
         Ok(Method { t: self.clone(), f })
@@ -243,10 +220,10 @@ impl Tracer {
     /// The expression as text, or a summary when written out as a tree it
     /// would exceed [`REPR_NODES`] nodes (a shared subexpression is written
     /// once per use, so the text of a DAG can be exponential in its size).
-    fn __repr__(&self) -> String {
+    pub fn __repr__(&self) -> String {
         let g = self.g.graph.borrow();
         let mut budget = REPR_NODES;
-        if fits(&g, self.id, &mut budget) {
+        if tree_fits_budget(&g, self.id, &mut budget) {
             format!("Tracer({})", rsdag::to_string(&g, self.id))
         } else {
             format!("Tracer(#{}, over {REPR_NODES} nodes)", self.id.0)
@@ -333,7 +310,6 @@ impl Tracer {
     fn __abs__(&self) -> Tracer {
         self.unary(UnaryOp::Abs)
     }
-    // `math.floor` and friends, which numpy's object loops call.
     fn __floor__(&self) -> Tracer {
         self.unary(UnaryOp::Floor)
     }
@@ -354,14 +330,14 @@ impl Tracer {
         ))
     }
     /// `cond != 0 ? self : other` (the select node).
-    fn select(&self, cond: &Bound<'_, PyAny>, other: &Bound<'_, PyAny>) -> PyResult<Tracer> {
+    pub fn select(&self, cond: &Bound<'_, PyAny>, other: &Bound<'_, PyAny>) -> PyResult<Tracer> {
         let c = self.operand(cond)?;
         let o = self.operand(other)?;
         let id = self.g.graph.borrow_mut().select(c, self.id, o);
         Ok(self.wrap(id))
     }
     /// The expression as text.
-    fn expr(&self) -> String {
+    pub fn expr(&self) -> String {
         rsdag::to_string(&self.g.graph.borrow(), self.id)
     }
 }
@@ -373,14 +349,14 @@ impl Scope {
         Scope {
             g: Rc::new(Traced {
                 graph: RefCell::new(Graph::new()),
-                imported: RefCell::default(),
+                func_by_program_id: RefCell::default(),
             }),
             inputs: Vec::new(),
         }
     }
     /// A new positional input.
     #[pyo3(signature = (name = None))]
-    fn input(&mut self, name: Option<&str>) -> Tracer {
+    pub fn input(&mut self, name: Option<&str>) -> Tracer {
         let k = self.inputs.len();
         let mut g = self.g.graph.borrow_mut();
         let name = name
@@ -396,7 +372,7 @@ impl Scope {
         }
     }
     /// A constant of this scope.
-    fn constant(&self, v: f64) -> Tracer {
+    pub fn constant(&self, v: f64) -> Tracer {
         let id = self.g.graph.borrow_mut().konst_f64(v);
         Tracer {
             g: self.g.clone(),
@@ -404,11 +380,11 @@ impl Scope {
         }
     }
     /// Number of inputs handed out.
-    fn n_inputs(&self) -> usize {
+    pub fn n_inputs(&self) -> usize {
         self.inputs.len()
     }
     /// Close the scope over `outputs` into a program.
-    fn compile(&self, outputs: &Bound<'_, PyList>) -> PyResult<Program> {
+    pub fn compile(&self, outputs: &Bound<'_, PyList>) -> PyResult<Program> {
         let ids = self.output_ids(outputs)?;
         Ok(self.program(&ids))
     }
@@ -416,7 +392,7 @@ impl Scope {
     /// `len(outputs) * len(wrt)` outputs (row-major); `wrt` are input
     /// indices (all inputs when empty).
     #[pyo3(signature = (outputs, wrt = vec![]))]
-    fn jacobian(&self, outputs: &Bound<'_, PyList>, wrt: Vec<usize>) -> PyResult<Program> {
+    pub fn jacobian(&self, outputs: &Bound<'_, PyList>, wrt: Vec<usize>) -> PyResult<Program> {
         let ids = self.output_ids(outputs)?;
         let wrt = self.wrt_symbols(&wrt)?;
         let mut g = self.g.graph.borrow_mut();
@@ -437,18 +413,22 @@ impl Scope {
     /// whose outputs are the structurally nonzero entries, row by row in
     /// ascending columns, with that pattern (`Program.pattern`).
     #[pyo3(signature = (outputs, wrt = vec![]))]
-    fn sparse_jacobian(&self, outputs: &Bound<'_, PyList>, wrt: Vec<usize>) -> PyResult<Program> {
+    pub fn sparse_jacobian(
+        &self,
+        outputs: &Bound<'_, PyList>,
+        wrt: Vec<usize>,
+    ) -> PyResult<Program> {
         let ids = self.output_ids(outputs)?;
         let wrt = self.wrt_symbols(&wrt)?;
         let jac = rsdag::Coo::jacobian(&mut self.g.graph.borrow_mut(), &ids, &wrt);
         let mut p = self.program(&jac.vals);
-        p.pattern = Some((jac.rows, jac.cols));
+        p.sparse_jacobian_pattern = Some((jac.rows, jac.cols));
         Ok(p)
     }
     /// The gradient of one scalar output with respect to `inputs[wrt]`
     /// (reverse mode; all inputs when empty).
     #[pyo3(signature = (output, wrt = vec![]))]
-    fn gradient(&self, output: &Tracer, wrt: Vec<usize>) -> PyResult<Program> {
+    pub fn gradient(&self, output: &Tracer, wrt: Vec<usize>) -> PyResult<Program> {
         let wrt = self.wrt_symbols(&wrt)?;
         let mut g = self.g.graph.borrow_mut();
         let grad = rsdag::gradient(&mut g, output.id, &wrt);
@@ -456,16 +436,12 @@ impl Scope {
         Ok(self.program(&grad))
     }
     /// Number of nodes in the graph.
-    fn n_nodes(&self) -> usize {
+    pub fn n_nodes(&self) -> usize {
         self.g.graph.borrow().len()
     }
 }
 
 impl Scope {
-    /// The program of `roots` over the inputs: their function, kept in a
-    /// graph of its own so the program composes into other traces, and its
-    /// tape over the composition (the programs called in this trace inlined
-    /// where they call others, batched where they are leaves).
     fn program(&self, roots: &[ExprId]) -> Program {
         let mut g = self.g.graph.borrow_mut();
         let mut s = rsdag::Scope::new(&mut g, "program");
@@ -473,14 +449,14 @@ impl Scope {
             s.param(x, ParamRole::Free);
         }
         let f = s.close(roots.iter().map(|&e| (e, OutputRole::Plain)));
-        let mut own = Graph::new();
-        let func = own.import(&g, f, &mut Default::default());
+        let mut graph_for_composition = Graph::new();
+        let func = graph_for_composition.import(&g, f, &mut Default::default());
         let tape = Tape::compile(&g, roots, &self.inputs);
         let mut p = Program::new(tape, self.inputs.len(), roots.len());
         p.symbolic = Some(Arc::new(Symbolic {
-            graph: own,
+            graph: graph_for_composition,
             func,
-            id: NEXT_PROGRAM.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            program_id: NEXT_PROGRAM.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }));
         p
     }
@@ -521,75 +497,57 @@ pub struct Program {
     native: std::sync::OnceLock<rsdag_jit::NativeTape>,
     n_in: usize,
     n_out: usize,
-    /// `(rows, cols)` of the outputs of a sparse Jacobian.
-    pattern: Option<(Vec<usize>, Vec<usize>)>,
-    /// The program as a function, for calling it inside another trace.
+    sparse_jacobian_pattern: Option<(Vec<usize>, Vec<usize>)>,
     symbolic: Option<Arc<Symbolic>>,
 }
 
-/// A program's function in a graph of its own, and the id a trace that
-/// imports it keeps it by.
 struct Symbolic {
     graph: Graph<F64>,
     func: FuncId,
-    id: u64,
+    program_id: u64,
 }
 
 static NEXT_PROGRAM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Evaluation buffers of one thread, shared by all programs: an evaluation
-/// takes them and puts them back, so once grown a call allocates nothing,
-/// and a reentrant call (an input whose conversion runs Python) gets its
-/// own.
 #[derive(Default)]
 struct Scratch {
     ins: Vec<f64>,
-    /// The shapes of the gathered arguments (see [`gather`]).
-    key: Vec<usize>,
+    arg_shapes: Vec<usize>,
     work: Vec<f64>,
     out: Vec<f64>,
 }
 
-/// Append the values of `arg` to `s.ins` and its shape to `s.key` (the
-/// number of dimensions, then the extents; a number has none): a number,
-/// a flat list or tuple of numbers, an object exporting a buffer of doubles
-/// (a float64 numpy array, in any layout, flattened in C order), or
-/// anything numpy converts to one.
 fn gather(arg: &Bound<'_, PyAny>, s: &mut Scratch) -> PyResult<()> {
     let py = arg.py();
     if let Ok(x) = arg.cast::<PyFloat>() {
         s.ins.push(x.value());
-        s.key.push(0);
+        s.arg_shapes.push(0);
         return Ok(());
     }
     if arg.is_instance_of::<PyList>() || arg.is_instance_of::<PyTuple>() {
         if let Ok(xs) = arg.extract::<Vec<f64>>() {
-            s.key.extend([1, xs.len()]);
+            s.arg_shapes.extend([1, xs.len()]);
             s.ins.extend(xs);
             return Ok(());
         }
-    } else if let Some(buf) = doubles(arg) {
-        s.key.push(buf.dimensions());
-        s.key.extend(buf.shape());
+    } else if let Some(buf) = doubles_in_host_byte_order(arg) {
+        s.arg_shapes.push(buf.dimensions());
+        s.arg_shapes.extend(buf.shape());
         let n = s.ins.len();
         s.ins.resize(n + buf.item_count(), 0.0);
         return buf.copy_to_slice(py, &mut s.ins[n..]);
     } else if let Ok(x) = arg.extract::<f64>() {
         s.ins.push(x);
-        s.key.push(0);
+        s.arg_shapes.push(0);
         return Ok(());
     }
-    // A float64 array now, which the buffer branch takes.
-    let arr = py
+    let float64_array = py
         .import("numpy")?
         .call_method1("asarray", (arg, "float64"))?;
-    gather(&arr, s)
+    gather(&float64_array, s)
 }
 
-/// The buffer of `arg` if it holds doubles in the host's byte order.
-/// pyo3 0.29 also takes a big-endian `>d` for `f64` on a little-endian
-/// host, so the order is checked here.
-fn doubles(arg: &Bound<'_, PyAny>) -> Option<PyBuffer<f64>> {
+fn doubles_in_host_byte_order(arg: &Bound<'_, PyAny>) -> Option<PyBuffer<f64>> {
     let buf = PyBuffer::<f64>::get(arg).ok()?;
     let host = if cfg!(target_endian = "little") {
         b'<'
@@ -603,9 +561,7 @@ fn doubles(arg: &Bound<'_, PyAny>) -> Option<PyBuffer<f64>> {
     }
 }
 
-/// The shapes in a [`Scratch::key`] as Python sees them: `None` for a
-/// scalar, else a tuple of extents.
-fn shapes<'py>(py: Python<'py>, key: &[usize]) -> PyResult<Bound<'py, PyTuple>> {
+fn python_shapes<'py>(py: Python<'py>, key: &[usize]) -> PyResult<Bound<'py, PyTuple>> {
     let mut out = Vec::new();
     let mut rest = key;
     while let Some((&nd, tail)) = rest.split_first() {
@@ -619,8 +575,6 @@ fn shapes<'py>(py: Python<'py>, key: &[usize]) -> PyResult<Bound<'py, PyTuple>> 
     PyTuple::new(py, out)
 }
 
-/// `vals` into `out` (any writable float64 buffer of their length), which
-/// is returned, or as a new list.
 fn emit<'py>(
     py: Python<'py>,
     vals: &[f64],
@@ -628,7 +582,7 @@ fn emit<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     match out {
         Some(o) => {
-            doubles(&o)
+            doubles_in_host_byte_order(&o)
                 .ok_or_else(|| PyTypeError::new_err("out takes a buffer of float64"))?
                 .copy_from_slice(py, vals)?;
             Ok(o)
@@ -644,7 +598,7 @@ impl Program {
             native: std::sync::OnceLock::new(),
             n_in,
             n_out,
-            pattern: None,
+            sparse_jacobian_pattern: None,
             symbolic: None,
         }
     }
@@ -654,7 +608,6 @@ impl Program {
             None => &self.tape,
         }
     }
-    /// Evaluate on `s.ins` into `s.out`.
     fn run(&self, py: Python<'_>, s: &mut Scratch) -> PyResult<()> {
         if s.ins.len() != self.n_in {
             return Err(PyValueError::new_err(format!(
@@ -684,23 +637,16 @@ impl Program {
     }
 }
 
-/// Clear `s` and gather `args` into it.
 fn gather_all(args: &Bound<'_, PyTuple>, s: &mut Scratch) -> PyResult<()> {
     s.ins.clear();
-    s.key.clear();
+    s.arg_shapes.clear();
     args.iter().try_for_each(|a| gather(&a, s))
 }
 
-/// A traced function's programs by argument shapes, the base of the Python
-/// `Compiled`. A call gathers the arguments, looks the program up by their
-/// shapes and evaluates it, all here; a new shape asks the subclass's
-/// `_trace(shapes)` for the program and the shape of its result (`None`
-/// for a scalar).
 #[pyclass(subclass, frozen)]
 struct Dispatch {
-    programs: Mutex<HashMap<Box<[usize]>, Entry>>,
-    /// `numpy.empty`, for the results.
-    empty: Py<PyAny>,
+    programs_by_arg_shapes: Mutex<HashMap<Box<[usize]>, Entry>>,
+    numpy_empty: Py<PyAny>,
 }
 
 struct Entry {
@@ -709,8 +655,10 @@ struct Entry {
 }
 
 impl Dispatch {
-    /// The entry for the shapes of the arguments gathered into `s`.
-    fn entry(slf: &Bound<'_, Self>, s: &Scratch) -> PyResult<(Py<Program>, Option<Py<PyTuple>>)> {
+    fn entry_for_gathered_shapes(
+        slf: &Bound<'_, Self>,
+        s: &Scratch,
+    ) -> PyResult<(Py<Program>, Option<Py<PyTuple>>)> {
         let py = slf.py();
         let copy = |e: &Entry| {
             (
@@ -719,18 +667,23 @@ impl Dispatch {
             )
         };
         let this = slf.get();
-        if let Some(e) = this.programs.lock().unwrap().get(&s.key[..]) {
+        if let Some(e) = this
+            .programs_by_arg_shapes
+            .lock()
+            .unwrap()
+            .get(&s.arg_shapes[..])
+        {
             return Ok(copy(e));
         }
         let (program, shape) = slf
-            .call_method1("_trace", (shapes(py, &s.key)?,))?
+            .call_method1("_trace", (python_shapes(py, &s.arg_shapes)?,))?
             .extract::<(Py<Program>, Option<Py<PyTuple>>)>()?;
         let e = Entry { program, shape };
         let out = copy(&e);
-        this.programs
+        this.programs_by_arg_shapes
             .lock()
             .unwrap()
-            .insert(s.key.as_slice().into(), e);
+            .insert(s.arg_shapes.as_slice().into(), e);
         Ok(out)
     }
 }
@@ -745,8 +698,8 @@ impl Dispatch {
         _kwargs: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         Ok(Dispatch {
-            programs: Mutex::default(),
-            empty: py.import("numpy")?.getattr("empty")?.unbind(),
+            programs_by_arg_shapes: Mutex::default(),
+            numpy_empty: py.import("numpy")?.getattr("empty")?.unbind(),
         })
     }
     #[pyo3(signature = (*args))]
@@ -757,29 +710,27 @@ impl Dispatch {
         let py = slf.py();
         rsdag::scratch::with(|s: &mut Scratch| {
             if let Err(e) = gather_all(args, s) {
-                // Called with tracers inside another trace: a composition.
                 if slf.call_method1("_traced", (args,))?.is_truthy()? {
                     return slf.call_method1("_compose", args);
                 }
                 return Err(e);
             }
-            let (program, shape) = Self::entry(slf, s)?;
+            let (program, shape) = Self::entry_for_gathered_shapes(slf, s)?;
             program.get().run(py, s)?;
             match shape {
                 None => Ok(PyFloat::new(py, s.out[0]).into_any()),
                 Some(shape) => {
-                    let o = slf.get().empty.bind(py).call1((shape,))?;
+                    let o = slf.get().numpy_empty.bind(py).call1((shape,))?;
                     emit(py, &s.out, Some(o))
                 }
             }
         })
     }
-    /// The program traced for the shapes of `args`.
     #[pyo3(signature = (*args))]
     fn program(slf: &Bound<'_, Self>, args: &Bound<'_, PyTuple>) -> PyResult<Py<Program>> {
         let mut s = Scratch::default();
         gather_all(args, &mut s)?;
-        Ok(Self::entry(slf, &s)?.0)
+        Ok(Self::entry_for_gathered_shapes(slf, &s)?.0)
     }
 }
 
@@ -791,7 +742,7 @@ impl Program {
     /// graph. The program comes into a graph once, however often it is
     /// called there; a program it calls comes along.
     #[pyo3(signature = (*args))]
-    fn compose(&self, args: &Bound<'_, PyTuple>) -> PyResult<Vec<Tracer>> {
+    pub fn compose(&self, args: &Bound<'_, PyTuple>) -> PyResult<Vec<Tracer>> {
         let sym = self
             .symbolic
             .as_ref()
@@ -828,11 +779,15 @@ impl Program {
                 ids.push(g.graph.borrow_mut().konst_f64(v));
             }
         }
-        let f = *g.imported.borrow_mut().entry(sym.id).or_insert_with(|| {
-            g.graph
-                .borrow_mut()
-                .import(&sym.graph, sym.func, &mut Default::default())
-        });
+        let f = *g
+            .func_by_program_id
+            .borrow_mut()
+            .entry(sym.program_id)
+            .or_insert_with(|| {
+                g.graph
+                    .borrow_mut()
+                    .import(&sym.graph, sym.func, &mut Default::default())
+            });
         let outs: Vec<u32> = (0..self.n_out as u32).collect();
         let calls = g.graph.borrow_mut().calls(f, &outs, &ids);
         Ok(calls
@@ -848,7 +803,7 @@ impl Program {
     /// threads evaluate it at once, each on its own buffers, and a large one
     /// releases the GIL while it runs.
     #[pyo3(signature = (*args, out = None))]
-    fn eval<'py>(
+    pub fn eval<'py>(
         &self,
         py: Python<'py>,
         args: &Bound<'py, PyTuple>,
@@ -865,7 +820,7 @@ impl Program {
     /// [`Self::eval`]. Natively the instances run in parallel; the GIL is
     /// released throughout.
     #[pyo3(signature = (inputs, out = None))]
-    fn eval_many<'py>(
+    pub fn eval_many<'py>(
         &self,
         py: Python<'py>,
         inputs: &Bound<'py, PyAny>,
@@ -897,7 +852,7 @@ impl Program {
     }
     /// Compile the tape to native code; evaluation switches over. A large
     /// batch of function-body calls runs on the thread pool.
-    fn compile_native(&self, py: Python<'_>) -> PyResult<()> {
+    pub fn compile_native(&self, py: Python<'_>) -> PyResult<()> {
         if self.native.get().is_some() {
             return Ok(());
         }
@@ -922,8 +877,8 @@ impl Program {
     /// `(rows, cols)` of a sparse Jacobian's outputs, `None` for any other
     /// program.
     #[getter]
-    fn pattern(&self) -> Option<(Vec<usize>, Vec<usize>)> {
-        self.pattern.clone()
+    pub fn pattern(&self) -> Option<(Vec<usize>, Vec<usize>)> {
+        self.sparse_jacobian_pattern.clone()
     }
     #[getter]
     fn n_ops(&self) -> usize {
@@ -934,13 +889,13 @@ impl Program {
     }
 }
 
-/// The items of an iterable.
 fn items<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
     obj.try_iter()?.collect()
 }
 
-/// The first tracer among `items`: the scope the numbers among them join.
-fn anchor<'a, 'py: 'a>(mut items: impl Iterator<Item = &'a Bound<'py, PyAny>>) -> PyResult<Tracer> {
+fn first_tracer<'a, 'py: 'a>(
+    mut items: impl Iterator<Item = &'a Bound<'py, PyAny>>,
+) -> PyResult<Tracer> {
     items
         .find_map(|x| x.cast::<Tracer>().ok().map(|t| t.borrow().clone()))
         .ok_or_else(|| PyTypeError::new_err("a traced operand is needed"))
@@ -950,23 +905,18 @@ fn exprs(t: &Tracer, items: &[Bound<'_, PyAny>]) -> PyResult<Vec<ExprId>> {
     items.iter().map(|x| t.operand(x)).collect()
 }
 
-/// `where(cond, a, b)` over tracers and numbers of one scope.
 #[pyfunction]
 fn select(cond: &Bound<'_, PyAny>, a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<Tracer> {
-    let t = anchor([cond, a, b].into_iter())?;
+    let t = first_tracer([cond, a, b].into_iter())?;
     let (c, x, y) = (t.operand(cond)?, t.operand(a)?, t.operand(b)?);
     let id = t.g.graph.borrow_mut().select(c, x, y);
     Ok(t.wrap(id))
 }
 
-/// `a @ b` for the `m * k` entries of `a` and the `k * n` of `b`, both
-/// row-major: the `m * n` entries of the product, each one `Dot` node. The
-/// rows against one column fuse into a `Gemv` kernel once compiled, against
-/// several columns into a `Gemm`.
 #[pyfunction]
 fn matmul(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>, n: usize) -> PyResult<Vec<Tracer>> {
     let (a, b) = (items(a)?, items(b)?);
-    let t = anchor(a.iter().chain(&b))?;
+    let t = first_tracer(a.iter().chain(&b))?;
     let (a, b) = (exprs(&t, &a)?, exprs(&t, &b)?);
     let k = b.len().checked_div(n).unwrap_or(0);
     if k == 0 || b.len() != k * n || !a.len().is_multiple_of(k) {
@@ -986,8 +936,6 @@ fn matmul(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>, n: usize) -> PyResult<Vec<
     Ok(out.into_iter().map(|id| t.wrap(id)).collect())
 }
 
-/// A reduction (`"sum"`, `"product"`, `"min"`, `"max"`) over an iterable,
-/// one `Reduce` node in the reference fold order.
 #[pyfunction]
 fn reduce(op: &str, xs: &Bound<'_, PyAny>) -> PyResult<Tracer> {
     let rop = match op {
@@ -998,19 +946,16 @@ fn reduce(op: &str, xs: &Bound<'_, PyAny>) -> PyResult<Tracer> {
         _ => return Err(PyValueError::new_err(format!("unknown reduction '{op}'"))),
     };
     let xs = items(xs)?;
-    let t = anchor(xs.iter())?;
+    let t = first_tracer(xs.iter())?;
     let ids = exprs(&t, &xs)?;
     let id = t.g.graph.borrow_mut().reduce(rop, ids);
     Ok(t.wrap(id))
 }
 
-/// The solution of the dense system `A x = b`, `a` the `n*n` entries
-/// row-major and `b` the `n` right-hand sides: one pivoting kernel in the
-/// compiled program, differentiable.
 #[pyfunction]
 fn solve(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<Vec<Tracer>> {
     let (a, b) = (items(a)?, items(b)?);
-    let t = anchor(a.iter().chain(&b))?;
+    let t = first_tracer(a.iter().chain(&b))?;
     let (a, b) = (exprs(&t, &a)?, exprs(&t, &b)?);
     if a.len() != b.len() * b.len() {
         return Err(PyValueError::new_err(

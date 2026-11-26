@@ -132,9 +132,9 @@ def test_tracer_defers_to_arrays_on_the_left():
         [np.exp(0.125) * 2, np.exp(0.375) * 2, 1.0, 3.0, 1.5, 0.5]
     )
 
-    # a genuinely untraceable operand still raises, from Python's own message
+    untraceable = "no"
     with pytest.raises(TypeError):
-        k * "no"
+        k * untraceable
 
 
 def test_numpy_ufuncs_by_name_and_reflected_operators():
@@ -249,13 +249,12 @@ def test_a_program_runs_many_inputs_and_from_many_threads():
         with ThreadPoolExecutor(4) as pool:
             got = list(pool.map(lambda x: f(x, 0.0), xs))
         assert np.array_equal(np.array(got), many)
-        # Large enough to release the GIL while it runs.
-        big = jit(lambda v: np.sin(v) * v, native=native)
+        releases_gil = jit(lambda v: np.sin(v) * v, native=native)
         vs = np.random.default_rng(1).standard_normal((16, 400))
         with ThreadPoolExecutor(4) as pool:
-            got = list(pool.map(big, vs))
-        assert np.array_equal(np.array(got), np.array([big(v) for v in vs]))
-        assert big.program(vs[0]).n_ops >= 256
+            got = list(pool.map(releases_gil, vs))
+        assert np.array_equal(np.array(got), np.array([releases_gil(v) for v in vs]))
+        assert releases_gil.program(vs[0]).n_ops >= 256
 
 
 def test_sparse_jacobian_matches_the_dense_one():
