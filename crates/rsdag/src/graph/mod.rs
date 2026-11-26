@@ -245,7 +245,7 @@ mod compose;
 mod flow;
 
 pub(crate) use calls::Deps;
-pub(crate) use flow::{leading_operands_without_derivative, Join, Set, Through};
+pub(crate) use flow::{non_diff_prefix, Join, Set, Through};
 
 impl<K: Field> Default for Graph<K> {
     fn default() -> Self {

@@ -26,11 +26,11 @@ fn build(kind: &str, n: usize, count: usize) -> (Graph<F64>, Vec<ExprId>, Vec<Sy
         g.sym(&format!("s{}", syms.len()))
     };
     for c in 0..count {
-        let dominant_diagonal_for_a_well_posed_solve = 4.0;
+        let diag = 4.0;
         let a: Vec<ExprId> = (0..n * n)
             .map(|k| {
                 let v = if k / n == k % n {
-                    dominant_diagonal_for_a_well_posed_solve
+                    diag
                 } else {
                     0.1 * (((k + c) % 7) as f64 - 3.0)
                 };

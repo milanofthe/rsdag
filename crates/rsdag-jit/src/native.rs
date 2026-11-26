@@ -39,10 +39,10 @@ use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 use crate::constants::{
-    CODE_ALIGN_BYTES, FLOAT_REG_NUMBERS, FORCED_LANES_SCALAR_COST_WITHOUT_OVERFLOW,
-    HOST_GATHER_MIN_ARGS, KERNEL_OPERANDS_A_XB_ACCUMULATOR, LANE_HOST_CALL_COST_OPS,
-    LANE_HOST_CALL_TWO_ARGUMENTS_AND_RESULT, LANE_MOVE_COST_OPS, MAX_LANES,
-    OPTIONS_KEY_CHUNK_OPS_SHIFT, OPTIONS_KEY_FREE_BIT_FOR_BACKGROUND, OPTIONS_KEY_LANES_SHIFT,
+    CODE_ALIGN_BYTES, FLOAT_REG_NUMBERS, FORCED_LANES_SCALAR_COST, HOST_GATHER_MIN_ARGS,
+    KERNEL_OPERANDS_A_XB_ACCUMULATOR, LANE_HOST_CALL_COST_OPS, LANE_HOST_CALL_VALUES,
+    LANE_MOVE_COST_OPS, MAX_LANES, OPTIONS_KEY_BACKGROUND_BIT, OPTIONS_KEY_CHUNK_OPS_SHIFT,
+    OPTIONS_KEY_LANES_SHIFT,
 };
 use crate::host::{self, Bundles};
 use crate::ops::{inline_product, minmax_inline, powi_inline, routine, Liveness};
@@ -93,7 +93,7 @@ fn lane_gather_len<I: Isa>(op: &Op) -> usize {
     match *op {
         _ if minmax_inline::<I>(op) => 0,
         Op::Reduce(ReduceOp::Min | ReduceOp::Max, _, n) => n as usize * l + n as usize + l,
-        _ if routine::<I>(op).is_some() => LANE_HOST_CALL_TWO_ARGUMENTS_AND_RESULT * l,
+        _ if routine::<I>(op).is_some() => LANE_HOST_CALL_VALUES * l,
         _ => 0,
     }
 }
@@ -180,7 +180,7 @@ const PHASES: usize = Phase::Whole as usize + 1;
 struct LaneCode {
     tape: NativeTape,
     block_cost_per_phase: [usize; PHASES],
-    inputs_moved_into_lanes_per_phase: [Vec<u32>; PHASES],
+    inputs_moved_per_phase: [Vec<u32>; PHASES],
 }
 
 impl LaneCode {
@@ -204,7 +204,7 @@ fn lane_costs(lt: &NativeTape, n_state: usize, n_out: usize) -> ([usize; 3], [us
 }
 
 impl NativeBody {
-    fn lanes_first_returning_scalar_start(
+    fn run_lanes_first(
         &self,
         phase: Phase,
         n: usize,
@@ -220,8 +220,7 @@ impl NativeBody {
             run(widest, 0..full);
         }
         let rest = n - full;
-        let mut cheapest_cost_and_first_lane_code = [(0usize, None::<usize>); MAX_LANES];
-        let best = &mut cheapest_cost_and_first_lane_code;
+        let mut best = [(0usize, None::<usize>); MAX_LANES];
         for m in 1..=rest {
             best[m] = (best[m - 1].0 + one, None);
             for (i, lc) in self
@@ -267,7 +266,7 @@ impl NativeBody {
         let (l, sl, n_out) = (lt.lanes, self.tape.state_len, self.n_out);
         let (n_args, stride) = (at.n_args, at.stride);
         let n_in = lt.layout.n_inputs.max(n_args).max(self.pure.len());
-        let moved = &lc.inputs_moved_into_lanes_per_phase[phase as usize];
+        let moved = &lc.inputs_moved_per_phase[phase as usize];
         let range = match phase {
             Phase::Prolog => 0..lt.prolog_chunks,
             Phase::Main => lt.prolog_chunks..lt.chunks.len(),
@@ -377,7 +376,7 @@ impl ExternBundle for NativeBody {
         }
     }
     fn prolog_batch(&self, pure: &[f64], states: &mut [f64], at: &Instances) {
-        let k0 = self.lanes_first_returning_scalar_start(Phase::Prolog, at.len(), |lc, r| {
+        let k0 = self.run_lanes_first(Phase::Prolog, at.len(), |lc, r| {
             self.run_lanes(
                 lc,
                 Phase::Prolog,
@@ -398,7 +397,7 @@ impl ExternBundle for NativeBody {
         });
     }
     fn main_batch(&self, args: &[f64], states: &[f64], out: &mut [f64], at: &Instances) {
-        let k0 = self.lanes_first_returning_scalar_start(Phase::Main, at.len(), |lc, r| {
+        let k0 = self.run_lanes_first(Phase::Main, at.len(), |lc, r| {
             self.run_lanes(
                 lc,
                 Phase::Main,
@@ -422,7 +421,7 @@ impl ExternBundle for NativeBody {
     fn call_batch(&self, args: &[f64], n_groups: usize, n_args: usize, out: &mut [f64]) {
         if self.batch == Batch::Serial {
             let at = Instances::first(n_groups, n_args, 0);
-            let g0 = self.lanes_first_returning_scalar_start(Phase::Whole, n_groups, |lc, r| {
+            let g0 = self.run_lanes_first(Phase::Whole, n_groups, |lc, r| {
                 self.run_lanes(lc, Phase::Whole, args, &at, r, None, None, Some(&mut *out))
             });
             rsdag::scratch::with::<Vec<f64>, _>(|work| {
@@ -462,7 +461,7 @@ fn native_body(
         Lanes::Never => Vec::new(),
         _ => NativeTape::compile_lanes_widest_first(body),
     };
-    let mut scalar = [FORCED_LANES_SCALAR_COST_WITHOUT_OVERFLOW; PHASES];
+    let mut scalar = [FORCED_LANES_SCALAR_COST; PHASES];
     let lanes: Vec<LaneCode> = lanes
         .into_iter()
         .map(|lt| {
@@ -477,7 +476,7 @@ fn native_body(
             LaneCode {
                 tape: lt,
                 block_cost_per_phase: block,
-                inputs_moved_into_lanes_per_phase: reads,
+                inputs_moved_per_phase: reads,
             }
         })
         .collect();
@@ -625,7 +624,7 @@ impl NativeTape {
                         }
                     };
                     let key = options_key(opts)
-                        ^ (u64::from(opts.background) << OPTIONS_KEY_FREE_BIT_FOR_BACKGROUND);
+                        ^ (u64::from(opts.background) << OPTIONS_KEY_BACKGROUND_BIT);
                     match b.backend_cache() {
                         Some(cache) => cache.get_or_try_insert(key, make),
                         None => make(),
@@ -643,15 +642,14 @@ impl NativeTape {
         let mut phase_ops_and_host_calls = [(0usize, 0usize); 2];
         for (k, op) in ops.iter().enumerate() {
             let p = &mut phase_ops_and_host_calls[usize::from(k >= split)];
-            let exp_ln_on_all_lanes_costs_a_host_call =
+            let lane_host_call =
                 lanes > 1 && matches!(op, Op::Unary(UnaryOp::Exp | UnaryOp::Ln, _));
-            p.0 += if exp_ln_on_all_lanes_costs_a_host_call {
+            p.0 += if lane_host_call {
                 1 + LANE_HOST_CALL_COST_OPS
             } else {
                 1
             };
-            p.1 +=
-                usize::from(routine::<A>(op).is_some() && !exp_ln_on_all_lanes_costs_a_host_call);
+            p.1 += usize::from(routine::<A>(op).is_some() && !lane_host_call);
         }
         let gather_len = match lanes {
             1 => tape.gather_len(),
@@ -684,9 +682,9 @@ impl NativeTape {
         debug_assert!(jobs.iter().all(|r| r.end <= split || r.start >= split));
         let chunk_at =
             |k: u32| (jobs.binary_search_by_key(&(k as usize), |r| r.start)).unwrap_or(jobs.len());
-        let one_gather_area_serialises_lane_regions = lanes > 1;
+        let serial = lanes > 1;
         let regions = (tape.regions().iter())
-            .filter(|_| !one_gather_area_serialises_lane_regions)
+            .filter(|_| !serial)
             .map(|r| ChunkRegion {
                 starts: r.starts.iter().map(|&k| chunk_at(k)).collect(),
                 hi: chunk_at(r.hi),
@@ -1053,8 +1051,8 @@ impl<'a, I: Isa> Emitter<'a, I> {
         }
     }
     fn bind(&mut self, r: u8, slot: u32, death: u32) {
-        let old_value_dead_by_tape_construction = self.cache_of_slot.remove(&slot);
-        if let Some(i) = old_value_dead_by_tape_construction {
+        if let Some(i) = self.cache_of_slot.remove(&slot) {
+            debug_assert!(self.death[i] <= self.pos);
             self.slot_of_cache[i] = None;
             self.dirty[i] = false;
         }
@@ -1750,8 +1748,7 @@ fn emit_chunk<A: Isa>(
         e.next_host_call = next_host_call_at_or_after[k];
         e.op(i);
     }
-    let past_chunk_so_later_reads_are_written_back = range.end as u32;
-    e.pos = past_chunk_so_later_reads_are_written_back;
+    e.pos = range.end as u32;
     e.flush();
     e.isa.epilogue();
     Ok(Emitted {

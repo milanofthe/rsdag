@@ -241,17 +241,13 @@ fn count_unexpected_conds(p: &mut Program, conds: &[Ref], expected: &[u8]) -> Re
         _ => Some(push(p, Kind::Reduce(ReduceOp::Sum), v)),
     };
     let n_expected_true = push(p, Kind::Const(expected_true.len() as f64), &[]);
-    let true_of_expected_false_plus_n_expected_true = match sum(p, &expected_false) {
+    let false_and_n_true = match sum(p, &expected_false) {
         Some(s) => push(p, Kind::Add, &[s, n_expected_true]),
         None => n_expected_true,
     };
     match sum(p, &expected_true) {
-        Some(s) => push(
-            p,
-            Kind::Sub,
-            &[true_of_expected_false_plus_n_expected_true, s],
-        ),
-        None => true_of_expected_false_plus_n_expected_true,
+        Some(s) => push(p, Kind::Sub, &[false_and_n_true, s]),
+        None => false_and_n_true,
     }
 }
 
@@ -523,9 +519,9 @@ impl Tape {
 fn decided(p: &Program, arm: &[Option<Ref>], r: Ref, read_by_main: bool) -> Ref {
     let mut r = r;
     while let Ref::Value(i, _) = r {
-        let main_reads_prolog_select_from_state = read_by_main && p.insts[i as usize].pure;
+        let from_state = read_by_main && p.insts[i as usize].pure;
         match arm[i as usize] {
-            Some(Ref::Input(_)) if main_reads_prolog_select_from_state => break,
+            Some(Ref::Input(_)) if from_state => break,
             Some(a) => r = a,
             None => break,
         }

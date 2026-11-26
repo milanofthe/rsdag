@@ -17,8 +17,8 @@ fn sym(g: &mut Graph<F64>, name: &str, syms: &mut Vec<SymbolId>) -> ExprId {
 
 #[test]
 fn chained_block_updates_run_natively_with_folded_kernels() {
-    let inline_dot_blocks_and_a_host_product_block = [3usize, 4, 8];
-    for b in inline_dot_blocks_and_a_host_product_block {
+    let blocks = [3usize, 4, 8];
+    for b in blocks {
         chained_block_updates(b);
     }
 }

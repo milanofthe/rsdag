@@ -622,7 +622,7 @@ impl Program {
             reads: Option<Vec<u32>>,
             stateful: bool,
             pure: bool,
-            call_depth_so_no_member_reads_another: u32,
+            depth: u32,
         }
         let m = self.insts.len();
         let mut depth = vec![0u32; m];
@@ -658,7 +658,7 @@ impl Program {
                     reads: reads.as_ref().map(|r| r.to_vec()),
                     stateful,
                     pure: self.insts[i].pure,
-                    call_depth_so_no_member_reads_another: depth[i],
+                    depth: depth[i],
                 };
                 let g = *index.entry(key).or_insert_with(|| {
                     groups.push(Vec::new());
@@ -1254,7 +1254,6 @@ impl Forest {
         let bpos = &t.pos;
         let bp = |e: ExprId| bpos[e.0 as usize] as usize;
 
-        const UNMAPPED_SYMBOL_IS_A_PURE_NAN_CONSTANT: bool = true;
         let mut pure = vec![false; m];
         if let Some(mask) = pure_inputs {
             let mut pure_list: HashMap<(u32, Site), bool> = HashMap::default();
@@ -1262,7 +1261,7 @@ impl Forest {
                 pure[i] = match *ctx.node(*id) {
                     Node::Const(_) => true,
                     Node::Symbol(s) => match t.input(s) {
-                        None => UNMAPPED_SYMBOL_IS_A_PURE_NAN_CONSTANT,
+                        None => true,
                         Some(k) => mask.get(k as usize).copied().unwrap_or(false),
                     },
                     Node::Call(o, l) => {
@@ -1630,13 +1629,8 @@ impl Forest {
         for (g, (key, members)) in groups.iter().enumerate() {
             if let GroupKey::Solve(l, pure) = key {
                 let (n, all) = (Graph::<K>::solve_n(l.len()), ctx.args(*l));
-                let depth_keeps_primal_and_derivative_solves_apart = depth[members[0]];
                 by_matrix
-                    .entry((
-                        all[..n * n].to_vec(),
-                        depth_keeps_primal_and_derivative_solves_apart,
-                        *pure,
-                    ))
+                    .entry((all[..n * n].to_vec(), depth[members[0]], *pure))
                     .or_default()
                     .push(g);
             }
@@ -1648,6 +1642,7 @@ impl Forest {
             .collect();
         merged.sort();
         for (gs, a) in merged {
+            debug_assert!(gs.windows(2).all(|w| w[0] < w[1]));
             let lists: Vec<ArgList> = gs
                 .iter()
                 .map(|&g| match &groups[g].0 {
@@ -1662,7 +1657,7 @@ impl Forest {
             groups[gs[0]] = (
                 GroupKey::SolveMany {
                     matrix: a,
-                    rhs_lists_in_first_encounter_order: lists,
+                    rhs_lists: lists,
                 },
                 members,
             );
@@ -1683,7 +1678,7 @@ impl Forest {
                 }
                 GroupKey::SolveMany {
                     matrix,
-                    rhs_lists_in_first_encounter_order: lists,
+                    rhs_lists: lists,
                 } => Some((matrix.clone(), lists.clone())),
                 _ => None,
             }
@@ -1888,7 +1883,7 @@ impl Forest {
             }
             GroupKey::SolveMany {
                 matrix: a,
-                rhs_lists_in_first_encounter_order: lists,
+                rhs_lists: lists,
             } => {
                 let n = (a.len() as f64).sqrt() as u32;
                 let k = lists.len() as u32;
@@ -2114,7 +2109,7 @@ enum GroupKey {
     Solve(ArgList, bool),
     SolveMany {
         matrix: Vec<ExprId>,
-        rhs_lists_in_first_encounter_order: Vec<ArgList>,
+        rhs_lists: Vec<ArgList>,
     },
     SolveBatch(Vec<System>),
 }

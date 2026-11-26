@@ -807,12 +807,11 @@ fn specialize_function<K: Field>(
         Output::Expr(e) if !g.is_zero(e) => o,
         _ => Output::Zero,
     });
-    let out_roles_without_parameter_indices = out_roles.into_iter().map(|r| match r {
+    let plain_roles = out_roles.into_iter().map(|r| match r {
         OutputRole::Derivative { .. } => OutputRole::Plain,
         r => r,
     });
-    let outputs: Vec<(Output, OutputRole)> =
-        outputs.zip(out_roles_without_parameter_indices).collect();
+    let outputs: Vec<(Output, OutputRole)> = outputs.zip(plain_roles).collect();
     let kept_roles: Vec<ParamRole> = kept.iter().map(|&k| roles[k]).collect();
     let params = kept.iter().map(|&k| params[k]).collect();
     g.define(&name, params, &kept_roles, None, outputs)

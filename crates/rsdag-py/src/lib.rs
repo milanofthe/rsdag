@@ -165,7 +165,7 @@ const NUMPY_NAMES_DIFFERING_FROM_RSDAG: &[(&str, Elementary)] = &[
     ("minimum", Elementary::Min),
 ];
 
-fn elementary_by_numpy_or_rsdag_name(name: &str) -> Option<Elementary> {
+fn elementary_by_name(name: &str) -> Option<Elementary> {
     NUMPY_NAMES_DIFFERING_FROM_RSDAG
         .iter()
         .find(|(n, _)| *n == name)
@@ -212,7 +212,7 @@ impl Method {
 impl Tracer {
     /// The elementwise functions by name, under rsdag's and numpy's names.
     pub fn __getattr__(&self, name: &str) -> PyResult<Method> {
-        let f = elementary_by_numpy_or_rsdag_name(name).ok_or_else(|| {
+        let f = elementary_by_name(name).ok_or_else(|| {
             PyAttributeError::new_err(format!("'Tracer' object has no attribute '{name}'"))
         })?;
         Ok(Method { t: self.clone(), f })

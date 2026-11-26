@@ -57,12 +57,12 @@ pub(crate) const KERNEL_OPERANDS_A_XB_ACCUMULATOR: usize = 3;
 
 /// The values per lane that the gather area of lane code holds for a host
 /// call: two arguments and the result.
-pub(crate) const LANE_HOST_CALL_TWO_ARGUMENTS_AND_RESULT: usize = 3;
+pub(crate) const LANE_HOST_CALL_VALUES: usize = 3;
 
 /// The cost of the scalar code per instance when the lanes are forced, so
 /// that the scalar code is never the cheaper way. The division leaves
 /// headroom for the multiples of the lane count.
-pub(crate) const FORCED_LANES_SCALAR_COST_WITHOUT_OVERFLOW: usize = usize::MAX / 16;
+pub(crate) const FORCED_LANES_SCALAR_COST: usize = usize::MAX / 16;
 
 /// The bit at which the chunk size starts in the options key of a bundle's
 /// native form (`options_key`). The key holds the chunk size, the batch
@@ -77,7 +77,7 @@ pub(crate) const OPTIONS_KEY_LANES_SHIFT: u32 = 62;
 /// whether the work goes to the background, so that the form of a bundle
 /// that the program runs is keyed by its code options and by where its work
 /// goes.
-pub(crate) const OPTIONS_KEY_FREE_BIT_FOR_BACKGROUND: u32 = 61;
+pub(crate) const OPTIONS_KEY_BACKGROUND_BIT: u32 = 61;
 
 /// AArch64 code prefetches the code ahead (`prfm plil2keep`) every this
 /// many bytes emitted. A large program streams through the front end once,

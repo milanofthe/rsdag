@@ -155,7 +155,7 @@ impl Join for Set {
     }
 }
 
-pub(crate) fn leading_operands_without_derivative(node: &Node) -> usize {
+pub(crate) fn non_diff_prefix(node: &Node) -> usize {
     match node {
         Node::Cmp(..) => 2,
         Node::Select(..) => 1,
@@ -332,7 +332,7 @@ impl<K: Field> Graph<K> {
                 _ => {
                     let ops = self.operands(e);
                     let skip = if through == Through::Carries {
-                        leading_operands_without_derivative(&node)
+                        non_diff_prefix(&node)
                     } else {
                         0
                     };

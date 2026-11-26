@@ -516,11 +516,10 @@ impl Isa for A64 {
     }
     const MINMAX: bool = true;
     fn minmax(&mut self, op: ReduceOp, d: u8, a: u8, b: u8) {
-        let ieee_min_max_num_as_f64_min_max_compiles_here = match op {
+        let opc = match op {
             ReduceOp::Min => FMINNM_D,
             _ => FMAXNM_D,
         };
-        let opc = ieee_min_max_num_as_f64_min_max_compiles_here;
         self.fbin(opc, d as u32, a as u32, b as u32);
     }
     fn abs(&mut self, d: u8, a: u8) {

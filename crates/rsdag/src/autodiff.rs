@@ -8,7 +8,7 @@ use crate::field::Field;
 use rustc_hash::FxHashMap as HashMap;
 
 use crate::func::{FuncId, OutputId};
-use crate::graph::{leading_operands_without_derivative, Graph, Join, NodeTable, Set, Through};
+use crate::graph::{non_diff_prefix, Graph, Join, NodeTable, Set, Through};
 use crate::node::{ArgList, BinOp, CmpOp, ExprId, Node, ReduceOp, SymbolId, UnaryOp};
 
 /// Derivative of `expr` with respect to the symbol `wrt`.
@@ -288,9 +288,7 @@ pub(crate) fn carrying<K: Field>(ctx: &Graph<K>, e: ExprId, out: &mut Vec<ExprId
                     .map(|&p| ctx.call_operand(o, l, p)),
             );
         }
-        ref node => {
-            out.extend_from_slice(&ctx.operands(e)[leading_operands_without_derivative(node)..])
-        }
+        ref node => out.extend_from_slice(&ctx.operands(e)[non_diff_prefix(node)..]),
     }
 }
 
@@ -380,7 +378,7 @@ fn tangent<K: Field>(
             .live_operands(ctx, e, o, l)
             .iter()
             .all(|&(_, c)| d(c) == zero),
-        _ => ctx.operands(e)[leading_operands_without_derivative(&node)..]
+        _ => ctx.operands(e)[non_diff_prefix(&node)..]
             .iter()
             .all(|&c| d(c) == zero),
     };

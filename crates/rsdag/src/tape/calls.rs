@@ -175,8 +175,7 @@ pub unsafe fn share_rows(c: &Call, slots: Shared, gather: Shared, inputs: &[f64]
         None => unsafe { gather.get(c.args + g * na + j) },
     };
     let set = |g: usize, row: usize| unsafe { slots.set(at + g, row as f64) };
-    let every_instance_shares_every_argument = own.is_empty();
-    if every_instance_shares_every_argument {
+    if own.is_empty() {
         (0..n).for_each(|g| set(g, 0));
         return;
     }

@@ -71,8 +71,7 @@ impl std::ops::Deref for Run {
 
 impl Drop for Run {
     fn drop(&mut self) {
-        let root_span_guard_dropped_before_the_record = self.on.take();
-        drop(root_span_guard_dropped_before_the_record);
+        drop(self.on.take());
         let Some(path) = std::env::var_os("RSPROBE_RECORD") else {
             return;
         };
