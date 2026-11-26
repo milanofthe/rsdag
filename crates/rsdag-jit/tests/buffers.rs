@@ -1,37 +1,19 @@
 //! The native backend over a reused, larger or poisoned work buffer: the
 //! same result as over a fresh one.
 
+#[path = "../../rsdag/tests/common/mod.rs"]
+mod common;
+use common::sine_series;
+
 use rsdag::Program;
-use rsdag::{ExprId, Graph, Node, SymbolId, Tape, F64};
+use rsdag::{Graph, Tape, F64};
 use rsdag_jit::NativeTape;
-
-fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
-    match g.node(e) {
-        Node::Symbol(s) => *s,
-        _ => unreachable!(),
-    }
-}
-
-fn chain(g: &mut Graph<F64>, n: usize) -> (ExprId, Vec<SymbolId>) {
-    let (p, x) = (g.sym("p"), g.sym("x"));
-    let mut acc = g.zero();
-    let mut xp = g.one();
-    for k in 0..n {
-        let kk = g.konst_f64(k as f64);
-        let pk = g.mul(p, kk);
-        let s = g.sin(pk);
-        let t = g.mul(s, xp);
-        acc = g.add(acc, t);
-        xp = g.mul(xp, x);
-    }
-    (acc, vec![sym(g, p), sym(g, x)])
-}
 
 #[test]
 fn a_reused_buffer_gives_the_fresh_result() {
     let mut g: Graph<F64> = Graph::new();
-    let (big, syms) = chain(&mut g, 300);
-    let (small, _) = chain(&mut g, 7);
+    let (big, syms) = sine_series(&mut g, 300);
+    let (small, _) = sine_series(&mut g, 7);
     let big_tape = Tape::compile_split(&g, &[big], &syms, &[true, false]);
     let small_tape = Tape::compile_split(&g, &[small], &syms, &[true, false]);
     let big_native = NativeTape::compile(&big_tape).expect("compile");

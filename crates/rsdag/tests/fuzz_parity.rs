@@ -7,6 +7,9 @@
 //! draws from the same population and a new op is covered here the moment it
 //! is drawable there.
 
+mod common;
+use common::same_bits;
+
 use rsdag::Program;
 use std::collections::HashMap;
 
@@ -20,10 +23,6 @@ fn sym_id(ctx: &Graph<BigRational>, e: ExprId) -> SymbolId {
         Node::Symbol(s) => s,
         _ => unreachable!(),
     }
-}
-
-fn same_bits(a: f64, b: f64) -> bool {
-    a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
 }
 
 /// One generated expression over `syms`, drawn from the vocabulary the test

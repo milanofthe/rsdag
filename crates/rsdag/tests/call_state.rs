@@ -3,16 +3,11 @@
 //! split over those parameters runs that prolog in its own prolog, once
 //! per binding, and only the rest per evaluation.
 
-use rsdag::Program;
-use rsdag::{ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
+mod common;
+use common::{identical, sym};
 
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    let Node::Symbol(s) = *g.node(e) else {
-        unreachable!()
-    };
-    (e, s)
-}
+use rsdag::Program;
+use rsdag::{FuncId, Graph, OutputRole, ParamRole, Scope, Tape, F64};
 
 /// `f(v, p) = [tanh(v) * k(p), v^2 + k(p)]` with `k(p)` an expensive chain
 /// over `p` alone: the prolog's work.
@@ -34,10 +29,6 @@ fn device(g: &mut Graph<F64>) -> FuncId {
     s.param(vs, ParamRole::State { id: 0 });
     s.param(ps, ParamRole::Param);
     s.close([(o0, OutputRole::Plain), (o1, OutputRole::Plain)])
-}
-
-fn same(a: &[f64], b: &[f64]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
 }
 
 #[test]
@@ -86,7 +77,7 @@ fn a_split_caller_runs_the_callees_prolog_in_its_own() {
             split.eval_main_into(&ins(t), &mut w, &mut got);
             whole.eval(&ins(t), &mut ww, &mut want);
             assert!(
-                same(&got, &want),
+                identical(&got, &want),
                 "{n} instances at t = {t}: {got:?} vs {want:?}"
             );
         }
@@ -130,7 +121,7 @@ fn instances_of_the_same_parameters_share_a_state_with_the_same_results() {
         for t in [0.0, 0.5, -1.25] {
             split.eval_main_into(&ins(t), &mut w, &mut got);
             whole.eval(&ins(t), &mut ww, &mut want);
-            assert!(same(&got, &want), "at t = {t}: {got:?} vs {want:?}");
+            assert!(identical(&got, &want), "at t = {t}: {got:?} vs {want:?}");
         }
     };
     run();
@@ -223,6 +214,6 @@ fn instances_share_rows_by_the_arguments_they_own() {
         let (mut got, mut ww, mut out) = (vec![0.0; split.out_len()], Vec::new(), Vec::new());
         split.eval_main_into(&vals, &mut w, &mut got);
         whole.eval(&vals, &mut ww, &mut out);
-        assert!(same(&got, &out), "{got:?} vs {out:?}");
+        assert!(identical(&got, &out), "{got:?} vs {out:?}");
     }
 }

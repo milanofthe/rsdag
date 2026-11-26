@@ -3,12 +3,15 @@
 //! interpreter and in native code; no piece writes a slot another piece
 //! reads or writes.
 
+#[path = "../../rsdag/tests/common/mod.rs"]
+mod common;
+use common::{bits, pool};
+
 use rsdag::Program;
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use rsdag::node::CmpOp;
-use rsdag::parallel::{self, Lent};
+use rsdag::parallel::{self};
 use rsdag::tape::Op;
 use rsdag::{ExprId, Graph, Node, ReduceOp, SymbolId, Tape, F64};
 use rsdag_jit::NativeTape;
@@ -61,21 +64,10 @@ fn assembly() -> (Graph<F64>, Vec<ExprId>, Vec<SymbolId>) {
     (g, roots, syms)
 }
 
-fn pool(threads: usize) -> Lent {
-    Lent {
-        pool: Arc::new(parallel::Workers::new(threads)),
-        dispatch: rsdag::parallel::Dispatch::free(threads),
-    }
-}
-
 fn inputs(shift: f64) -> Vec<f64> {
     (0..N)
         .map(|k| 0.3 + shift + 0.011 * k as f64 - (k % 7) as f64 * 0.09)
         .collect()
-}
-
-fn bits(v: &[f64]) -> Vec<u64> {
-    v.iter().map(|x| x.to_bits()).collect()
 }
 
 #[test]

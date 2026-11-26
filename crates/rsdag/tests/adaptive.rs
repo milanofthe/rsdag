@@ -1,16 +1,12 @@
 //! The adaptive program without native code (a wasm build, say): the
 //! interpreter and its choice specialization, bit for bit the interpreter.
 
+mod common;
+use common::same;
+
 use rsdag::synth::{build, inputs, Rng, Spec, Vocabulary};
 use rsdag::Program;
 use rsdag::{Adaptive, Graph, Policy, Tape, F64};
-
-fn same(a: &[f64], b: &[f64]) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .zip(b)
-            .all(|(x, y)| x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()))
-}
 
 #[test]
 fn specialization_alone_is_the_interpreter() {

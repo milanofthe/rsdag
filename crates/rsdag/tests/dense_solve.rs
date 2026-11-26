@@ -1,18 +1,14 @@
 //! The dense solve as a node: one pivoting kernel for all components,
 //! exact against the reference routine and differentiable in both modes.
 
+mod common;
+use common::symbol_of;
+
 use rsdag::Program;
 use std::collections::HashMap;
 
 use rsdag::synth::Spec;
-use rsdag::{ExprId, Graph, Node, SymbolId, Tape, F64};
-
-fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
-    match g.node(e) {
-        Node::Symbol(s) => *s,
-        _ => unreachable!(),
-    }
-}
+use rsdag::{ExprId, Graph, SymbolId, Tape, F64};
 
 /// A random diagonally dominant system over symbols, with its values.
 fn system(
@@ -25,7 +21,7 @@ fn system(
     let a: Vec<ExprId> = (0..n * n)
         .map(|k| {
             let e = g.sym(&format!("a{k}"));
-            syms.push(sym(g, e));
+            syms.push(symbol_of(g, e));
             vals.push(if k / n == k % n {
                 4.0 + rng.val()
             } else {
@@ -37,7 +33,7 @@ fn system(
     let b: Vec<ExprId> = (0..n)
         .map(|i| {
             let e = g.sym(&format!("b{i}"));
-            syms.push(sym(g, e));
+            syms.push(symbol_of(g, e));
             vals.push(rng.val());
             e
         })

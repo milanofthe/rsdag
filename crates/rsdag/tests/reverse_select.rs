@@ -6,21 +6,16 @@
 //! and below `REVERSE_MIN_TOUCHED`, behind every rule of the reverse sweep.
 //! The bound is the forward result's.
 
+mod common;
+use common::sym;
+
 use rsdag::autodiff::REVERSE_MIN_TOUCHED;
 use rsdag::eval::eval;
 use rsdag::{
-    differentiate, gradient, sparse_jacobian, BinOp, CmpOp, ExprId, Graph, Node, OutputRole,
-    ParamRole, ReduceOp, Scope, SymbolId, UnaryOp, F64,
+    differentiate, gradient, sparse_jacobian, BinOp, CmpOp, ExprId, Graph, OutputRole, ParamRole,
+    ReduceOp, Scope, SymbolId, UnaryOp, F64,
 };
 use std::collections::HashMap;
-
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    let Node::Symbol(s) = *g.node(e) else {
-        unreachable!()
-    };
-    (e, s)
-}
 
 /// Reverse against forward for `f` by `wrt` at `env`: equal within the
 /// rounding of the forward value, and finite.

@@ -6,6 +6,9 @@
 //! caller binding a global by a parameter of its own name. Each against the
 //! program with every call inlined, where the globals are plain symbols.
 
+mod common;
+use common::sym;
+
 use rsdag::Program;
 use std::collections::HashMap;
 
@@ -14,14 +17,6 @@ use rsdag::{
     ReduceOp, Scope, SymbolId, Tape, F64,
 };
 use rustc_hash::FxHashMap;
-
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    let Node::Symbol(s) = *g.node(e) else {
-        unreachable!()
-    };
-    (e, s)
-}
 
 /// `d(va, vb)` reading the card `t1`, `t2`: `t1 tanh(va - vb) + exp(t2 va)`
 /// and its negation.

@@ -2,19 +2,14 @@
 //! program: a view computes what its own compilation computes, value for
 //! value, and its calls run bodies of the outputs it reads only.
 
+mod common;
+use common::sym;
+
 use rsdag::Program;
 use rsdag::{
     sparse_jacobian, tape::Op, ExprId, FuncId, Graph, Lowered, Node, OutputRole, ParamRole,
     ReduceOp, Scope, SymbolId, Tape, F64,
 };
-
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    let Node::Symbol(s) = *g.node(e) else {
-        unreachable!()
-    };
-    (e, s)
-}
 
 /// `d(va, vb, k, w)`: a current and a charge over a card parameter and an
 /// instance parameter, those pure with `roles` (a body with a prolog).

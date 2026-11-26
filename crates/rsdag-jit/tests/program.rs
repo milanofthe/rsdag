@@ -2,16 +2,13 @@
 //! outputs through `Program`, and a prolog by either serves the other's
 //! main phase.
 
+#[path = "../../rsdag/tests/common/mod.rs"]
+mod common;
+use common::same;
+
 use rsdag::synth::{build, inputs, Spec, Vocabulary};
 use rsdag::{Graph, Program, Tape, F64};
 use rsdag_jit::NativeTape;
-
-fn same(a: &[f64], b: &[f64]) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .zip(b)
-            .all(|(x, y)| x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()))
-}
 
 #[test]
 fn both_backends_through_one_interface() {

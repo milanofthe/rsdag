@@ -4,21 +4,16 @@
 //! no specialization, whether the shortened bodies are compiled where they
 //! are first needed or in the background while the evaluations go on.
 
+#[path = "../../rsdag/tests/common/mod.rs"]
+mod common;
+use common::{same, sym};
+
 use rsdag::variant::VariantPolicy;
 use rsdag::Program;
 use rsdag::{
-    BodyBackend, ChoicePolicy, CmpOp, ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope,
-    SymbolId, Tape, F64,
+    BodyBackend, ChoicePolicy, CmpOp, FuncId, Graph, OutputRole, ParamRole, Scope, Tape, F64,
 };
 use rsdag_jit::{Lanes, NativeTape, Options};
-
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    let Node::Symbol(s) = *g.node(e) else {
-        unreachable!()
-    };
-    (e, s)
-}
 
 /// `f(v, p)`: a sum of regions of `v`, a heavy arm above each threshold
 /// and a light one below; the instances start between 0.7 and 0.9, most
@@ -81,13 +76,6 @@ fn tape(n: usize, choices: bool) -> (Tape, Vec<f64>) {
         ..BodyBackend::default()
     });
     (t, ins)
-}
-
-fn same(a: &[f64], b: &[f64]) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .zip(b)
-            .all(|(x, y)| x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()))
 }
 
 fn run(n: usize, background: bool, lanes: Lanes) {

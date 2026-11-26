@@ -2,17 +2,13 @@
 //! call whatever their arguments are, and instances that feed instances
 //! batch by call depth.
 
+mod common;
+use common::symbol_of;
+
 use rsdag::Program;
 use std::collections::HashMap;
 
-use rsdag::{ExprId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
-
-fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
-    match g.node(e) {
-        Node::Symbol(s) => *s,
-        _ => unreachable!(),
-    }
-}
+use rsdag::{ExprId, Graph, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
 
 /// `cell(a, b) = exp(a) - b*b + a`.
 fn cell(g: &mut Graph<F64>) -> rsdag::FuncId {
@@ -36,7 +32,7 @@ fn instances_with_computed_arguments_batch_into_one_call() {
     let mut g: Graph<F64> = Graph::new();
     let f = cell(&mut g);
     let xs: Vec<ExprId> = (0..n).map(|i| g.sym(&format!("x{i}"))).collect();
-    let syms: Vec<SymbolId> = xs.iter().map(|&e| sym(&g, e)).collect();
+    let syms: Vec<SymbolId> = xs.iter().map(|&e| symbol_of(&g, e)).collect();
     // Arguments are expressions of the inputs, not the inputs themselves.
     let roots: Vec<ExprId> = (0..n)
         .map(|i| {
@@ -64,7 +60,7 @@ fn instances_that_feed_instances_batch_by_depth() {
     let mut g: Graph<F64> = Graph::new();
     let f = cell(&mut g);
     let xs: Vec<ExprId> = (0..n).map(|i| g.sym(&format!("x{i}"))).collect();
-    let syms: Vec<SymbolId> = xs.iter().map(|&e| sym(&g, e)).collect();
+    let syms: Vec<SymbolId> = xs.iter().map(|&e| symbol_of(&g, e)).collect();
     // A first layer of instances, then a second layer fed by the first.
     let first: Vec<ExprId> = (0..n)
         .map(|i| g.call(f, 0, &[xs[i], xs[(i + 1) % n]]))

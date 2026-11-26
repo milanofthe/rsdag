@@ -2,23 +2,15 @@
 //! compute exactly what the serial loop computes: prologs, main phases over
 //! the instances' states, and calls without state.
 
-use rsdag::Program;
-use std::sync::Arc;
+mod common;
+use common::{bits, pool, sym};
 
-use rsdag::parallel::{self, Lent};
-use rsdag::{
-    ExprId, FuncId, Graph, Node, OutputRole, ParamRole, ReduceOp, Scope, SymbolId, Tape, F64,
-};
+use rsdag::Program;
+
+use rsdag::parallel::{self};
+use rsdag::{ExprId, FuncId, Graph, OutputRole, ParamRole, ReduceOp, Scope, SymbolId, Tape, F64};
 
 const N: usize = 64;
-
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    match *g.node(e) {
-        Node::Symbol(s) => (e, s),
-        _ => unreachable!(),
-    }
-}
 
 /// A two-terminal device: the current `p0 tanh(p1 (a - b))` and a charge
 /// `p0 exp(-a b)`, its parameters with the `Param` role.
@@ -70,13 +62,6 @@ fn ring() -> (Graph<F64>, Vec<ExprId>, Vec<SymbolId>, Vec<bool>) {
     (g, roots, syms, pure)
 }
 
-fn pool(threads: usize) -> Lent {
-    Lent {
-        pool: Arc::new(parallel::Workers::new(threads)),
-        dispatch: rsdag::parallel::Dispatch::free(threads),
-    }
-}
-
 fn inputs() -> Vec<f64> {
     (0..3 * N)
         .map(|k| 0.3 + 0.01 * k as f64 - (k % 7) as f64 * 0.05)
@@ -87,10 +72,6 @@ fn eval(tape: &Tape, x: &[f64]) -> Vec<f64> {
     let (mut w, mut out) = (Vec::new(), Vec::new());
     tape.eval(x, &mut w, &mut out);
     out
-}
-
-fn bits(v: &[f64]) -> Vec<u64> {
-    v.iter().map(|x| x.to_bits()).collect()
 }
 
 #[test]

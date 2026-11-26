@@ -9,19 +9,13 @@
 //!
 //!     cargo run --release -p rsdag --example hierarchy
 
+#[path = "../tests/common/mod.rs"]
+mod common;
+use common::sym;
+
 use std::time::Instant;
 
-use rsdag::{
-    sparse_jacobian, ExprId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64,
-};
-
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    match *g.node(e) {
-        Node::Symbol(s) => (e, s),
-        _ => unreachable!(),
-    }
-}
+use rsdag::{sparse_jacobian, ExprId, Graph, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
 
 fn main() {
     println!("n,build_ms,jacobian_ms,substitute_ms,specialize_ms,program_ms,nodes");

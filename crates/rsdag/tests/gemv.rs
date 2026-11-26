@@ -3,8 +3,10 @@
 //! otherwise, bit-identical to the rows as separate dots, and surviving
 //! specialization.
 
+mod common;
+use common::assert_matches_eval;
+
 use rsdag::Program;
-use std::collections::HashMap;
 
 use rsdag::{ExprId, Graph, SymbolId, Tape, F64};
 
@@ -29,16 +31,6 @@ fn statespace(g: &mut Graph<F64>, n: usize, m: usize) -> (Vec<ExprId>, Vec<Symbo
     (roots, syms)
 }
 
-fn check(g: &Graph<F64>, roots: &[ExprId], syms: &[SymbolId], tape: &Tape, inputs: &[f64]) {
-    let env: HashMap<SymbolId, f64> = syms.iter().copied().zip(inputs.iter().copied()).collect();
-    let want = rsdag::eval(g, roots, &env);
-    let (mut w, mut o) = (Vec::new(), Vec::new());
-    tape.eval(inputs, &mut w, &mut o);
-    for (k, (a, b)) in want.iter().zip(&o).enumerate() {
-        assert_eq!(a.to_bits(), b.to_bits(), "output {k}: {a} vs {b}");
-    }
-}
-
 #[test]
 fn a_state_space_block_is_two_kernels_over_inputs_in_place() {
     let (n, m) = (16, 3);
@@ -57,7 +49,7 @@ fn a_state_space_block_is_two_kernels_over_inputs_in_place() {
     let inputs: Vec<f64> = (0..syms.len())
         .map(|k| 0.01 * (k % 13) as f64 - 0.05)
         .collect();
-    check(&g, &roots, &syms, &tape, &inputs);
+    assert_matches_eval(&g, &roots, &syms, &tape, &inputs);
 }
 
 #[test]
@@ -81,7 +73,7 @@ fn computed_entries_are_gathered_and_short_inputs_read_as_nan() {
     let tape = Tape::compile(&g, &roots, &syms);
     assert_eq!(gemvs_in(&tape), 1, "{}", tape.dump());
     let inputs: Vec<f64> = (0..n).map(|k| 0.1 + 0.07 * k as f64).collect();
-    check(&g, &roots, &syms, &tape, &inputs);
+    assert_matches_eval(&g, &roots, &syms, &tape, &inputs);
     // A run of inputs read in place, with fewer inputs than the run: NaN.
     let (roots2, syms2) = statespace(&mut g, 8, 1);
     let tape2 = Tape::compile(&g, &roots2, &syms2);

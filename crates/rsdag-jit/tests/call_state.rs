@@ -3,17 +3,13 @@
 //! and since both backends lay out the state the same way, a prolog run by
 //! one serves the main phase of the other.
 
-use rsdag::Program;
-use rsdag::{ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
-use rsdag_jit::NativeTape;
+#[path = "../../rsdag/tests/common/mod.rs"]
+mod common;
+use common::{identical, sym};
 
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    let Node::Symbol(s) = *g.node(e) else {
-        unreachable!()
-    };
-    (e, s)
-}
+use rsdag::Program;
+use rsdag::{FuncId, Graph, OutputRole, ParamRole, Scope, Tape, F64};
+use rsdag_jit::NativeTape;
 
 fn device(g: &mut Graph<F64>) -> FuncId {
     let (v, vs) = sym(g, "dev.v");
@@ -33,10 +29,6 @@ fn device(g: &mut Graph<F64>) -> FuncId {
     s.param(vs, ParamRole::State { id: 0 });
     s.param(ps, ParamRole::Param);
     s.close([(o0, OutputRole::Plain), (o1, OutputRole::Plain)])
-}
-
-fn same(a: &[f64], b: &[f64]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
 }
 
 #[test]
@@ -75,7 +67,7 @@ fn stateful_calls_run_natively_and_share_the_state_layout() {
         for t in [0.0, 0.5, -1.25] {
             tape.eval(&ins(t), &mut w, &mut want);
             native.eval_main(&ins(t), &mut nw, &mut got);
-            assert!(same(&got, &want), "{n}: native at t = {t}");
+            assert!(identical(&got, &want), "{n}: native at t = {t}");
         }
         // The interpreter's prolog under the native main phase, and back.
         let s = tape.state_len();
@@ -85,11 +77,14 @@ fn stateful_calls_run_natively_and_share_the_state_layout() {
         nw2[..s].copy_from_slice(&iw[..s]);
         native.eval_main(&ins(0.75), &mut nw2, &mut got);
         tape.eval(&ins(0.75), &mut w, &mut want);
-        assert!(same(&got, &want), "{n}: interpreter prolog, native main");
+        assert!(
+            identical(&got, &want),
+            "{n}: interpreter prolog, native main"
+        );
         let mut iw2 = vec![f64::NAN; tape.work_len()];
         iw2[..s].copy_from_slice(&nw[..s]);
         let mut o = vec![0.0; tape.out_len()];
         tape.eval_main_into(&ins(0.75), &mut iw2, &mut o);
-        assert!(same(&o, &want), "{n}: native prolog, interpreter main");
+        assert!(identical(&o, &want), "{n}: native prolog, interpreter main");
     }
 }

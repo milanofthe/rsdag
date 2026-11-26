@@ -8,18 +8,11 @@
 
 use rsdag::Program;
 mod common;
+use common::graph::sym;
 use common::per_call;
 
-use rsdag::{CmpOp, ExprId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
+use rsdag::{CmpOp, ExprId, Graph, OutputRole, ParamRole, Scope, SymbolId, Tape, F64};
 use rsdag_jit::NativeTape;
-
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    let Node::Symbol(s) = *g.node(e) else {
-        unreachable!()
-    };
-    (e, s)
-}
 
 fn chain(g: &mut Graph<F64>, x: ExprId, n: usize, c: f64) -> ExprId {
     let mut y = x;

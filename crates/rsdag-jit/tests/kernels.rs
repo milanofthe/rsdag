@@ -2,13 +2,13 @@
 //! products and the dense solve, inputs read in place and gathered slots,
 //! bit-identical to the interpreter.
 
+#[path = "../../rsdag/tests/common/mod.rs"]
+mod common;
+use common::identical;
+
 use rsdag::Program;
 use rsdag::{ExprId, Graph, SymbolId, Tape, F64};
 use rsdag_jit::NativeTape;
-
-fn same(a: &[f64], b: &[f64]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
-}
 
 #[test]
 fn the_gemv_kernel_matches_the_interpreter() {
@@ -46,7 +46,7 @@ fn the_gemv_kernel_matches_the_interpreter() {
         let (mut w1, mut o1, mut w2, mut o2) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         tape.eval(&inputs, &mut w1, &mut o1);
         native.eval(&inputs, &mut w2, &mut o2);
-        assert!(same(&o1, &o2), "n {n} computed {computed}");
+        assert!(identical(&o1, &o2), "n {n} computed {computed}");
     }
 }
 
@@ -84,7 +84,7 @@ fn the_gemm_kernel_matches_the_interpreter() {
         let (mut w1, mut o1, mut w2, mut o2) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         tape.eval(&inputs, &mut w1, &mut o1);
         native.eval(&inputs, &mut w2, &mut o2);
-        assert!(same(&o1, &o2), "m {m} k {k} n {n} computed {computed}");
+        assert!(identical(&o1, &o2), "m {m} k {k} n {n} computed {computed}");
     }
 }
 
@@ -120,7 +120,7 @@ fn the_solve_kernel_matches_the_interpreter() {
         tape.eval(&inputs, &mut w1, &mut o1);
         native.eval(&inputs, &mut w2, &mut o2);
         assert!(
-            same(&o1, &o2),
+            identical(&o1, &o2),
             "n {n} computed {computed}: {o1:?} vs {o2:?}"
         );
     }
@@ -154,7 +154,7 @@ fn the_multi_solve_kernel_matches_the_interpreter() {
     let (mut w1, mut o1, mut w2, mut o2) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     tape.eval(&inputs, &mut w1, &mut o1);
     native.eval(&inputs, &mut w2, &mut o2);
-    assert!(same(&o1, &o2));
+    assert!(identical(&o1, &o2));
 }
 
 /// Independent solves of one shape run as one batch (up to sixteen
@@ -219,7 +219,7 @@ fn a_batch_of_solves_matches_each_solve_alone() {
         let (mut w1, mut o1, mut w2, mut o2) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         tape.eval(&inputs, &mut w1, &mut o1);
         native.eval(&inputs, &mut w2, &mut o2);
-        assert!(same(&o1, &o2), "n {n} count {count}: native differs");
+        assert!(identical(&o1, &o2), "n {n} count {count}: native differs");
         // Each solve compiled alone.
         let mut at = 0;
         let mut i = 0;
@@ -229,7 +229,7 @@ fn a_batch_of_solves_matches_each_solve_alone() {
             let (mut w, mut o) = (Vec::new(), Vec::new());
             alone.eval(&inputs, &mut w, &mut o);
             assert!(
-                same(&o, &o1[at..at + n]),
+                identical(&o, &o1[at..at + n]),
                 "n {n} count {count}: solve {i} differs"
             );
             at += n;

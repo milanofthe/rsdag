@@ -6,6 +6,9 @@
 //! several right-hand sides is each solved alone, and a batch of systems is
 //! each system solved alone.
 
+mod common;
+use common::identical;
+
 use rsdag::semantics::{
     dot_slice, gemm, gemv, reduce_slice, solve, solve_batch_into, solve_many, solve_many_into,
     solve_scratch_len,
@@ -21,10 +24,6 @@ fn values(rng: &mut rsdag::synth::Rng, len: usize) -> Vec<f64> {
             v * 10f64.powi((rng.val() * 8.0) as i32 - 4)
         })
         .collect()
-}
-
-fn same(a: &[f64], b: &[f64]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
 }
 
 #[test]
@@ -54,7 +53,7 @@ fn gemv_rows_are_dots() {
         let mut y = vec![0.0; m];
         gemv(&a, &x, m, n, &mut y);
         let rows: Vec<f64> = (0..m).map(|i| dot_slice(&a[i * n..][..n], &x)).collect();
-        assert!(same(&y, &rows), "m {m} n {n}");
+        assert!(identical(&y, &rows), "m {m} n {n}");
     }
 }
 
@@ -78,7 +77,7 @@ fn gemm_entries_are_dots() {
         let entries: Vec<f64> = (0..m * n)
             .map(|e| dot_slice(&a[e / n * k..][..k], &b[e % n * k..][..k]))
             .collect();
-        assert!(same(&c, &entries), "m {m} k {k} n {n}");
+        assert!(identical(&c, &entries), "m {m} k {k} n {n}");
     }
 }
 
@@ -101,7 +100,10 @@ fn each_right_hand_side_is_solved_as_alone() {
         for c in 0..k {
             let mut xc = vec![0.0; n];
             solve(&a, &b[c * n..(c + 1) * n], n, &mut xc);
-            assert!(same(&x[c * n..(c + 1) * n], &xc), "n {n} k {k} column {c}");
+            assert!(
+                identical(&x[c * n..(c + 1) * n], &xc),
+                "n {n} k {k} column {c}"
+            );
         }
     }
 }
@@ -140,7 +142,7 @@ fn a_batch_of_solves_matches_each_solve_alone() {
                         &mut scratch,
                     );
                     assert!(
-                        same(&x1[c * sb..(c + 1) * sb], &x2),
+                        identical(&x1[c * sb..(c + 1) * sb], &x2),
                         "n {n} k {k} count {count} instance {c}"
                     );
                 }

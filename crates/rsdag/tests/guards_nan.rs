@@ -2,19 +2,14 @@
 //! NaN argument stays NaN through `exp`, `ln` and `sqrt` and through their
 //! derivatives, while the clamped values themselves are unchanged.
 
+mod common;
+use common::sym;
+
 use rsdag::node::UnaryOp;
 use rsdag::semantics::{unary_f64, LN_FLOOR};
 use rsdag::BigRational;
 use rsdag::Program;
-use rsdag::{differentiate, ExprId, Graph, Node, SymbolId, Tape, F64};
-
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    let Node::Symbol(s) = *g.node(e) else {
-        unreachable!()
-    };
-    (e, s)
-}
+use rsdag::{differentiate, Graph, Node, Tape, F64};
 
 #[test]
 fn nan_passes_every_guard() {

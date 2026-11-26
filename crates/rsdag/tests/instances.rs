@@ -2,20 +2,15 @@
 //! walks calls (rewriting, specializing, differentiating, compiling) works
 //! on the list once per instance. The results are the inlined graph's.
 
+mod common;
+use common::sym;
+
 use rsdag::Program;
 use rsdag::{
-    sparse_jacobian, ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64,
+    sparse_jacobian, ExprId, FuncId, Graph, OutputRole, ParamRole, Scope, SymbolId, Tape, F64,
 };
 
 const N: usize = 40;
-
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    match *g.node(e) {
-        Node::Symbol(s) => (e, s),
-        _ => unreachable!(),
-    }
-}
 
 /// body(v, p): output k is p_k v_k^2 + sin(v_{k+1}) through a callee
 /// + 3 v_{k+2}, every output reading four of the 2 N parameters.

@@ -2,37 +2,17 @@
 //! bigger tape serves a smaller one's prolog and main passes unchanged, and
 //! nothing an evaluation reads depends on what the buffer held before.
 
+mod common;
+use common::sine_series;
+
 use rsdag::Program;
-use rsdag::{ExprId, Graph, Node, SymbolId, Tape, F64};
-
-fn sym(g: &Graph<F64>, e: ExprId) -> SymbolId {
-    match g.node(e) {
-        Node::Symbol(s) => *s,
-        _ => unreachable!(),
-    }
-}
-
-/// `sum_k sin(p * k) * x^k` over `n` terms: `p` parameter-pure, `x` not.
-fn chain(g: &mut Graph<F64>, n: usize) -> (ExprId, Vec<SymbolId>) {
-    let (p, x) = (g.sym("p"), g.sym("x"));
-    let mut acc = g.zero();
-    let mut xp = g.one();
-    for k in 0..n {
-        let kk = g.konst_f64(k as f64);
-        let pk = g.mul(p, kk);
-        let s = g.sin(pk);
-        let t = g.mul(s, xp);
-        acc = g.add(acc, t);
-        xp = g.mul(xp, x);
-    }
-    (acc, vec![sym(g, p), sym(g, x)])
-}
+use rsdag::{Graph, Tape, F64};
 
 #[test]
 fn a_larger_buffer_from_another_tape_serves_prolog_and_main() {
     let mut g: Graph<F64> = Graph::new();
-    let (big, syms) = chain(&mut g, 200);
-    let (small, _) = chain(&mut g, 5);
+    let (big, syms) = sine_series(&mut g, 200);
+    let (small, _) = sine_series(&mut g, 5);
     let big_tape = Tape::compile_split(&g, &[big], &syms, &[true, false]);
     let small_tape = Tape::compile_split(&g, &[small], &syms, &[true, false]);
     let inputs: [f64; 2] = [0.3, 0.7];

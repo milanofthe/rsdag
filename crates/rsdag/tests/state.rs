@@ -2,16 +2,12 @@
 //! the main phase needs of it, so an instance's prolog result can be saved
 //! as that prefix and the main phase run on any other buffer holding it.
 
+mod common;
+use common::same;
+
 use rsdag::synth::{build, inputs, Spec, Vocabulary};
 use rsdag::Program;
 use rsdag::{Graph, Tape, F64};
-
-fn same(a: &[f64], b: &[f64]) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .zip(b)
-            .all(|(x, y)| x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()))
-}
 
 #[test]
 fn the_state_prefix_carries_the_prolog() {

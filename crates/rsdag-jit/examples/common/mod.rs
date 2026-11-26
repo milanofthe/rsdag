@@ -2,6 +2,9 @@
 
 use std::time::Instant;
 
+#[path = "../../../rsdag/tests/common/mod.rs"]
+pub mod graph;
+
 /// The shortest batch of calls a timing takes, in seconds.
 const BATCH_S: f64 = 0.05;
 

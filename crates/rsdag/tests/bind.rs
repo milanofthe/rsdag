@@ -4,22 +4,17 @@
 //! once per card) evaluates, differentiates, specializes, inlines, compiles
 //! and serializes to the same bits.
 
+mod common;
+use common::{bits, sym};
+
 use rsdag::Program;
 use std::collections::HashMap;
 
 use rsdag::{
-    eval, sparse_jacobian, substitute, ExprId, FuncId, Graph, Node, OutputRole, ParamRole,
-    ReduceOp, Scope, SymbolId, Tape, F64,
+    eval, sparse_jacobian, substitute, ExprId, FuncId, Graph, OutputRole, ParamRole, ReduceOp,
+    Scope, SymbolId, Tape, F64,
 };
 use rustc_hash::FxHashMap;
-
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    let Node::Symbol(s) = *g.node(e) else {
-        unreachable!()
-    };
-    (e, s)
-}
 
 const CARD: usize = 6;
 
@@ -120,10 +115,6 @@ fn env(b: &Built) -> HashMap<SymbolId, f64> {
         .enumerate()
         .map(|(k, &s)| (s, 0.05 + 0.037 * k as f64))
         .collect()
-}
-
-fn bits(v: &[f64]) -> Vec<u64> {
-    v.iter().map(|x| x.to_bits()).collect()
 }
 
 /// The values of every entry of a sparse Jacobian, by row.

@@ -3,20 +3,15 @@
 //! derivatives bit for bit the full body's, through bindings that flip the
 //! branches.
 
+#[path = "common/mod.rs"]
+pub mod common;
+use common::{identical, sym};
+
 use rsdag::variant::VariantPolicy;
 use rsdag::Program;
 use rsdag::{
-    BodyBackend, CmpOp, ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape,
-    F64,
+    BodyBackend, CmpOp, ExprId, FuncId, Graph, OutputRole, ParamRole, Scope, SymbolId, Tape, F64,
 };
-
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    let Node::Symbol(s) = *g.node(e) else {
-        unreachable!()
-    };
-    (e, s)
-}
 
 /// A chain of `n` transcendental steps over `x`: an arm worth removing.
 fn chain(g: &mut Graph<F64>, x: ExprId, n: usize, c: f64) -> ExprId {
@@ -124,10 +119,6 @@ pub fn variant_of(body: &dyn rsdag::ExternBundle, pure: &[f64]) -> f64 {
     state[body.state_len() - 1]
 }
 
-pub fn same(a: &[f64], b: &[f64]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
-}
-
 #[test]
 fn a_parameter_branching_body_runs_its_variants() {
     for n in [1usize, 12] {
@@ -144,7 +135,7 @@ fn a_parameter_branching_body_runs_its_variants() {
                 let ins = inputs(n, t, binding);
                 split.eval_main_into(&ins, &mut w, &mut got);
                 whole.eval(&ins, &mut ww, &mut want);
-                assert!(same(&got, &want), "{n} at {binding:#x}, t = {t}");
+                assert!(identical(&got, &want), "{n} at {binding:#x}, t = {t}");
             }
         }
     }
@@ -190,7 +181,7 @@ fn derivatives_through_the_variants_are_the_full_bodys() {
         let ins = inputs(n, 0.25, binding);
         split.eval_main_into(&ins, &mut w, &mut got);
         whole.eval(&ins, &mut ww, &mut want);
-        assert!(same(&got, &want), "at {binding:#x}");
+        assert!(identical(&got, &want), "at {binding:#x}");
     }
 }
 
@@ -254,6 +245,6 @@ fn a_decided_prolog_select_stays_in_the_state() {
     for t in [0.0, 0.3] {
         split.eval_main_into(&ins(t), &mut w, &mut got);
         whole.eval(&ins(t), &mut ww, &mut want);
-        assert!(same(&got, &want), "t = {t}: {got:?} vs {want:?}");
+        assert!(identical(&got, &want), "t = {t}: {got:?} vs {want:?}");
     }
 }

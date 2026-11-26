@@ -3,8 +3,8 @@
 //! as separate dots, whatever order the entries were built in, and
 //! surviving specialization.
 
-use rsdag::Program;
-use std::collections::HashMap;
+mod common;
+use common::assert_matches_eval;
 
 use rsdag::{ExprId, Graph, SymbolId, Tape, F64};
 
@@ -37,16 +37,6 @@ fn matmul(
     (roots, syms)
 }
 
-fn check(g: &Graph<F64>, roots: &[ExprId], syms: &[SymbolId], tape: &Tape, inputs: &[f64]) {
-    let env: HashMap<SymbolId, f64> = syms.iter().copied().zip(inputs.iter().copied()).collect();
-    let want = rsdag::eval(g, roots, &env);
-    let (mut w, mut o) = (Vec::new(), Vec::new());
-    tape.eval(inputs, &mut w, &mut o);
-    for (k, (a, b)) in want.iter().zip(&o).enumerate() {
-        assert_eq!(a.to_bits(), b.to_bits(), "output {k}: {a} vs {b}");
-    }
-}
-
 #[test]
 fn a_matrix_product_is_one_kernel_whatever_the_entry_order() {
     for column_major in [false, true] {
@@ -59,7 +49,7 @@ fn a_matrix_product_is_one_kernel_whatever_the_entry_order() {
         let inputs: Vec<f64> = (0..syms.len())
             .map(|i| 0.01 * (i % 13) as f64 - 0.05)
             .collect();
-        check(&g, &roots, &syms, &tape, &inputs);
+        assert_matches_eval(&g, &roots, &syms, &tape, &inputs);
     }
 }
 
@@ -83,7 +73,7 @@ fn computed_factors_are_gathered() {
     let tape = Tape::compile(&g, &roots, &syms);
     assert_eq!(kernels_in(&tape, "Gemm(8x5"), 1, "{}", tape.dump());
     let inputs: Vec<f64> = (0..syms.len()).map(|i| 0.1 + 0.07 * i as f64).collect();
-    check(&g, &roots, &syms, &tape, &inputs);
+    assert_matches_eval(&g, &roots, &syms, &tape, &inputs);
 }
 
 #[test]

@@ -3,14 +3,16 @@
 //! bundle whose output count changed after compile is refused instead of
 //! being handed a write past its block.
 
+#[path = "../../rsdag/tests/common/mod.rs"]
+mod common;
+use common::sym;
+
 use rsdag::Program;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use rsdag::{
-    ExprId, ExternBundle, Graph, Node, Output, OutputRole, ParamRole, SymbolId, Tape, F64,
-};
+use rsdag::{ExternBundle, Graph, Output, OutputRole, ParamRole, Tape, F64};
 use rsdag_jit::NativeTape;
 
 /// `[a + b]`, panicking when `a` is negative; reports `n_out` outputs.
@@ -26,14 +28,6 @@ impl ExternBundle for Touchy {
         assert!(args[0] >= 0.0, "negative argument");
         out[0] = args[0] + args[1];
     }
-}
-
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    let Node::Symbol(s) = *g.node(e) else {
-        unreachable!()
-    };
-    (e, s)
 }
 
 /// `calls` instances of the bundle over distinct arguments, summed; many

@@ -2,19 +2,14 @@
 //! imported into another with what it calls, called there, and compiled as
 //! one program whose only calls are its leaves.
 
+mod common;
+use common::sym;
+
 use rsdag::Program;
 use rsdag::{
-    differentiate, ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope, SymbolId, Tape, F64,
+    differentiate, ExprId, FuncId, Graph, OutputRole, ParamRole, Scope, SymbolId, Tape, F64,
 };
 use rustc_hash::FxHashMap;
-
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    match *g.node(e) {
-        Node::Symbol(s) => (e, s),
-        _ => unreachable!(),
-    }
-}
 
 /// A leaf `dev(a, b) = [a b, sin a]` and a composite
 /// `blk(x, y, z) = [dev0(x, y) + dev1(y, z), dev0(y, z)]` over it, that is

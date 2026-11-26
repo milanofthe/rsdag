@@ -10,7 +10,8 @@ mod variants;
 
 use rsdag::{Adaptive, Policy, Tape};
 use rsdag_jit::{NativeTape, Options};
-use variants::{circuit, inputs, same, variant_of};
+use variants::common::identical;
+use variants::{circuit, inputs, variant_of};
 
 #[test]
 fn variants_run_natively() {
@@ -30,7 +31,10 @@ fn variants_run_natively() {
                 let ins = inputs(n, t, binding);
                 tape.eval(&ins, &mut w, &mut want);
                 native.eval_main(&ins, &mut nw, &mut got);
-                assert!(same(&got, &want), "{n} at {binding:#x}, t = {t}, full body");
+                assert!(
+                    identical(&got, &want),
+                    "{n} at {binding:#x}, t = {t}, full body"
+                );
             }
             for _ in 0..3 {
                 rsdag_jit::background::drain();
@@ -40,7 +44,7 @@ fn variants_run_natively() {
                 let ins = inputs(n, t, binding);
                 tape.eval(&ins, &mut w, &mut want);
                 native.eval_main(&ins, &mut nw, &mut got);
-                assert!(same(&got, &want), "{n} at {binding:#x}, t = {t}");
+                assert!(identical(&got, &want), "{n} at {binding:#x}, t = {t}");
             }
         }
     }
@@ -77,12 +81,12 @@ fn an_episode_takes_the_variants_that_land_after_its_prolog() {
         let ins = inputs(n, 0.25 * k as f64, binding);
         reference.eval(&ins, &mut w, &mut want);
         program.eval_main(&mut ep, &ins, &mut aw, &mut got);
-        assert!(same(&got, &want), "pass {k}");
+        assert!(identical(&got, &want), "pass {k}");
     }
     assert!(program.native().is_some(), "the native code landed");
     assert!(program.tape().forms_epoch() > 0, "the variants landed");
     assert!(
-        !same(&aw[..s], &full),
+        !identical(&aw[..s], &full),
         "the episode laid its state out again, on the variants"
     );
 }
@@ -108,7 +112,7 @@ fn a_native_prolog_builds_its_variant_without_the_background() {
         let ins = inputs(n, 0.5, binding);
         tape.eval(&ins, &mut w, &mut want);
         native.eval_main(&ins, &mut nw, &mut got);
-        assert!(same(&got, &want), "at {binding:#x}");
+        assert!(identical(&got, &want), "at {binding:#x}");
     }
 }
 
@@ -131,13 +135,13 @@ fn a_prolog_of_one_backend_serves_the_main_phase_of_the_other() {
         native.eval_prolog(&inputs(n, 0.0, binding ^ 0xff), &mut nw);
         nw[..s].copy_from_slice(&iw[..s]);
         native.eval_main(&ins, &mut nw, &mut got);
-        assert!(same(&got, &want), "interpreter prolog, native main");
+        assert!(identical(&got, &want), "interpreter prolog, native main");
         // The native prolog under the interpreter's main phase.
         native.eval_prolog(&inputs(n, 0.0, binding), &mut nw);
         let mut iw2 = vec![f64::NAN; tape.work_len()];
         iw2[..s].copy_from_slice(&nw[..s]);
         let mut o = vec![0.0; tape.out_len()];
         tape.eval_main_into(&ins, &mut iw2, &mut o);
-        assert!(same(&o, &want), "native prolog, interpreter main");
+        assert!(identical(&o, &want), "native prolog, interpreter main");
     }
 }

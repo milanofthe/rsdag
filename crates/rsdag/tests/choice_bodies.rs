@@ -5,21 +5,16 @@
 //! while instances cross their regions, while they thrash, and through the
 //! derivatives.
 
+mod common;
+use common::{same, sym};
+
 use rsdag::Program;
 
 use rsdag::variant::VariantPolicy;
 use rsdag::{
-    BodyBackend, ChoicePolicy, CmpOp, ExprId, FuncId, Graph, Node, OutputRole, ParamRole, Scope,
+    BodyBackend, ChoicePolicy, CmpOp, ExprId, FuncId, Graph, OutputRole, ParamRole, Scope,
     SymbolId, Tape, F64,
 };
-
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    let Node::Symbol(s) = *g.node(e) else {
-        unreachable!()
-    };
-    (e, s)
-}
 
 /// `f(v, p)`, `p` a parameter: a sum of regions of `v`, each a select
 /// between a heavy arm (above its threshold) and a light one. The
@@ -98,13 +93,6 @@ fn tape(c: &Circuit, choices: bool) -> Tape {
         ..BodyBackend::default()
     });
     t
-}
-
-fn same(a: &[f64], b: &[f64]) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .zip(b)
-            .all(|(x, y)| x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()))
 }
 
 /// `f` under an rsprobe context: the specializations the bodies built

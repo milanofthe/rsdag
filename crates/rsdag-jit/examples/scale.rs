@@ -27,22 +27,15 @@
 
 use rsdag::Program;
 mod common;
+use common::graph::sym;
 use common::per_call;
 use std::time::Instant;
 
 use rsdag::{
-    sparse_jacobian, Bound, ExprId, FuncId, Graph, Node, OutputRole, ParamRole, ReduceOp, Scope,
+    sparse_jacobian, Bound, ExprId, FuncId, Graph, OutputRole, ParamRole, ReduceOp, Scope,
     SymbolId, Tape, F64,
 };
 use rsdag_jit::NativeTape;
-
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    match *g.node(e) {
-        Node::Symbol(s) => (e, s),
-        _ => unreachable!(),
-    }
-}
 
 fn ms(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1e3

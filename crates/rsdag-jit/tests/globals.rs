@@ -2,17 +2,13 @@
 //! interpreter's values bit for bit, plain and split over the card, on a
 //! batch wide enough for lanes.
 
-use rsdag::Program;
-use rsdag::{ExprId, Graph, Node, OutputRole, ParamRole, ReduceOp, Scope, SymbolId, Tape, F64};
-use rsdag_jit::NativeTape;
+#[path = "../../rsdag/tests/common/mod.rs"]
+mod common;
+use common::sym;
 
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    let Node::Symbol(s) = *g.node(e) else {
-        unreachable!()
-    };
-    (e, s)
-}
+use rsdag::Program;
+use rsdag::{ExprId, Graph, OutputRole, ParamRole, ReduceOp, Scope, SymbolId, Tape, F64};
+use rsdag_jit::NativeTape;
 
 #[test]
 fn native_calls_read_their_globals() {

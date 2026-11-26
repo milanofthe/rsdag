@@ -3,17 +3,12 @@
 //! are the full main phase's, bit for bit. Its own prolog is the full one,
 //! the state the same.
 
+mod common;
+use common::{same, sym};
+
 use rsdag::node::CmpOp;
 use rsdag::Program;
-use rsdag::{ExprId, Graph, Guards, Node, SymbolId, Tape, F64};
-
-fn sym(g: &mut Graph<F64>, name: &str) -> (ExprId, SymbolId) {
-    let e = g.sym(name);
-    let Node::Symbol(s) = *g.node(e) else {
-        unreachable!()
-    };
-    (e, s)
-}
+use rsdag::{Graph, Guards, Tape, F64};
 
 /// Selects on the varying inputs and on prolog values, nested, sharing
 /// conditions, an arm a prolog value.
@@ -67,13 +62,6 @@ fn rng(s: &mut u64) -> f64 {
     *s ^= *s >> 7;
     *s ^= *s << 17;
     (*s >> 11) as f64 / (1u64 << 53) as f64 * 4.0 - 2.0
-}
-
-fn same(a: &[f64], b: &[f64]) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .zip(b)
-            .all(|(x, y)| x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()))
 }
 
 /// The full main phase at `x` over `w`, and its trace.

@@ -2,17 +2,14 @@
 //! rung serves a call: across region flips, parameter changes between
 //! episodes, and the native code landing in the middle of an episode.
 
+#[path = "../../rsdag/tests/common/mod.rs"]
+mod common;
+use common::same;
+
 use rsdag::synth::{build, inputs, Rng, Spec, Vocabulary};
 use rsdag::Program;
 use rsdag::{Adaptive, OutputRole, ParamRole, Policy, Scope};
 use rsdag::{Graph, Tape, F64};
-
-fn same(a: &[f64], b: &[f64]) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .zip(b)
-            .all(|(x, y)| x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()))
-}
 
 fn program(seed: u64) -> (Tape, Vec<f64>, Vec<bool>) {
     let mut g: Graph<F64> = Graph::new();
