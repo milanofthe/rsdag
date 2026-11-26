@@ -17,7 +17,7 @@ use rsdag::Program;
 use std::collections::HashMap;
 
 use rsdag::dot::reachable;
-use rsdag::node::{Node, UnaryOp};
+use rsdag::node::Node;
 use rsdag::synth::{build_over, Rng, Spec, Vocabulary};
 use rsdag::BigRational;
 use rsdag::{differentiate, eval, ExprId, Graph, ReduceOp, SymbolId, Tape};
@@ -55,16 +55,6 @@ fn roundings(nodes: &[Node]) -> usize {
             Node::Call(..) | Node::Solve(..) => unreachable!("the draw has no calls or solves"),
         })
         .sum()
-}
-
-// https://github.com/milanofthe/rsdag/issues/243
-fn has_gamma(nodes: &[Node]) -> bool {
-    nodes.iter().any(|n| {
-        matches!(
-            n,
-            Node::Unary(UnaryOp::Tgamma | UnaryOp::Lgamma | UnaryOp::Digamma, _)
-        )
-    })
 }
 
 fn build_with_syms(
@@ -366,10 +356,6 @@ fn differentiate_matches_finite_differences() {
         let steps = 4 + rng.below(10);
         let root = build_with_syms(&mut ctx, &mut rng, &syms, steps, true);
         let nodes = cone(&ctx, root);
-        if has_gamma(&nodes) {
-            continue;
-        }
-
         let n = roundings(&nodes);
 
         let wrt = rng.below(nsym);
