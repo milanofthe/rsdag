@@ -9,6 +9,7 @@ use rsdag::semantics::{binary_f64, reduce_slice, unary_f64};
 use rsdag::tape::calls::{run_call, run_stage, Call, Shared};
 use std::sync::Arc;
 
+use crate::constants::KERNEL_OPERANDS_A_XB_ACCUMULATOR;
 use crate::native::Layout;
 
 pub(crate) type Bundles = Vec<Arc<dyn ExternBundle>>;
@@ -152,13 +153,12 @@ pub(crate) struct KernelDesc {
     pub(crate) m: u64,
     pub(crate) k: u64,
     pub(crate) n: u64,
-    pub(crate) operands_a_xb_accumulator: [Place; KernelDesc::OPERANDS],
+    pub(crate) operands_a_xb_accumulator: [Place; KERNEL_OPERANDS_A_XB_ACCUMULATOR],
     pub(crate) fold_codes_addr_or_zero: u64,
     pub(crate) out_byte_offset: u64,
 }
 
 impl KernelDesc {
-    pub(crate) const OPERANDS: usize = 3;
     pub(crate) const GEMV: u64 = 0;
     pub(crate) const GEMM: u64 = 1;
     pub(crate) const SOLVE_M_SYSTEMS_K_RHS: u64 = 2;

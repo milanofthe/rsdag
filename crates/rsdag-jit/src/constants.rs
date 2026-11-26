@@ -25,6 +25,18 @@ pub(crate) const CODE_ALIGN_BYTES: usize = 16;
 
 pub(crate) const FLOAT_REG_NUMBERS: usize = 32;
 
+pub(crate) const KERNEL_OPERANDS_A_XB_ACCUMULATOR: usize = 3;
+
+pub(crate) const LANE_HOST_CALL_TWO_ARGUMENTS_AND_RESULT: usize = 3;
+
+pub(crate) const FORCED_LANES_SCALAR_COST_WITHOUT_OVERFLOW: usize = usize::MAX / 16;
+
+pub(crate) const OPTIONS_KEY_CHUNK_OPS_SHIFT: u32 = 32;
+
+pub(crate) const OPTIONS_KEY_LANES_SHIFT: u32 = 62;
+
+pub(crate) const OPTIONS_KEY_FREE_BIT_FOR_BACKGROUND: u32 = 61;
+
 #[cfg(target_arch = "aarch64")]
 pub(crate) const PREFETCH_EVERY_BYTES: usize = 128;
 

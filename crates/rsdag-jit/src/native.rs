@@ -39,8 +39,10 @@ use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 use crate::constants::{
-    CODE_ALIGN_BYTES, FLOAT_REG_NUMBERS, HOST_GATHER_MIN_ARGS, LANE_HOST_CALL_COST_OPS,
-    LANE_MOVE_COST_OPS, MAX_LANES,
+    CODE_ALIGN_BYTES, FLOAT_REG_NUMBERS, FORCED_LANES_SCALAR_COST_WITHOUT_OVERFLOW,
+    HOST_GATHER_MIN_ARGS, KERNEL_OPERANDS_A_XB_ACCUMULATOR, LANE_HOST_CALL_COST_OPS,
+    LANE_HOST_CALL_TWO_ARGUMENTS_AND_RESULT, LANE_MOVE_COST_OPS, MAX_LANES,
+    OPTIONS_KEY_CHUNK_OPS_SHIFT, OPTIONS_KEY_FREE_BIT_FOR_BACKGROUND, OPTIONS_KEY_LANES_SHIFT,
 };
 use crate::host::{self, Bundles};
 use crate::ops::{inline_product, minmax_inline, powi_inline, routine, Liveness};
@@ -87,12 +89,11 @@ struct ChunkRegion {
 }
 
 fn lane_gather_len<I: Isa>(op: &Op) -> usize {
-    const TWO_ARGUMENTS_AND_RESULT: usize = 3;
     let l = I::LANES;
     match *op {
         _ if minmax_inline::<I>(op) => 0,
         Op::Reduce(ReduceOp::Min | ReduceOp::Max, _, n) => n as usize * l + n as usize + l,
-        _ if routine::<I>(op).is_some() => TWO_ARGUMENTS_AND_RESULT * l,
+        _ if routine::<I>(op).is_some() => LANE_HOST_CALL_TWO_ARGUMENTS_AND_RESULT * l,
         _ => 0,
     }
 }
@@ -461,8 +462,7 @@ fn native_body(
         Lanes::Never => Vec::new(),
         _ => NativeTape::compile_lanes_widest_first(body),
     };
-    let lanes_forced_scalar_never_cheaper_without_overflow = usize::MAX / 16;
-    let mut scalar = [lanes_forced_scalar_never_cheaper_without_overflow; PHASES];
+    let mut scalar = [FORCED_LANES_SCALAR_COST_WITHOUT_OVERFLOW; PHASES];
     let lanes: Vec<LaneCode> = lanes
         .into_iter()
         .map(|lt| {
@@ -504,10 +504,6 @@ fn native_body(
         rate: rsdag::parallel::Rate::new(rsdag::constants::NATIVE_NS_PER_OP),
     }))
 }
-
-const OPTIONS_KEY_CHUNK_OPS_SHIFT: u32 = 32;
-const OPTIONS_KEY_LANES_SHIFT: u32 = 62;
-const OPTIONS_KEY_FREE_BIT_FOR_BACKGROUND: u32 = 61;
 
 fn options_key(opts: &Options) -> u64 {
     let batch = match opts.batch {
@@ -1485,7 +1481,7 @@ impl<'a, I: Isa> Emitter<'a, I> {
         let (dst, width) = (t.dst(i), t.width(i));
         let c = acc.and_then(|f| f.c).map(|c| (c, width));
         let mut at = 0usize;
-        let mut operands = [host::Place::NONE; host::KernelDesc::OPERANDS];
+        let mut operands = [host::Place::NONE; KERNEL_OPERANDS_A_XB_ACCUMULATOR];
         for (p, &(src, len)) in operands.iter_mut().zip(srcs.iter().chain(&c)) {
             *p = self.dense_arg(t.operand(src, len), len, &mut at);
         }
@@ -1666,7 +1662,6 @@ impl<'a, I: Isa> Emitter<'a, I> {
     }
 
     fn fold(&mut self, op: Arith, ident: f64, a: &[u32], b: Option<&[u32]>) -> u8 {
-        const { assert!(FOLD_LANES == 4) };
         let n = a.len();
         let ch = n / FOLD_LANES;
         let mut s = if ch == 0 {
@@ -1679,10 +1674,11 @@ impl<'a, I: Isa> Emitter<'a, I> {
                     self.release_except(&acc);
                 }
             }
+            let [a0, a1, a2, a3] = acc;
             let l = self.fresh();
-            self.isa.arith(op, l, acc[0], acc[1]);
+            self.isa.arith(op, l, a0, a1);
             let r = self.fresh();
-            self.isa.arith(op, r, acc[2], acc[3]);
+            self.isa.arith(op, r, a2, a3);
             let s = self.fresh();
             self.isa.arith(op, s, l, r);
             s
