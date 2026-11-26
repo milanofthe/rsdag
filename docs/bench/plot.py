@@ -24,7 +24,7 @@ DATA = os.path.join(HERE, "data")
 sys.path.insert(0, os.path.join(HERE, ".."))
 from style import BLUE, FONT, GREEN, GREY, ORANGE  # noqa: E402
 
-LEGIBLE_ON_A_LIGHT_AND_A_DARK_PAGE = {
+STYLE = {
     "font.family": FONT,
     "font.size": 10,
     "axes.spines.top": False,
@@ -46,7 +46,7 @@ LEGIBLE_ON_A_LIGHT_AND_A_DARK_PAGE = {
     "legend.labelcolor": GREY,
     "hatch.linewidth": 1.0,
 }
-plt.rcParams.update(LEGIBLE_ON_A_LIGHT_AND_A_DARK_PAGE)
+plt.rcParams.update(STYLE)
 ASCII_TEXT_ONLY = {"axes.unicode_minus": False}
 plt.rcParams.update(ASCII_TEXT_ONLY)
 

@@ -15,11 +15,11 @@ nice cargo run -q --release -p rsdag --example hierarchy > "$D/hierarchy.csv"
 PY="${PYTHON:-$(command -v python3 || command -v python)}"
 if [ -n "${RSDAG_MODULES:-}" ]; then
     M="$RSDAG_MODULES"
-    COMPOSED_AS_RSDAG_COMPILES_THEM="$M/composed"
-    mkdir -p "$M/values" "$COMPOSED_AS_RSDAG_COMPILES_THEM"
+    COMPOSED="$M/composed"
+    mkdir -p "$M/values" "$COMPOSED"
     echo "circuits: rsdag"
-    nice cargo run -q --release -p rsdag-jit --example modules -- --values "$M/values" --composed "$COMPOSED_AS_RSDAG_COMPILES_THEM" "$M"/*.json > "$D/modules_rsdag.csv"
+    nice cargo run -q --release -p rsdag-jit --example modules -- --values "$M/values" --composed "$COMPOSED" "$M"/*.json > "$D/modules_rsdag.csv"
     echo "circuits: CasADi, JAX"
-    nice "$PY" docs/bench/modules.py "$M/values" "$COMPOSED_AS_RSDAG_COMPILES_THEM"/*.json > "$D/modules_other.csv"
+    nice "$PY" docs/bench/modules.py "$M/values" "$COMPOSED"/*.json > "$D/modules_other.csv"
 fi
 "$PY" docs/bench/plot.py
