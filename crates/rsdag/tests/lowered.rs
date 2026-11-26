@@ -43,7 +43,7 @@ struct System {
     pure: Vec<bool>,
 }
 
-fn ring_of_cells_calling_the_device_twice(n: usize, params_pure_with_a_prolog: bool) -> System {
+fn ring(n: usize, params_pure_with_a_prolog: bool) -> System {
     let mut g: Graph<F64> = Graph::new();
     let d = device(&mut g, params_pure_with_a_prolog);
     let (a, sa) = sym(&mut g, "cell.a");
@@ -129,14 +129,11 @@ fn call_widths(tape: &Tape) -> Vec<u32> {
 #[test]
 fn a_view_computes_what_its_own_compilation_does() {
     for params_pure_with_a_prolog in [true, false] {
-        views_compute_what_their_own_compilations_do(ring_of_cells_calling_the_device_twice(
-            7,
-            params_pure_with_a_prolog,
-        ));
+        check_views(ring(7, params_pure_with_a_prolog));
     }
 }
 
-fn views_compute_what_their_own_compilations_do(s: System) {
+fn check_views(s: System) {
     let values: Vec<f64> = (0..s.inputs.len()).map(|j| 0.1 + 0.07 * j as f64).collect();
     let all: Vec<ExprId> = (s.currents.iter())
         .chain(&s.charges)
@@ -168,7 +165,7 @@ fn views_compute_what_their_own_compilations_do(s: System) {
 
 #[test]
 fn a_view_of_every_root_is_the_compilation() {
-    let s = ring_of_cells_calling_the_device_twice(5, true);
+    let s = ring(5, true);
     let all: Vec<ExprId> = s.currents.iter().chain(&s.jac_i).copied().collect();
     let lowered = Lowered::new(&s.g, &all, &s.inputs, Some(&s.pure));
     let view = lowered.tape(&s.g, &all);

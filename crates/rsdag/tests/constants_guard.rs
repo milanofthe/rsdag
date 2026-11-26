@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 struct Exempt {
     file: &'static str,
     item_paths: &'static [&'static str],
-    item_paths_held_to_the_rule_all_the_same: &'static [&'static str],
+    not_exempt: &'static [&'static str],
     reason: &'static str,
 }
 
@@ -39,13 +39,13 @@ const EXEMPT: &[Exempt] = &[
     Exempt {
         file: "rsdag-jit/src/x86_64.rs",
         item_paths: &[WHOLE_FILE],
-        item_paths_held_to_the_rule_all_the_same: &["X64::exp_inline", "X64::ln_inline"],
+        not_exempt: &["X64::exp_inline", "X64::ln_inline"],
         reason: "x86-64 instruction encodings, registers and ABI frame sizes",
     },
     Exempt {
         file: "rsdag-jit/src/aarch64.rs",
         item_paths: &[WHOLE_FILE],
-        item_paths_held_to_the_rule_all_the_same: &[],
+        not_exempt: &[],
         reason: "AArch64 instruction encodings, registers and ABI",
     },
     Exempt {
@@ -56,31 +56,31 @@ const EXEMPT: &[Exempt] = &[
             "Mapping::new::PAGE_EXECUTE_READ",
             "Mapping::drop::MEM_RELEASE",
         ],
-        item_paths_held_to_the_rule_all_the_same: &[],
+        not_exempt: &[],
         reason: "Win32's memory allocation and protection flags",
     },
     Exempt {
         file: "rsdag-jit/src/host.rs",
         item_paths: &["reduce_code"],
-        item_paths_held_to_the_rule_all_the_same: &[],
+        not_exempt: &[],
         reason: "the op codes of the host's reduce routine, an ABI with the emitted code",
     },
     Exempt {
         file: "rsdag/src/semantics.rs",
         item_paths: &["digamma", "trigamma"],
-        item_paths_held_to_the_rule_all_the_same: &[],
+        not_exempt: &[],
         reason: "the recurrence threshold and Bernoulli coefficients of the asymptotic series",
     },
     Exempt {
         file: "rsdag/src/semantics.rs",
         item_paths: &["splitmix64", "unit", "rand_stream"],
-        item_paths_held_to_the_rule_all_the_same: &[],
+        not_exempt: &[],
         reason: "splitmix64's constants, and the 53 bits of a double's mantissa",
     },
     Exempt {
         file: "rsdag/src/node.rs",
         item_paths: &["shape"],
-        item_paths_held_to_the_rule_all_the_same: &[],
+        not_exempt: &[],
         reason: "splitmix64's constants of the structural hash",
     },
     Exempt {
@@ -92,25 +92,25 @@ const EXEMPT: &[Exempt] = &[
             "Fold::SELF",
             "Fold::SELF_SHIFT",
         ],
-        item_paths_held_to_the_rule_all_the_same: &[],
+        not_exempt: &[],
         reason: "tag bits: an operand's input bit, a fold code's fields",
     },
     Exempt {
         file: "rsdag/src/graph/mod.rs",
         item_paths: &["BOUND"],
-        item_paths_held_to_the_rule_all_the_same: &[],
+        not_exempt: &[],
         reason: "the tag bit of a bound symbol",
     },
     Exempt {
         file: "rsdag/src/role.rs",
         item_paths: &["ParamRole::place"],
-        item_paths_held_to_the_rule_all_the_same: &[],
+        not_exempt: &[],
         reason: "the rank of each role's group in a signature, an enumeration",
     },
     Exempt {
         file: "rsdag/src/synth.rs",
         item_paths: &[WHOLE_FILE],
-        item_paths_held_to_the_rule_all_the_same: &[],
+        not_exempt: &[],
         reason: "the synthetic program generator (test support behind feature synth)",
     },
 ];
@@ -328,12 +328,12 @@ fn lex(src: &str) -> (Vec<Token>, Vec<usize>) {
                 while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'_') {
                     i += 1;
                 }
-                let fraction_not_range_field_or_method = b.get(i) == Some(&b'.')
+                let fraction = b.get(i) == Some(&b'.')
                     && b.get(i + 1) != Some(&b'.')
                     && !b
                         .get(i + 1)
                         .is_some_and(|&d| d.is_ascii_alphabetic() || d == b'_');
-                if fraction_not_range_field_or_method {
+                if fraction {
                     i += 1;
                     while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'_') {
                         i += 1;
@@ -746,10 +746,7 @@ fn exempt(rel: &str, item: &str) -> bool {
     EXEMPT.iter().any(|e| {
         rel.ends_with(e.file)
             && e.item_paths.iter().any(|p| under(p))
-            && !e
-                .item_paths_held_to_the_rule_all_the_same
-                .iter()
-                .any(|p| under(p))
+            && !e.not_exempt.iter().any(|p| under(p))
     })
 }
 

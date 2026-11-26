@@ -9,10 +9,22 @@ use common::{identical, sym};
 use rsdag::Program;
 use rsdag::{FuncId, Graph, OutputRole, ParamRole, Scope, Tape, F64};
 
-const PARAMS_WITH_REPEATS_AND_BOTH_SIGNED_ZEROS: [f64; 12] =
-    [0.2, 0.3, 0.2, 0.2, 0.0, -0.0, 0.3, 0.7, 0.2, 0.0, 0.7, 0.3];
+const PARAMS: [f64; 12] = [0.2, 0.3, 0.2, 0.2, 0.0, -0.0, 0.3, 0.7, 0.2, 0.0, 0.7, 0.3];
 
-fn device_with_an_expensive_prolog_over_its_parameter(g: &mut Graph<F64>) -> FuncId {
+fn params() -> [f64; 12] {
+    let has = |v: f64| PARAMS.iter().any(|q| q.to_bits() == v.to_bits());
+    assert!(
+        has(0.0) && has(-0.0),
+        "the parameters hold both signed zeros"
+    );
+    assert!(
+        (1..PARAMS.len()).any(|i| PARAMS[..i].contains(&PARAMS[i])),
+        "the parameters repeat"
+    );
+    PARAMS
+}
+
+fn device(g: &mut Graph<F64>) -> FuncId {
     let (v, vs) = sym(g, "dev.v");
     let (p, ps) = sym(g, "dev.p");
     let mut k = p;
@@ -36,7 +48,7 @@ fn device_with_an_expensive_prolog_over_its_parameter(g: &mut Graph<F64>) -> Fun
 fn a_split_caller_runs_the_callees_prolog_in_its_own() {
     for n in [1usize, 12] {
         let mut g: Graph<F64> = Graph::new();
-        let f = device_with_an_expensive_prolog_over_its_parameter(&mut g);
+        let f = device(&mut g);
         let mut syms = Vec::new();
         let mut roots = Vec::new();
         for i in 0..n {
@@ -87,9 +99,9 @@ fn a_split_caller_runs_the_callees_prolog_in_its_own() {
 
 #[test]
 fn instances_of_the_same_parameters_share_a_state_with_the_same_results() {
-    let qs = PARAMS_WITH_REPEATS_AND_BOTH_SIGNED_ZEROS;
+    let qs = params();
     let mut g: Graph<F64> = Graph::new();
-    let f = device_with_an_expensive_prolog_over_its_parameter(&mut g);
+    let f = device(&mut g);
     let (mut syms, mut roots) = (Vec::new(), Vec::new());
     for i in 0..qs.len() {
         let (x, xs) = sym(&mut g, &format!("x{i}"));
@@ -152,7 +164,7 @@ fn carded(g: &mut Graph<F64>) -> FuncId {
 
 #[test]
 fn instances_share_rows_by_the_arguments_they_own() {
-    let qs = PARAMS_WITH_REPEATS_AND_BOTH_SIGNED_ZEROS;
+    let qs = params();
     for shared_q in [false, true] {
         let mut g: Graph<F64> = Graph::new();
         let f = carded(&mut g);

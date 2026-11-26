@@ -69,13 +69,8 @@ fn a_module_survives_json_with_its_constants_bit_exact() {
     let mut g: Graph<F64> = Graph::new();
     let mut spec = Spec::new(3).steps(120).params(4).vocab(Vocabulary::Full);
     let (mut roots, syms) = build(&mut g, &mut spec);
-    let shortest_decimal_parses_back_to_its_neighbour = 1.106704f64.next_up();
-    let values_a_text_format_mangles = [
-        f64::INFINITY,
-        f64::NEG_INFINITY,
-        f64::NAN,
-        shortest_decimal_parses_back_to_its_neighbour,
-    ];
+    let neighbour = 1.106704f64.next_up();
+    let values_a_text_format_mangles = [f64::INFINITY, f64::NEG_INFINITY, f64::NAN, neighbour];
     for v in values_a_text_format_mangles {
         let k = g.konst_f64(v);
         roots.push(k);

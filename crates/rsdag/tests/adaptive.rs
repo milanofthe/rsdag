@@ -109,8 +109,7 @@ impl rsdag::Compiler for InterpreterOnACopyOfTheTape {
     }
 }
 
-fn regions_that_decide_half_of_the_tape() -> (Graph<F64>, Vec<rsdag::ExprId>, Vec<rsdag::SymbolId>)
-{
+fn select_regions() -> (Graph<F64>, Vec<rsdag::ExprId>, Vec<rsdag::SymbolId>) {
     let mut g: Graph<F64> = Graph::new();
     let x = g.sym("x");
     let rsdag::Node::Symbol(xs) = *g.node(x) else {
@@ -140,7 +139,7 @@ fn regions_that_decide_half_of_the_tape() -> (Graph<F64>, Vec<rsdag::ExprId>, Ve
 
 #[test]
 fn a_specialization_is_compiled_where_the_interpreted_one_does_not_serve() {
-    let (g, roots, syms) = regions_that_decide_half_of_the_tape();
+    let (g, roots, syms) = select_regions();
     let tape = Tape::compile(&g, &roots, &syms);
     let full = tape.n_ops();
     let a = Adaptive::new(

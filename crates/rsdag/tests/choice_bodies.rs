@@ -17,7 +17,7 @@ use rsdag::{
 };
 
 const REGIONS: usize = 24;
-const REGIONS_ABOVE_THE_STARTING_STATES: usize = 20;
+const UPPER_REGIONS: usize = 20;
 
 fn device(g: &mut Graph<F64>) -> FuncId {
     let (v, vs) = sym(g, "dev.v");
@@ -25,8 +25,8 @@ fn device(g: &mut Graph<F64>) -> FuncId {
     let mut y = g.zero();
     for k in 0..REGIONS {
         let th = match k {
-            0..REGIONS_ABOVE_THE_STARTING_STATES => 1.0 + 0.1 * k as f64,
-            _ => 0.78 + 0.02 * (k - REGIONS_ABOVE_THE_STARTING_STATES) as f64,
+            0..UPPER_REGIONS => 1.0 + 0.1 * k as f64,
+            _ => 0.78 + 0.02 * (k - UPPER_REGIONS) as f64,
         };
         let th = g.konst_f64(th);
         let c = g.cmp(CmpOp::Gt, v, th);
@@ -92,7 +92,7 @@ fn tape(c: &Circuit, specialize_over_choices: bool) -> Tape {
     t
 }
 
-fn specializations_built_and_off_where_rsprobe_records(f: impl FnOnce()) -> Option<[u64; 2]> {
+fn spec_counts(f: impl FnOnce()) -> Option<[u64; 2]> {
     let ctx = rsprobe::Context::new();
     {
         let _on = ctx.enter();
@@ -112,11 +112,7 @@ fn rng(s: &mut u64) -> f64 {
     (*s >> 11) as f64 / (1u64 << 53) as f64
 }
 
-fn run_and_match_the_plain_tape_at_every_step(
-    n: usize,
-    steps: usize,
-    step: impl Fn(usize, usize) -> f64,
-) {
+fn match_plain(n: usize, steps: usize, step: impl Fn(usize, usize) -> f64) {
     let c = circuit(n);
     let (spec, plain) = (tape(&c, true), tape(&c, false));
     let mut ins: Vec<f64> = (0..n)
@@ -138,17 +134,12 @@ fn run_and_match_the_plain_tape_at_every_step(
 
 #[test]
 fn bodies_specialize_over_their_choices_and_stay_the_full_bodies() {
-    let drift = specializations_built_and_off_where_rsprobe_records(|| {
-        run_and_match_the_plain_tape_at_every_step(64, 60, |i, _| {
-            0.004 * if i % 2 == 0 { 1.0 } else { -1.0 }
-        })
-    });
-    let change = specializations_built_and_off_where_rsprobe_records(|| {
-        run_and_match_the_plain_tape_at_every_step(64, 30, |_, k| if k == 4 { 1.2 } else { 0.0 })
-    });
+    let drift =
+        spec_counts(|| match_plain(64, 60, |i, _| 0.004 * if i % 2 == 0 { 1.0 } else { -1.0 }));
+    let change = spec_counts(|| match_plain(64, 30, |_, k| if k == 4 { 1.2 } else { 0.0 }));
     let seed = std::cell::Cell::new(11u64);
-    let jumps = specializations_built_and_off_where_rsprobe_records(|| {
-        run_and_match_the_plain_tape_at_every_step(64, 40, |_, k| {
+    let jumps = spec_counts(|| {
+        match_plain(64, 40, |_, k| {
             if k < 3 {
                 return 0.0;
             }

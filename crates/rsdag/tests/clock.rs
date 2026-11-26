@@ -31,19 +31,19 @@ fn compile_and_eval() {
 
 #[test]
 fn a_compile_nothing_records_reads_no_clock() {
-    let every_site_active_entered_on_no_thread = Context::builder()
+    let idle = Context::builder()
         .threshold(Level::TRACE)
         .clock(clock_counting_its_reads)
         .build();
-    let reads_after_the_build_took_its_origin = READS.load(Relaxed);
+    let before = READS.load(Relaxed);
     compile_and_eval();
-    assert_eq!(READS.load(Relaxed), reads_after_the_build_took_its_origin);
-    drop(every_site_active_entered_on_no_thread);
-    let entered_below_every_site_of_rsdag = Context::builder()
+    assert_eq!(READS.load(Relaxed), before);
+    drop(idle);
+    let quiet = Context::builder()
         .threshold(Level::ERROR)
         .clock(clock_counting_its_reads)
         .build();
-    let _on = entered_below_every_site_of_rsdag.enter();
+    let _on = quiet.enter();
     let reads_after_the_entry = READS.load(Relaxed);
     compile_and_eval();
     assert_eq!(READS.load(Relaxed), reads_after_the_entry);

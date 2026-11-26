@@ -91,8 +91,10 @@ fn the_evaluation_paths_do_not_allocate() {
         "a call of a body allocated"
     );
 
-    let orders_on_both_sides_of_the_blocked_elimination = [3usize, 80];
-    for n in orders_on_both_sides_of_the_blocked_elimination {
+    let orders = [3usize, 80];
+    assert!(orders[0] <= rsdag::constants::LU_UNBLOCKED_MAX);
+    assert!(orders[1] > rsdag::constants::LU_UNBLOCKED_MAX);
+    for n in orders {
         let mut g: Graph<F64> = Graph::new();
         let xs: Vec<_> = (0..n).map(|i| g.sym(&format!("x{i}"))).collect();
         let syms: Vec<_> = xs

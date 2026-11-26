@@ -91,8 +91,7 @@ fn ln_ref(x: f64) -> DoubleDouble {
         }
         sum
     } else {
-        let platform_ln_for_one_newton_step_on_exp = m.ln();
-        let y = platform_ln_for_one_newton_step_on_exp;
+        let y = m.ln();
         let ey = exp_by_series_for_r_up_to_0_36(DoubleDouble(-y, 0.0));
         add(
             DoubleDouble(y, 0.0),

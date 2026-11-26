@@ -20,9 +20,8 @@ fn values(rng: &mut rsdag::synth::Rng, len: usize) -> Vec<f64> {
     (0..len)
         .map(|_| {
             let v = rng.val() - 0.5;
-            let magnitude_spread_so_that_fold_order_matters =
-                10f64.powi((rng.val() * 8.0) as i32 - 4);
-            v * magnitude_spread_so_that_fold_order_matters
+            let scale = 10f64.powi((rng.val() * 8.0) as i32 - 4);
+            v * scale
         })
         .collect()
 }

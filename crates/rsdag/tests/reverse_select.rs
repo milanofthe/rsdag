@@ -17,12 +17,7 @@ use rsdag::{
 };
 use std::collections::HashMap;
 
-fn reverse_matches_forward_and_is_finite(
-    g: &mut Graph<F64>,
-    f: ExprId,
-    wrt: &[SymbolId],
-    env: &HashMap<SymbolId, f64>,
-) {
+fn check_reverse(g: &mut Graph<F64>, f: ExprId, wrt: &[SymbolId], env: &HashMap<SymbolId, f64>) {
     let rev = gradient(g, f, wrt);
     let fwd: Vec<ExprId> = wrt.iter().map(|&s| differentiate(g, f, s)).collect();
     let (r, d) = (eval(g, &rev, env), eval(g, &fwd, env));
@@ -43,32 +38,28 @@ fn an_untaken_branch_with_an_infinite_partial_does_not_reach_the_gradient() {
     let zero = g.zero();
     let pos = g.cmp(CmpOp::Gt, x, zero);
     let env: HashMap<SymbolId, f64> = [(xs, 0.0), (ys, 2.0)].into_iter().collect();
-    let y_over_x_with_infinite_partial_at_0 = g.div(y, x);
+    let y_x = g.div(y, x);
     let yy = g.mul(y, y);
-    let f = g.select(pos, y_over_x_with_infinite_partial_at_0, yy);
-    reverse_matches_forward_and_is_finite(&mut g, f, &[xs, ys], &env);
+    let f = g.select(pos, y_x, yy);
+    check_reverse(&mut g, f, &[xs, ys], &env);
     let u_shared_by_both_branches = g.mul(x, y);
     let ux = g.div(u_shared_by_both_branches, x);
     let uy = g.add(u_shared_by_both_branches, y);
     let f = g.select(pos, ux, uy);
-    reverse_matches_forward_and_is_finite(&mut g, f, &[xs, ys], &env);
+    check_reverse(&mut g, f, &[xs, ys], &env);
     let ypos = g.cmp(CmpOp::Gt, y, zero);
     let one = g.one();
     let ix = g.div(one, x);
     let iy = g.div(one, y);
-    let inner_select_in_the_untaken_branch = g.select(ypos, ix, iy);
+    let inner = g.select(ypos, ix, iy);
     let xy = g.mul(x, y);
-    let f = g.select(pos, inner_select_in_the_untaken_branch, xy);
-    reverse_matches_forward_and_is_finite(&mut g, f, &[xs, ys], &env);
+    let f = g.select(pos, inner, xy);
+    check_reverse(&mut g, f, &[xs, ys], &env);
     let used_again_past_the_select = g.mul(f, y);
-    reverse_matches_forward_and_is_finite(&mut g, used_again_past_the_select, &[xs, ys], &env);
-    let min_taking_y_over_an_infinite_1_over_x = g.reduce(ReduceOp::Min, vec![y, ix]);
-    reverse_matches_forward_and_is_finite(
-        &mut g,
-        min_taking_y_over_an_infinite_1_over_x,
-        &[xs, ys],
-        &env,
-    );
+    check_reverse(&mut g, used_again_past_the_select, &[xs, ys], &env);
+    let min = g.reduce(ReduceOp::Min, vec![y, ix]);
+    assert_eq!(eval(&g, &[min], &env)[0], env[&ys]);
+    check_reverse(&mut g, min, &[xs, ys], &env);
 }
 
 #[test]

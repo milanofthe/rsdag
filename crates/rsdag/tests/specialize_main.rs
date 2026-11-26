@@ -44,8 +44,8 @@ fn tape() -> Tape {
     let s5 = g.select(c2, inner, s4);
     let o1 = g.add(s2, s3);
     let o2 = g.mul(s4, s5);
-    let value_condition_where_nan_takes_then = g.add(a, b);
-    let s6 = g.select(value_condition_where_nan_takes_then, s2, e1);
+    let cond = g.add(a, b);
+    let s6 = g.select(cond, s2, e1);
     Tape::compile_split(
         &g,
         &[o1, o2, s1, x, s6],

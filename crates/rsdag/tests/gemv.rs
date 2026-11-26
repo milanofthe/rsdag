@@ -72,9 +72,10 @@ fn computed_entries_are_gathered_and_short_inputs_read_as_nan() {
     assert_matches_eval(&g, &roots, &syms, &tape, &inputs);
     let (roots2, syms2) = statespace(&mut g, 8, 1);
     let tape2 = Tape::compile(&g, &roots2, &syms2);
-    let fewer_inputs_than_the_run_reads_in_place: Vec<f64> = vec![0.5; 20];
+    let short: Vec<f64> = vec![0.5; 20];
+    assert!(short.len() < syms2.len());
     let (mut w, mut o) = (Vec::new(), Vec::new());
-    tape2.eval(&fewer_inputs_than_the_run_reads_in_place, &mut w, &mut o);
+    tape2.eval(&short, &mut w, &mut o);
     assert!(o.iter().all(|v| v.is_nan()));
 }
 

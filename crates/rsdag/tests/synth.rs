@@ -16,11 +16,11 @@ fn a_seed_reproduces_the_same_program_and_values() {
     let (nodes, ops, out) = run();
     let (nodes2, ops2, out2) = run();
     assert_eq!((nodes, ops), (nodes2, ops2));
-    let same_bits_including_overflows_to_inf_and_nan = out
+    let same = out
         .iter()
         .zip(&out2)
         .all(|(a, b)| a.to_bits() == b.to_bits());
-    assert!(same_bits_including_overflows_to_inf_and_nan);
+    assert!(same);
 }
 
 #[test]
@@ -40,14 +40,8 @@ fn every_in_crate_path_matches_the_arena() {
             case.tape.eval(row, &mut w, &mut o);
             o.clone()
         });
-        let every_other_input_pure_so_the_prolog_has_a_prefix: Vec<bool> =
-            (0..case.syms.len()).map(|k| k % 2 == 0).collect();
-        let split = Tape::compile_split(
-            &case.graph,
-            &case.roots,
-            &case.syms,
-            &every_other_input_pure_so_the_prolog_has_a_prefix,
-        );
+        let pure: Vec<bool> = (0..case.syms.len()).map(|k| k % 2 == 0).collect();
+        let split = Tape::compile_split(&case.graph, &case.roots, &case.syms, &pure);
         let (mut sw, mut so) = (Vec::new(), Vec::new());
         case.expect_bits("split tape", |row| {
             split.eval(row, &mut sw, &mut so);
