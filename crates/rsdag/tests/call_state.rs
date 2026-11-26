@@ -4,7 +4,7 @@
 //! per binding, and only the rest per evaluation.
 
 mod common;
-use common::{identical, sym};
+use common::{circuit, exp_ln_device, identical, sym, Circuit};
 
 use rsdag::Program;
 use rsdag::{FuncId, Graph, OutputRole, ParamRole, Scope, Tape, F64};
@@ -24,43 +24,15 @@ fn params() -> [f64; 12] {
     PARAMS
 }
 
-fn device(g: &mut Graph<F64>) -> FuncId {
-    let (v, vs) = sym(g, "dev.v");
-    let (p, ps) = sym(g, "dev.p");
-    let mut k = p;
-    for i in 0..40 {
-        let c = g.konst_f64(1.0 + 0.01 * i as f64);
-        let e = g.exp(k);
-        let t = g.mul(c, e);
-        k = g.ln(t);
-    }
-    let tv = g.tanh(v);
-    let o0 = g.mul(tv, k);
-    let v2 = g.mul(v, v);
-    let o1 = g.add(v2, k);
-    let mut s = Scope::new(g, "dev");
-    s.param(vs, ParamRole::State { id: 0 });
-    s.param(ps, ParamRole::Param);
-    s.close([(o0, OutputRole::Plain), (o1, OutputRole::Plain)])
-}
-
 #[test]
 fn a_split_caller_runs_the_callees_prolog_in_its_own() {
     for n in [1usize, 12] {
-        let mut g: Graph<F64> = Graph::new();
-        let f = device(&mut g);
-        let mut syms = Vec::new();
-        let mut roots = Vec::new();
-        for i in 0..n {
-            let (x, xs) = sym(&mut g, &format!("x{i}"));
-            let (q, qs) = sym(&mut g, &format!("q{i}"));
-            syms.push(xs);
-            syms.push(qs);
-            let a = g.call(f, 0, &[x, q]);
-            let b = g.call(f, 1, &[x, q]);
-            roots.push(g.add(a, b));
-        }
-        let pure: Vec<bool> = (0..syms.len()).map(|k| k % 2 == 1).collect();
+        let Circuit {
+            g,
+            roots,
+            syms,
+            pure,
+        } = circuit(n, |g| exp_ln_device(g, 40), &["q"]);
         let split = Tape::compile_split(&g, &roots, &syms, &pure);
         let whole = Tape::compile(&g, &roots, &syms);
         assert!(
@@ -100,19 +72,12 @@ fn a_split_caller_runs_the_callees_prolog_in_its_own() {
 #[test]
 fn instances_of_the_same_parameters_share_a_state_with_the_same_results() {
     let qs = params();
-    let mut g: Graph<F64> = Graph::new();
-    let f = device(&mut g);
-    let (mut syms, mut roots) = (Vec::new(), Vec::new());
-    for i in 0..qs.len() {
-        let (x, xs) = sym(&mut g, &format!("x{i}"));
-        let (q, qsym) = sym(&mut g, &format!("q{i}"));
-        syms.push(xs);
-        syms.push(qsym);
-        let a = g.call(f, 0, &[x, q]);
-        let b = g.call(f, 1, &[x, q]);
-        roots.push(g.add(a, b));
-    }
-    let pure: Vec<bool> = (0..syms.len()).map(|k| k % 2 == 1).collect();
+    let Circuit {
+        g,
+        roots,
+        syms,
+        pure,
+    } = circuit(qs.len(), |g| exp_ln_device(g, 40), &["q"]);
     let split = Tape::compile_split(&g, &roots, &syms, &pure);
     let whole = Tape::compile(&g, &roots, &syms);
     let ins = |t: f64| -> Vec<f64> {

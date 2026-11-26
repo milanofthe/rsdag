@@ -6,14 +6,14 @@
 //! derivatives.
 
 mod common;
-use common::{same, sym};
+use common::{same, sym, Circuit};
 
 use rsdag::Program;
 
 use rsdag::variant::VariantPolicy;
 use rsdag::{
-    BodyBackend, ChoicePolicy, CmpOp, ExprId, FuncId, Graph, OutputRole, ParamRole, Scope,
-    SymbolId, Tape, F64,
+    BodyBackend, ChoicePolicy, CmpOp, ExprId, FuncId, Graph, OutputRole, ParamRole, Scope, Tape,
+    F64,
 };
 
 const REGIONS: usize = 24;
@@ -49,32 +49,8 @@ fn device(g: &mut Graph<F64>) -> FuncId {
     s.close([(y, OutputRole::Plain), (o1, OutputRole::Plain)])
 }
 
-struct Circuit {
-    g: Graph<F64>,
-    roots: Vec<ExprId>,
-    syms: Vec<SymbolId>,
-    pure: Vec<bool>,
-}
-
 fn circuit(n: usize) -> Circuit {
-    let mut g: Graph<F64> = Graph::new();
-    let f = device(&mut g);
-    let (mut syms, mut roots, mut pure) = (Vec::new(), Vec::new(), Vec::new());
-    for i in 0..n {
-        let (x, xs) = sym(&mut g, &format!("x{i}"));
-        let (p, ps) = sym(&mut g, &format!("p{i}"));
-        syms.extend([xs, ps]);
-        pure.extend([false, true]);
-        let a = g.call(f, 0, &[x, p]);
-        let b = g.call(f, 1, &[x, p]);
-        roots.push(g.add(a, b));
-    }
-    Circuit {
-        g,
-        roots,
-        syms,
-        pure,
-    }
+    common::circuit(n, device, &["p"])
 }
 
 fn tape(c: &Circuit, specialize_over_choices: bool) -> Tape {

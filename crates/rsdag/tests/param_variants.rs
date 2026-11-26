@@ -5,13 +5,11 @@
 
 #[path = "common/mod.rs"]
 pub mod common;
-use common::{identical, sym};
+use common::{identical, sym, Circuit};
 
 use rsdag::variant::VariantPolicy;
 use rsdag::Program;
-use rsdag::{
-    BodyBackend, CmpOp, ExprId, FuncId, Graph, OutputRole, ParamRole, Scope, SymbolId, Tape, F64,
-};
+use rsdag::{BodyBackend, CmpOp, ExprId, FuncId, Graph, OutputRole, ParamRole, Scope, Tape, F64};
 
 fn transcendental_chain(g: &mut Graph<F64>, x: ExprId, n: usize, c: f64) -> ExprId {
     let mut y = x;
@@ -55,35 +53,9 @@ pub fn device(g: &mut Graph<F64>) -> FuncId {
     s.close([(o0, OutputRole::Plain), (o1, OutputRole::Plain)])
 }
 
-pub struct Circuit {
-    pub g: Graph<F64>,
-    pub roots: Vec<ExprId>,
-    pub syms: Vec<SymbolId>,
-    /// Per input whether it is a parameter.
-    pub pure: Vec<bool>,
-}
-
 /// `n` instances, each `f(x_i, p_i, q_i)`, both outputs summed.
 pub fn circuit(n: usize) -> Circuit {
-    let mut g: Graph<F64> = Graph::new();
-    let f = device(&mut g);
-    let (mut syms, mut roots, mut pure) = (Vec::new(), Vec::new(), Vec::new());
-    for i in 0..n {
-        let (x, xs) = sym(&mut g, &format!("x{i}"));
-        let (p, ps) = sym(&mut g, &format!("p{i}"));
-        let (q, qs) = sym(&mut g, &format!("q{i}"));
-        syms.extend([xs, ps, qs]);
-        pure.extend([false, true, true]);
-        let a = g.call(f, 0, &[x, p, q]);
-        let b = g.call(f, 1, &[x, p, q]);
-        roots.push(g.add(a, b));
-    }
-    Circuit {
-        g,
-        roots,
-        syms,
-        pure,
-    }
+    common::circuit(n, device, &["p", "q"])
 }
 
 /// The inputs: states `t`-shifted, parameters by `binding` (one sign per
