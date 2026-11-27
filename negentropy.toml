@@ -2,7 +2,6 @@
 environment = ['^crates/rsdag/src/simd\.rs: .*"RSDAG_SSE2"']
 duplicate = ['^crates/rsdag/src/graph/calls\.rs: .*fn node\(&mut self, _: ExprId, node: Node, ops: &\[ExprId\]\) -> ExprId']
 unwrap = [
-    '^crates/rsdag-jit/src/background\.rs: .*expect\("failed to build the compile pool"\)',
     '^crates/rsdag-jit/src/background\.rs: .*expect\("spawn the compile queue"\)',
     '^crates/rsdag-jit/src/host\.rs: .*expect\("a kernel.s first operand"\)',
     '^crates/rsdag-jit/src/native\.rs: .*expect\("a call of the tape names its operands"\)',

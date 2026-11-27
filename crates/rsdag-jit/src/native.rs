@@ -11,7 +11,8 @@
 //! liveness knows. A value that dies inside the chunk never touches
 //! memory; nothing is ever spilled anywhere but where the interpreter keeps
 //! it anyway. Compile time is linear in the op count, and the chunks are
-//! emitted in parallel into one executable mapping.
+//! emitted in parallel on the compile threads ([`crate::background`]) into
+//! one executable mapping.
 //!
 //! A large program is executed once per evaluation, straight through, so
 //! its cost is instruction fetch: the bytes per op. That is why nothing is
@@ -30,7 +31,6 @@
 //! operation sequence, reductions folded in the reference order, every
 //! transcendental through the same host function.
 
-use rayon::prelude::*;
 use rsdag::node::{BinOp, CmpOp, ReduceOp, UnaryOp};
 use rsdag::tape::calls::{Call, Phase};
 use rsdag::tape::{input_index, read, Accum, Fold, Op, Operand, Src, INPUT};
@@ -697,12 +697,12 @@ impl NativeTape {
         let emitted: Result<Vec<Emitted>, JitError> = {
             let _s = rsprobe::scope!("emit");
             let node = rsprobe::current();
-            jobs.par_iter()
-                .map(|ops| {
-                    let _node = node.enter();
-                    emit_chunk::<A>(tape, ops.clone(), &layout, &liveness, &bundles)
-                })
-                .collect()
+            crate::background::map(jobs.len(), |k| {
+                let _node = node.enter();
+                emit_chunk::<A>(tape, jobs[k].clone(), &layout, &liveness, &bundles)
+            })
+            .into_iter()
+            .collect()
         };
         let emitted = emitted?;
         // https://github.com/milanofthe/rsdag/issues/240
