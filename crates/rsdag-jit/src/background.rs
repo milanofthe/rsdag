@@ -1,5 +1,5 @@
 //! The background compiler: the threads compile jobs run on, which also
-//! emit the chunks of every compile.
+//! emit the chunks of the compiles in those jobs.
 //!
 //! Compiling is long work (a large program takes tens to hundreds of
 //! milliseconds).
@@ -10,14 +10,19 @@
 //! burst never owns every core either.
 //!
 //! A thread runs one job at a time, start to end. The chunks of a compile
-//! (`map`) are claimed one by one by the thread that compiles and by the
-//! threads that are idle, which take them before the next queued job. A
-//! compiling thread whose chunks are all claimed waits only for the chunks
-//! in flight: it never runs other work meanwhile, so the depth of its stack
-//! does not depend on how many jobs are queued, and a compile is never held
-//! up behind another job.
+//! in a job (`map`) are claimed one by one by the thread that compiles and
+//! by the threads that are idle, which take them before the next queued
+//! job. A compiling thread whose chunks are all claimed waits only for the
+//! chunks in flight: it never runs other work meanwhile, so the depth of its
+//! stack does not depend on how many jobs are queued, and a compile is never
+//! held up behind another job.
+//!
+//! A compile outside a job has a caller that waits for it: its chunks run
+//! on the threads that caller holds, the pool lent to it or else its
+//! current rayon pool, as wide as the chunks go.
 
 use std::any::Any;
+use std::cell::Cell;
 use std::collections::{BTreeSet, VecDeque};
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -68,7 +73,9 @@ pub(crate) fn map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
     if n < 2 {
         return (0..n).map(f).collect();
     }
-    threads_started();
+    if !COMPILE_THREAD.get() {
+        return rspool::map::<rspool::rayon::Rayon, _>(n, rspool::Work::ns(f64::INFINITY), f);
+    }
     let slots: Vec<Mutex<Option<T>>> = (0..n).map(|_| Mutex::new(None)).collect();
     let piece = |i: usize| {
         let r = f(i);
@@ -163,7 +170,12 @@ enum Next {
     Run(u64, Job),
 }
 
+thread_local! {
+    static COMPILE_THREAD: Cell<bool> = const { Cell::new(false) };
+}
+
 fn run() {
+    COMPILE_THREAD.set(true);
     loop {
         let next = {
             let mut s = lock();
@@ -227,19 +239,32 @@ static DONE: Condvar = Condvar::new();
 
 #[cfg(test)]
 mod tests {
-    use super::map;
+    use super::{drain, map, submit};
 
     const PIECES: usize = 1000;
 
+    fn here_and_in_a_job(check: fn()) {
+        check();
+        let (done, checked) = std::sync::mpsc::channel();
+        submit(move || {
+            check();
+            let _ = done.send(());
+        });
+        drain();
+        assert!(checked.try_recv().is_ok(), "the check failed in a job");
+    }
+
     #[test]
     fn map_keeps_the_order_of_its_pieces() {
-        assert_eq!(map(PIECES, |i| i), (0..PIECES).collect::<Vec<_>>());
+        here_and_in_a_job(|| assert_eq!(map(PIECES, |i| i), (0..PIECES).collect::<Vec<_>>()));
     }
 
     #[test]
     fn map_raises_a_panic_of_a_piece_on_the_caller() {
-        let raised = std::panic::catch_unwind(|| map(PIECES, |i| assert!(i != PIECES / 2)));
-        assert!(raised.is_err());
-        assert_eq!(map(PIECES, |i| i).len(), PIECES);
+        here_and_in_a_job(|| {
+            let raised = std::panic::catch_unwind(|| map(PIECES, |i| assert!(i != PIECES / 2)));
+            assert!(raised.is_err());
+            assert_eq!(map(PIECES, |i| i).len(), PIECES);
+        });
     }
 }
