@@ -11,8 +11,8 @@
 //! liveness knows. A value that dies inside the chunk never touches
 //! memory; nothing is ever spilled anywhere but where the interpreter keeps
 //! it anyway. Compile time is linear in the op count, and the chunks are
-//! emitted in parallel on the compile threads ([`crate::background`]) into
-//! one executable mapping.
+//! emitted in parallel ([`crate::background`]) into one executable
+//! mapping.
 //!
 //! A large program is executed once per evaluation, straight through, so
 //! its cost is instruction fetch: the bytes per op. That is why nothing is
