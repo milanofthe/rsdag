@@ -238,7 +238,6 @@ name = "rsdag-jit"
 version = "5.0.0"
 dependencies = [
  "libc",
- "rayon",
  "rsdag",
  "rspool",
  "rsprobe",

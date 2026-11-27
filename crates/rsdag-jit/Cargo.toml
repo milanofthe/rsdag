@@ -10,7 +10,6 @@ description = "Native code backend for rsdag programs"
 [dependencies]
 rsdag.workspace = true
 rustc-hash.workspace = true
-rayon.workspace = true
 rspool = { workspace = true, features = ["rayon"] }
 # Scopes of the compile and the background jobs; `--features rsprobe/on`
 # records them.
